@@ -1922,7 +1922,10 @@ class ReActAgent(BaseAgent):
                 phase="post_call",
                 usage_metadata=getattr(ai_message, "usage_metadata", None),
             )
-            self._raise_for_model_response_error(ai_message)
+            self._raise_for_model_response_error(
+                ai_message,
+                configured_output_limit=self._has_configured_output_limit(),
+            )
             return ai_message
 
         # Streaming path: accumulate chunks via __add__, write to session in real-time
@@ -2028,7 +2031,10 @@ class ReActAgent(BaseAgent):
             phase="post_call",
             usage_metadata=ai_message.usage_metadata,
         )
-        self._raise_for_model_response_error(ai_message)
+        self._raise_for_model_response_error(
+            ai_message,
+            configured_output_limit=self._has_configured_output_limit(),
+        )
         if ai_message.usage_metadata:
             perf_metrics = {}
             call_latency = (time.monotonic() - call_start_time) * 1000
@@ -2075,24 +2081,37 @@ class ReActAgent(BaseAgent):
             )
         return ai_message
 
+    def _has_configured_output_limit(self) -> bool:
+        """Return whether this agent explicitly limits a single model response."""
+        model_config = getattr(self._config, "model_config_obj", None)
+        if isinstance(model_config, dict):
+            return model_config.get("max_tokens") is not None
+        return getattr(model_config, "max_tokens", None) is not None
+
     @staticmethod
-    def _raise_for_model_response_error(message: AssistantMessage) -> None:
+    def _raise_for_model_response_error(
+        message: AssistantMessage,
+        *,
+        configured_output_limit: bool = False,
+    ) -> None:
         """Turn provider error responses into rail-visible exceptions."""
         finish_reason = str(getattr(message, "finish_reason", "") or "").strip().lower()
         usage = getattr(message, "usage_metadata", None)
         code = int(getattr(usage, "code", 0) or 0)
         content = getattr(message, "content", "")
-        no_answer = not getattr(message, "tool_calls", None) and not (isinstance(content, str) and content.strip())
-        if finish_reason in {"length", "max_tokens"} and no_answer:
-            # A reasoning model can spend its whole output budget thinking and stop
-            # before any answer or tool call. Treating that as the final answer
-            # would end the turn with an empty "successful" result.
+        no_answer = not getattr(message, "tool_calls", None) and not (
+            isinstance(content, str) and content.strip()
+        )
+        if finish_reason in {"length", "max_tokens"} and (configured_output_limit or no_answer):
+            # A response that has no answer is always incomplete. When the
+            # caller explicitly sets max_tokens, a partial answer or tool call
+            # is incomplete as well and must be surfaced to the session.
             output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
             raise_error(
                 StatusCode.MODEL_CALL_FAILED,
                 error_msg=(
                     f"model hit its output limit (finish_reason={finish_reason}, output_tokens={output_tokens}) "
-                    "before producing an answer or a tool call"
+                    "before completing the response"
                 ),
                 details={"finish_reason": finish_reason, "output_tokens": output_tokens},
             )

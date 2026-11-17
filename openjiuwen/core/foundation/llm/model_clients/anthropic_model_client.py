@@ -909,19 +909,22 @@ class AnthropicModelClient(BaseModelClient):
 
         # Manual thinking.budget_tokens shares the response ceiling with the
         # final answer. Official Anthropic and compatible gateways require
-        # max_tokens > budget_tokens; raise the ceiling instead of silently
-        # shrinking the requested thinking depth.
+        # max_tokens > budget_tokens. The fallback is deliberately bounded to
+        # a safe model output limit, so do not synthesize a larger value when
+        # a thinking budget exhausts it. Callers need to choose a compatible
+        # output cap or a smaller thinking budget.
         thinking_cfg = params.get("thinking")
         if isinstance(thinking_cfg, Mapping):
             budget = thinking_cfg.get("budget_tokens")
             if isinstance(budget, int) and params["max_tokens"] <= budget:
-                llm_logger.debug(
-                    "Anthropic: raising max_tokens from %s to %s so it exceeds "
-                    "thinking.budget_tokens.",
-                    params["max_tokens"],
-                    budget + 1024,
+                raise build_error(
+                    StatusCode.MODEL_CONFIG_ERROR,
+                    error_msg=(
+                        "Anthropic max_tokens must be greater than "
+                        f"thinking.budget_tokens (max_tokens={params['max_tokens']}, "
+                        f"thinking.budget_tokens={budget})."
+                    ),
                 )
-                params["max_tokens"] = budget + 1024
 
         # Compatible gateways may add fields that are not keyword parameters
         # in the Anthropic SDK. Send them through extra_body so the SDK merges
@@ -1344,9 +1347,14 @@ class AnthropicModelClient(BaseModelClient):
                 )
 
         stop_reason = getattr(response, "stop_reason", None) or ""
-        finish_reason = "tool_calls" if tool_calls else (
-            "stop" if stop_reason in ("end_turn", "stop_sequence", "max_tokens") else (stop_reason or "stop")
-        )
+        if stop_reason == "max_tokens":
+            finish_reason = "max_tokens"
+        elif tool_calls:
+            finish_reason = "tool_calls"
+        elif stop_reason in ("end_turn", "stop_sequence"):
+            finish_reason = "stop"
+        else:
+            finish_reason = stop_reason or "stop"
 
         provider_metadata_candidates = (
             ("stop_reason", getattr(response, "stop_reason", None)),
@@ -1584,7 +1592,7 @@ class AnthropicModelClient(BaseModelClient):
             finish_reason = "stop"
             if stop_reason == "tool_use":
                 finish_reason = "tool_calls"
-            elif stop_reason in ("end_turn", "stop_sequence", "max_tokens"):
+            elif stop_reason in ("end_turn", "stop_sequence"):
                 finish_reason = "stop"
             elif stop_reason:
                 finish_reason = stop_reason

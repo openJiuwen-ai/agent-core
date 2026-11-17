@@ -876,6 +876,32 @@ class TestResponseReasoning:
         ]
 
     @pytest.mark.asyncio
+    async def test_non_stream_max_tokens_stop_reason_is_preserved(self):
+        response = MagicMock()
+        response.content = []
+        response.usage = None
+        response.stop_reason = "max_tokens"
+        response.stop_sequence = None
+
+        message = await _make_client()._parse_response(response)
+
+        assert message.finish_reason == "max_tokens"
+        assert message.provider_metadata == {"stop_reason": "max_tokens"}
+
+    @pytest.mark.asyncio
+    async def test_non_stream_max_tokens_stop_reason_wins_over_tool_calls(self):
+        response = MagicMock()
+        response.content = [self._block(type="tool_use", id="t1", name="lookup", input={})]
+        response.usage = None
+        response.stop_reason = "max_tokens"
+        response.stop_sequence = None
+
+        message = await _make_client()._parse_response(response)
+
+        assert message.tool_calls and message.tool_calls[0].id == "t1"
+        assert message.finish_reason == "max_tokens"
+
+    @pytest.mark.asyncio
     async def test_redacted_thinking_is_preserved_but_not_exposed(self):
         response = MagicMock()
         response.content = [
@@ -915,6 +941,17 @@ class TestResponseReasoning:
             "thinking": "plan",
             "signature": "sig",
         }]
+
+    def test_stream_max_tokens_stop_reason_is_preserved(self):
+        event = MagicMock(type="message_delta")
+        event.delta = MagicMock(stop_reason="max_tokens")
+        event.usage = None
+
+        chunk = _make_client()._event_to_chunk(event, {})
+
+        assert chunk is not None
+        assert chunk.finish_reason == "max_tokens"
+        assert chunk.provider_metadata == {"stop_reason": "max_tokens"}
 
 
 # ---------------------------------------------------------------------------
@@ -1046,6 +1083,42 @@ class TestSamplingParams:
         assert "top_p" not in params
         assert "temperature" not in extra
         assert "top_p" not in extra
+
+    def test_explicit_output_cap_must_exceed_thinking_budget(self):
+        client = _make_client()
+        client.model_config = ModelRequestConfig(
+            model="claude-opus-4",
+            max_tokens=8192,
+            reasoning={"mode": "enabled", "budget_tokens": 8192},
+        )
+
+        with pytest.raises(BaseError, match="max_tokens must be greater than thinking.budget_tokens") as exc_info:
+            self._params(client)
+
+        assert exc_info.value.status is StatusCode.MODEL_CONFIG_ERROR
+
+    def test_implicit_output_cap_allows_thinking_budget_below_model_limit(self):
+        client = _make_client()
+        client.model_config = ModelRequestConfig(
+            model="claude-opus-4",
+            reasoning={"mode": "enabled", "budget_tokens": 32000},
+        )
+
+        params = self._params(client)
+
+        assert params["max_tokens"] == 32768
+
+    def test_implicit_output_cap_rejects_thinking_budget_at_model_limit(self):
+        client = _make_client()
+        client.model_config = ModelRequestConfig(
+            model="claude-opus-4",
+            reasoning={"mode": "enabled", "budget_tokens": 32768},
+        )
+
+        with pytest.raises(BaseError, match="max_tokens must be greater than thinking.budget_tokens") as exc_info:
+            self._params(client)
+
+        assert exc_info.value.status is StatusCode.MODEL_CONFIG_ERROR
 
     def test_base_message_metadata_survives_common_conversion(self):
         client = _make_client()
