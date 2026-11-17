@@ -76,7 +76,7 @@ inventory
 shared/fingerprint
   ├── retrieval tree
   │     ↓
-  │   AgenticSymphonyToolkit.retrieval
+  │   Discovery skill_index
   │     ↓
   │   candidate capability_id
   │
@@ -90,12 +90,12 @@ shared/fingerprint
 ```
 
 - `shared/fingerprint` 扫描或消费能力清单，抽取语义画像，归一化 IO，并原子发布带 schema 版本的能力指纹。
-- `retrieval` 构建并读取能力树索引，向 Agent 渐进披露分支和候选能力。
+- `retrieval` 构建并读取能力树索引，供 Discovery 查询技能。
 - `orchestration/graph` 生成关系候选、进行 IO/语义匹配、判断关系并构建能力图。
 - `orchestration` 管理图产物，并根据候选能力和任务目标生成执行路线。
 - `evaluation` 提供可注册的静态质量和调用方轨迹评估，不固化业务准入阈值。
 - `interfaces` 定义使用方需要实现或传入的协议。
-- `agent` 提供 Agent-facing toolkit；使用方负责将 toolkit 方法接入自己的调用体系。
+- `agent` 提供构建、更新和读取技能索引的 `AgenticSkillRetrievalToolkit`。
 
 能力图是编排领域的内部组成，不是一个独立的 Runtime 服务；公共运行时通过
 `SymphonyRuntime.orchestration` 暴露图生命周期和规划能力。`FingerprintService` 和 `EvaluationSuite` 可独立使用。
@@ -555,54 +555,7 @@ class ArtifactPathProvider(Protocol):
 
 ### 能力检索
 
-最终检索服务将已注册能力组织成树索引，并向 Agent 按需披露分支和候选能力：
-
-```python
-# 最终目标示例；当前不可运行。
-status = symphony.retrieval.status()
-if not status.exists or not status.fresh:
-    await symphony.retrieval.build(force=False)
-
-result = await symphony.retrieval.search(
-    "读取 PDF 内容并生成摘要",
-)
-candidate_ids = [
-    capability.capability_id
-    for capability in result.capabilities
-]
-```
-
-目标服务包括索引状态查询、构建与取消、树摘要读取、分支探索及自然语言检索；检索结果包含候选能力、命中分支、排序信息和产物版本。
-
-### 多服务 Runtime
-
-最终 `SymphonyRuntime` 将组合检索、编排和评估子服务：
-
-```python
-# 最终目标示例；当前不可运行。
-from openjiuwen.symphony import SymphonyRuntime
-
-symphony = SymphonyRuntime(
-    inventory_provider=adapter.capability_inventory_provider(),
-    tree_artifact_root=adapter.tree_artifact_root(),
-    graph_artifact_root=adapter.graph_artifact_root(),
-    retrieval_settings=adapter.retrieval_settings(),
-    orchestration_settings=adapter.orchestration_settings(),
-    model=adapter.model(),
-)
-
-retrieval_result = await symphony.retrieval.search(
-    "读取 PDF 内容并生成摘要",
-)
-candidate_ids = [
-    capability.capability_id
-    for capability in retrieval_result.capabilities
-]
-plan = await symphony.orchestration.plan(
-    query="读取 PDF 内容并生成摘要",
-    candidate_ids=candidate_ids,
-)
-```
+`InstalledSkillsDirectoryToolkit` 通过 `skill_index` 提供技能目录查询、词法搜索和读取。构建或更新目录索引使用 `AgenticSkillRetrievalToolkit`。
 
 ### 能力评估
 
@@ -616,31 +569,6 @@ evaluation = await symphony.evaluation.evaluate_capabilities(
     traces=traces,
 )
 ```
-
-### Agent Toolkit
-
-最终 `AgenticSymphonyToolkit` 组合检索和编排能力，使用方可以将其方法接入自己的 Agent 调用体系：
-
-```python
-# 最终目标示例；当前不可运行。
-toolkit = symphony.agent_toolkit(language="cn")
-
-retrieval_result = await toolkit.retrieval.search(
-    "读取 PDF 内容，总结后发送邮件",
-)
-candidate_ids = [
-    capability.capability_id
-    for capability in retrieval_result.capabilities
-]
-plan = await toolkit.orchestration.plan(
-    query="读取 PDF 内容，总结后发送邮件",
-    candidate_ids=candidate_ids,
-)
-```
-
-- `toolkit.retrieval` 最终提供根分类渲染、分支预览、分支展开和自然语言检索。
-- `toolkit.orchestration` 最终提供关系图读取、刷新和在线计划生成。
-- Toolkit 只提供 Agent-facing 领域方法；工具注册、权限、进度展示和 UI 由使用方负责。
 
 ## 最终运行时产物
 
