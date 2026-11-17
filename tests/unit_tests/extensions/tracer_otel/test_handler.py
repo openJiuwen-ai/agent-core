@@ -1667,6 +1667,30 @@ class TestSessionRebindDuringLiveRun:
         self.handler.set_session_id("embedded-bare-session")
         assert self.handler._cached_session_id == "embedded-bare-session"
 
+    async def test_drop_workflow_spans_unblocks_rebind(self):
+        """泄漏兜底：span 永不结束时守卫永久短路重绑；drop_workflow_spans
+        强关泄漏 span（带 drop 标记事件）并解锁后续重绑。"""
+        await self.handler.on_call_start(
+            invoke_id="wf_root",
+            metadata={"workflow_id": "wf-1", "workflow_name": "demo"},
+        )
+        leaked = self.handler._layer_root_spans["wf_root"].span
+
+        # 泄漏形态：end/on_call_done 永不到达，守卫把外来重绑永久短路
+        self.handler.set_session_id("embedded-bare-session")
+        assert self.handler._cached_session_id != "embedded-bare-session"
+
+        self.handler.drop_workflow_spans()
+
+        assert leaked.end_time is not None
+        assert "oj.span.dropped" in [e.name for e in leaked.events]
+        assert self.handler._layer_root_spans == {}
+        assert self.handler._component_spans == {}
+
+        # 解锁后同一外来 session id 照常完成重绑
+        self.handler.set_session_id("embedded-bare-session")
+        assert self.handler._cached_session_id == "embedded-bare-session"
+
 
 class TestMultiRoundConversationTraceContinuity:
     """Test multi-round conversation trace continuity (Problem B core fix).
