@@ -16,6 +16,7 @@ from unittest.mock import (
 )
 
 import pytest
+from sqlalchemy.exc import OperationalError as SAOperationalError
 
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventMessage,
@@ -2325,6 +2326,58 @@ async def test_stale_inprogress_probe_failure_freezes_whole_tick():
     assert watch["silent_accum"] == 590.0  # frozen, not 590 + 300
     assert watch["tenure_accum"] == 0.0  # tenure also frozen (merged probe)
     assert handler._last_inprogress_tick_at == frozen_tick_at  # delta 未消费
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_inprogress_probe_unexpected_error_freezes_tick():
+    """探针抛出 retry_on_locked 吸收面之外的读层异常（连接失效/表结构异常等
+    非 OperationalError/SATimeoutError）时不得穿透 on_poll_task 打崩
+    POLL_TASK——本地吞掉并冻结本 tick，与 team_context 活动探针的
+    fail-open 对称。"""
+    agent = _make_leader()
+    task = _make_claimed_task("t-err", assignee="dev-1", updated_at=0)
+    _stub_inprogress_sweep(agent, [task])
+    agent._configurator.team_backend.db.fetch_stale_sweep_probe = AsyncMock(
+        side_effect=RuntimeError("connection invalidated"),
+    )
+
+    handler = agent._coordination.dispatcher.stale_task
+    watch = _seed_inprogress_watch(handler, "t-err", silent_accum=590.0)
+    frozen_tick_at = time.time() - 10000.0
+    handler._last_inprogress_tick_at = frozen_tick_at
+
+    await handler._check_stale_inprogress_tasks()  # 不抛出
+
+    agent.deliver_input.assert_not_called()
+    assert watch["silent_accum"] == 590.0
+    assert watch["tenure_accum"] == 0.0
+    assert handler._last_inprogress_tick_at == frozen_tick_at
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_inprogress_probe_storage_gone_retires_polls():
+    """团队存储已删除（session.delete 删表）时探针经 passthrough 把
+    "no such table" OperationalError 直接上抛——handler 走僵尸轮询自停
+    （pause_polls），而不是被重试吸收成每 tick 永久冻结。"""
+    agent = _make_leader()
+    task = _make_claimed_task("t-gone", assignee="dev-1", updated_at=0)
+    _stub_inprogress_sweep(agent, [task])
+    gone = SAOperationalError(
+        "SELECT ...", {}, Exception("no such table: team_task_abc")
+    )
+    agent._configurator.team_backend.db.fetch_stale_sweep_probe = AsyncMock(
+        side_effect=gone,
+    )
+
+    handler = agent._coordination.dispatcher.stale_task
+    handler._poll = MagicMock()
+    handler._poll.pause_polls = AsyncMock()
+
+    await handler._check_stale_inprogress_tasks()  # 不抛出，自停轮
+
+    handler._poll.pause_polls.assert_awaited_once()
 
 
 @pytest.mark.asyncio

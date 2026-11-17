@@ -98,8 +98,11 @@ class StaleTaskHandler(BaseCoordinationHandler):
     _SILENCE_SCALE_CAP: ClassVar[int] = 8
     # Witness 结果窗口缓存：水位线秒级滞后对分钟级沉默判定
     # 无感（tick 本身 30s 一跳、tick_delta 分辨率 ±30s），缓存把稳态下
-    # 每 tick 的 GROUP BY 扫描摊薄到每窗口一次。
-    _WITNESS_CACHE_TTL_S: ClassVar[float] = 15.0
+    # 的 GROUP BY 扫描摊薄到约每两 tick 一次。TTL 必须大于 POLL_TASK
+    # 间隔（EventBus 默认 task_poll_interval=30s）否则稳态恒 miss——
+    # 45s 在默认配置下 miss/hit 交替；部署侧把 poll 间隔调到 ≥45s 时
+    # 缓存退化为永不命中（仅损失摊薄，正确性不变）。
+    _WITNESS_CACHE_TTL_S: ClassVar[float] = 45.0
 
     def __init__(
             self,
@@ -455,9 +458,10 @@ class StaleTaskHandler(BaseCoordinationHandler):
           的零水位带到下一个有任务的 tick——虽然 TTL 也只有 15s）。
 
         Returns:
-            ``(watched_tasks, witness_map)``；探针重试耗尽返回 None（调用方
-            冻结本 tick）。无 DB 后端的退化形态返回 ``(tasks, {})``——
-            witness 恒空，回落到任务 updated_at 单见证（旧 message_manager 缺失路径的同语义）。
+            ``(watched_tasks, witness_map)``；探针重试耗尽或读层异常返回
+            None（调用方冻结本 tick）。无 DB 后端的退化形态返回 ``(tasks, {})``
+            ——witness 恒空，回落到任务 updated_at 单见证（旧 message_manager
+            缺失路径的同语义）。
         """
         team_backend = getattr(self._infra, "team_backend", None)
         team_db = getattr(team_backend, "db", None)
@@ -473,11 +477,26 @@ class StaleTaskHandler(BaseCoordinationHandler):
             )
             return self._filter_watched_inprogress(tasks), cache[1]
         started_mono = time.monotonic()
-        probe = await team_db.fetch_stale_sweep_probe(
-            team_backend.team_name,
-            task_status=TaskStatus.IN_PROGRESS.value,
-            exclude_assignee=self._blueprint.member_name,
-        )
+        try:
+            probe = await team_db.fetch_stale_sweep_probe(
+                team_backend.team_name,
+                task_status=TaskStatus.IN_PROGRESS.value,
+                exclude_assignee=self._blueprint.member_name,
+            )
+        except Exception as exc:
+            # 与 team_context 活动探针对称的 fail-open：retry_on_locked 只吸收
+            # OperationalError/SATimeoutError，其余读层异常（连接失效、表结构
+            # 异常等）不得穿透 on_poll_task 打崩 POLL_TASK——冻结本 tick。
+            # 团队存储已删除（"no such table" 经探针 passthrough 上抛）则
+            # 走僵尸轮询自停，而非永久冻结。
+            if await self._retire_polls_if_storage_gone(exc):
+                return None
+            team_logger.warning(
+                "stale-inprogress: sweep probe read error, freezing this tick (team=%s): %s",
+                getattr(team_backend, "team_name", "?"),
+                exc,
+            )
+            return None
         elapsed_ms = (time.monotonic() - started_mono) * 1000.0
         if probe is None:
             team_logger.warning(
