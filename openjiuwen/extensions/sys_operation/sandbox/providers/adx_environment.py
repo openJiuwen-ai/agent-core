@@ -144,7 +144,14 @@ class _AdxEnvironmentBackend:
             raise ValueError("ADX base_url must be an HTTP(S) origin")
         if url.query or url.fragment:
             raise ValueError("ADX base_url must be an HTTP(S) origin")
-        scope = build_adx_shared_scope_key(base_url, self.endpoint.isolation_key) + self._scope_suffix + node_scope
+        # Keep teardown under the configured scope while separating resolved node endpoints.
+        scope = (
+            build_adx_shared_scope_key(self.endpoint.base_url, self.endpoint.isolation_key)
+            + self._scope_suffix
+            + node_scope
+        )
+        if base_url.rstrip("/") != self.endpoint.base_url.rstrip("/"):
+            scope += "|endpoint=" + hashlib.sha256(base_url.rstrip("/").encode()).hexdigest()
         return url, scope
 
     @staticmethod
@@ -238,7 +245,9 @@ class _AdxEnvironmentBackend:
         if key == shared_key:
             return True
         if shared_key:
-            return key.startswith((shared_key + "|identity=", shared_key + "|node=", shared_key + "|rootfs="))
+            return key.startswith(
+                (shared_key + "|identity=", shared_key + "|node=", shared_key + "|rootfs=", shared_key + "|endpoint=")
+            )
         if base_url:
             return key.startswith(base_url.rstrip("/") + "|")
         return False
@@ -249,6 +258,7 @@ class _AdxEnvironmentBackend:
         from adx_environment import Environment  # pylint: disable=no-name-in-module
 
         deleted = []
+        failed = []
         with cls._lock:
             keys = []
             for key in cls._instances:
@@ -256,11 +266,19 @@ class _AdxEnvironmentBackend:
                     keys.append(key)
             for key in keys:
                 instance, connection = cls._instances[key]
-                Environment.delete(instance.id, connection=connection)
-                instance.close()
+                try:
+                    Environment.delete(instance.id, connection=connection)
+                    instance.close()
+                except Exception as error:  # pylint: disable=broad-exception-caught
+                    # Retain this entry for retry, but finish the other independent cleanups.
+                    failed.append((instance.id, error))
+                    continue
                 del cls._instances[key]
                 cls._incarnations[key] = uuid.uuid4().hex
                 deleted.append(key)
+        if failed:
+            details = "; ".join(f"{environment_id}: {error}" for environment_id, error in failed)
+            raise RuntimeError(f"ADX tool cleanup failed: {details}") from failed[0][1]
         return deleted
 
     async def _run_command(

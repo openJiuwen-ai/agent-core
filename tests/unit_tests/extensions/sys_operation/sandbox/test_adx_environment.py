@@ -585,3 +585,106 @@ def test_failed_tool_does_not_reset_adx_restart_budget_or_replay_commands(monkey
     assert factory.call_count == 1
     instance.close.assert_not_called()
     instance.commands.run.assert_called_once()
+
+
+@pytest.fixture
+def adx_cleanup_cache(monkeypatch):
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import _AdxEnvironmentBackend
+
+    monkeypatch.setattr(_AdxEnvironmentBackend, "_instances", {})
+    monkeypatch.setattr(_AdxEnvironmentBackend, "_incarnations", {})
+    return _AdxEnvironmentBackend
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initial_url", ["http://localhost:18080", "http://first-node:18080"])
+@pytest.mark.parametrize("cleanup", ["launcher", "base_url"])
+async def test_cleanup_reaches_changed_node_endpoints_without_deleting_other_scopes(
+    monkeypatch, tmp_path, adx_cleanup_cache, initial_url, cleanup
+):
+    import json
+
+    import adx_environment
+
+    from openjiuwen.core.sys_operation.sandbox.launchers.pre_deployment_launcher import PreDeploymentLauncher
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import (
+        AdxEnvironmentFSProvider,
+        delete_adx_environment,
+    )
+
+    instances = [MagicMock(id=f"cleanup-node-{index}") for index in range(4)]
+    factory = MagicMock(side_effect=instances)
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    context = tmp_path / "node.json"
+    config = provider_config()
+    config.launcher_config.extra_params["endpoint_file"] = str(context)
+    endpoint = SandboxEndpoint(base_url="http://localhost:18080", isolation_key="cleanup-owner")
+    provider = AdxEnvironmentFSProvider(endpoint, config)
+    for index, node in enumerate(
+        [
+            {"ingress_url": initial_url, "node_id": "first"},
+            {"ingress_url": "http://second-node:18080", "node_id": "second"},
+            {"ingress_url": "http://second-node:18080", "node_id": "replacement"},
+        ]
+    ):
+        context.write_text(json.dumps(node))
+        assert provider._get_environment() is instances[index]
+    assert len({call.kwargs["name"] for call in factory.call_args_list}) == 3
+
+    other_url = endpoint.base_url if cleanup == "launcher" else "http://other-origin:18080"
+    other = AdxEnvironmentFSProvider(SandboxEndpoint(base_url=other_url, isolation_key="other-owner"), config)
+    assert other._get_environment() is instances[3]
+    if cleanup == "launcher":
+        await PreDeploymentLauncher().delete(
+            "", sandbox_type="adx-environment", base_url=endpoint.base_url, isolation_key=endpoint.isolation_key
+        )
+    else:
+        await delete_adx_environment(base_url=endpoint.base_url)
+
+    assert [call.args[0] for call in factory.delete.call_args_list] == [item.id for item in instances[:3]]
+    for item in instances[:3]:
+        item.close.assert_called_once()
+    instances[3].close.assert_not_called()
+    assert len(adx_cleanup_cache._instances) == 1
+
+
+@pytest.mark.parametrize("failure", ["delete", "close"])
+def test_cleanup_finishes_other_entries_and_retries_only_failures(monkeypatch, adx_cleanup_cache, failure):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import (
+        AdxEnvironmentFSProvider,
+        build_adx_shared_scope_key,
+    )
+
+    endpoint = SandboxEndpoint(base_url="http://localhost:18080", isolation_key="cleanup-errors")
+    instances = [MagicMock(id=f"cleanup-error-{index}") for index in range(3)]
+    factory = MagicMock(side_effect=instances)
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    for index, instance in enumerate(instances):
+        config = provider_config()
+        config.launcher_config.extra_params.update(user=str(index), group=str(index))
+        assert AdxEnvironmentFSProvider(endpoint, config)._get_environment() is instance
+
+    errors = [RuntimeError("first cleanup failure"), RuntimeError("last cleanup failure")]
+    if failure == "delete":
+        factory.delete.side_effect = [errors[0], None, errors[1]]
+    else:
+        instances[0].close.side_effect = errors[0]
+        instances[2].close.side_effect = errors[1]
+    shared_key = build_adx_shared_scope_key(endpoint.base_url, endpoint.isolation_key)
+    with pytest.raises(RuntimeError, match="ADX tool cleanup failed") as raised:
+        adx_cleanup_cache.delete_environments(shared_key, None)
+
+    assert raised.value.__cause__ is errors[0]
+    assert instances[0].id in str(raised.value) and instances[2].id in str(raised.value)
+    assert factory.delete.call_count == 3
+    instances[1].close.assert_called_once()
+    assert {entry[0].id for entry in adx_cleanup_cache._instances.values()} == {instances[0].id, instances[2].id}
+
+    factory.delete.side_effect = None
+    instances[0].close.side_effect = None
+    instances[2].close.side_effect = None
+    assert len(adx_cleanup_cache.delete_environments(shared_key, None)) == 2
+    assert [call.args[0] for call in factory.delete.call_args_list[3:]] == [instances[0].id, instances[2].id]
+    assert not adx_cleanup_cache._instances
