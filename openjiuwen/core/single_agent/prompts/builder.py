@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.core.common.logging import logger
@@ -222,10 +223,18 @@ class SystemPromptBuilder:
         Safe to call multiple times. Each call produces a complete
         prompt from the current state of all registered sections.
         """
+        sections = self.get_effective_sections()
+        return self.render_sections(section.render(self.language) for section in sections)
+
+    def get_effective_sections(self) -> List[PromptSection]:
+        """Return the current mode-filtered sections in native render order."""
         sections = self._get_sections_for_build()
-        sorted_sections = sorted(sections, key=self.get_section_sort_key)
-        parts = [s.render(self.language) for s in sorted_sections]
-        return "\n\n".join(part for part in parts if part.strip())
+        return sorted(sections, key=self.get_section_sort_key)
+
+    @staticmethod
+    def render_sections(texts: Iterable[str | None]) -> str:
+        """Render an already ordered text snapshot without consulting builder state."""
+        return "\n\n".join(text for text in texts if isinstance(text, str) and text.strip())
 
     def _get_sections_for_build(self) -> List[PromptSection]:
         """Return the sections that should participate in the final build."""

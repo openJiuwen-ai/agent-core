@@ -21,7 +21,6 @@ from __future__ import annotations
 from typing import (
     TYPE_CHECKING,
     Any,
-    Awaitable,
     Callable,
     Optional,
     Set,
@@ -87,6 +86,7 @@ class TeamToolRail(DeepAgentRail):
         role: str,
         teammate_mode: str = "build_mode",
         dispatch_mode: str = "autonomous",
+        extension_bus: Optional[Any] = None,
         lifecycle: str = "temporary",
         team_mode: str = "default",
         bootstrap_mode: str = "leader",
@@ -112,6 +112,7 @@ class TeamToolRail(DeepAgentRail):
         self._role = role
         self._teammate_mode = teammate_mode
         self._dispatch_mode = dispatch_mode
+        self._extension_bus = extension_bus
         self._lifecycle = lifecycle
         self._team_mode = team_mode
         self._bootstrap_mode = bootstrap_mode
@@ -154,6 +155,7 @@ class TeamToolRail(DeepAgentRail):
         # default — no extra gate needed here.
         tools: list[Tool] = create_team_tools(
             role=self._role,
+            extension_bus=self._extension_bus,
             agent_team=self._team_backend,
             teammate_mode=self._teammate_mode,
             dispatch_mode=self._dispatch_mode,
