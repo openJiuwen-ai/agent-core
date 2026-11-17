@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import Any, ClassVar
 
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
@@ -27,7 +28,6 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
-from openjiuwen.agent_teams.broadcast_delivery import choose_delivery, is_receiver_routed
 from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
 from openjiuwen.agent_teams.i18n import reply_hint_for, t
 from openjiuwen.agent_teams.inbound_render import (
@@ -42,8 +42,8 @@ from openjiuwen.agent_teams.message_template import (
     revision_getters,
     task_links,
 )
-from openjiuwen.agent_teams.private_message import ACTIVE_TASKS, read_delivery
-from openjiuwen.agent_teams.prompts.loader import TemplateLoader, bind_template_loader
+from openjiuwen.agent_teams.tools.message_manager import ACTIVE_TASKS, is_receiver_routed, message_metadata, read_delivery
+from openjiuwen.agent_teams.prompts.loader import TemplateLoader, bind_template_loader, load_template
 from openjiuwen.agent_teams.schema.events import EventMessage, MessageEvent, TeamEvent
 from openjiuwen.agent_teams.schema.external_runtime_reliability import ExternalRuntimeFailure
 from openjiuwen.agent_teams.schema.status import MemberStatus, retire_target
@@ -51,6 +51,32 @@ from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.timefmt import format_absolute_time
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session import InteractiveInput
+
+
+async def choose_delivery(state, *, group=False):
+    from openjiuwen.agent_evolving.attribution.jev import JevClient
+
+    fallback = "steer" if group else "legacy"
+    if not any(os.environ.get(key) for key in ("JEV_BASE_URL", "JEV_MODEL", "JEV_API_KEY")):
+        return fallback
+    try:
+        client = JevClient(timeout=3)
+        try:
+            async with asyncio.timeout(5):
+                modes = ("steer", "follow_up") if group else ("steer", "follow_up", "drop")
+                question = {"type": "choice", "criteria": {mode: mode for mode in modes},
+                            "instructions": load_template("group_delivery" if group else "broadcast_delivery",
+                                                          state.get("language", "en"))}
+                answers = await client.system_one(state, {"delivery": question})
+                choice = (answers.get("delivery") or {}).get("choice")
+                if choice in modes:
+                    team_logger.info("Jev delivery for {}: {}", state.get("recipient"), choice)
+                    return choice
+        finally:
+            await client.close()
+    except Exception as exc:
+        team_logger.warning("Jev unavailable for {}: {}", state.get("recipient"), type(exc).__name__)
+    return fallback
 
 
 class MessageHandler(BaseCoordinationHandler):
@@ -235,7 +261,6 @@ class MessageHandler(BaseCoordinationHandler):
         is_human_agent = backend is not None and await backend.is_human_agent(member_name)
         is_bridge = self._blueprint.role == TeamRole.BRIDGE_AGENT and backend is not None
 
-
         while True:
             all_unread = await self._read_all_unread(member_name)
             # Abort is a control operation, not an input for another model turn.
@@ -265,8 +290,7 @@ class MessageHandler(BaseCoordinationHandler):
                     stopped = getattr(self._round, "leader_stop", lambda: None)()
                     resumed_by_leader = False
                     if stopped:
-                        meta = getattr(msg, "meta", None)
-                        meta = json.loads(meta) if isinstance(meta, str) and meta else meta
+                        meta = message_metadata(msg)
                         leader = await backend.resolve_leader_member_name() if backend is not None else None
                         explicit_leader_input = (
                             msg.from_member_name == leader and not getattr(msg, "broadcast", False)
@@ -368,17 +392,12 @@ class MessageHandler(BaseCoordinationHandler):
                             await self._record_delivery(msg, member_name, "dropped", mode)
                             delivered.append(msg)
                             continue
-                        if self._round.has_pending_interrupt():
-                            continue
-                        if mode == "follow_up" and target_tasks:
-                            if (await self._active_task_versions(member_name)).keys() & target_tasks.keys():
-                                await self._record_delivery(msg, member_name, "deferred", mode)
-                                continue
                     if not mode and not self._round.has_pending_interrupt():
                         mode = await self._mailbox_delivery_mode(member_name, msg)
                     if mode == "follow_up" and target_tasks and not resumed_by_leader:
                         active = await self._active_task_versions(member_name)
                         if active.keys() & target_tasks.keys():
+                            await self._record_delivery(msg, member_name, "deferred", mode)
                             continue
                     # An external_runtime_failed JSON message is rendered as a
                     # <team-event> and never falls through to plain
@@ -405,16 +424,41 @@ class MessageHandler(BaseCoordinationHandler):
                         )
                     team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
-                    claim = getattr(self._infra.message_manager, "claim_delivery", None)
-                    if callable(claim) and not await claim(msg.message_id, member_name):
-                        continue
+                    message_steers = mode == "steer" if mode else use_steer
+                    merged = []
+                    snapshot = getattr(self._round, "active_input_snapshot", lambda: None)()
+                    if message_steers and snapshot is not None and not is_bridge:
+                        for old in all_unread:
+                            if old in delivered or old.timestamp >= msg.timestamp:
+                                continue
+                            meta = message_metadata(old)
+                            entry = meta.get("delivery_feedback", {}).get(member_name, {})
+                            old_mode = entry.get("mode") or read_delivery(old)[0]
+                            if old_mode == "follow_up" and not meta.get("template"):
+                                merged.append(old)
+                        if merged:
+                            earlier = [{"message_id": old.message_id, "sender": old.from_member_name,
+                                "timestamp": old.timestamp, "original_mode": "follow_up",
+                                "target_tasks": message_metadata(old).get("delivery_feedback", {}).get(
+                                    member_name, {}).get("target_tasks", read_delivery(old)[1]),
+                                "content": self._format_message(old, expanded=await self._expand(old),
+                                           is_human_agent=is_human_agent)} for old in merged]
+                            text = json.dumps({"follow_up_context": earlier,
+                                "follow_up_policy": "Earlier requests for context, not completed work. Keep after-task "
+                                                    "timing; use the current task board and newer instructions.",
+                                "current_steer": text}, ensure_ascii=False)
                     if resumed_by_leader:
                         self._round.set_leader_stop(None)
-                    message_steers = mode == "steer" if mode else use_steer
-                    await self._round.deliver_input(text, use_steer=message_steers, delivery_id=msg.message_id)
-                    delivered.append(msg)
+                    try:
+                        await self._round.deliver_input(text, use_steer=message_steers)
+                    except BaseException:
+                        if resumed_by_leader:
+                            self._round.set_leader_stop(stopped)
+                        raise
+                    delivered.extend([*merged, msg])
+                    for old in merged:
+                        await self._record_delivery(old, member_name, "merged", "follow_up")
                     await self._record_delivery(msg, member_name, "submitted", mode)
-                    getattr(self, "_broadcast_decisions", {}).pop(msg.message_id, None)
                     await self._observe_shown_revision(expanded)
             finally:
                 if delivered:
@@ -436,12 +480,10 @@ class MessageHandler(BaseCoordinationHandler):
             # Install the barrier before cancellation so task-board events and
             # asynchronous completions cannot restart the stopped member.
             await self._round.cancel_agent()
-            self._deferred_broadcast = None
             discarded = messages[:index + 1]
             for old in discarded:
                 old_mode = read_delivery(old)[0]
-                old_meta = getattr(old, "meta", None) or {}
-                old_meta = json.loads(old_meta) if isinstance(old_meta, str) else old_meta
+                old_meta = message_metadata(old)
                 entry = old_meta.get("delivery_feedback", {}).get(member_name, {})
                 old_mode = entry.get("mode") or old_mode
                 state = "stopped" if old is msg else ("cleared" if old_mode == "follow_up" else "held")
@@ -453,8 +495,7 @@ class MessageHandler(BaseCoordinationHandler):
         return False
 
     async def _record_delivery(self, msg: Any, member_name: str, state: str, mode: str | None) -> None:
-        meta = getattr(msg, "meta", None)
-        meta = json.loads(meta) if isinstance(meta, str) and meta else meta
+        meta = message_metadata(msg)
         if not isinstance(meta, dict) or not ("delivery_feedback" in meta or is_receiver_routed(msg) or meta.get("type") == "group_chat"):
             return
         await self._infra.message_manager.db.message.record_delivery(
@@ -466,13 +507,8 @@ class MessageHandler(BaseCoordinationHandler):
         return None
 
     async def _broadcast_mode(self, member_name: str, msg: Any) -> tuple[str | None, dict]:
-        meta = getattr(msg, "meta", None) or {}
-        meta = json.loads(meta) if isinstance(meta, str) else meta
+        meta = message_metadata(msg)
         feedback = meta.get("delivery_feedback", {}).get(member_name, {})
-        cached = getattr(self, "_broadcast_decisions", {})
-        self._broadcast_decisions = cached
-        if msg.message_id in cached:
-            return cached[msg.message_id]
         if feedback.get("mode") == "follow_up":
             return "follow_up", feedback.get("target_tasks", {})
         manager = self._infra.task_manager
@@ -506,7 +542,6 @@ class MessageHandler(BaseCoordinationHandler):
                              msg.message_id, member_name)
             mode = "follow_up"
         if mode == "follow_up":
-            cached[msg.message_id] = (mode, versions)
             await self._infra.message_manager.db.message.record_delivery(
                 msg.message_id, member_name, "deferred", mode=mode, target_tasks=versions,
             )

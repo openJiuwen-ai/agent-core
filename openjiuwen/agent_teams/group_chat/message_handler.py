@@ -1,11 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Group mailbox policy over the shared message delivery lifecycle."""
 
-from openjiuwen.agent_teams.agent.coordination.handlers.message import MessageHandler
-from openjiuwen.agent_teams.broadcast_delivery import choose_group_delivery
+from openjiuwen.agent_teams.agent.coordination.handlers.message import MessageHandler, choose_delivery
 from openjiuwen.agent_teams.group_chat.handler import context_for, group_metadata
 from openjiuwen.agent_teams.message_template import ExpandedMessage
-from openjiuwen.agent_teams.private_message import ACTIVE_TASKS
+from openjiuwen.agent_teams.tools.message_manager import ACTIVE_TASKS
 from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -80,14 +79,14 @@ class GroupMessageHandler(MessageHandler):
         if not self._round.has_in_flight_round():
             return "follow_up"
         active = [task for task in tasks if task.status in ACTIVE_TASKS]
-        mode = await choose_group_delivery({
+        mode = await choose_delivery({
             "recipient": member_name,
             "role_description": (getattr(getattr(self._blueprint, "card", None), "description", None) or "")[:500],
             "sender": msg.from_member_name,
             "message": msg.content[:2000],
             "current_input": snapshot[1] if snapshot else "",
             "active_tasks": [{"title": task.title[:200], "summary": task.content[:300]} for task in active[:4]],
-        })
+        }, group=True)
         if not self._round.has_in_flight_round():
             return "follow_up"
         if snapshot is not None:

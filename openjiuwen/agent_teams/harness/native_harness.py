@@ -44,6 +44,7 @@ control event and awaits an ack resolved solely by the supervisor coroutine):
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from enum import Enum
 from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable
@@ -211,7 +212,7 @@ class NativeHarness(DeepAgent):
         self._owns_session: bool = False
         self._slow_round_log_after_seconds: float | None = parts.config.completion_timeout
         self._st = HarnessInternalState()
-        self.follow_up_merger = None
+        self._merge_follow_ups = False
         self._control: asyncio.Queue = asyncio.Queue()
         # Harness-private event bus; consumers subscribe via
         # ``subscribe(on_state=, on_round=)``. Metrics/logging off — these fire
@@ -623,7 +624,6 @@ class NativeHarness(DeepAgent):
         *,
         immediate: bool = False,
         run_context: RunContext | None = None,
-        delivery_id: str | None = None,
     ) -> str:
         """Push an inbound message to the supervisor.
 
@@ -657,7 +657,6 @@ class NativeHarness(DeepAgent):
             content=content,
             immediate=immediate,
             run_context=run_context,
-            delivery_id=delivery_id,
         )
         await self._control.put(_CmdSend(msg=msg, ack=ack))
         return await ack
@@ -962,7 +961,6 @@ class NativeHarness(DeepAgent):
             content=cmd.msg.content,
             immediate=cmd.msg.immediate,
             run_context=cmd.msg.run_context,
-            delivery_id=cmd.msg.delivery_id,
         )
 
         phase = self._st.phase
@@ -979,7 +977,7 @@ class NativeHarness(DeepAgent):
                 # Steer the active round via the shared steering queue that the
                 # executor drains before the next inner model call.
                 try:
-                    await self._steer_with_follow_ups(msg)
+                    self._steer_with_follow_ups(msg)
                 except Exception as exc:
                     # A rejected input must not terminate the running worker.
                     logger.exception("[NativeHarness] steering admission failed; input remains retryable")
@@ -1861,41 +1859,36 @@ class NativeHarness(DeepAgent):
     # Task-loop bridge helpers
     # ------------------------------------------------------------------
 
-    async def _steer_with_follow_ups(self, msg):
-        merger = self.follow_up_merger
-        if merger is None or not isinstance(msg.content, str):
+    def _steer_with_follow_ups(self, msg):
+        # The supervisor already owns and serializes this FIFO. Keep its inputs
+        # until steering succeeds; no mailbox writes or second receipt protocol.
+        if not self._merge_follow_ups or not isinstance(msg.content, str):
             self._push_steer(msg.content, run_context=msg.run_context)
             return
-        # Normalize legacy loop queues into the FIFO, without discarding input.
-        # Inputs arriving after this synchronous snapshot stay in their queues.
         if msg.run_context is None:
-            legacy = self._drain_pending_follow_ups(self._session) or []
-            for content in legacy:
+            for content in self._drain_pending_follow_ups(self._session) or []:
                 self._st.pending_queue.append(InboxMessage(
                     seq=self._st.next_seq(), content=content, immediate=False,
                 ))
-        snapshot = []
+        queued = []
         for item in self._st.pending_queue:
             if item.run_context != msg.run_context or not isinstance(item.content, str):
                 break
-            snapshot.append(item)
-        batch = await merger.prepare(msg.content, msg.delivery_id, snapshot,
-                                     allow_mailbox=msg.run_context is None)
-        if batch is None:
-            if not self._push_steer(msg.content, run_context=msg.run_context):
+            queued.append(item)
+        if queued:
+            content = json.dumps({
+                "follow_up_context": [item.content for item in queued],
+                "follow_up_policy": "Earlier follow_up context, not completed work. Keep after-task timing; "
+                                    "judge relevance using the task board and newer instructions. No second todo queue.",
+                "current_steer": msg.content,
+            }, ensure_ascii=False)
+            if not self._push_steer(content, run_context=msg.run_context):
                 raise RuntimeError("Steering input queue is unavailable")
+            for _ in queued:
+                self._st.pending_queue.popleft()
             return
-        try:
-            if not self._push_steer(batch.content, run_context=msg.run_context):
-                raise RuntimeError("Steering input queue is unavailable")
-        except BaseException:
-            await merger.finish(batch, accepted=False)
-            raise
-        # The steer has been accepted before either source is removed.
-        self._st.pending_queue = type(self._st.pending_queue)(
-            item for item in self._st.pending_queue if item.seq not in batch.runtime_sequences
-        )
-        await merger.finish(batch, accepted=True)
+        if not self._push_steer(msg.content, run_context=msg.run_context):
+            raise RuntimeError("Steering input queue is unavailable")
 
     def _push_steer(
         self,

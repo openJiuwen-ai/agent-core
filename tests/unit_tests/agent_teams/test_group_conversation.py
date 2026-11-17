@@ -96,13 +96,13 @@ async def test_group_steer_does_not_target_a_new_round(group, monkeypatch):
     group.host.has_in_flight_round = lambda: True
     group.host.active_input_snapshot = lambda: (active, "Review the old draft")
 
-    async def decide(state):
+    async def decide(state, **kwargs):
         nonlocal active
         assert state["current_input"] == "Review the old draft"
         active = object()
         return "steer"
 
-    monkeypatch.setattr("openjiuwen.agent_teams.group_chat.message_handler.choose_group_delivery", decide)
+    monkeypatch.setattr("openjiuwen.agent_teams.group_chat.message_handler.choose_delivery", decide)
     await post(group, "correct the old draft", ["alice"])
     await group.handler.on_poll_mailbox(None)
     assert group.host.deliver_input.call_args.kwargs["use_steer"] is False

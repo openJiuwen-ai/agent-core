@@ -10,8 +10,6 @@ modules:
   - openjiuwen/agent_teams
 files:
   - openjiuwen/agent_teams/agent/coordination/handlers/message.py
-  - openjiuwen/agent_teams/broadcast_delivery.py
-  - openjiuwen/agent_teams/follow_up_merge.py
   - openjiuwen/agent_teams/harness/native_harness.py
   - openjiuwen/agent_teams/tools/database/message_dao.py
   - openjiuwen/agent_teams/tools/tool_message.py
@@ -44,12 +42,17 @@ flowchart LR
  A[忙时 steer] --> B[快照此前 follow_up]
  B --> C[保留原文 来源 时间 任务绑定]
  C --> D{运行时接受}
- D -->|成功| E[移出原队列并记录 merged]
+ D -->|成功| E[移出原队列 邮箱记录 merged]
  D -->|失败| F[保留原输入]
 ```
 
-运行时只合并相同调用上下文的连续 FIFO；InteractiveInput 与不同上下文隔离。晚于快照的输入保留。邮箱合并预留与最终投递认领通过写锁串行化，失败恢复，过期预留可重试。
+复用 Native supervisor 原 FIFO：成功推入 steering 后才取出相同上下文的连续输入；InteractiveInput 与不同上下文隔离，晚到输入继续排队。邮箱复用原串行 drain、原入站 XML 渲染和 finally 批量已读，投递失败保留原消息；运行时输入不再写成数据库行，反馈沿用 submitted，邮箱合并反馈为 merged。
 广播使用逐接收方 handled 状态，延后消息不阻塞后续 steer/drop；群聊保留原时间游标。返回 message_id，发送者或同团队 Leader 可查询投递反馈。submitted/merged 仅表示运行时接受，不表示模型阅读或任务完成。
+
+## 复用现有接口
+
+本次移除原 PR 新建的 private_message、broadcast_delivery、follow_up_merge 三个 Python 模块。模式与元数据归已有 TeamMessageManager；Jev 调用在已有消息处理器内完成，群聊复用该函数，判断文案使用现有 cn/en 模板加载器。send / deliver_input / InboxMessage 恢复原接口，不再跨层传递 delivery_id。
+删除合并令牌、预留/认领、合成消息、超时恢复和重复广播缓存。每类队列由其原所有者消费，不另建持久化投递协议。保留接收方反馈、任务绑定、Leader 停止与审批/goal 守卫。
 
 ## 不采用的方案
 
@@ -60,5 +63,5 @@ flowchart LR
 
 ## 验证与限制
 
-Windows、Python 3.13，精简后运行 14 个相关测试文件：318 passed、19 skipped，28 条依赖弃用警告。跳过项沿用原有测试标记，没有新增跳过。覆盖投递与权限、停止和恢复、广播及群聊、Jev 回退、上下文合并、审批与 goal 兼容、工具描述及提示词装配。
+Windows、Python 3.13，本次复用改写后运行 14 个相关测试文件：322 passed、19 skipped，29 条依赖弃用警告。跳过项沿用原有测试标记，没有新增跳过。覆盖投递与权限、停止和恢复、广播及群聊、Jev 回退、上下文合并、审批与 goal 兼容、工具描述及提示词装配。
 本次未运行真实模型业务情景；外部 CLI Harness 的 Native 合并与停止规则未做端到端验证。运行时接受不是模型消费证明，异常重试不保证恰好消费一次。

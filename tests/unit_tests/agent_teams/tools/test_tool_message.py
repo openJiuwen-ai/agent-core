@@ -126,7 +126,6 @@ async def test_old_terminal_feedback_without_handled_flag_does_not_replay(db):
     message_id = (await send.invoke({"to": "*", "content": "Already delivered before upgrade"})).data["message_id"]
     await db.message.record_delivery(message_id, DEV_1, "submitted", mode="steer")
     assert not await db.message.get_broadcast_messages(TEAM_NAME, DEV_1, unread_only=True)
-    assert not await db.message.claim_delivery(message_id, DEV_1)
     await db.message.record_delivery(message_id, DEV_1, "pending")
     feedback = (await send.invoke({"action": "status", "message_id": message_id})).data["recipients"]
     assert feedback[DEV_1]["state"] == "submitted"

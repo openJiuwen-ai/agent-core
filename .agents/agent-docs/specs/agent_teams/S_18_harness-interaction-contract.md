@@ -278,7 +278,7 @@ replace 使用 expected_version 做 CAS。平台应在成员执行前初始化�
 
 ## Steer 合并 follow_up 上下文（2026-11-16）
 
-Native TeamHarness 忙时 steer 将此前 follow_up 邮箱输入及相同调用上下文的运行时 FIFO 快照合并，保留原消息 ID、发送者、原模式、时间、任务绑定和正文。成功提交 steering 通道后移出原队列，反馈记 merged；失败保留输入，快照之后的新输入不清除。merged 只表示上下文提交，不代表阅读、执行或任务完成。
+Native TeamHarness 忙时 steer 复用原生输入通道：邮箱处理器附上此前未读 follow_up 的原文、来源、时间和任务绑定，投递成功后才按原已读接口移出邮箱并记 merged；Native supervisor 合并相同调用上下文的连续 FIFO，成功推入 steering 后才移出队列。两处都不建立额外持久化队列，失败保留原输入，晚到输入继续排队。运行时输入沿用原有渲染的消息来源，不生成合成数据库消息；其反馈仍为 submitted。submitted/merged 均不表示模型阅读或任务完成。
 
 不新增待办队列、不增加 pending/resolve 工具、不维护消息完成状态、不发送自动后续提醒。成员按当前任务看板和最新有效指令判断旧信息的适用性，有冲突询问 Leader。原定后续工作仍由任务看板管理。外部 CLI 运行时保持原行为。
 

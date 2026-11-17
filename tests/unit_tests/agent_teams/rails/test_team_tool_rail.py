@@ -59,14 +59,12 @@ async def test_team_tools_stay_direct_under_progressive_policy(backend, role):
     """A member built with progressive_tool enabled still advertises every team tool."""
     manager = AbilityManager(owner_id=f"{role}-agent")
     manager.set_tool_exposure_policy(True, direct_tool_names={"tool_search", "tool_call"})
-    agent = SimpleNamespace(ability_manager=manager, follow_up_merger=None)
+    agent = SimpleNamespace(ability_manager=manager, _merge_follow_ups=False)
     rail = TeamToolRail(team_backend=backend, role=role)
 
     rail.init(agent)
 
-    from openjiuwen.agent_teams.follow_up_merge import TeamFollowUpMerger
-    assert isinstance(agent.follow_up_merger, TeamFollowUpMerger)
-    assert agent.follow_up_merger.manager is backend.message_manager
+    assert agent._merge_follow_ups is True
 
     team_tool_names = {tool.card.name for tool in rail._tools}
     assert team_tool_names

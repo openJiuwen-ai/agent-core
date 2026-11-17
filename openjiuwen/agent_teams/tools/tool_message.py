@@ -8,10 +8,9 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
-from openjiuwen.agent_teams.private_message import ACTIVE_TASKS, MODES, MODE_KEY
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.locales import Translator
-from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
+from openjiuwen.agent_teams.tools.message_manager import ACTIVE_TASKS, MODES, MODE_KEY, TeamMessageManager
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
 from openjiuwen.core.common.logging import team_logger

@@ -13,6 +13,7 @@ from typing import (
     Optional,
 )
 
+from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.events import (
     BroadcastEvent,
@@ -23,6 +24,34 @@ from openjiuwen.agent_teams.schema.events import (
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database import TeamDatabase, TeamMessageBase
 from openjiuwen.core.common.logging import team_logger
+
+
+MODE_KEY = "private_delivery_mode"
+MODES = ("steer", "follow_up", "abort")
+ACTIVE_TASKS = frozenset(
+    status.value for status in (TaskStatus.PLANNING, TaskStatus.IN_PROGRESS, TaskStatus.IN_REVIEW)
+)
+
+
+def message_metadata(message):
+    raw = getattr(message, "meta", None)
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def read_delivery(message):
+    raw = message_metadata(message)
+    if getattr(message, "broadcast", False) or raw.get(MODE_KEY) not in MODES:
+        return None, {}
+    tasks = raw.get("target_tasks")
+    return raw[MODE_KEY], tasks if isinstance(tasks, dict) else {}
+
+
+def is_receiver_routed(message):
+    return getattr(message, "broadcast", False) and message_metadata(message).get("receiver_routed") is True
 
 
 class TeamMessageManager:
@@ -57,9 +86,6 @@ class TeamMessageManager:
         self.member_name = member_name
         self.db = db
         self.messager = messager
-
-    async def claim_delivery(self, message_id: str, member_name: str) -> bool:
-        return await self.db.message.claim_delivery(message_id, member_name)
 
     async def send_message(
         self,

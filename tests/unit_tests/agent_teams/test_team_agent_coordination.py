@@ -291,7 +291,6 @@ async def test_wake_feeds_messages_to_agent():
     fake_msg.broadcast = False
     fake_msg.timestamp = 1000
     agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.claim_delivery = AsyncMock(return_value=True)
     agent._configurator.message_manager.mark_message_read = AsyncMock(return_value=True)
     agent._configurator.message_manager.get_broadcast_messages = AsyncMock(return_value=[])
     agent._coordination.dispatcher.message._read_all_unread = AsyncMock(
@@ -1126,7 +1125,6 @@ async def test_process_unread_delegates_raw_delivered_messages_to_manager():
     """
     agent = _make_leader()
     agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.claim_delivery = AsyncMock(return_value=True)
     mark_messages_read = AsyncMock(return_value=3)
     agent._configurator.message_manager.mark_messages_read = mark_messages_read
     # deliver_input is a no-op so the delivered-object collection is exercised

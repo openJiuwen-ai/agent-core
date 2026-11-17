@@ -115,7 +115,7 @@ class AgentRoundController(Protocol):
     def leader_stop(self) -> dict | None: ...
     def set_leader_stop(self, marker: dict | None) -> None: ...
     async def cancel_agent(self) -> None: ...
-    async def deliver_input(self, content: Any, *, use_steer: bool = True, run_context: RunContext | None = None, delivery_id: str | None = None) -> None: ...
+    async def deliver_input(self, content: Any, *, use_steer: bool = True, run_context: RunContext | None = None) -> None: ...
     async def resume_interrupt(self, user_input: Any) -> None: ...
 
 
@@ -545,13 +545,13 @@ Leader 开启 goal（`LeaderSpec.goal`）后，团队完成判定多一个条件
 - 普通 receiver_routed 广播用各接收方 feedback.handled 判断是否仍待投递，不使用广播时间水位。较早 follow_up 不阻塞后续 steer/drop；follow_up 的目标任务持久化，各次轮询及恢复不重新调用 Jev 改判。群聊仍使用原时间游标保证上下文连续。
 - Jev 未配置、失败或非法输出时回退原投递机制：空闲直接处理、忙时 steer。不重试等待，不冒充 drop；普通广播反馈记录 routing=legacy_fallback。群聊同样回退原 steer 机制。
 - 私信也记录反馈并返回 message_id。Leader 可查询同团队消息；其他成员只能查询自己发送的消息。submitted 仅表示运行时接受，不是阅读、完成或验收。
-- 最终投递前持写锁认领，合并预留期间不重复投递；异常中断在 dispatching 时不会假报 submitted。
+- 投递与已读沿用原处理器串行 drain 和 finally 批量标记；Native FIFO 由 supervisor 串行消费。不新增认领、预留令牌或超时租约；异常重试沿用原机制，不保证恰好消费一次。
 - abort 清除运行时 follow_up；中止之前的邮箱 follow_up 标记 cleared，其他邮箱输入标记 held 并保留历史，不自动重放；abort 自身标记 stopped。新 Leader 私信恢复。Native 团队忙时 steer 合并此前 follow_up 上下文并移出投递队列；这不表示任务完成。
 - 同团队新建消息时间戳递增，防止同一时钟 tick 的 abort/恢复被错误排序。时间戳不表示精确物理时间。
 
 
 ## Steer 合并 follow_up 上下文（2026-11-16）
 
-Native TeamHarness 忙时 steer 将此前 follow_up 邮箱输入及相同调用上下文的运行时 FIFO 快照合并，保留原消息 ID、发送者、原模式、时间、任务绑定和正文。成功提交 steering 通道后移出原队列，反馈记 merged；失败保留输入，快照之后的新输入不清除。merged 只表示上下文提交，不代表阅读、执行或任务完成。
+Native TeamHarness 忙时 steer 复用原生输入通道：邮箱处理器附上此前未读 follow_up 的原文、来源、时间和任务绑定，投递成功后才按原已读接口移出邮箱并记 merged；Native supervisor 合并相同调用上下文的连续 FIFO，成功推入 steering 后才移出队列。两处都不建立额外持久化队列，失败保留原输入，晚到输入继续排队。运行时输入沿用原有渲染的消息来源，不生成合成数据库消息；其反馈仍为 submitted。submitted/merged 均不表示模型阅读或任务完成。
 
 不新增待办队列、不增加 pending/resolve 工具、不维护消息完成状态、不发送自动后续提醒。成员按当前任务看板和最新有效指令判断旧信息的适用性，有冲突询问 Leader。原定后续工作仍由任务看板管理。外部 CLI 运行时保持原行为。

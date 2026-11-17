@@ -60,8 +60,6 @@ if TYPE_CHECKING:
 class TeamHarness:
     """Sole adapter between TeamAgent and a NativeHarness-backed DeepAgent."""
 
-    supports_follow_up_merge = True
-
     def __init__(
         self,
         agent_spec: "DeepAgentSpec",
@@ -386,7 +384,6 @@ class TeamHarness:
         *,
         immediate: bool = False,
         run_context: RunContext | None = None,
-        delivery_id: str | None = None,
     ) -> Any:
         """Submit input to the native; ``immediate`` steers the active round."""
         if self._native is None:
@@ -394,8 +391,6 @@ class TeamHarness:
                 StatusCode.AGENT_TEAM_EXECUTION_ERROR,
                 error_msg="TeamHarness.send() before start().",
             )
-        if delivery_id is not None:
-            return await self._native.send(content, immediate=immediate, run_context=run_context, delivery_id=delivery_id)
         if run_context is None:
             return await self._native.send(content, immediate=immediate)
         return await self._native.send(

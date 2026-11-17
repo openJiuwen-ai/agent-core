@@ -115,7 +115,6 @@ class AgentRoundController(Protocol):
         *,
         use_steer: bool = True,
         run_context: RunContext | None = None,
-        delivery_id: str | None = None,
     ) -> None:
         """Guarantee that content reaches the DeepAgent regardless of state."""
         ...

@@ -144,11 +144,8 @@ class TeamToolRail(DeepAgentRail):
         if self._tools is not None:
             return
         super().init(agent)
-        # Native owns the FIFO; this adapter supplies team persistence policy.
-        from openjiuwen.agent_teams.follow_up_merge import TeamFollowUpMerger
-        if hasattr(agent, "follow_up_merger"):
-            agent.follow_up_merger = TeamFollowUpMerger(self._team_backend.message_manager)
-
+        if hasattr(agent, "_merge_follow_ups"):
+            agent._merge_follow_ups = True
         # Tool descriptions consult the team's evolved ``prompts/tool/``
         # files via the resident ``WorkspaceCache``. The cache is read off
         # the team backend (which delegates to the workspace manager) — the

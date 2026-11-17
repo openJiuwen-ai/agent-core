@@ -630,7 +630,6 @@ class TeamAgent(BaseAgent):
         *,
         use_steer: bool = True,
         run_context: RunContext | None = None,
-        delivery_id: str | None = None,
     ) -> None:
         # The runtime's single supervisor serialises inputs: send() starts a
         # round when idle, steers (use_steer) or queues a follow-up when running.
@@ -639,9 +638,6 @@ class TeamAgent(BaseAgent):
             return
         harness = self.harness
         if harness is None:
-            return
-        if delivery_id is not None and getattr(harness, "supports_follow_up_merge", False) is True:
-            await harness.send(content, immediate=use_steer, run_context=run_context, delivery_id=delivery_id)
             return
         if run_context is None:
             await harness.send(content, immediate=use_steer)

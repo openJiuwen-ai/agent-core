@@ -199,7 +199,7 @@ class MessageDao:
             feedback = meta.setdefault("delivery_feedback", {})
             previous = feedback.get(member_name, {})
             # A retry after runtime acceptance must not make feedback regress.
-            if previous.get("state") in {"submitted", "dropped", "withdrawn", "stopped", "cleared", "held", "merged", "merging"}:
+            if previous.get("state") in {"submitted", "dropped", "withdrawn", "stopped", "cleared", "held", "merged"}:
                 return
             feedback[member_name] = {
                 **previous, **details, "state": state, "mode": mode or previous.get("mode"),
@@ -207,77 +207,6 @@ class MessageDao:
             }
             row.meta = json.dumps(meta, ensure_ascii=False)
             await session.commit()
-
-    async def reserve_merge(self, message_ids, member, token, steer_id, runtime_ids, synthetic_ids):
-        model = _get_message_model()
-        accepted = []
-        async with self._sessions.write() as session:
-            rows = (await session.execute(select(model).where(model.message_id.in_(message_ids)).with_for_update())).scalars().all()
-            for row in rows:
-                meta = json.loads(row.meta) if row.meta else {}
-                entry = meta.get("delivery_feedback", {}).get(member)
-                if entry is None or entry.get("state") not in {"pending", "deferred", "submitted", "merging"}:
-                    continue
-                if entry.get("state") == "submitted" and row.message_id not in runtime_ids:
-                    continue
-                entry.update(state="merging", merge_token=token, merged_into=steer_id,
-                             merge_reserved_at=get_current_time(),
-                             merge_previous_state=entry.get("merge_previous_state", entry.get("state", "pending")),
-                             merge_synthetic=row.message_id in synthetic_ids)
-                if row.message_id in synthetic_ids:
-                    row.is_read = False
-                row.meta = json.dumps(meta, ensure_ascii=False)
-                accepted.append(row.message_id)
-            await session.commit()
-        return [mid for mid in message_ids if mid in accepted]
-
-    async def finish_merge(self, message_ids, member, token, *, accepted):
-        model = _get_message_model()
-        async with self._sessions.write() as session:
-            rows = (await session.execute(select(model).where(model.message_id.in_(message_ids)).with_for_update())).scalars().all()
-            for row in rows:
-                meta = json.loads(row.meta)
-                entry = meta["delivery_feedback"].get(member, {})
-                if entry.get("merge_token") != token:
-                    continue
-                if accepted:
-                    entry.update(state="merged", handled=True, updated_at=get_current_time())
-                    if not row.broadcast:
-                        row.is_read = True
-                else:
-                    entry["state"] = entry.get("merge_previous_state", "pending")
-                    if entry.get("merge_synthetic"):
-                        entry.update(state="cleared", handled=True)
-                        row.is_read = True
-                for key in ("merge_token", "merge_previous_state", "merge_synthetic"):
-                    entry.pop(key, None)
-                row.meta = json.dumps(meta, ensure_ascii=False)
-            await session.commit()
-
-    async def claim_delivery(self, message_id: str, member_name: str) -> bool:
-        """Claim an unhandled delivery before handing it to the runtime."""
-        model = _get_message_model()
-        async with self._sessions.write() as session:
-            row = (await session.execute(select(model).where(model.message_id == message_id).with_for_update())).scalar_one_or_none()
-            if row is None:
-                return False
-            meta = json.loads(row.meta) if row.meta else {}
-            entry = meta.get("delivery_feedback", {}).get(member_name)
-            if entry is None:
-                return True
-            if entry.get("state") == "merging":
-                if get_current_time() - entry.get("merge_reserved_at", 0) < 30_000:
-                    return False
-                # Recover an abandoned admission after process/DB failure.
-                entry["state"] = "pending"
-                for key in ("merge_token", "merge_previous_state", "merge_synthetic"):
-                    entry.pop(key, None)
-            if entry.get("handled") or entry.get("state") in {"submitted", "dropped", "withdrawn", "stopped", "cleared", "held", "merged", "merging"}:
-                return False
-            entry["state"] = "dispatching"
-            row.meta = json.dumps(meta, ensure_ascii=False)
-            await session.commit()
-            return True
 
     async def create_message(
         self,
