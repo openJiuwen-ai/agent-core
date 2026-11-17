@@ -83,8 +83,10 @@ def _anthropic_output_tokens(
     thinking = params.get("thinking")
     budget = thinking.get("budget_tokens") if isinstance(thinking, Mapping) else None
     if isinstance(budget, int) and ceiling <= budget:
-        ceiling = budget + 1024
-    # The SDK merges extra_body after the adapter has raised its ceiling.
+        # Match AnthropicModelClient: an incompatible output ceiling is rejected
+        # instead of being silently raised above the configured value.
+        return None
+    # The SDK merges extra_body after the adapter validates its primary ceiling.
     # Its explicit wire override therefore wins over the generated value.
     if "max_tokens" in extra_body:
         ceiling = extra_body["max_tokens"]
