@@ -59,12 +59,10 @@ async def test_team_tools_stay_direct_under_progressive_policy(backend, role):
     """A member built with progressive_tool enabled still advertises every team tool."""
     manager = AbilityManager(owner_id=f"{role}-agent")
     manager.set_tool_exposure_policy(True, direct_tool_names={"tool_search", "tool_call"})
-    agent = SimpleNamespace(ability_manager=manager, _merge_follow_ups=False)
+    agent = SimpleNamespace(ability_manager=manager)
     rail = TeamToolRail(team_backend=backend, role=role)
 
     rail.init(agent)
-
-    assert agent._merge_follow_ups is True
 
     team_tool_names = {tool.card.name for tool in rail._tools}
     assert team_tool_names

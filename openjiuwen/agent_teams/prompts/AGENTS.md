@@ -19,7 +19,6 @@ Markdown 模板是团队 Agent 的行为契约。Python 侧只做装配（`secti
 
 | 模板文件 | 触发条件 | 装配位置 | 主要内容 |
 |---|---|---|---|
-| `broadcast_delivery.md` / `group_delivery.md` | 接收方投递判断 | coordination `choose_delivery` 经 `load_template` 加载 | Jev 的投递时机准则；群聊不允许 drop |
 | `org_root_aggregation.md` | Organization Leader | `organization/runtime.py` / `organization/tools.py` | Shared aggregation selection policy (cn/en) |
 | （无模板，Python 装配） | `member_name` 或 `member_prompt` 非空 | `messages.build_identity_text` → `build_team_identity_section` | **唯一的 per-member 内容**：自身 `member_name` 一行 + `## 私有工作约定` 子节（`member_prompt` 为空则只出名字）。正文只有一份（`build_identity_text`），section 只是它给外部 CLI 用的包装（P:10，`include_member_specific=True` 内联进静态 prompt）；**进程内成员经对话历史收到它**（`<team-context>`），留在系统提示词会让每个成员各占一份前缀 KV cache。见 [[F_68]] / [[F_70]] |
 | `leader_bootstrap.md` | `role == LEADER`，**常驻系统提示词** | `build_leader_bootstrap_section` | Leader 在系统提示词里唯一的团队内容（[[F_76]]）：身份定位 + `{{collaboration_mechanism}}` 槽 + 「先调 `build_team`，完整协同准则随它的返回结果下发」。**建队之前唯一成立的内容**，因此也只有它留在前缀 |

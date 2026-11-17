@@ -87,7 +87,11 @@ async def test_reading_newer_broadcast_preserves_old_deferred_for_same_recipient
     send = _leader_send(db)
     old = (await send.invoke({"to": "*", "content": "Useful later"})).data["message_id"]
     new = (await send.invoke({"to": "*", "content": "Urgent correction"})).data["message_id"]
-    await db.message.save_delivery_mode(old, DEV_1, "follow_up", {"A": 1})
+    import asyncio
+    await asyncio.gather(
+        db.message.save_delivery_mode(old, DEV_1, "follow_up", {"A": 1}),
+        db.message.mark_message_read(old, DEV_2),
+    )
     await send.message_manager.mark_messages_read([await db.message.get_message(new)], DEV_1)
     unread = await db.message.get_broadcast_messages(TEAM_NAME, DEV_1, unread_only=True)
     assert [m.message_id for m in unread] == [old]
@@ -97,8 +101,6 @@ async def test_reading_newer_broadcast_preserves_old_deferred_for_same_recipient
     assert DEV_2 in await db.message.members_with_unread(TEAM_NAME, [DEV_2])
 
 
-
-
 @pytest.mark.asyncio
 async def test_abort_and_resume_are_ordered_even_with_same_clock_tick(db, monkeypatch):
     monkeypatch.setattr("openjiuwen.agent_teams.tools.database.message_dao.get_current_time", lambda: 100)
@@ -106,10 +108,6 @@ async def test_abort_and_resume_are_ordered_even_with_same_clock_tick(db, monkey
     stop = (await send.invoke({"to": DEV_1, "content": "Stop", "mode": "abort"})).data["message_id"]
     resume = (await send.invoke({"to": DEV_1, "content": "New work", "mode": "steer"})).data["message_id"]
     assert (await db.message.get_message(resume)).timestamp > (await db.message.get_message(stop)).timestamp
-
-
-
-
 
 
 def _member_send(db, dispatch_mode: str = "autonomous"):
@@ -419,76 +417,10 @@ async def test_group_reply_cannot_disappear_in_private_user_mailbox(db, lang):
 @pytest.mark.asyncio
 async def test_private_modes_enforce_abort_role_and_single_recipient(db):
     member = _member_send(db)
-    assert set(member.card.input_params["properties"]["mode"]["enum"]) == {"steer", "follow_up"}
     rejected = await member.invoke({"to": DEV_2, "content": "Stop", "mode": "abort"})
     assert not rejected.success and "leader" in rejected.error
 
     leader = _leader_send(db)
-    assert "abort" in leader.card.input_params["properties"]["mode"]["enum"]
     for recipients in ({"to": "*"}, {"targets": [DEV_1, DEV_2]}, {"to": "user"}):
         result = await leader.invoke({**recipients, "content": "Stop", "mode": "abort"})
         assert not result.success
-
-    scheduled = _member_send(db, dispatch_mode="scheduled")
-    scheduled.message_manager.send_message = AsyncMock(return_value="message-id")
-    result = await scheduled.invoke({"to": "leader", "content": "Please stop task A", "mode": "steer"})
-    assert result.success
-    scheduled.message_manager.send_message.assert_awaited_once_with(
-        content="Please stop task A",
-        to_member_name=LEADER_NAME,
-        meta={"private_delivery_mode": "steer", "target_tasks": {}},
-    )
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["follow_up", "abort"])
-async def test_only_follow_up_binds_active_tasks(db, mode):
-    from types import SimpleNamespace
-
-    leader = _leader_send(db)
-    leader._team.get_member_status = AsyncMock(return_value=MemberStatus.BUSY.value)
-    leader._team.task_manager.get_tasks_by_assignee = AsyncMock(return_value=[
-        SimpleNamespace(task_id="task-A", updated_at=123, status="in_progress"),
-        SimpleNamespace(task_id="task-B", updated_at=456, status="completed"),
-    ])
-    leader.message_manager.send_message = AsyncMock(return_value="message-id")
-
-    result = await leader.invoke({"to": DEV_1, "content": "Control current work", "mode": mode})
-
-    assert result.success
-    leader.message_manager.send_message.assert_awaited_once_with(
-        content="Control current work",
-        to_member_name=DEV_1,
-        meta={"private_delivery_mode": mode, "target_tasks": {"task-A": 123} if mode == "follow_up" else {}},
-    )
-    if mode == "abort":
-        leader._team.task_manager.get_tasks_by_assignee.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_broadcast_decision_and_read_mark_preserve_other_recipients(db):
-    import asyncio
-    import json
-    send = _leader_send(db)
-    message_id = (await send.invoke({"to": "*", "content": "An update"})).data["message_id"]
-    await asyncio.gather(
-        db.message.save_delivery_mode(message_id, DEV_1, "follow_up", {"A": 1}),
-        db.message.mark_message_read(message_id, DEV_2),
-    )
-    row = await db.message.get_message(message_id)
-    decisions = json.loads(row.meta)["delivery_feedback"]
-    assert decisions[DEV_1] == {"mode": "follow_up", "target_tasks": {"A": 1}}
-    assert decisions[DEV_2] == {"handled": True}
-    assert await db.message.members_with_unread(TEAM_NAME, [DEV_1, DEV_2]) == {DEV_1}
-    assert set(send.card.input_params["required"]) == {"content"}
-    assert "action" not in send.card.input_params["properties"]
-
-
-@pytest.mark.asyncio
-async def test_historical_terminal_broadcast_does_not_replay(db):
-    for state in ("submitted", "withdrawn", "merged"):
-        await db.message.create_message(message_id=state, team_name=TEAM_NAME, from_member_name=LEADER_NAME,
-            content="Already handled", broadcast=True,
-            meta={"receiver_routed": True, "delivery_feedback": {
-                DEV_1: {"state": state}, DEV_2: {"handled": True}}})
-    assert not await db.message.get_broadcast_messages(TEAM_NAME, DEV_1, unread_only=True)
-    assert not await db.message.members_with_unread(TEAM_NAME, [DEV_1, DEV_2])

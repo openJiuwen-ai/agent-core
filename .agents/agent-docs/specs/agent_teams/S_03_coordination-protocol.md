@@ -12,19 +12,6 @@ author_email: chengshuo5@huawei.com
 
 # Coordination Protocol
 
-## 私信模式的提示词约束与兼容
-
-普通集群的 Agent 私信由提示词要求显式选择 `steer` / `follow_up`，只有 Leader 可选择 `abort`。当前工作需要的信息使用 steer，可等当前任务结束的请求使用 follow_up；停止由成员向 Leader 申请。定向多人的通知在工具允许的收件人范围内拆成单独私信并分别选模式，不通过 targets 省略选择。广播、群聊和发给用户的消息不适用。工具 schema 与运行时仍接受旧调用省略 mode；这是兼容行为，不是当前模型的推荐路径。提示词不保证模型每次遵循，需以实际调用观察。
-
-选择标准是“当前任务结束后收到是否太晚”：可能导致错误、返工、继续阻塞、使用旧接口或失去用途的信息用 steer，包括前置指导和依赖就绪通知；follow_up 仅用于不影响当前任务且结束后仍有价值的独立请求。不能因对方忙碌或消息标题是补充说明而延后；混合请求优先拆开，合发用 steer 并明确各部分时机。abort 仅用于执行本身必须立即停止，一般需求变更用 steer，不因暂时无回复而中止。仅允许联系 Leader 的调度工具不提示成员直联、多播或广播。
-
-## Leader 私信中止
-
-普通集群 `send_message(mode="abort")` 仅允许 Leader，对接收方是控制指令，正文不启动模型轮次。
-接收方先建立持久化停止屏障，再硬取消执行，清除运行时 follow_up（包括已载入状态的队列）以及中止之前的邮箱输入；历史记录保留，旧输入不再投递。
-停止不完成任务、不解除依赖、不撤销已经发生的文件修改。只有更新的显式 Leader 私信解除屏障并开始新工作；队友、广播、任务板事件和 Leader 身份的调度模板不能恢复成员。
-abort 以成员当前运行时为停止对象；任务数量、任务身份和更新时间变化均不阻止 Leader 中止。
-
 `agent_teams.agent.coordination` 子系统的设计规约：事件总线 + 分发器 + 8 个场景 handler + kernel 装配。本文描述"系统当前是什么样"。
 
 ## 元信息
@@ -33,7 +20,7 @@ abort 以成员当前运行时为停止对象；任务数量、任务身份和�
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/coordination/` |
-| 最近一次修订日期 | 2026-11-17 |
+| 最近一次修订日期 | 2026-11-10 |
 | 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md`、`F_14_human-agent-team-event-rendering.md`、`F_65_runtime-idle-clock-stall-nudge.md`、`F_74_leader-member-activity-and-team-idle.md`、`F_81_disband-requires-explicit-intent.md`、`F_120_autonomous-completion-summary-and-note.md`、`F_121_autonomous-leader-quiet-board-events.md`、`F_129_task-revision-and-staleness.md`（调度模式 `TASK_UPDATED` 不再 steer、自主模式只触发任务修改告知；投递与指派通知记下执行者已看到的任务版本） |
 
 ## 范围 / 边界
@@ -111,11 +98,8 @@ class AgentRoundController(Protocol):
     def has_in_flight_round(self) -> bool: ...
     def has_pending_interrupt(self) -> bool: ...
 
-    def active_input_snapshot(self) -> tuple[object, str] | None: ...
-    def leader_stop(self) -> dict | None: ...
-    def set_leader_stop(self, marker: dict | None) -> None: ...
     async def cancel_agent(self) -> None: ...
-    async def deliver_input(self, content: Any, *, use_steer: bool = True, run_context: RunContext | None = None) -> None: ...
+    async def deliver_input(self, content: Any, *, use_steer: bool = True) -> None: ...
     async def resume_interrupt(self, user_input: Any) -> None: ...
 
 
@@ -532,26 +516,3 @@ Leader 开启 goal（`LeaderSpec.goal`）后，团队完成判定多一个条件
 - **harness（已存在 docs）**：`AgentRoundController` 的 `deliver_input / cancel_agent / resume_interrupt` 最终落到 `TeamHarness` → `DeepAgent`；具体 round 状态机（pre-stream / streaming / finalize）与 HITL interrupt 语义归 harness。本文只规约"handler 通过窄 protocol 调进去，host 自己分流到 start/follow_up/steer"。
 - **`S_02_team-agent-architecture`**：TeamAgent 四象限分解（blueprint / state / resources / infra）、`SpawnManager` / `RecoveryManager` / `StreamController` 的职责拆分归该 spec。本文复用 `TeamAgentBlueprint` 与 `TeamInfra` 作为 handler 的注入面，但不规约其内部字段。
 - **`S_22_scheduling-runtime`**（F_62）：leader 侧调度决策引擎。kernel 只做四件事——setup 构造（仅 `spec.dispatch_mode == "scheduled"` 的 leader）、start 组合 wake + 团队已存在时激活、`notify_team_built` 激活、pause/stop 失活；决策语义（开工/验票/升级）与 `SCHEDULER_SCAN` 的消费全部归该 spec。task_board / stale_task 的调度模式类（`ScheduledTaskBoardHandler` / `ScheduledStaleTaskHandler`）在构造期按 spec 模式装配（不变量 6）；handler 方法内不出现 dispatch_mode 分支，调度类的行为差异见 S_22 不变量 14。
-
-
-## 接收方路由与审批边界
-
-普通广播由每位接收方通过 Jev 选择 steer、follow_up 或 drop，发送方不能指定模式。群聊仅在被 @ 且运行中时判断 steer 或 follow_up；被 @ 的空闲成员直接投递，未被 @ 的成员不因此唤起。Jev 回退规则见下节。
-
-工具审批 JSON 沿用审批协议，先验证 Leader 身份和有效字段，再绑定 tool_call_id 恢复中断；在飞恢复期间保持未读，过时审批不转为普通输入。普通 steer/follow_up 不绕过待审批门禁。Leader abort 作为独立停止控制仍先于普通消息投递。
-
-## 消息模式与原有已读处理
-
-- 普通 receiver_routed 广播用各接收方 feedback.handled 判断是否仍待投递，不使用广播时间水位。较早 follow_up 不阻塞后续 steer/drop；follow_up 的目标任务持久化，各次轮询及恢复不重新调用 Jev 改判。群聊仍使用原时间游标保证上下文连续。
-- Jev 未配置、失败或非法输出时回退原投递机制：空闲直接处理、忙时 steer。不重试等待，不冒充 drop；回退不新增持久化状态。群聊同样回退原 steer 机制。
-- 发送返回 message_id，广播返回仅确认写入成功。沿用原工具的发送操作和必填参数，不增加 status 查询，也不记录私信投递状态。广播仅持久化每位接收方的 follow_up 模式、目标任务和 handled 已读标记；兼容读取历史终态反馈。
-- 投递与已读沿用原处理器串行 drain 和 finally 批量标记；Native FIFO 由 supervisor 串行消费。不新增认领、预留令牌或超时租约；异常重试沿用原机制，不保证恰好消费一次。
-- abort 清除运行时 follow_up；中止之前的邮箱输入按原接口标记已读，保留历史但不自动重放，不再维护 cleared/held/stopped 反馈状态。新 Leader 私信恢复。Native 团队忙时 steer 合并此前 follow_up 上下文并移出投递队列；这不表示任务完成。
-- 同团队新建消息时间戳递增，防止同一时钟 tick 的 abort/恢复被错误排序。时间戳不表示精确物理时间。
-
-
-## Steer 合并 follow_up 上下文（2026-11-16）
-
-Native TeamHarness 忙时 steer 复用原生输入通道：邮箱处理器附上此前未读 follow_up 的原文、来源、时间和任务绑定，投递成功后按原批量已读接口处理；Native supervisor 合并相同调用上下文的连续 FIFO，成功推入 steering 后才移出队列。两处共用 follow_up_context 包装函数，不建立额外持久化队列；失败保留原输入，晚到输入继续排队。输入沿用原有渲染的消息来源，不生成合成数据库消息。已读仅表示运行时接受，不表示模型阅读或任务完成。
-
-不新增待办队列、不增加 pending/resolve 工具、不维护消息完成状态、不发送自动后续提醒。成员按当前任务看板和最新有效指令判断旧信息的适用性，有冲突询问 Leader。原定后续工作仍由任务看板管理。外部 CLI 运行时保持原行为。

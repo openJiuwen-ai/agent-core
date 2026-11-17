@@ -172,12 +172,3 @@ pause/resume。`checkpoint.py` 使用 JSON 信封和现有 VCS context codec 保
 NativeHarness 装配绑定成员 BuildContext 的 `resolve_execution_environment`，由 AbilityManager
 在每次工具调用开始时解析。team 会话设置由 `TeamDatabase.session_settings` 保存版本，
 平台可按调用读取，因此冷恢复和跨进程成员不依赖首轮请求上下文。见 `F_20261104_1721_session-execution-settings`。
-
-
-## Steer 合并 follow_up 上下文（2026-11-16）
-
-Native TeamHarness 忙时 steer 复用原生输入通道：邮箱处理器附上此前未读 follow_up 的原文、来源、时间和任务绑定，投递成功后按原批量已读接口处理；Native supervisor 合并相同调用上下文的连续 FIFO，成功推入 steering 后才移出队列。两处共用 follow_up_context 包装函数，不建立额外持久化队列；失败保留原输入，晚到输入继续排队。输入沿用原有渲染的消息来源，不生成合成数据库消息。已读仅表示运行时接受，不表示模型阅读或任务完成。
-
-不新增待办队列、不增加 pending/resolve 工具、不维护消息完成状态、不发送自动后续提醒。成员按当前任务看板和最新有效指令判断旧信息的适用性，有冲突询问 Leader。原定后续工作仍由任务看板管理。外部 CLI 运行时保持原行为。
-
-Leader 停止标记同样阻止 goal 自动续跑：无论轮次收尾还是 IDLE 时 nudge_goal，均不得启动新的目标尝试或重新打开已阻塞目标。只有新的显式 Leader 私信成功投递后，才清除此停止标记。工具审批仍按原有 Leader 校验与待审批协议处理，普通 steer/follow_up 不得绕过待审批门禁。

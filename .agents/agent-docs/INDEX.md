@@ -141,7 +141,6 @@ generated: true
 | [F_20261110_1851_leader-external-harness](features/F_20261110_1851_leader-external-harness.md) | F | Leader 三方 Harness 插拔实施与决策归档 | alan_cheng | [D-20261110-1839-leader-external-harness](designs/active/D-20261110-1839-leader-external-harness/design.md) |
 | [F_20261110_1912_view-task-names-the-assignee-and-its-status](features/F_20261110_1912_view-task-names-the-assignee-and-its-status.md) | F | view_task 点名负责人及其成员状态 | alan_cheng | 无独立 D：小范围渲染与读取增强，方案在会话中与需求方确认，未单独立 D 文档 |
 | [F_20261110_1922_team-goal-mode](features/F_20261110_1922_team-goal-mode.md) | F | Team Leader 与成员 Goal 模式实施与决策归档 | alan_cheng | [D-20261110-1903-team-goal-mode](designs/active/D-20261110-1903-team-goal-mode/design.md) |
-| [F_20261116_1653_steer-follow-up-context](features/F_20261116_1653_steer-follow-up-context.md) | F | Team message delivery modes and receiver routing | yzdnh123 | 无独立 D：按用户确认的投递规则实施，并按 2026-11-17 确认收紧 PR 范围。 |
 | [F_20_human-agent-mailbox-unread-flip](features/agent_teams/F_20_human-agent-mailbox-unread-flip.md) | F | Human-Agent Mailbox: Flip Auto-Read Off | alan_cheng | 待核实 |
 | [F_21_external-agent-access](features/agent_teams/F_21_external-agent-access.md) | F | External Agent Access: skill+cli / mcp Wrappers | alan_cheng | 待核实 |
 | [F_21_team-completion-auto-pause](features/agent_teams/F_21_team-completion-auto-pause.md) | F | Team Completion Auto-Pause | alan_cheng | 待核实 |

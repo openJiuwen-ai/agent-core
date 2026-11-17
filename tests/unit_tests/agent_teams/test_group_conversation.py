@@ -75,10 +75,6 @@ async def test_group_mention_selects_delivery_without_discarding(group, monkeypa
 
     if busy and mentioned:
         client.system_one.assert_awaited_once()
-        state, questions = client.system_one.call_args.args
-        assert state["recipient"] == "alice"
-        assert set(questions["delivery"]["criteria"]) == {"steer", "follow_up"}
-        client.close.assert_awaited_once()
     else:
         client.system_one.assert_not_awaited()
     if mentioned:
@@ -98,7 +94,6 @@ async def test_group_steer_does_not_target_a_new_round(group, monkeypatch):
 
     async def decide(state, **kwargs):
         nonlocal active
-        assert state["current_input"] == "Review the old draft"
         active = object()
         return "steer"
 
