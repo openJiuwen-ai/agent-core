@@ -27,110 +27,110 @@ generated: true
 
 ## agent_evolving/ttse
 
-| ID / 文档 | 类型 | 标题 | 作者 | 代码文件 | 关联 D |
-|---|---|---|---|---|---|
-| [S_01_ttse-bank](agent_evolving/S_01_ttse-bank.md) | S | TTSE 经验库容量与写入契约 | xinyang_bali | openjiuwen/agent_evolving/ttse/config.py, openjiuwen/agent_evolving/ttse/stores.py, openjiuwen/agent_evolving/ttse/index.py | — |
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [S_01_ttse-bank](agent_evolving/S_01_ttse-bank.md) | S | TTSE 经验库容量与写入契约 | xinyang_bali | — |
 
 <a id="module-agent_teams"></a>
 
 ## agent_teams
 
-| ID / 文档 | 类型 | 标题 | 作者 | 代码文件 | 关联 D |
-|---|---|---|---|---|---|
-| [S_01_public-api-and-spec-flow](agent_teams/S_01_public-api-and-spec-flow.md) | S | S_01 公开 API 表面与 Spec 流 | alan_cheng | — | — |
-| [S_02_team-agent-architecture](agent_teams/S_02_team-agent-architecture.md) | S | TeamAgent 架构规约 | alan_cheng | — | — |
-| [S_03_coordination-protocol](agent_teams/S_03_coordination-protocol.md) | S | Coordination Protocol | alan_cheng | — | — |
-| [S_04_session-and-recovery](agent_teams/S_04_session-and-recovery.md) | S | Session and Recovery | alan_cheng | — | — |
-| [S_05_member-spawn-and-stream](agent_teams/S_05_member-spawn-and-stream.md) | S | Member Spawn 与 Stream 控制 | alan_cheng | — | — |
-| [S_06_runtime-pool-dispatch](agent_teams/S_06_runtime-pool-dispatch.md) | S | Runtime Pool & Dispatch | alan_cheng | — | — |
-| [S_07_interaction-views-and-hitt](agent_teams/S_07_interaction-views-and-hitt.md) | S | Interaction Views and HITT Runtime Surface | alan_cheng | — | — |
-| [S_08_team-tools-contract](agent_teams/S_08_team-tools-contract.md) | S | Team Tools Contract | alan_cheng | — | — |
-| [S_09_prompts-and-rails](agent_teams/S_09_prompts-and-rails.md) | S | Prompts 与 Team Rails | alan_cheng | — | — |
-| [S_10_messager-transport](agent_teams/S_10_messager-transport.md) | S | S_10 Messager 传输层与注册表 | alan_cheng | — | — |
-| [S_11_models-pool-and-allocation](agent_teams/S_11_models-pool-and-allocation.md) | S | Models Pool and Allocation | alan_cheng | — | — |
-| [S_12_schema-data-models](agent_teams/S_12_schema-data-models.md) | S | Schema Data Models | alan_cheng | — | — |
-| [S_13_team-workspace](agent_teams/S_13_team-workspace.md) | S | Team Workspace | alan_cheng | — | — |
-| [S_14_monitor-and-observability](agent_teams/S_14_monitor-and-observability.md) | S | Monitor and Observability | alan_cheng | — | — |
-| [S_15_cli-tui](agent_teams/S_15_cli-tui.md) | S | Agent Teams CLI / TUI Spec | alan_cheng | — | — |
-| [S_16_top-level-utilities](agent_teams/S_16_top-level-utilities.md) | S | Top-level Utilities | alan_cheng | — | — |
-| [S_17_team-plan](agent_teams/S_17_team-plan.md) | S | Team.plan 运行时规约 | weichenhao | — | — |
-| [S_18_harness-interaction-contract](agent_teams/S_18_harness-interaction-contract.md) | S | S_18 Harness 交互契约（HarnessProtocol / MemberRuntime） | alan_cheng | — | — |
-| [S_18_swarmflow-engine-and-worker](agent_teams/S_18_swarmflow-engine-and-worker.md) | S | Swarmflow 引擎与 Worker 运行时规约 | alan_cheng | — | — |
-| [S_19_reliability-framework](agent_teams/S_19_reliability-framework.md) | S | S_19 Reliability framework | alan_cheng | — | — |
-| [S_20_native-harness-async-tool-framework](agent_teams/S_20_native-harness-async-tool-framework.md) | S | NativeHarness 异步工具框架运行时规约 | alan_cheng | — | — |
-| [S_21_swarmflow-concurrency-governor](agent_teams/S_21_swarmflow-concurrency-governor.md) | S | Swarmflow 并发治理运行时规约 | chenchunzhou | — | — |
-| [S_22_scheduling-runtime](agent_teams/S_22_scheduling-runtime.md) | S | Scheduling Runtime（调度模式运行时） | alan_cheng | — | — |
-| [S_23_agent-template-snapshot-loading](agent_teams/S_23_agent-template-snapshot-loading.md) | S | S_23 AgentTemplate 快照加载 | openJiuwen-bot | — | — |
-| [S_23_session-file-data-store](agent_teams/S_23_session-file-data-store.md) | S | Session 文件数据存储（message/task 正文外置） | hwxiajing | — | — |
-| [S_24_evolvable-workspace](agent_teams/S_24_evolvable-workspace.md) | S | 可演进 workspace（A/B/C 三类文本演进机制） | hwxiajing | — | — |
-| [S_25_swarmflow-verify](agent_teams/S_25_swarmflow-verify.md) | S | Swarmflow verify 原语规约 | sodawlh | — | — |
-| [S_26_team-shared-deliverables](agent_teams/S_26_team-shared-deliverables.md) | S | 团队共享产物目录（Team Shared Deliverables） | hwxiajing | — | — |
-| [S_27_external-harness-member-runtime](agent_teams/S_27_external-harness-member-runtime.md) | S | S_27 External Harness Member Runtime | alan_cheng | — | — |
-| [S_28_group-conversation-and-delegation](agent_teams/S_28_group-conversation-and-delegation.md) | S | S_28 群聊输入与文件归档 | openJiuwen-bot | — | — |
-| [S_29_team-organization](agent_teams/S_29_team-organization.md) | S | Team Organization | ZezeChang | — | — |
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [S_01_public-api-and-spec-flow](agent_teams/S_01_public-api-and-spec-flow.md) | S | S_01 公开 API 表面与 Spec 流 | alan_cheng | — |
+| [S_02_team-agent-architecture](agent_teams/S_02_team-agent-architecture.md) | S | TeamAgent 架构规约 | alan_cheng | — |
+| [S_03_coordination-protocol](agent_teams/S_03_coordination-protocol.md) | S | Coordination Protocol | alan_cheng | — |
+| [S_04_session-and-recovery](agent_teams/S_04_session-and-recovery.md) | S | Session and Recovery | alan_cheng | — |
+| [S_05_member-spawn-and-stream](agent_teams/S_05_member-spawn-and-stream.md) | S | Member Spawn 与 Stream 控制 | alan_cheng | — |
+| [S_06_runtime-pool-dispatch](agent_teams/S_06_runtime-pool-dispatch.md) | S | Runtime Pool & Dispatch | alan_cheng | — |
+| [S_07_interaction-views-and-hitt](agent_teams/S_07_interaction-views-and-hitt.md) | S | Interaction Views and HITT Runtime Surface | alan_cheng | — |
+| [S_08_team-tools-contract](agent_teams/S_08_team-tools-contract.md) | S | Team Tools Contract | alan_cheng | — |
+| [S_09_prompts-and-rails](agent_teams/S_09_prompts-and-rails.md) | S | Prompts 与 Team Rails | alan_cheng | — |
+| [S_10_messager-transport](agent_teams/S_10_messager-transport.md) | S | S_10 Messager 传输层与注册表 | alan_cheng | — |
+| [S_11_models-pool-and-allocation](agent_teams/S_11_models-pool-and-allocation.md) | S | Models Pool and Allocation | alan_cheng | — |
+| [S_12_schema-data-models](agent_teams/S_12_schema-data-models.md) | S | Schema Data Models | alan_cheng | — |
+| [S_13_team-workspace](agent_teams/S_13_team-workspace.md) | S | Team Workspace | alan_cheng | — |
+| [S_14_monitor-and-observability](agent_teams/S_14_monitor-and-observability.md) | S | Monitor and Observability | alan_cheng | — |
+| [S_15_cli-tui](agent_teams/S_15_cli-tui.md) | S | Agent Teams CLI / TUI Spec | alan_cheng | — |
+| [S_16_top-level-utilities](agent_teams/S_16_top-level-utilities.md) | S | Top-level Utilities | alan_cheng | — |
+| [S_17_team-plan](agent_teams/S_17_team-plan.md) | S | Team.plan 运行时规约 | weichenhao | — |
+| [S_18_harness-interaction-contract](agent_teams/S_18_harness-interaction-contract.md) | S | S_18 Harness 交互契约（HarnessProtocol / MemberRuntime） | alan_cheng | — |
+| [S_18_swarmflow-engine-and-worker](agent_teams/S_18_swarmflow-engine-and-worker.md) | S | Swarmflow 引擎与 Worker 运行时规约 | alan_cheng | — |
+| [S_19_reliability-framework](agent_teams/S_19_reliability-framework.md) | S | S_19 Reliability framework | alan_cheng | — |
+| [S_20_native-harness-async-tool-framework](agent_teams/S_20_native-harness-async-tool-framework.md) | S | NativeHarness 异步工具框架运行时规约 | alan_cheng | — |
+| [S_21_swarmflow-concurrency-governor](agent_teams/S_21_swarmflow-concurrency-governor.md) | S | Swarmflow 并发治理运行时规约 | chenchunzhou | — |
+| [S_22_scheduling-runtime](agent_teams/S_22_scheduling-runtime.md) | S | Scheduling Runtime（调度模式运行时） | alan_cheng | — |
+| [S_23_agent-template-snapshot-loading](agent_teams/S_23_agent-template-snapshot-loading.md) | S | S_23 AgentTemplate 快照加载 | openJiuwen-bot | — |
+| [S_23_session-file-data-store](agent_teams/S_23_session-file-data-store.md) | S | Session 文件数据存储（message/task 正文外置） | hwxiajing | — |
+| [S_24_evolvable-workspace](agent_teams/S_24_evolvable-workspace.md) | S | 可演进 workspace（A/B/C 三类文本演进机制） | hwxiajing | — |
+| [S_25_swarmflow-verify](agent_teams/S_25_swarmflow-verify.md) | S | Swarmflow verify 原语规约 | sodawlh | — |
+| [S_26_team-shared-deliverables](agent_teams/S_26_team-shared-deliverables.md) | S | 团队共享产物目录（Team Shared Deliverables） | hwxiajing | — |
+| [S_27_external-harness-member-runtime](agent_teams/S_27_external-harness-member-runtime.md) | S | S_27 External Harness Member Runtime | alan_cheng | — |
+| [S_28_group-conversation-and-delegation](agent_teams/S_28_group-conversation-and-delegation.md) | S | S_28 群聊输入与文件归档 | openJiuwen-bot | — |
+| [S_29_team-organization](agent_teams/S_29_team-organization.md) | S | Team Organization | ZezeChang | — |
 
 <a id="module-core-context_engine"></a>
 
 ## core/context_engine
 
-| ID / 文档 | 类型 | 标题 | 作者 | 代码文件 | 关联 D |
-|---|---|---|---|---|---|
-| [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | — |
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | — |
 
 <a id="module-core-controller"></a>
 
 ## core/controller
 
-| ID / 文档 | 类型 | 标题 | 作者 | 代码文件 | 关联 D |
-|---|---|---|---|---|---|
-| [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | — |
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | — |
 
 <a id="module-core-runner-drunner-dmessage_queue"></a>
 
 ## core/runner/drunner/dmessage_queue
 
-| ID / 文档 | 类型 | 标题 | 作者 | 代码文件 | 关联 D |
-|---|---|---|---|---|---|
-| [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | — |
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | — |
 
 <a id="module-core-session"></a>
 
 ## core/session
 
-| ID / 文档 | 类型 | 标题 | 作者 | 代码文件 | 关联 D |
-|---|---|---|---|---|---|
-| [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | — |
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | — |
 
 <a id="module-extensions-a2a"></a>
 
 ## extensions/a2a
 
-| ID / 文档 | 类型 | 标题 | 作者 | 代码文件 | 关联 D |
-|---|---|---|---|---|---|
-| [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | — |
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | — |
 
 <a id="module-harness"></a>
 
 ## harness
 
-| ID / 文档 | 类型 | 标题 | 作者 | 代码文件 | 关联 D |
-|---|---|---|---|---|---|
-| [S_01_public-api-and-construction](harness/S_01_public-api-and-construction.md) | S | S_01 公开 API 表面与构造流 | yangzequ | — | — |
-| [S_02_deep-agent-architecture](harness/S_02_deep-agent-architecture.md) | S | S_02 DeepAgent 架构 | yangzequ | — | — |
-| [S_03_task-loop](harness/S_03_task-loop.md) | S | S_03 TaskLoop 事件体系 | yangzequ | — | — |
-| [S_04_rails-contract](harness/S_04_rails-contract.md) | S | S_04 Rails 契约 | yangzequ | — | — |
-| [S_05_tools-contract](harness/S_05_tools-contract.md) | S | S_05 工具契约 | yangzequ | — | — |
-| [S_06_prompts-and-l10n](harness/S_06_prompts-and-l10n.md) | S | S_06 Prompts 与 i18n | yangzequ | — | — |
-| [S_07_skill-library-state](harness/S_07_skill-library-state.md) | S | S_07 Skill 库开关状态 | yangzequ | — | — |
-| [S_08_security-engine](harness/S_08_security-engine.md) | S | S_08 安全引擎 | yangzequ | — | — |
-| [S_09_workspace](harness/S_09_workspace.md) | S | S_09 Workspace | yangzequ | — | — |
-| [S_10_subagent-runtime](harness/S_10_subagent-runtime.md) | S | S_10 SubAgent 运行时 | yangzequ | — | — |
-| [S_11_goal-and-evaluation](harness/S_11_goal-and-evaluation.md) | S | S_11 Goal 与评估 | yangzequ | — | — |
-| [S_12_manifest-declarative-assembly](harness/S_12_manifest-declarative-assembly.md) | S | S_12 Manifest 声明式装配 | yangzequ | — | — |
-| [S_13_resources-packages](harness/S_13_resources-packages.md) | S | S_13 资源包加载（Plugin / AgentTemplate） | yangzequ | — | — |
-| [S_14_lsp-integration](harness/S_14_lsp-integration.md) | S | S_14 LSP 集成 | yangzequ | — | — |
-| [S_15_cli-and-config](harness/S_15_cli-and-config.md) | S | S_15 CLI 与配置 | yangzequ | — | — |
-| [S_16_kv-cache-subagent-lifecycle](harness/S_16_kv-cache-subagent-lifecycle.md) | S | S_16 KV Cache 子代理生命周期 | MengHan18 | — | — |
-| [S_17_personal-context](harness/S_17_personal-context.md) | S | S_17 Personal Context | yangzequ | — | — |
-| [S_18_subagents-and-lifecycle](harness/S_18_subagents-and-lifecycle.md) | S | S_18 SubAgent 预设与生命周期 | yangzequ | — | — |
-| [S_19_harness-providers](harness/S_19_harness-providers.md) | S | S_19 Harness Providers（协议实现、IO Adapter 与 Manifest 工厂） | alan_cheng | — | — |
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [S_01_public-api-and-construction](harness/S_01_public-api-and-construction.md) | S | S_01 公开 API 表面与构造流 | yangzequ | — |
+| [S_02_deep-agent-architecture](harness/S_02_deep-agent-architecture.md) | S | S_02 DeepAgent 架构 | yangzequ | — |
+| [S_03_task-loop](harness/S_03_task-loop.md) | S | S_03 TaskLoop 事件体系 | yangzequ | — |
+| [S_04_rails-contract](harness/S_04_rails-contract.md) | S | S_04 Rails 契约 | yangzequ | — |
+| [S_05_tools-contract](harness/S_05_tools-contract.md) | S | S_05 工具契约 | yangzequ | — |
+| [S_06_prompts-and-l10n](harness/S_06_prompts-and-l10n.md) | S | S_06 Prompts 与 i18n | yangzequ | — |
+| [S_07_skill-library-state](harness/S_07_skill-library-state.md) | S | S_07 Skill 库开关状态 | yangzequ | — |
+| [S_08_security-engine](harness/S_08_security-engine.md) | S | S_08 安全引擎 | yangzequ | — |
+| [S_09_workspace](harness/S_09_workspace.md) | S | S_09 Workspace | yangzequ | — |
+| [S_10_subagent-runtime](harness/S_10_subagent-runtime.md) | S | S_10 SubAgent 运行时 | yangzequ | — |
+| [S_11_goal-and-evaluation](harness/S_11_goal-and-evaluation.md) | S | S_11 Goal 与评估 | yangzequ | — |
+| [S_12_manifest-declarative-assembly](harness/S_12_manifest-declarative-assembly.md) | S | S_12 Manifest 声明式装配 | yangzequ | — |
+| [S_13_resources-packages](harness/S_13_resources-packages.md) | S | S_13 资源包加载（Plugin / AgentTemplate） | yangzequ | — |
+| [S_14_lsp-integration](harness/S_14_lsp-integration.md) | S | S_14 LSP 集成 | yangzequ | — |
+| [S_15_cli-and-config](harness/S_15_cli-and-config.md) | S | S_15 CLI 与配置 | yangzequ | — |
+| [S_16_kv-cache-subagent-lifecycle](harness/S_16_kv-cache-subagent-lifecycle.md) | S | S_16 KV Cache 子代理生命周期 | MengHan18 | — |
+| [S_17_personal-context](harness/S_17_personal-context.md) | S | S_17 Personal Context | yangzequ | — |
+| [S_18_subagents-and-lifecycle](harness/S_18_subagents-and-lifecycle.md) | S | S_18 SubAgent 预设与生命周期 | yangzequ | — |
+| [S_19_harness-providers](harness/S_19_harness-providers.md) | S | S_19 Harness Providers（协议实现、IO Adapter 与 Manifest 工厂） | alan_cheng | — |
