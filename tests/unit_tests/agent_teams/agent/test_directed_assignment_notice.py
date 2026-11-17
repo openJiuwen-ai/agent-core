@@ -14,9 +14,10 @@ An ``in_progress`` notice renders the owner nudge (``stale_claim_self``) — it
 names the task and points at ``view_task`` instead of telling an owner to
 ``claim`` work it already holds (claiming is a no-op for a build-mode member
 and is rejected outright for a plan-mode one). The plan gate (``planning``)
-stays silent as before: that work reaches the member through the
-plan-approval flow, and a claim-style instruction there would be
-unexecutable.
+stays silent exactly as before this widening: waking a plan-mode assignee
+needs a ``submit_plan``-shaped notice, and reusing a claim-style wording there
+would be unexecutable, so that pre-existing gap is tracked separately instead
+of shipping a wrong instruction.
 
 Scheduled dispatch is deliberately excluded from the widening: the
 scheduler's handoff already mails the owner of an entered task its start
@@ -87,6 +88,7 @@ class FakeHost:
 
     def __init__(self) -> None:
         self.delivered: list[str] = []
+        self.steers: list[bool] = []
 
     def is_agent_ready(self) -> bool:
         return True
@@ -108,6 +110,7 @@ class FakeHost:
 
     async def deliver_input(self, content, *, use_steer: bool = True) -> None:
         self.delivered.append(str(content))
+        self.steers.append(use_steer)
 
     async def resume_interrupt(self, user_input) -> None:
         return None
@@ -197,6 +200,7 @@ async def test_directed_assignment_wakes_the_assignee(db, bus):
     assert len(host.delivered) == 1, "assignment notice must be delivered exactly once"
     assert "angle-3" in host.delivered[0]
     assert "claim_task(status=claimed)" not in host.delivered[0]
+    assert host.steers == [False], "an entered owner is nudged, never steered"
 
 
 @pytest.mark.asyncio
@@ -228,6 +232,7 @@ async def test_reassigned_in_progress_task_is_announced_to_new_owner(db, bus):
     assert len(host.delivered) == 1
     assert "t1" in host.delivered[0]
     assert "claim_task(status=claimed)" not in host.delivered[0]
+    assert host.steers == [False], "a new owner already running is not interrupted"
 
 
 @pytest.mark.asyncio
@@ -247,16 +252,40 @@ async def test_pending_assignment_is_still_announced(db, bus):
     assert len(host.delivered) == 1
     assert "fresh" in host.delivered[0]
     assert "claim_task" in host.delivered[0]
+    assert host.steers == [True], "a pending assignment is the start of the work"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_pending_notice_for_task_no_longer_owned_is_not_announced(db, bus):
+    """A pending notice that lost a race against a later handoff stays silent.
+
+    ``assign`` writes the assignee before publishing TASK_CLAIMED; if the row
+    moved on to another member by delivery time, waking this one would start
+    duplicate work on a task it no longer owns.
+    """
+    leader_infra = _infra(db, bus, LEADER)
+    assert (
+        await leader_infra.task_manager.add_graph(
+            [TaskGraphSpec(title="handed-over", content="c", task_id="t-race", assignee="dev-1")]
+        )
+    ).ok
+    assert (await leader_infra.task_manager.reassign("t-race", "dev-2")).ok
+
+    host, handler = _handler(TaskBoardHandler, db, bus, "dev-1")
+    await handler.on_task_claimed(_claimed_event("t-race", "dev-1"))
+
+    assert host.delivered == []
 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_plan_gate_assignment_is_not_announced(db, bus):
-    """A plan-gate assignment stays silent, as before the fix.
+    """A plan-gate assignment stays silent exactly as before the fix.
 
-    ``planning`` work reaches the assignee through the plan-approval flow;
-    a claim-style instruction would be unexecutable there (claim_task
-    rejects plan-mode members).
+    Waking a plan-mode assignee needs a ``submit_plan``-shaped notice; no
+    existing wording fits (claim_task rejects plan-mode members), so this
+    pre-existing gap is left to the stale sweep and tracked separately.
     """
     leader_infra = _infra(db, bus, LEADER)
     assert (

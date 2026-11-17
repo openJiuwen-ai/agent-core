@@ -41,9 +41,12 @@ autonomous（自主）团队里，leader 用 `update_task(assignee=...)` 把任�
   - `planning` / `blocked` / 终态 / 已不归自己：保持静默（planning 由计划审批流送达，blocked 由解锁后的看板唤醒）。
 - 新增 `_ANNOUNCE_ENTERED_ASSIGNMENTS` 类级开关：自主模式 True，`ScheduledTaskBoardHandler` 置 False——调度模式的进入态交接由调度器自己的扫描负责，事件再投会双投。
 - `observe_revision` 只对 `pending` 通知与 human-agent 分支记录（owner-nudge 不带正文，成员自行 `view_task` 读取）。
+- `pending` 通知只投给任务**当前** `assignee`：`assign()` 先写 assignee 再发事件，事件若输给一次更晚的交接，旧 owner 不能再被唤醒（无 assignee 的行保持原行为）。
+- 运行态 owner-nudge 以 `use_steer=False` 追加投递（与 `StaleTaskHandler` 自催同纪律）：要唤醒的是“已经在干这件活”的人，steer 会打断它正在跑的 round；`pending` 仍是 steer（那是工作的开始）。
 - 不新增任何提示词/i18n 文案：运行态复用既有模板，避免为一次缺陷修复引入产品文案变更。
+- `planning`（PLAN_MODE 入口态）保持静默属**本次之前就存在**的缺口：唤醒它需要一条面向 `submit_plan` 的文案，复用 claim 句式会给出无法执行的指令，故不在本 PR 内夹带，另行跟进。
 
 ## 验证
 
-- 新增 `tests/unit_tests/agent_teams/agent/test_directed_assignment_notice.py`（9 例）：改派运行中任务、普通指派、`pending` 不回归、`blocked`/终态静默、过期通知（任务已不归自己）不投递、调度模式不投递进入态、调度模式 `pending` 照常投递。
+- 新增 `tests/unit_tests/agent_teams/agent/test_directed_assignment_notice.py`（10 例）：改派运行中任务、普通指派、`pending` 不回归、运行态 nudge 不 steer、`pending` 过期指派不投递、`blocked`/终态静默、过期通知（任务已不归自己）不投递、调度模式不投递进入态、调度模式 `pending` 照常投递。
 - 回归：`tests/unit_tests/agent_teams/agent/test_mode_handlers.py`、`tests/unit_tests/agent_teams/agent/test_team_scheduler.py` → 97 passed / 0 failed。

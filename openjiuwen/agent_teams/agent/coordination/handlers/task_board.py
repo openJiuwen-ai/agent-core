@@ -121,14 +121,21 @@ class TaskBoardHandler(BaseCoordinationHandler):
         after the task has already entered its working state). A dispatch
         mode whose scheduler delivers entered work through its own handoff
         turns ``_ANNOUNCE_ENTERED_ASSIGNMENTS`` off. Everything else —
-        ``planning`` (the plan gate), blocked, terminal, or no longer owned
-        by this member — stays silent: the board wakes the member once the
-        task unblocks, and planning work reaches it through plan approval.
+        blocked, terminal, or no longer owned by this member — stays silent:
+        the board wakes the member once the task unblocks.
+
+        ``planning`` stays silent as before this widening. That gap is
+        pre-existing and untouched here: a plan-gate assignee needs a
+        ``submit_plan``-shaped notice, no existing wording fits, so waking it
+        is left to the stale sweep instead of shipping a wrong instruction.
         """
         if task is None:
             return False
         if task.status == TaskStatus.PENDING.value:
-            return True
+            # A notice that lost a race against a later handoff must not wake
+            # the previous owner: only the task's current assignee is
+            # addressed, and an unassigned row keeps the legacy announcement.
+            return not task.assignee or task.assignee == member_name
         if task.status != TaskStatus.IN_PROGRESS.value:
             return False
         if not self._ANNOUNCE_ENTERED_ASSIGNMENTS:
@@ -237,11 +244,9 @@ class TaskBoardHandler(BaseCoordinationHandler):
         else:
             # The notice carries the task itself, so the member starts without
             # a view_task round-trip (pending) or is nudged as the owner of
-            # already-entered work. Anything else — a task still in the plan
-            # gate (``planning``), blocked, terminal, or gone — is not
-            # announced: the member is woken by the board once it unblocks,
-            # and planning work reaches the member through the
-            # plan-approval flow. See ``_is_announceable``.
+            # already-entered work. Anything else — blocked, terminal, or
+            # gone — is not announced: the member is woken by the board once
+            # it unblocks. See ``_is_announceable``.
             task = await self._infra.task_manager.get(payload.task_id)
             if not self._is_announceable(task, member_name):
                 team_logger.debug(
@@ -263,7 +268,13 @@ class TaskBoardHandler(BaseCoordinationHandler):
             payload.task_id,
             is_self_human,
         )
-        await self._round.deliver_input(content)
+        # The owner nudge only tells a member to keep pushing work it already
+        # holds, so it is appended rather than steered: steering would
+        # interrupt the very round doing that work (same discipline as
+        # ``StaleTaskHandler``). A pending notice is the start of the work and
+        # keeps steering so a running member pivots to it.
+        entered = task is not None and task.status == TaskStatus.IN_PROGRESS.value
+        await self._round.deliver_input(content, use_steer=not entered)
         if task is not None and (is_self_human or task.status == TaskStatus.PENDING.value):
             # The pending notice carried the task body (a human reads it on
             # its own screen): that revision is now seen (F_129). The owner
