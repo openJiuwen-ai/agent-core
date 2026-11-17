@@ -647,14 +647,25 @@ class Workflow(metaclass=_WorkflowMeta):
             else:
                 node_session = NodeSession(sub_workflow_session, self._end_comp_id)
                 outputs = node_session.state().get_outputs(self._end_comp_id)
-                if isinstance(outputs, dict) and isinstance(outputs.get("output"), list):
-                    # Split the batched end-node output into per-frame deliveries
-                    # so downstream per-frame templates see the same shape as
-                    # streaming sub-workflows produce.
-                    for item in outputs["output"]:
-                        yield {"output": item}
+                # Normalize the batched end-node output to the streaming frame
+                # contract: like End.stream, each frame carries an 'output' entry.
+                if outputs is None:
+                    # A streaming End with no inputs yields no frames either.
+                    return
+                if isinstance(outputs, dict):
+                    if isinstance(outputs.get("output"), list):
+                        # Batched collect result: deliver per chunk, same as
+                        # streaming sub-workflows.
+                        for item in outputs["output"]:
+                            yield {"output": item}
+                    else:
+                        # {'output': ...} / {'response': ...}, same key shape as
+                        # the streaming branch produces for this End config.
+                        yield outputs
                 else:
-                    yield outputs
+                    # Bare value (e.g. filtered by outputs_schema): wrap it like
+                    # End.stream wraps non-dict inputs.
+                    yield {"output": outputs}
         finally:
             await asyncio.shield(sub_workflow_session.close())
             await asyncio.shield(self._internal.reset())

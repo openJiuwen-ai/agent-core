@@ -54,25 +54,46 @@ with a value in enclosing scope`）。错误信息指向内部变量名，用户
 `int('out')` 抛 ValueError 被吞掉返回 None——崩溃修掉了但数据静默丢失
 （父图 end 无 OUTPUT 帧）。评审意见（Medium）指出后采纳"逐元素 yield"方案：
 `outputs` 为 dict 且 `output` 为 list 时，逐元素 yield `{'output': item}`，形状与流式帧
-完全一致；其余形状不猜测、保持整块 yield。
+完全一致。
+
+评审跟进（第二轮，P2/P3）：首版对 dict 形状外的形态未规整。探针
+（`core02_shape_probe.py`）实测批式回退分支各 End 形态与流式分支对照：
+- INVOKE + 有输入：批式帧 `{'output': {'out': 1}}`，与流式契约一致，父图 OUTPUT 正常；
+- INVOKE + 无输入：`get_outputs` 返回 None，被当作 None 帧下发，违反帧契约
+  （流式 End 无输入时不产出任何帧）；
+- response_template：批式帧 `{'response': 'resp: 12'}`，流式对照帧同样以 `response`
+  为键（逐段多帧 vs 批式单帧，粒度差异系批式聚合的固有差异，键契约一致），
+  评审所称"裸字符串"实测未复现，批式与流式键形状一致。
+
+据此最终规整规则（workflow.py `else` 分支）：
+1. `outputs is None`：不下发任何帧（与流式 End 无输入行为一致）；
+2. dict 且 `output` 为 list：逐元素 yield `{'output': item}`（collect 聚合拆帧）；
+3. 其余 dict：原样 yield（`{'output': ...}` / `{'response': ...}` 键形状与流式分支一致）；
+4. 裸值（如被 outputs_schema 过滤出的非 dict 结果）：包为 `{'output': outputs}` 下发
+   （与 End.stream 对非 dict 输入的 `dict(output=inputs)` 包装一致）。
 
 考虑过的备选：统一把批式输出规整成流式 dict 形状（无论是否 list）。拒绝原因：非 list
-形状（如模板型 End 或批式 invoke 路径的 dict 形状）没有流式对应关系，强行规整属于猜测，
-超出本缺陷范围，保持窄守卫。
+形状没有流式对应关系，强行规整属于猜测，超出本缺陷范围，保持窄守卫。
 
 ## 回归证据与适用范围
 
-- 候选版本：`fix/subworkflow-stream-batch-mode` 分支（基于 `develop@1071f4564`），2026-11-16。
+- 候选版本：`fix/subworkflow-stream-batch-mode` 分支（基于 `develop@1071f4564`），2026-11-17。
 - 复现脚本修复后实测：对照组成功 16 帧（不变）；复现组成功完成且产出与流式组完全相同的
   end 节点 OUTPUT 帧（`result: 1` / `result: 2`，共 16 帧），数据不再静默丢失。
-- 目标单测：`tests/unit_tests/core/component/test_sub_workflow_comp.py` 6 passed
-  （含新增回归用例 `test_workflow_with_batch_sub_workflow_on_stream_edge`：
-  断言批式子流按 3 帧 `{'output': {'out': ...}}` 逐帧交付，且父图 end OUTPUT chunks 与
-  流式子流场景（`test_workflow` 期望）完全一致）。
-- 回归范围：`tests/unit_tests/core/component`（117 passed, 14 skipped）、
-  `tests/unit_tests/core/workflow`（117 passed），无回归。
-- 未验证范围：真实 LLM 组件子流、模板型 End 组件（`response_template`）组合未覆盖；
-  重验条件为上述构造的最小复现与目标单测。
+- 形状探针（`core02_shape_probe.py`）修复后实测：A 形态单帧 `{'output': {'out': 1}}` 且
+  父图 OUTPUT 正常；B 形态 0 帧（不再下发 None 帧）；C 形态 `{'response': ...}` 键契约与
+  流式对照一致。
+- 目标单测：`tests/unit_tests/core/component/test_sub_workflow_comp.py` 9 passed，
+  含 4 个回归用例：
+  `test_workflow_with_batch_sub_workflow_on_stream_edge`（collect 聚合拆帧 + 父图 OUTPUT
+  与流式一致）、`test_workflow_with_batch_invoke_sub_workflow_on_stream_edge`（INVOKE 形态）、
+  `test_workflow_with_batch_sub_workflow_no_output_on_stream_edge`（无输出 0 帧）、
+  `test_workflow_with_batch_template_sub_workflow_on_stream_edge`（response_template 键
+  契约与流式对照一致）。
+- 回归范围：`tests/unit_tests/core/component` + `tests/unit_tests/core/workflow`
+  231 passed, 14 skipped，无回归。
+- 未验证范围：真实 LLM 组件子流、outputs_schema 过滤出裸值的 End 组合未覆盖；
+  重验条件为上述构造的最小复现、形状探针与目标单测。
 
 ## 防错模式与资料同步
 
@@ -87,5 +108,9 @@ with a value in enclosing scope`）。错误信息指向内部变量名，用户
 - ~~批式子流经父图流式边交付的单帧形状为 `{'output': [chunks...]}`（list），父图 end 节点
   按帧模板路径取不到值，该组合"能跑完但不产出 OUTPUT 帧"。~~ 已在评审跟进修复中解决：
   批式 list 输出逐元素拆分为与流式一致的帧形状下发，父图下游解析恢复正常。
+- ~~批式回退分支对 None / 裸值形态未规整帧契约。~~ 已在第二轮评审跟进中解决：
+  None 不下发帧、裸值包 `{'output': ...}` 下发。
+- response_template End 的批式回退为单帧聚合（`{'response': 'resp: 12'}`），流式分支为
+  逐段多帧，粒度差异系批式聚合的固有差异，键契约一致；如需逐段拆分需另行评估。
 - `_sub_stream` 的 `while` 循环中 `receive` 持续返回 `None` 时存在理论上的无限循环风险，
   属既有行为，未在本次处理。
