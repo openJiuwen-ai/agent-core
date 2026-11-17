@@ -396,6 +396,19 @@ def whole_lines(numbered):
     return "\n".join(out)
 
 
+def deliverable_files(root):
+    """Files the work itself produced, not reference inputs or scratch check scripts."""
+    found = []
+    for path in sorted(Path(root).rglob("*")):
+        if not path.is_file() or path.name.startswith(".check_"):
+            continue
+        relative = path.relative_to(root)
+        if relative.parts[0] == INPUTS_DIR:
+            continue
+        found.append(relative)
+    return found
+
+
 async def run_check(check, root, tools, number=1):
     """Run one check in the workspace. Returns (facts, screenshots). Raises when the check itself cannot run."""
     tool = check.get("tool")
@@ -405,7 +418,20 @@ async def run_check(check, root, tools, number=1):
                 + ("; read_evidence is its own tool, not a check" if tool == "read_evidence" else "")}, []
     if tool == "read":
         if not check.get("path"):
-            return {**facts, "skipped": "read needs a \"path\"; a saved result is read with the read_evidence tool"}, []
+            if check.get("id"):
+                return {**facts, "skipped": "read needs a \"path\"; a saved result is read with the read_evidence tool"}, []
+            files = deliverable_files(root)
+            if len(files) == 1:
+                check = {**check, "path": str(files[0])}
+            elif files:
+                chunks, shots = [], []
+                for relative in files:
+                    one, one_shots = await run_check({**check, "path": str(relative)}, root, tools, number)
+                    chunks.append(f"===== {relative} =====\n{one.get('output') or one.get('skipped') or ''}")
+                    shots.extend(one_shots)
+                return {**facts, "path": ", ".join(str(item) for item in files), "output": "\n\n".join(chunks)}, shots
+            else:
+                return {**facts, "skipped": "read needs a \"path\"; a saved result is read with the read_evidence tool"}, []
         path = inside(root, check["path"])
         if path.is_dir():   # a folder: say what is in it rather than fail
             names = sorted(str(p.relative_to(path)) for p in path.rglob("*") if p.is_file())[:200]
