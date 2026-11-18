@@ -12,6 +12,7 @@ from openjiuwen.harness.security.models import PermissionLevel
 from openjiuwen.harness.security.permission_engine.netguard.net_guard import (
     NetGuardChecker,
     build_net_guard_checker,
+    match_net_pattern,
 )
 
 
@@ -78,6 +79,45 @@ def test_localhost_and_loopback_ignore_default_port() -> None:
         result = checker.evaluate("mcp_fetch_webpage", {"url": url})
         assert result is not None, url
         assert result.permission == PermissionLevel.DENY, url
+
+
+@pytest.mark.parametrize("pattern,target,matched", [
+    ("127.0.0.1:8080", "127.0.0.1:8080", True),
+    ("127.0.0.1:8080", "127.0.0.1:8081", False),
+    ("127.0.0.1:8080", "127.0.0.2:8080", False),
+    ("127.0.0.1:8080", "127.0.0.1", False),
+    ("127.0.0.1:80", "http://127.0.0.1/data", True),
+    ("127.0.0.1:80", "https://127.0.0.1/data", False),
+    ("[::1]:8080", "[0:0:0:0:0:0:0:1]:8080", True),
+    ("[::1]:8080", "[::1]:8081", False),
+    ("*.internal.example:443", "https://api.internal.example/data", True),
+    ("*.internal.example:443", "https://api.internal.example:8443/data", False),
+    ("127.0.0.1", "127.0.0.1:8081", True),
+    ("::1", "[::1]:8081", True),
+])
+def test_endpoint_rule_binds_host_and_port(pattern, target, matched):
+    assert match_net_pattern(pattern, target) is matched
+
+
+@pytest.mark.parametrize("action", ["allow", "ask", "deny"])
+def test_endpoint_rules_use_all_existing_network_actions(action):
+    checker = _checker(defaults="deny" if action == "allow" else "allow", urls={"127.0.0.1:8080": action})
+    result = checker.evaluate("mcp_fetch_webpage", {"url": "http://127.0.0.1:8080/data"})
+    other = checker.evaluate("mcp_fetch_webpage", {"url": "http://127.0.0.1:8081/data"})
+    if action == "allow":
+        assert result is None  # An allowed network check does not lift another guard's ASK.
+        assert other is not None and other.is_denied
+    else:
+        assert result is not None and result.permission == PermissionLevel(action)
+        assert other is None
+
+
+def test_port_deny_overrides_builtin_loopback_allow(tmp_path):
+    engine = PermissionEngine({"enabled": True, "net_guard": {
+        "enabled": True, "defaults": "deny", "urls": {"127.0.0.1:8080": "deny"},
+    }}, workspace_root=tmp_path)
+    assert engine.check_network_access("127.0.0.1:8080").is_denied
+    assert engine.check_network_access("127.0.0.1:8081").is_allowed
 
 
 def test_url_glob_and_prefix() -> None:

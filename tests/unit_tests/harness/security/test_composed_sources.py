@@ -42,6 +42,23 @@ def test_composition_skips_package_injection_and_rejects_bad_version():
         prepare_permissions_for_engine({"composition": {"schema_version": 999}})
 
 
+def test_composed_unlayered_restriction_is_diagnosed_without_assigning_a_source(monkeypatch):
+    from unittest.mock import Mock
+    from openjiuwen.core.common.logging import logger
+
+    warning = Mock()
+    monkeypatch.setattr(logger, "warning", warning)
+    rule = {"id": "missing-source", "tools": ["bash"], "pattern": "re:protected", "action": "ask"}
+    prepared = prepare_permissions_for_engine({
+        "enabled": True, "tools": {"bash": "allow"}, "rules": [rule],
+        "composition": composition(["user", "builtin"]),
+    })
+    assert prepared["rules"] == [rule]
+    warning.assert_called_once()
+    assert "unlayered_restrictions" in warning.call_args.args[0]
+    assert warning.call_args.args[1] == ["missing-source"]
+
+
 def test_command_priority_deny_and_remembered_approval():
     cfg = {
         "enabled": True,

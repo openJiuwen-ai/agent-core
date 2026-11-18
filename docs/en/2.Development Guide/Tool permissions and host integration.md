@@ -67,6 +67,18 @@ permissions = {
 
 The engine no longer supports a separate legacy “pattern-only” path; express policy with `tools`, `defaults`, `rules`, and `approval_overrides`.
 
+ASK/DENY command globs (`*` and `?`) inspect the complete command text, including
+arrays, parentheses, pipelines and semicolons, even with unknown-structure checking
+disabled. This does not evaluate variables or dynamic code. ALLOW rules and approval
+overrides retain their bounded wildcard matching; remembered command scopes are
+unchanged. Regex and literal patterns retain their existing semantics.
+Subcommand receipts require one fully parsed literal child. Opaque arrays or
+expressions can still use exact whole-command approval. `permission.rail.resolve/result`
+correlate decisions by session and tool-call ID; `permission.shell_grant.match` records
+the receipt ID and command hash. Composed ASK/DENY rules missing `layer` produce a
+`permission.composition.unlayered_restrictions` warning without assigning a source
+or changing source priority.
+
 Command DENY/ASK rules also inspect literal argv views: full executable path,
 basename, and (on Windows) the name without `.exe`. Windows executable casing is
 normalized without changing argument casing. Shell quote decoding is limited to
@@ -247,6 +259,12 @@ approval, and it never rewrites a final ASK to ALLOW. Disabling the workspace or
 its source removes this contribution on refresh. V1 has no such exception.
 
 ### 6.2 Host outbound redirects and opaque readers
+
+Network patterns may specify a host and port, such as `127.0.0.1:8080`, `[::1]:8080`,
+or `*.internal.example:443`. Both must match; IPv6 addresses compare by value.
+Bare host/IP patterns still cover all ports, and scheme-qualified URL patterns retain
+their prefix/glob behavior. HTTP/HTTPS URLs without explicit ports use 80/443;
+scheme-less connection endpoints must include their port.
 
 Host applications publish `permissions.net_guard` through the outbound policy registry.
 While host enforcement is active, built-in HTTP clients check every redirect target before

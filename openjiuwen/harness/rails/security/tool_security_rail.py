@@ -8,6 +8,7 @@ for ASK decisions using the built-in interrupt rail flow.
 from __future__ import annotations
 
 import inspect
+import hashlib
 import json
 from copy import copy, deepcopy
 from dataclasses import replace
@@ -790,8 +791,11 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
         logger.info(
             "[PermissionEngine] permission.rail.resolve tool=%s normalized=%s "
+            "session_id=%s tool_call_id=%s command_sha256=%s "
             "tool_args=%s auto_confirm_key=%s user_input_type=%s",
-            tool_name, normalized_name, _summarize_tool_args_for_log(tool_args), auto_confirm_key,
+            tool_name, normalized_name, session_id, getattr(tool_call, "id", ""),
+            hashlib.sha256(str(tool_args.get("command") or tool_args.get("cmd") or "").encode("utf-8")).hexdigest(),
+            _summarize_tool_args_for_log(tool_args), auto_confirm_key,
             type(user_input).__name__ if user_input else None
         )
 
@@ -892,16 +896,18 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                         or "shell_subcommand_grant" in matched):
                     await self._record_runtime_approval(session_id, tool_call, result)
                 logger.info(
-                    "[PermissionEngine] permission.rail.result tool=%s decision=allow matched_rule=%s",
-                    tool_name,
+                    "[PermissionEngine] permission.rail.result tool=%s session_id=%s tool_call_id=%s "
+                    "decision=allow matched_rule=%s",
+                    tool_name, session_id, getattr(tool_call, "id", ""),
                     result.matched_rule,
                 )
                 return self.approve()
 
             if result.permission == PermissionLevel.DENY:
                 logger.warning(
-                    "[PermissionEngine] permission.rail.result tool=%s decision=deny matched_rule=%s",
-                    tool_name,
+                    "[PermissionEngine] permission.rail.result tool=%s session_id=%s tool_call_id=%s "
+                    "decision=deny matched_rule=%s",
+                    tool_name, session_id, getattr(tool_call, "id", ""),
                     result.matched_rule,
                 )
                 return self.reject(tool_result=f"[PERMISSION_DENIED] {result.reason or 'Operation not allowed'}")

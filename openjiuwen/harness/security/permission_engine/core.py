@@ -131,6 +131,20 @@ def _fill_legacy_host_rule_actions(cfg: dict[str, Any]) -> dict[str, Any]:
     return cfg
 
 
+def _unlayered_restriction_ids(rules: Any) -> list[Any]:
+    """Return ASK/DENY rule ids that a composed snapshot left without a source layer."""
+    if not isinstance(rules, list):
+        return []
+    missing = []
+    for rule in rules:
+        if not isinstance(rule, dict) or rule.get("layer") is not None:
+            continue
+        action = str(rule.get("action") or "").strip().lower()
+        if action in {"ask", "deny"}:
+            missing.append(rule.get("id"))
+    return missing
+
+
 def prepare_permissions_for_engine(
     config: PermissionsSection | dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -161,6 +175,15 @@ def prepare_permissions_for_engine(
         validate_delete_metadata(cfg)
         # The composed snapshot already contains selected package rules.
         prepared = _fill_legacy_host_rule_actions(deepcopy(cfg))
+        from openjiuwen.core.common.logging import logger as diagnostic_logger
+
+        unlayered = _unlayered_restriction_ids(prepared.get("rules"))
+        if unlayered:
+            diagnostic_logger.warning(
+                "[PermissionEngine] permission.composition.unlayered_restrictions "
+                "rule_ids=%s source_order=%s; composed rules require their source layer",
+                unlayered, order,
+            )
         if SOURCE_USER not in order:
             prepared["approval_overrides"] = []
         return prepared

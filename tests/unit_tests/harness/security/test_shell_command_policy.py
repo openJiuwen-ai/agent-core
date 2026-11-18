@@ -119,3 +119,53 @@ def test_complex_full_command_deny_still_beats_approval_floor():
         approval_overrides=[{"tools": ["shell"], "pattern": command, "action": "allow"}],
     )
     assert decision(cfg, command) == PermissionLevel.DENY
+
+
+_OPAQUE_COMMANDS = [
+    ("bash", "cd C:/qa && (cat a.txt | head -1) && { cat a.txt ; true ; }"),
+    ("powershell", 'Get-Content @("C:/qa/a.txt","C:/qa/b.txt")'),
+]
+
+
+@pytest.mark.parametrize("tool,command", _OPAQUE_COMMANDS)
+@pytest.mark.parametrize("composed", [False, True])
+@pytest.mark.parametrize("action", ["ask", "deny"])
+def test_restrictive_glob_covers_opaque_command_without_structure_floor(tool, command, composed, action):
+    cfg = config(shell_guard={"unknown_structure": False}, rules=[
+        {"id": "local", "tools": [tool], "pattern": "*C:/qa*", "action": action, "layer": "user"},
+        {"id": "floor", "tools": ["shell"], "pattern": "unrelated *", "action": "ask", "layer": "builtin"},
+    ])
+    if composed:
+        cfg["composition"] = {"schema_version": 1, "source_order": ["user", "cloud", "builtin"]}
+    assert decision(cfg, command, tool) == PermissionLevel(action)
+
+
+@pytest.mark.parametrize("tool,command", _OPAQUE_COMMANDS)
+def test_glob_allow_and_legacy_approval_do_not_expand_to_opaque_command(tool, command):
+    cfg = config(tools={tool: "ask"}, shell_guard={"unknown_structure": False},
+                 rules=[{"tools": [tool], "pattern": "*C:/qa*", "action": "allow"}],
+                 approval_overrides=[{"tools": [tool], "pattern": "*C:/qa*", "action": "allow"}])
+    assert decision(cfg, command, tool) == PermissionLevel.ASK
+
+
+@pytest.mark.asyncio
+async def test_remembered_simple_powershell_does_not_waive_complex_glob(tmp_path):
+    from openjiuwen.harness.security.permission_engine.core import PermissionEngine
+    from openjiuwen.harness.security.permission_engine.approve.operation_grants import build_operation_grants
+
+    args = {"command": "Get-Content C:/qa/a.txt", "shell_type": "powershell", "workdir": str(tmp_path)}
+    cfg = config(package_builtin_rules=False, shell_guard={"unknown_structure": False}, rules=[
+        {"id": "local", "tools": ["powershell"], "pattern": "*C:/qa*", "action": "ask", "layer": "user"},
+    ], composition={"schema_version": 1, "source_order": ["user", "cloud", "builtin"]})
+    cfg["approval_overrides"] = build_operation_grants(
+        "powershell", args, cfg, mode="allow_with_scope", scope="subcommands",
+    )
+    before = deepcopy(cfg)
+    engine = PermissionEngine(cfg, workspace_root=tmp_path)
+    assert (await engine.check_permission("powershell", args)).is_allowed
+    complex_args = {**args, "command": 'Get-Content @("C:/qa/a.txt","C:/qa/b.txt")'}
+    assert (await engine.check_permission("powershell", complex_args)).needs_approval
+    deny_cfg = deepcopy(cfg)
+    deny_cfg["rules"][0]["action"] = "deny"
+    assert (await PermissionEngine(deny_cfg, workspace_root=tmp_path).check_permission("powershell", args)).is_denied
+    assert cfg == before
