@@ -423,8 +423,7 @@ def create_team_tools(
     # Plan tools only make sense in plan_mode.
     if teammate_mode != "plan_mode":
         excluded = {"approve_plan", "submit_plan"}
-        # Leader must keep approve_tool when team permissions are on,
-        # so it can resolve teammate ASK interrupts.
+        # This tool-only flag covers permission ASK and legacy member requests.
         if not team_permissions_enabled:
             excluded.add("approve_tool")
         allowed = allowed - excluded

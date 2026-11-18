@@ -61,6 +61,13 @@ from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
+from openjiuwen.core.single_agent.interrupt.response import InterruptKind
+from openjiuwen.core.single_agent.interrupt.state import (
+    INTERRUPTION_KEY,
+    match_answers,
+    pending_interrupts,
+    retarget_stale_permission_answer,
+)
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -580,7 +587,9 @@ class NativeHarness(DeepAgent):
         IDLE on completion rather than continuing the task plan.
 
         Behavior by phase:
-        - IDLE: starts a new round with ``content``.
+        - IDLE: queues ordinary input while a permission interrupt is pending;
+          otherwise starts a round with ``content``. Use ``InteractiveInput``
+          to answer the pending permission.
         - RUNNING + immediate=True: steers the active round (injected at the
           next ReAct iteration top).
         - RUNNING + immediate=False: enqueued as a follow-up; consumed when the
@@ -596,6 +605,22 @@ class NativeHarness(DeepAgent):
         Returns:
             The monotonic sequence id of this message.
         """
+        return await self._send(content, immediate=immediate, run_context=run_context)
+
+    async def resume_interrupt(
+        self, content: InteractiveInput, *, run_context: RunContext | None = None,
+    ) -> str:
+        """Match and admit a Team answer in the supervisor's control command."""
+        return await self._send(content, run_context=run_context, require_pending_interrupt=True)
+
+    async def _send(
+        self,
+        content: Any,
+        *,
+        immediate: bool = False,
+        run_context: RunContext | None = None,
+        require_pending_interrupt: bool = False,
+    ) -> str:
         self._require_alive()
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         msg = InboxMessage(
@@ -604,7 +629,7 @@ class NativeHarness(DeepAgent):
             immediate=immediate,
             run_context=run_context,
         )
-        await self._control.put(_CmdSend(msg=msg, ack=ack))
+        await self._control.put(_CmdSend(msg=msg, ack=ack, require_pending_interrupt=require_pending_interrupt))
         return await ack
 
     async def abort(self, *, immediate: bool = False) -> None:
@@ -886,6 +911,41 @@ class NativeHarness(DeepAgent):
 
     async def _on_send(self, cmd: _CmdSend) -> None:
         """Route a send according to current phase."""
+        if cmd.require_pending_interrupt:
+            if cmd.ack.done():
+                return
+            reason = None
+            if self._st.phase in (HarnessState.RUNNING, HarnessState.PAUSING):
+                reason = "interrupt_resume_busy"
+            elif self._session is None:
+                reason = "interrupt_resume_unavailable"
+            elif not isinstance(cmd.msg.content, InteractiveInput):
+                reason = "unsupported_interactive_input"
+            else:
+                try:
+                    pending = pending_interrupts(self._session.get_state(INTERRUPTION_KEY))
+                except Exception:
+                    logger.warning("interrupt resume could not read pending state", exc_info=True)
+                    pending = None
+                if not pending:
+                    # Nothing is waiting yet. That is not proof the tool id is wrong.
+                    reason = "interrupt_resume_unavailable"
+                else:
+                    matched = match_answers(cmd.msg.content, pending)
+                    if (not matched.answers or matched.unmatched) and retarget_stale_permission_answer(
+                        cmd.msg.content, pending,
+                    ):
+                        matched = match_answers(cmd.msg.content, pending)
+                    if not matched.answers or matched.unmatched:
+                        reason = "unsupported_interactive_input"
+            if reason is not None:
+                # Expected non-admission must not escape and terminate the supervisor.
+                cmd.ack.set_exception(build_error(
+                    StatusCode.DEEPAGENT_RUNTIME_ERROR,
+                    error_msg="Interrupt answer was not admitted.",
+                    details={"operation": "interrupt_admission", "reason": reason},
+                ))
+                return
         seq = self._st.next_seq()
         msg = InboxMessage(
             seq=seq,
@@ -896,12 +956,24 @@ class NativeHarness(DeepAgent):
 
         phase = self._st.phase
         if phase is HarnessState.IDLE:
-            active = self._start_round(
-                msg.content,
-                run_context=msg.run_context,
-            )
-            await self._transition(HarnessState.RUNNING)
-            await self._emit_round("started", active.round_id)
+            if (
+                not isinstance(msg.content, InteractiveInput)
+                and self._session is not None
+                and any(
+                    item.kind == InterruptKind.PERMISSION
+                    for item in pending_interrupts(self._session.get_state(INTERRUPTION_KEY))
+                )
+            ):
+                # IDLE can still own a permission interrupt. Ordinary input is
+                # a follow-up, not an unaddressed answer to the paused tool.
+                self._st.pending_queue.append(msg)
+            else:
+                active = self._start_round(
+                    msg.content,
+                    run_context=msg.run_context,
+                )
+                await self._transition(HarnessState.RUNNING)
+                await self._emit_round("started", active.round_id)
         elif phase is HarnessState.RUNNING:
             active = self._st.active
             if msg.immediate and active is not None:
