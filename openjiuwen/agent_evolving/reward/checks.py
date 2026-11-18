@@ -15,8 +15,8 @@ import tempfile
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-from .files import clip, extract_text
-from .workspace import INPUTS_DIR, inside
+from .files import clip, extract_text, file_too_large, modified_between
+from .workspace import INPUTS_DIR, inside, walk_files
 
 PAGE_CODE = (".html", ".htm", ".js", ".mjs", ".css")   # the source of work used in a browser: it is run, not read
 
@@ -43,6 +43,12 @@ BROWSER_CHECK_SECONDS = 240      # one whole browser check (start, load, every a
 PYTHON_SECONDS = 60
 
 CHECK_OUTPUT = 6000      # characters kept from one check's output
+
+# A "read" with no path sees the deliverable itself. Bound what it adds to the context: at most this many files
+# are read (more become an index), this many characters in all, and this many pictures.
+AUTO_READ_FILES = 8
+AUTO_READ_CHARS = 30000
+AUTO_READ_PICTURES = 4
 
 
 def cdn_file(url):
@@ -396,21 +402,35 @@ def whole_lines(numbered):
     return "\n".join(out)
 
 
-def deliverable_files(root):
-    """Files the work itself produced, not reference inputs or scratch check scripts."""
+def is_reference(root, path):
+    """Whether a workspace file is an explicit reference input under _inputs/."""
+    try:
+        return Path(path).resolve().relative_to(Path(root).resolve()).parts[0] == INPUTS_DIR
+    except (OSError, ValueError):
+        return False
+
+
+def deliverable_files(root, since_ns=None, until_ns=None):
+    """Files the work itself produced, not reference inputs or scratch check scripts.
+
+    Only files modified inside the task's trace time range are returned when bounds are given. Hidden paths,
+    symlinks and scratch folders are skipped, so a large or sensitive tree is not walked.
+    """
+    root = Path(root)
     found = []
-    for path in sorted(Path(root).rglob("*")):
-        if not path.is_file() or path.name.startswith(".check_"):
-            continue
+    for path in walk_files(root):
         relative = path.relative_to(root)
-        if relative.parts[0] == INPUTS_DIR:
+        if relative.parts[0] == INPUTS_DIR or not modified_between(path, since_ns, until_ns):
             continue
         found.append(relative)
     return found
 
 
-async def run_check(check, root, tools, number=1):
-    """Run one check in the workspace. Returns (facts, screenshots). Raises when the check itself cannot run."""
+async def run_check(check, root, tools, number=1, since_ns=None, until_ns=None):
+    """Run one check in the workspace. Returns (facts, screenshots). Raises when the check itself cannot run.
+
+    since_ns / until_ns bound a read to files modified in the task's trace time range; None means no bound.
+    """
     tool = check.get("tool")
     facts = {"tool": tool, "note": check.get("note", "")}
     if tool not in tools:
@@ -419,26 +439,53 @@ async def run_check(check, root, tools, number=1):
     if tool == "read":
         if not check.get("path"):
             if check.get("id"):
-                return {**facts, "skipped": "read needs a \"path\"; a saved result is read with the read_evidence tool"}, []
-            files = deliverable_files(root)
+                return {**facts, "skipped": "read needs a \"path\"; "
+                                             "a saved result is read with the read_evidence tool"}, []
+            files = deliverable_files(root, since_ns, until_ns)
+            shown_paths = ", ".join(str(item) for item in files[:AUTO_READ_FILES])
+            if len(files) > AUTO_READ_FILES:
+                index = "\n".join(str(item) for item in files[:200])
+                if len(files) > 200:
+                    index += f"\n... ({len(files) - 200} more)"
+                return {**facts, "path": f"{len(files)} files",
+                        "output": "folder; files:\n" + clip(index, AUTO_READ_CHARS)}, []
             if len(files) == 1:
                 check = {**check, "path": str(files[0])}
             elif files:
-                chunks, shots = [], []
+                chunks, shots, size = [], [], 0
                 for relative in files:
-                    one, one_shots = await run_check({**check, "path": str(relative)}, root, tools, number)
-                    chunks.append(f"===== {relative} =====\n{one.get('output') or one.get('skipped') or ''}")
+                    if relative.suffix.lower() in IMAGE_SUFFIXES and len(shots) >= AUTO_READ_PICTURES:
+                        chunks.append(f"===== {relative} =====\n(skipped: at most {AUTO_READ_PICTURES} pictures)")
+                        continue
+                    one, one_shots = await run_check({**check, "path": str(relative)}, root, tools, number,
+                                                     since_ns=since_ns, until_ns=until_ns)
+                    body = one.get("output") or one.get("skipped") or ""
+                    if one.get("skipped"):
+                        chunks.append(f"===== {relative} =====\n(skipped: {one['skipped']})")
+                        continue
+                    chunk = f"===== {relative} =====\n{body}"
+                    if size + len(chunk) > AUTO_READ_CHARS:
+                        chunks.append(f"[cut: auto-read stopped at {AUTO_READ_CHARS} characters]")
+                        break
+                    chunks.append(chunk)
+                    size += len(chunk)
                     shots.extend(one_shots)
-                return {**facts, "path": ", ".join(str(item) for item in files), "output": "\n\n".join(chunks)}, shots
+                return {**facts, "path": shown_paths, "output": "\n\n".join(chunks)}, shots
             else:
-                return {**facts, "skipped": "read needs a \"path\"; a saved result is read with the read_evidence tool"}, []
+                return {**facts, "skipped": "read needs a \"path\"; "
+                                             "a saved result is read with the read_evidence tool"}, []
         path = inside(root, check["path"])
         if path.is_dir():   # a folder: say what is in it rather than fail
-            names = sorted(str(p.relative_to(path)) for p in path.rglob("*") if p.is_file())[:200]
+            names = sorted(str(p.relative_to(path)) for p in walk_files(path))[:200]
             return {**facts, "path": check.get("path"), "output": "folder; files:\n" + "\n".join(names)}, []
+        if not is_reference(root, path) and not modified_between(path, since_ns, until_ns):
+            return {**facts, "path": check.get("path"),
+                    "skipped": "file was not modified in the task's time range"}, []
         if "browser" in tools and path.suffix.lower() in PAGE_CODE:   # work that is used, not read
             return {**facts, "skipped": "the source of a page is not read: use the page in the browser; find the names "
                                         "a probe needs with a probe (Object.keys(window), the page's buttons)"}, []
+        if file_too_large(path):
+            return {**facts, "path": check.get("path"), "skipped": "file too large"}, []
         if path.suffix.lower() in IMAGE_SUFFIXES:   # a picture is looked at: it goes to the Judge as a picture
             found = await asyncio.to_thread(picture_or_none, path)
             if found is None:
@@ -447,7 +494,9 @@ async def run_check(check, root, tools, number=1):
             facts = {**facts, "path": check.get("path"), "picture": size,
                      "output": f"picture file ({size}); the Judge sees it as a picture"}
             return facts, [(f"file {check['path']}", data)]
-        text = extract_text(path.name, path.read_bytes()) or "[binary file]"
+        text = extract_text(path.name, path.read_bytes())
+        if text is None:
+            return {**facts, "path": check.get("path"), "skipped": "binary file"}, []
         lines = text.splitlines()
         if check.get("pattern"):
             pattern = re.compile(check["pattern"], re.I)

@@ -1,6 +1,6 @@
 """Domain knowledge ("metric guides") for writing criteria and planning checks: Markdown files whose first line may
-be "keywords: a, b, c". Before each run the guides are scanned: one with keywords is used when one of them occurs in
-the Task; for those without keywords, one short model call picks the ones that fit. Guides are read from the bundled
+be "keywords: a, b, c". Before each run the guides are scanned: guides with a keyword in the Task and guides without
+keywords become candidates, and one short model call picks at most one that fits. Guides are read from the bundled
 metrics/ folder (picture books, games, personal assistants), from ~/.reward/metrics/
 (or $REWARD_HOME/metrics/) and from config "metric_guides" (files or folders).
 """
@@ -38,7 +38,8 @@ def read_guide(path):
 
 
 def by_keywords(task, config):
-    """([(name, body)] chosen by keyword, [(name, body)] without keywords, still to be decided)."""
+    """([(name, body)] with a keyword in the Task, [(name, body)] without keywords). The first list is only
+    candidates for the model, not a decision; see for_task."""
     text = (task or "").lower()
     chosen, undecided = [], []
     for path in guide_files(config.get("metric_guides")):
@@ -52,39 +53,40 @@ def by_keywords(task, config):
             chosen.append((name, body))
     return chosen, undecided
 
-PICK_PROMPT = """You choose which evaluation guides fit a Task. You see the Task and, for each guide, its name and
-opening. Choose a guide only when the work the Task asks for is of the kind the guide is about. Return JSON:
-{"guides": ["name", ...]} (empty when none fits)."""
+PICK_PROMPT = """You choose which evaluation guides fit a Task. You see the Task and, for each candidate, its
+name and opening. Candidates are guides whose keywords occur in the Task and guides without keywords. Choose at
+most one guide that genuinely fits the work the Task asks for; return none when no candidate fits. Return JSON:
+{"guides": ["name"]} ({"guides": []} when none fits)."""
 
 
 async def for_task(task, config, model=None, log=lambda message: None, notes=None):
-    """[(name, body)] of the guides that fit this Task: keyword matches, plus those without keywords that the model
-    picks (none of them when there is no model; when the pick fails, a warning says so).
+    """[(name, body)] of the guide that fits this Task, chosen by the model from keyword matches and guides without
+    keywords. No candidates, no model or a failed pick means no guide; a failed pick adds a warning when possible.
 
-    A task that hits no keyword is still offered every guide, including game and personal assistant.
-    An existing keyword match is left as it is; the selector is not asked to replace it.
+    A keyword match is only a candidate, not a decision: a word that occurs incidentally, or several guides that
+    match at once, still need the model's confirmation. Guides with the same name collapse to one; the later
+    source (the user folder, then metric_guides) wins.
     """
     chosen, undecided = by_keywords(task, config)
-    if not chosen and model is not None:
-        offered = []
-        for path in guide_files(config.get("metric_guides")):
-            try:
-                name, _keywords, body = read_guide(path)
-            except OSError:
-                continue
-            offered.append((name, body))
-        undecided = offered
-    if undecided and model is not None:
-        try:
-            found = await model.json(PICK_PROMPT, json.dumps(
-                {"task": task, "guides": [{"name": n, "opening": b[:400]} for n, b in undecided]}, ensure_ascii=False))
-            names = set(found.get("guides") or []) if isinstance(found, dict) else set(found or [])
-            chosen += [(n, b) for n, b in undecided if n in names]
-        except Exception as error:  # noqa: BLE001 - guides help, the score does not depend on them
-            log(f"choosing guides failed: {str(error)[:200]}")
-            if notes is not None:
-                notes.append(f"挑选评测知识没有完成（{type(error).__name__}），本次只用了按关键词选中的文档。")
-    return chosen
+    candidates = list({name: (name, body) for name, body in chosen + undecided}.values())
+    if not candidates or model is None:
+        return []
+    try:
+        found = await model.json(PICK_PROMPT, json.dumps(
+            {"task": task, "guides": [{"name": n, "opening": b[:400]} for n, b in candidates]}, ensure_ascii=False))
+        names = found.get("guides") if isinstance(found, dict) else found
+        if not isinstance(names, list):
+            raise ValueError("the guide pick must be a list")
+        picked = [(n, b) for n, b in candidates if isinstance(n, str) and n in set(names)]
+        if len(picked) > 1:
+            log("choosing guides picked more than one; using none")
+            return []
+        return picked
+    except Exception as error:  # noqa: BLE001 - guides help, the score does not depend on them
+        log(f"choosing guides failed: {str(error)[:200]}")
+        if notes is not None:
+            notes.append(f"挑选评测知识没有完成（{type(error).__name__}），本次没有使用评测知识。")
+        return []
 
 
 def as_text(guides):

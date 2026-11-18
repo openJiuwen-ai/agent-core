@@ -490,7 +490,7 @@ async def score_workspace(task, root, config, options=None):
     options = (options or RewardOptions()).for_run()
     models.set_language(task)
     root = Path(root)
-    deliverable, inputs = workspace_files(root)
+    deliverable, inputs = workspace_files(root, options.since_ns, options.until_ns)
     tools = checks.available_tools(root, config)
     has_pictures = "browser" in tools or any(p.suffix.lower() in checks.IMAGE_SUFFIXES for p in root.rglob("*")
                                            if checks.INPUTS_DIR not in p.parts)
@@ -536,6 +536,7 @@ async def score_with(task, root, config, options, *, deliverable, inputs, tools,
     # A stronger eye, if configured.
     art = models.Model(config["art_judge"]) if config.get("art_judge") else judge
     ctx = {"root": root, "tools": tools, "evidence": evidence, "art_judge": art, "config": config,
+           "since_ns": options.since_ns, "until_ns": options.until_ns,
            "plan_input": {"task": task, "available_tools": tools, "final_reply": response,
                           **({"domain_knowledge": knowledge} if knowledge else {}),
                           "workspace": {"files": {name: f"{text.count(chr(10)) + 1} lines"

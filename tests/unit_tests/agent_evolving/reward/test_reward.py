@@ -30,9 +30,10 @@ class _Answer:
 def _model(answers):
     model = models.Model.__new__(models.Model)
     model.name, model.extra = "m", {}
-    calls = []
+    calls, modes = [], []
 
     async def stream(messages, **kwargs):
+        modes.append("stream")
         calls.append((messages, kwargs))
         answer = answers.pop(0)
         if isinstance(answer, Exception):
@@ -45,7 +46,16 @@ def _model(answers):
         else:
             yield _Answer(answer)
 
-    model._model = type("Core", (), {"stream": staticmethod(stream)})()
+    async def invoke(messages, **kwargs):
+        modes.append("invoke")
+        calls.append((messages, kwargs))
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return _Answer(answer)
+
+    model.modes = modes
+    model._model = type("Core", (), {"stream": staticmethod(stream), "invoke": staticmethod(invoke)})()
     return model, calls
 
 
@@ -72,13 +82,27 @@ async def test_json_reads_typed_content_blocks():
 
 
 @pytest.mark.asyncio
-async def test_a_failed_call_is_retried_once_then_its_error_is_raised():
+async def test_a_failed_stream_falls_back_to_one_non_streamed_call():
     model, calls = _model(["not json", '{"a": 2}'])
     assert await model.json("sys", "user") == {"a": 2} and len(calls) == 2
+    assert model.modes == ["stream", "invoke"]
+    model, calls = _model([RuntimeError("stream down"), '{"a": 2}'])
+    assert await model.json("sys", "user") == {"a": 2} and len(calls) == 2
+    assert model.modes == ["stream", "invoke"]
     model, calls = _model(["x", "y"])
     with pytest.raises(ValueError):
         await model.json("sys", "user")
     assert len(calls) == 2
+    assert model.modes == ["stream", "invoke"]
+
+
+@pytest.mark.asyncio
+async def test_both_failures_are_not_retried_again():
+    model, calls = _model([RuntimeError("stream down"), RuntimeError("invoke down")])
+    with pytest.raises(RuntimeError, match="invoke down"):
+        await model.json("sys", "user")
+    assert len(calls) == 2
+    assert model.modes == ["stream", "invoke"]
 
 
 def test_the_reward_model_uses_agent_core_for_openai_and_anthropic():
@@ -344,7 +368,8 @@ def dispatcher(answers, seen):
 
 
 def install(monkeypatch, answers, seen, name="judge-model", vision=True):
-    answers = [*answers, ("You read an agent's final reply", {"claims": []})]
+    answers = [*answers, ("You choose which evaluation guides", {"guides": []}),
+               ("You read an agent's final reply", {"claims": []})]
     monkeypatch.setattr(models.Model, "__init__",
                         lambda self, config: self.__dict__.update(name=name, vision=vision))
     monkeypatch.setattr(models.Model, "json", dispatcher(answers, seen))
@@ -497,26 +522,56 @@ async def test_metric_guides_are_scanned_and_the_fitting_ones_used(tmp_path, mon
     assert "Words and pictures work together" in chosen[0][1] and not chosen[0][1].startswith("keywords")
 
     class Picker:
+        def __init__(self, names):
+            self.names = names
+
         async def json(self, system, user):
-            assert system.startswith("You choose which evaluation guides") and "game_feel" in user
-            return {"guides": ["game_feel"]}
-    assert [n for n, _ in await guides.for_task("做一个跳跃小游戏", {}, Picker())] == ["game", "game_feel"]
-    assert [n for n, _ in await guides.for_task("整理工单日报", {})] == []          # no model: unlabelled ones skipped
+            assert system.startswith("You choose which evaluation guides")
+            assert "game" in user and "game_feel" in user
+            return {"guides": self.names}
+    task = "做一个跳跃小游戏"
+    assert [n for n, _ in await guides.for_task(task, {}, Picker(["game"]))] == ["game"]
+    assert [n for n, _ in await guides.for_task(task, {}, Picker(["game_feel"]))] == ["game_feel"]
+    assert [n for n, _ in await guides.for_task(task, {}, Picker([]))] == []               # the model can reject a keyword
+    assert [n for n, _ in await guides.for_task(task, {}, Picker(["game", "game_feel"]))] == []
+    assert [n for n, _ in await guides.for_task(task, {})] == []                           # no model: no selection
+    assert [n for n, _ in await guides.for_task("整理工单日报", {})] == []
     extra = tmp_path / "extra.md"
     extra.write_text("keywords: 工单\n# Ticket guide")
-    assert [n for n, _ in await guides.for_task("整理工单日报", {"metric_guides": [str(extra)]})] == ["extra"]
 
-    class DomainPicker:
+    class PickExtra:
+        async def json(self, system, user):
+            assert system.startswith("You choose which evaluation guides")
+            return {"guides": ["extra"]}
+    assert [n for n, _ in await guides.for_task("整理工单日报", {"metric_guides": [str(extra)]},
+                                               PickExtra())] == ["extra"]
+
+    class Broken:
+        async def json(self, system, user):
+            raise RuntimeError("picker down")
+    assert [n for n, _ in await guides.for_task(task, {}, Broken())] == []                  # a failed pick uses no guide
+
+    class NamedPicker:
         def __init__(self, name):
             self.name = name
 
         async def json(self, system, user):
             assert system.startswith("You choose which evaluation guides")
-            assert self.name in user
             return {"guides": [self.name]}
 
-    assert [n for n, _ in await guides.for_task("守住小镇直到天亮", {}, DomainPicker("game"))] == ["game"]
-    assert [n for n, _ in await guides.for_task("把接送和买菜排清楚", {}, DomainPicker("personal_assistant"))] == ["personal_assistant"]
+    assert [n for n, _ in await guides.for_task("守住小镇直到天亮", {}, NamedPicker("game"))] == []
+    assert [n for n, _ in await guides.for_task("把接送和买菜排清楚", {}, NamedPicker("personal_assistant"))] == []
+
+    duplicate = tmp_path / "duplicate" / "game.md"
+    duplicate.parent.mkdir()
+    duplicate.write_text("keywords: 游戏\n# Replacement game guide", encoding="utf-8")
+
+    class SeeOne:
+        async def json(self, system, user):
+            assert user.count('"name": "game"') == 1 and "Replacement game guide" in user
+            return {"guides": ["game"]}
+    picked = await guides.for_task(task, {"metric_guides": [str(duplicate)]}, SeeOne())
+    assert [n for n, _ in picked] == ["game"] and "Replacement game guide" in picked[0][1]
 
 
 @pytest.mark.asyncio
@@ -524,6 +579,7 @@ async def test_the_chosen_guide_reaches_the_criteria_writer_and_the_reply(tmp_pa
     monkeypatch.setenv("REWARD_HOME", str(tmp_path / "none"))
     seen = []
     install(monkeypatch, [
+        ("You choose which evaluation guides", {"guides": ["picture_book"]}),
         ("You write evaluation criteria", {"criteria": [PAGE_CRITERIA["criteria"][0]]}),
         ("You plan checks", {"checks": []}),
         ("You judge each claim", JUDGED),

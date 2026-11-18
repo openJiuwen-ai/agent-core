@@ -131,8 +131,9 @@ class EvidenceRun:
     async def run_one(self, number, check):
         check = with_tool(check)
         serves = [c for c in check.get("criteria") or [] if c in self.ids] or list(self.ids)
+        times = {key: self.ctx[key] for key in ("since_ns", "until_ns") if self.ctx.get(key) is not None}
         try:
-            facts, shots = await checks.run_check(check, self.ctx["root"], self.ctx["tools"], number)
+            facts, shots = await checks.run_check(check, self.ctx["root"], self.ctx["tools"], number, **times)
         except Exception as error:  # noqa: BLE001 - shown to the agent, which can fix the check
             facts, shots = {"tool": check.get("tool"), "note": check.get("note", ""),
                             "could_not_run": f"{type(error).__name__}: {str(error)[:400]}"}, []

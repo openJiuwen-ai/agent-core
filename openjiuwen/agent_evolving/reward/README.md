@@ -169,7 +169,7 @@ options = RewardOptions(txt_response="", user_note="", process_signal="", rubric
 - `~/.reward/metrics/`（或 `$REWARD_HOME/metrics/`），放入即生效；
 - 配置项 `metric_guides` 列出的文件或目录。
 
-**选取方式**：文档首行为 `keywords: 绘本, picture book, …` 时，任务中出现任一关键词即选用，不额外调用模型（自带文档均有关键词）。没有关键词的文档，由一次轻量模型调用根据任务原文和各文档的标题、开头判断是否相关（`guides.for_task`）。
+**选取方式**：文档首行为 `keywords: 绘本, picture book, …` 时，任务中出现任一关键词的文档，以及没有关键词的文档，都会成为候选；再由一次轻量模型调用根据任务原文和各候选的标题、开头，最多选一份（`guides.for_task`）。关键词只负责召回候选，不直接决定使用；模型明确返回空、返回多份、调用失败或没有模型时，本次都不使用评测知识。同名文档按加载顺序后者覆盖前者：包内 `metrics/` → `~/.reward/metrics/` → `metric_guides`。
 
 **使用方式**：选中的文档附在任务之后交给出题模型，由它按任务挑选适用的维度，可以写针对单页、相邻两页或整部作品的子项；取证 Agent 也能看到这些文档（例如逐页翻看、对比各页主角）。结果的「输入」一行和 JSON 的 `meta.guides` 列出使用了哪些文档。
 

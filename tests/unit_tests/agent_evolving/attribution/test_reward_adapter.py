@@ -96,6 +96,10 @@ def test_claims_become_dimensions_with_tiers_and_unknowns_are_counted() -> None:
         adapter.to_reward_payload({"total": {"score": 50}, "sub_category_items": [{"status": "unknown"}]})
 
 
+def test_event_time_range_spans_the_visible_trajectory() -> None:
+    assert adapter.event_time_range(_nodes()) == (10, 96)
+
+
 def test_final_reply_is_the_last_message_the_user_got(tmp_path: Any) -> None:
     assert adapter.final_reply(_task_parse(tmp_path), _nodes()) == "最终答复"
     bare = TaskParseResult(task_description="t", message_artifacts=[], file_artifacts=[], file_candidates=[])
@@ -217,6 +221,7 @@ async def test_reward_diagnosis_keeps_failed_tool_calls(monkeypatch: Any, tmp_pa
     )
     assert seen["artifacts"] == [str(tmp_path / "schedule.md")]  # a missing file is left out
     assert seen["options"].txt_response == "最终答复" and seen["options"].user_note == "外婆的时间要核对"
+    assert (seen["options"].since_ns, seen["options"].until_ns) == (10, 97)  # the trajectory clock bounds reads
     assert result.signal_mode == "reward" and result.reward_overall.total_score == 72
     # tiers follow each claim's status, and each score sits in its tier's band (>= 90 / >= 75 / else)
     assert [s.tier for s in result.signals] == ["weak", "fair", "fair", "perfect", "uncertain", "uncertain"]

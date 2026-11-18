@@ -1,4 +1,4 @@
-"""Suggestion reads the saved score and stays off unless the only guide is game."""
+"""Suggestion reads the given score and stays off unless the only guide is game."""
 
 import json
 
@@ -29,14 +29,12 @@ def test_screenshots_are_spread_from_the_opening_to_the_last():
 
 
 @pytest.mark.asyncio
-async def test_the_designer_sees_what_the_scoring_saw(tmp_path):
+async def test_the_designer_sees_what_the_scoring_saw():
     result = {"meta": {"task": "做一个能玩的塔防", "guides": ["game"]},
               "total": {"summary": "能玩，开局看不清"},
               "sub_category_items": [{"rubric": "开局能看清目标", "status": "unmet",
                                       "comment": "目标在画面外", "type": "floor"}],
               "evidence": {"play": [{"tool": "browser", "output": "点了开始，敌人从桥上来" + "。" * 3000}]}}
-    suggestion.write_evidence(tmp_path, result)
-    assert json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))["meta"]["guides"] == ["game"]
     materials = {"screenshots": [("check 1, after start", "aGk=")], "knowledge": "塔防要有路线取舍",
                  "deliverable": {"tower.html": "function buildRoads() {}"}}
 
@@ -57,6 +55,6 @@ async def test_the_designer_sees_what_the_scoring_saw(tmp_path):
                                  "existing": "buildRoads 只有一条环路", "evidence": "check 1, after start"}],
                     "explore": []}
 
-    text = await suggestion.suggest(tmp_path, Model(), "zh", materials=materials, final_reply="做好了")
+    text = await suggestion.suggest(result, Model(), "zh", materials=materials, final_reply="做好了")
     assert text.startswith("## 本轮主设计") and "### 桥南分岔" in text and "## 实现顺序与技术方案" in text
     assert "## 保留" in text and "整体效果如何验证" in text
