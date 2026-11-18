@@ -9,8 +9,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 
 from openjiuwen.symphony.config import RetrievalConfig
 from openjiuwen.symphony.discovery import InstalledSkillsDirectoryToolkit, SkillFS
-from openjiuwen.symphony.inventory import DirectoryInventory
-from openjiuwen.symphony.runtime_storage import RuntimeStorage
+from openjiuwen.symphony.inventory import DirectoryInventory, RuntimeStorage
 
 
 class DiscoverySession(InstalledSkillsDirectoryToolkit):

@@ -46,7 +46,7 @@ finally:
 
 `capability.sources` 是非空目录列表，每项声明 `type` 和 `root`，整组共用 `scan`、`fingerprint` 和 `storage.artifact_root`。配置可声明多个同类或不同类型的目录。当前 Runtime 要求单个来源，并提供 `skill` 读取器。旧的 `capability.root` 和 `capability.type` 会被校验拒绝。
 
-公共配置树及默认值见 [config.tree.txt](config.tree.txt)。
+顶层配置包含 `capability`、`storage`、`retrieval` 和 `orchestration`；Flow 策略位于 `orchestration.experience`。公共配置树及默认值见 [config.tree.txt](config.tree.txt)。
 
 ## 三个入口
 
@@ -60,7 +60,7 @@ finally:
 
 两个构建入口的 `prepare_artifact(version_dir)` 回调可写入宿主附属产物，完成后才发布。构建取消或发布前集合变化均保留之前的可用版本。关闭 Runtime 会等待自己的构建、图增量、规划、Flow 和会话任务收尾；取消某个关闭等待者不会取消内部关闭任务。注入的宿主模型始终由宿主关闭。
 
-三个开关独立。禁用能力可查询状态，执行入口拒绝操作。`model=None` 支持状态、产物读取和确定性发现；构图与规划会报告缺少模型。构树按 `task.allow_fallback_tree` 处理；启用旧索引保护时，不用失败后的回退树替换已有可用分类树。
+检索与编排开关独立；经验沉淀和 Flow 需要 `orchestration.enabled` 与 `orchestration.experience.enabled` 同时开启。禁用能力可查询状态，执行入口拒绝操作。`model=None` 支持状态、产物读取和确定性发现；构图与规划会报告缺少模型。构树按 `task.allow_fallback_tree` 处理；启用旧索引保护时，不用失败后的回退树替换已有可用分类树。
 
 ## 构建与模型
 

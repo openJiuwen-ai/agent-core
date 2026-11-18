@@ -1,8 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Symphony 运行配置，供 SymphonyRuntime(model, config) 及内部消费者统一使用。
 
-公共入口为 SymphonyConfig，按 capability、storage、retrieval、orchestration、
-flow 组合可调策略；能力来源列表和产物目录必填，其余策略由默认值补全。
+公共入口为 SymphonyConfig，按 capability、storage、retrieval、orchestration 组合可调策略；
+能力来源列表和产物目录必填，其余策略由默认值补全。Flow 策略统一归入 orchestration.experience。
 指纹协议和一次性构树内部预算单独定义；解析后的运行快照不另设策略默认值。
 公共树模型与内部模型分别登记；便利导出只保留核心配置类，供验证和文档读取完整登记。
 本文件不读取环境、扫描目录或创建模型客户端；目录检查和服务组装由 Runtime 负责。
@@ -64,7 +64,7 @@ class OrchestrationPlanConfig(SymphonyConfigModel):
     )
 
 
-# 目录扫描与指纹：默认值来自 shared/fingerprint/{scanner,parser,settings}.py。
+# 目录扫描与指纹策略。
 class ScanLimitsConfig(SymphonyConfigModel):
     """目录发现和资源读取预算；单位分别为条目数和字节。"""
 
@@ -147,6 +147,12 @@ class FingerprintProtocolConfig(SymphonyConfigModel):
     configuration_signature: str = Field(
         "", title="附加配置签名", description="独立指纹服务允许附加的配置身份；空字符串表示未提供。",
     )
+
+
+_FINGERPRINT_PROTOCOL = FingerprintProtocolConfig()
+FINGERPRINT_SCHEMA_VERSION = _FINGERPRINT_PROTOCOL.schema_version
+EXTRACTION_PROTOCOL_VERSION = _FINGERPRINT_PROTOCOL.extraction_version
+EVALUATION_PROTOCOL_VERSION = _FINGERPRINT_PROTOCOL.evaluation_version
 
 
 class FingerprintPolicyConfig(SymphonyConfigModel):
