@@ -84,6 +84,7 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_STATUS,
     OJ_STREAM_INPUTS,
     OJ_STREAM_OUTPUTS,
+    OJ_STREAM_TRUNCATED,
     OJ_TRACE_ID,
     OJ_WORKFLOW_COMPONENT_ID,
     OJ_WORKFLOW_COMPONENT_NAME,
@@ -1275,6 +1276,75 @@ class TestOtelWorkflowHandler:
         assert len(finished) == 1
         assert OJ_STREAM_INPUTS in finished[0].attributes
         assert OJ_STREAM_OUTPUTS in finished[0].attributes
+
+    async def test_workflow_stream_buffers_redacted_by_default(self):
+        """All three diagnostic attributes honor redaction like sibling content attributes."""
+        config = OtelTracerConfig(redaction_enabled=True)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="comp1",
+            metadata={"component_id": "comp1", "component_type": "LLM", "workflow_id": "wf1"},
+            parent_node_id="",
+        )
+        await handler.on_pre_stream(invoke_id="comp1", chunk={"text": "secret prompt"})
+        await handler.on_post_stream(invoke_id="comp1", chunk={"text": "secret response"})
+        await handler.on_invoke(invoke_id="comp1", on_invoke_data={"step": "secret invoke"})
+        await handler.on_call_done(invoke_id="comp1")
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.attributes[OJ_STREAM_INPUTS].startswith("sha256:")
+        assert s.attributes[OJ_STREAM_OUTPUTS].startswith("sha256:")
+        assert s.attributes[OJ_WORKFLOW_INVOKE_DATA].startswith("sha256:")
+        # Plaintext must not leak into the exported attributes.
+        assert "secret prompt" not in s.attributes[OJ_STREAM_INPUTS]
+        assert "secret response" not in s.attributes[OJ_STREAM_OUTPUTS]
+        assert "secret invoke" not in s.attributes[OJ_WORKFLOW_INVOKE_DATA]
+
+    async def test_workflow_stream_buffers_flushed_with_length_cap(self):
+        """Serialized stream attributes are capped by max_attr_length (issue #2320)."""
+        config = OtelTracerConfig(redaction_enabled=False, max_attr_length=32)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="comp1",
+            metadata={"component_id": "comp1", "component_type": "LLM", "workflow_id": "wf1"},
+            parent_node_id="",
+        )
+        for i in range(5):
+            await handler.on_post_stream(invoke_id="comp1", chunk={"text": "word" + str(i)})
+        await handler.on_call_done(invoke_id="comp1")
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert OJ_STREAM_OUTPUTS in s.attributes
+        assert len(s.attributes[OJ_STREAM_OUTPUTS]) == config.max_attr_length + len("...<truncated>")
+        # Only 5 small frames — none dropped, so no truncation marker.
+        assert OJ_STREAM_TRUNCATED not in s.attributes
+
+    async def test_workflow_stream_buffer_drop_marker(self):
+        """Frames dropped by the bounded buffer are reported via OJ_STREAM_TRUNCATED."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="comp1",
+            metadata={"component_id": "comp1", "component_type": "LLM", "workflow_id": "wf1"},
+            parent_node_id="",
+        )
+        for i in range(105):
+            await handler.on_post_stream(invoke_id="comp1", chunk={"text": "chunk-" + str(i)})
+        await handler.on_call_done(invoke_id="comp1")
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert OJ_STREAM_TRUNCATED in s.attributes
+        dropped = json.loads(s.attributes[OJ_STREAM_TRUNCATED])
+        assert dropped == {"stream_outputs": 5}
 
     async def test_exception_safety(self):
         """Handler exceptions do not propagate to business flow."""
@@ -2545,6 +2615,28 @@ class TestOtelWorkflowHandlerDeferredEndNode:
         assert "chunk-2" in s.attributes[OJ_STREAM_INPUTS]
         assert s.attributes[OJ_WORKFLOW_COMPONENT_ID] == "end1"
         assert s.attributes[OJ_SESSION_ID] == "workflow-session-123"
+
+    async def test_deferred_window_buffers_bounded(self):
+        """Deferred-window stream buffers are bounded like the live path (issue #2320)."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        # Exceed the frame cap inside the deferral window: 105 frames -> 100 kept, 5 dropped.
+        for i in range(105):
+            await handler.on_post_stream("end1", {"payload": f"chunk-{i}"})
+        assert len(handler._deferred_end_starts["end1"]["stream_outputs"]) == 100
+
+        await handler.on_call_finalize("end1")
+        await handler.on_call_done("end1")
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        # Deferred-window drops are merged into the final truncation marker.
+        assert OJ_STREAM_TRUNCATED in s.attributes
+        dropped = json.loads(s.attributes[OJ_STREAM_TRUNCATED])
+        assert dropped == {"stream_outputs": 5}
 
     async def test_end_node_fallback_opens_span_with_begin_timestamp(self):
         """Marker never arrived (stream error): on_call_done falls back to the

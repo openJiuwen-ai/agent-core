@@ -11,6 +11,8 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_TRACE_ID,
 )
 from openjiuwen.extensions.tracer_otel.span_manager import (
+    _MAX_STREAM_CHUNK_BYTES,
+    _MAX_STREAM_FRAMES,
     OtelAgentSpanManager,
     OtelSpanState,
     OtelWorkflowSpanManager,
@@ -165,3 +167,56 @@ class TestOtelWorkflowSpanManager:
         assert mgr.get_on_invoke_data("inv1") == []
         assert mgr.get_stream_inputs("inv1") == []
         assert mgr.get_stream_outputs("inv1") == []
+
+    # --- Bounded buffer policy (issue #2320) ---
+
+    def test_append_drops_frames_over_frame_cap(self):
+        mgr = OtelWorkflowSpanManager()
+        state = OtelSpanState(span=_MockSpan(), context_token=_MockToken(), invoke_id="inv1")
+        mgr.push("inv1", state)
+
+        for i in range(_MAX_STREAM_FRAMES + 5):
+            mgr.append_stream_output("inv1", {"chunk": i})
+
+        assert len(mgr.get_stream_outputs("inv1")) == _MAX_STREAM_FRAMES
+        assert mgr.get_stream_outputs("inv1")[0] == {"chunk": 0}
+        assert mgr.get_stream_outputs("inv1")[-1] == {"chunk": _MAX_STREAM_FRAMES - 1}
+        assert mgr.get_dropped_counts("inv1") == {"stream_outputs": 5}
+
+    def test_append_drops_oversized_single_chunk(self):
+        mgr = OtelWorkflowSpanManager()
+        state = OtelSpanState(span=_MockSpan(), context_token=_MockToken(), invoke_id="inv1")
+        mgr.push("inv1", state)
+
+        big_chunk = {"text": "x" * (_MAX_STREAM_CHUNK_BYTES + 10)}
+        mgr.append_stream_input("inv1", big_chunk)
+        mgr.append_stream_input("inv1", {"text": "ok"})
+
+        assert mgr.get_stream_inputs("inv1") == [{"text": "ok"}]
+        assert mgr.get_dropped_counts("inv1") == {"stream_inputs": 1}
+
+    def test_append_drops_when_total_bytes_exceeded(self):
+        mgr = OtelWorkflowSpanManager()
+        state = OtelSpanState(span=_MockSpan(), context_token=_MockToken(), invoke_id="inv1")
+        mgr.push("inv1", state)
+
+        # Each chunk serializes to ~30 bytes; exceeding the cap should stop
+        # accumulation and count the dropped frames rather than grow unbounded.
+        total_appended = 0
+        for i in range(10000):
+            mgr.append_stream_output("inv1", {"chunk": "x" * 16})
+            total_appended += 1
+            if len(mgr.get_stream_outputs("inv1")) < i + 1:
+                break
+
+        buffered = mgr.get_stream_outputs("inv1")
+        assert len(buffered) < total_appended
+        dropped = mgr.get_dropped_counts("inv1")
+        assert dropped["stream_outputs"] == total_appended - len(buffered)
+
+    def test_get_dropped_counts_empty_when_nothing_dropped(self):
+        mgr = OtelWorkflowSpanManager()
+        state = OtelSpanState(span=_MockSpan(), context_token=_MockToken(), invoke_id="inv1")
+        mgr.push("inv1", state)
+        mgr.append_stream_output("inv1", {"chunk": "a"})
+        assert mgr.get_dropped_counts("inv1") == {}

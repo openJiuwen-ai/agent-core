@@ -98,6 +98,7 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_STATUS,
     OJ_STREAM_INPUTS,
     OJ_STREAM_OUTPUTS,
+    OJ_STREAM_TRUNCATED,
     OJ_TRACE_ID,
     OJ_WORKFLOW_COMPONENT_ID,
     OJ_WORKFLOW_COMPONENT_NAME,
@@ -114,9 +115,12 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_WORKFLOW_VERSION,
 )
 from openjiuwen.extensions.tracer_otel.span_manager import (
+    _KIND_STREAM_INPUTS,
+    _KIND_STREAM_OUTPUTS,
     OtelAgentSpanManager,
     OtelSpanState,
     OtelWorkflowSpanManager,
+    bounded_append,
 )
 
 
@@ -1252,15 +1256,27 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
 
         on_invoke_data = self._span_manager.get_on_invoke_data(invoke_id)
         if on_invoke_data:
-            state.span.set_attribute(OJ_WORKFLOW_INVOKE_DATA, _serialize(on_invoke_data))
+            state.span.set_attribute(
+                OJ_WORKFLOW_INVOKE_DATA, redact(_serialize(on_invoke_data), self._config)
+            )
 
         stream_inputs = self._span_manager.get_stream_inputs(invoke_id)
         if stream_inputs:
-            state.span.set_attribute(OJ_STREAM_INPUTS, _serialize(stream_inputs))
+            state.span.set_attribute(
+                OJ_STREAM_INPUTS, redact(_serialize(stream_inputs), self._config)
+            )
 
         stream_outputs = self._span_manager.get_stream_outputs(invoke_id)
         if stream_outputs:
-            state.span.set_attribute(OJ_STREAM_OUTPUTS, _serialize(stream_outputs))
+            state.span.set_attribute(
+                OJ_STREAM_OUTPUTS, redact(_serialize(stream_outputs), self._config)
+            )
+
+        # Surface any frames dropped by the bounded-buffer policy so callers can
+        # distinguish a complete diagnostic buffer from a truncated one.
+        dropped = self._span_manager.get_dropped_counts(invoke_id)
+        if dropped:
+            state.span.set_attribute(OJ_STREAM_TRUNCATED, _serialize(dropped))
 
     def _refresh_inputs_attribute(self, invoke_id: str) -> None:
         """Re-serialize OJ_WORKFLOW_INPUTS after transform callbacks mutated inputs.
@@ -1324,6 +1340,8 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                     "begin_time": datetime.now(tz=_CACHED_TZLOCAL).replace(tzinfo=None),
                     "stream_inputs": [],
                     "stream_outputs": [],
+                    "stream_byte_counts": {_KIND_STREAM_INPUTS: 0, _KIND_STREAM_OUTPUTS: 0},
+                    "stream_dropped": {_KIND_STREAM_INPUTS: 0, _KIND_STREAM_OUTPUTS: 0},
                 }
                 return
             self._create_workflow_span(
@@ -1514,6 +1532,11 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             self._span_manager.append_stream_input(invoke_id, chunk)
         for chunk in deferred["stream_outputs"]:
             self._span_manager.append_stream_output(invoke_id, chunk)
+        # Merge any frames dropped by the bounded deferred-window policy so the
+        # final OJ_STREAM_TRUNCATED reflects both collection paths.
+        dropped = deferred.get("stream_dropped")
+        if dropped:
+            self._span_manager.merge_dropped_counts(invoke_id, dropped)
 
     async def on_call_done(self, invoke_id: str, outputs: Any = None, **kwargs):
         try:
@@ -1614,7 +1637,13 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 else:
                     deferred = self._deferred_end_starts.get(invoke_id)
                     if deferred is not None:
-                        deferred["stream_inputs"].append(chunk)
+                        bounded_append(
+                            deferred["stream_inputs"],
+                            _KIND_STREAM_INPUTS,
+                            chunk,
+                            deferred["stream_byte_counts"],
+                            deferred["stream_dropped"],
+                        )
         except Exception as exc:
             session_logger.warning("otel workflow handler: on_pre_stream failed: %s", exc)
 
@@ -1749,7 +1778,13 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 # span materializes at the finalize marker.
                 deferred = self._deferred_end_starts.get(invoke_id)
                 if deferred is not None and isinstance(chunk, dict):
-                    deferred["stream_outputs"].append(chunk)
+                    bounded_append(
+                        deferred["stream_outputs"],
+                        _KIND_STREAM_OUTPUTS,
+                        chunk,
+                        deferred["stream_byte_counts"],
+                        deferred["stream_dropped"],
+                    )
                 return
             if not state.recorded:
                 return

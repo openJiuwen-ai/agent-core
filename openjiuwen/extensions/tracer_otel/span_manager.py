@@ -10,6 +10,7 @@ sequentially within the same async context in a single session/Tracer.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -20,6 +21,44 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_TOOL_NAME,
     OJ_TRACE_ID,
 )
+
+# Incremental-buffer bounds (issue #2320). Capped at the collection stage so a
+# long stream never grows an unbounded per-frame list before serialization.
+# Thresholds are deliberate defaults; kept hardcoded rather than exposed as
+# OtelTracerConfig fields until real capacity requirements are measured.
+_MAX_STREAM_FRAMES = 100
+_MAX_STREAM_CHUNK_BYTES = 2048
+_MAX_STREAM_BUFFER_BYTES = 65536
+
+# Incremental-buffer kind keys (used by _byte_counts / _dropped accounting).
+_KIND_ON_INVOKE_DATA = "on_invoke_data"
+_KIND_STREAM_INPUTS = "stream_inputs"
+_KIND_STREAM_OUTPUTS = "stream_outputs"
+
+
+def bounded_append(buf: list, kind: str, chunk: dict, byte_counts: dict, dropped: dict) -> None:
+    """Bounded append for an incremental buffer.
+
+    Shared by ``OtelWorkflowSpanManager`` and the deferred end-node window so
+    both collection paths enforce the same frame / single-chunk / total-byte
+    caps. On overflow the frame is dropped and counted, never truncated in
+    place.
+    """
+    if len(buf) >= _MAX_STREAM_FRAMES:
+        dropped[kind] = dropped.get(kind, 0) + 1
+        return
+    try:
+        chunk_bytes = len(json.dumps(chunk, default=str, ensure_ascii=False))
+    except (TypeError, ValueError):
+        chunk_bytes = len(str(chunk))
+    if chunk_bytes > _MAX_STREAM_CHUNK_BYTES:
+        dropped[kind] = dropped.get(kind, 0) + 1
+        return
+    if byte_counts[kind] + chunk_bytes > _MAX_STREAM_BUFFER_BYTES:
+        dropped[kind] = dropped.get(kind, 0) + 1
+        return
+    buf.append(chunk)
+    byte_counts[kind] += chunk_bytes
 
 
 @dataclass
@@ -115,17 +154,32 @@ class OtelWorkflowSpanManager:
         self._on_invoke_data: dict[str, list[dict]] = {}
         self._stream_inputs: dict[str, list] = {}
         self._stream_outputs: dict[str, list] = {}
+        # Bounded-buffer accounting (issue #2320): invoke_id → kind → value
+        self._byte_counts: dict[str, dict[str, int]] = {}
+        self._dropped: dict[str, dict[str, int]] = {}
 
     def push(self, invoke_id: str, state: OtelSpanState) -> None:
         self._spans[invoke_id] = state
         self._on_invoke_data[invoke_id] = []
         self._stream_inputs[invoke_id] = []
         self._stream_outputs[invoke_id] = []
+        self._byte_counts[invoke_id] = {
+            _KIND_ON_INVOKE_DATA: 0,
+            _KIND_STREAM_INPUTS: 0,
+            _KIND_STREAM_OUTPUTS: 0,
+        }
+        self._dropped[invoke_id] = {
+            _KIND_ON_INVOKE_DATA: 0,
+            _KIND_STREAM_INPUTS: 0,
+            _KIND_STREAM_OUTPUTS: 0,
+        }
 
     def pop(self, invoke_id: str) -> OtelSpanState | None:
         self._on_invoke_data.pop(invoke_id, None)
         self._stream_inputs.pop(invoke_id, None)
         self._stream_outputs.pop(invoke_id, None)
+        self._byte_counts.pop(invoke_id, None)
+        self._dropped.pop(invoke_id, None)
         return self._spans.pop(invoke_id, None)
 
     def get(self, invoke_id: str) -> OtelSpanState | None:
@@ -133,13 +187,36 @@ class OtelWorkflowSpanManager:
 
     # --- Incremental data buffers ---
 
+    def _try_append(self, invoke_id: str, kind: str, buf: list, chunk: dict) -> None:
+        """Bounded append for incremental buffers (delegates to shared helper)."""
+        counts = self._byte_counts.get(invoke_id)
+        if counts is None:
+            return
+        bounded_append(buf, kind, chunk, counts, self._dropped[invoke_id])
+
+    def merge_dropped_counts(self, invoke_id: str, dropped: dict) -> None:
+        """Merge deferred-window dropped counts into this span's dropped counts."""
+        target = self._dropped.get(invoke_id)
+        if target is None:
+            return
+        for kind, count in dropped.items():
+            if count:
+                target[kind] = target.get(kind, 0) + count
+
+    def get_dropped_counts(self, invoke_id: str) -> dict[str, int]:
+        """Per-kind dropped-frame counts, or an empty dict when none were dropped."""
+        dropped = self._dropped.get(invoke_id)
+        if not dropped:
+            return {}
+        return {kind: count for kind, count in dropped.items() if count > 0}
+
     def append_on_invoke_data(self, invoke_id: str, data: dict) -> None:
         state = self._spans.get(invoke_id)
         if state is None or not state.recorded:
             return
         buf = self._on_invoke_data.get(invoke_id)
         if buf is not None:
-            buf.append(data)
+            self._try_append(invoke_id, _KIND_ON_INVOKE_DATA, buf, data)
 
     def get_on_invoke_data(self, invoke_id: str) -> list[dict]:
         return self._on_invoke_data.get(invoke_id, [])
@@ -150,7 +227,7 @@ class OtelWorkflowSpanManager:
             return
         buf = self._stream_inputs.get(invoke_id)
         if buf is not None:
-            buf.append(chunk)
+            self._try_append(invoke_id, _KIND_STREAM_INPUTS, buf, chunk)
 
     def get_stream_inputs(self, invoke_id: str) -> list:
         return self._stream_inputs.get(invoke_id, [])
@@ -161,7 +238,7 @@ class OtelWorkflowSpanManager:
             return
         buf = self._stream_outputs.get(invoke_id)
         if buf is not None:
-            buf.append(chunk)
+            self._try_append(invoke_id, _KIND_STREAM_OUTPUTS, buf, chunk)
 
     def get_stream_outputs(self, invoke_id: str) -> list:
         return self._stream_outputs.get(invoke_id, [])
