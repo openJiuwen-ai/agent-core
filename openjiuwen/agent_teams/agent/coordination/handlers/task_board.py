@@ -114,34 +114,22 @@ class TaskBoardHandler(BaseCoordinationHandler):
     _ANNOUNCE_ENTERED_ASSIGNMENTS: ClassVar[bool] = True
 
     def _is_announceable(self, task: TeamTaskBase | None, member_name: str) -> bool:
-        """Whether a self-addressed TASK_CLAIMED still needs announcing.
+        """Whether a self-addressed TASK_CLAIMED is announced to this member.
 
-        ``pending`` and own ``in_progress`` assignments are announced (the
-        ``assign()`` CAS and a state-keeping ``reassign()`` publish TASK_CLAIMED
-        after the task has already entered its working state). A dispatch
-        mode whose scheduler delivers entered work through its own handoff
-        turns ``_ANNOUNCE_ENTERED_ASSIGNMENTS`` off. Everything else —
-        blocked, terminal, or no longer owned by this member — stays silent:
-        the board wakes the member once the task unblocks.
-
-        ``planning`` stays silent as before this widening. That gap is
-        pre-existing and untouched here: a plan-gate assignee needs a
-        ``submit_plan``-shaped notice, no existing wording fits, so waking it
-        is left to the stale sweep instead of shipping a wrong instruction.
+        ``pending`` is announced for the task's current assignee; own
+        ``in_progress`` is announced while ``_ANNOUNCE_ENTERED_ASSIGNMENTS``
+        is on. Any other status, and a row owned by another member, is not.
         """
         if task is None:
             return False
         if task.status == TaskStatus.PENDING.value:
-            # A notice that lost a race against a later handoff must not wake
-            # the previous owner: only the task's current assignee is
-            # addressed, and an unassigned row keeps the legacy announcement.
+            # Only the current assignee is addressed; a row without one keeps
+            # the previous behaviour.
             return not task.assignee or task.assignee == member_name
         if task.status != TaskStatus.IN_PROGRESS.value:
             return False
         if not self._ANNOUNCE_ENTERED_ASSIGNMENTS:
             return False
-        # A notice that lost a race against a later reassignment must not
-        # wake the old owner — its TASK_REVOKED steers it off instead.
         return task.assignee == member_name
 
     def _assignment_notice_body(self, task: TeamTaskBase) -> str:
@@ -187,9 +175,8 @@ class TaskBoardHandler(BaseCoordinationHandler):
         only once the task is workable (``pending``); a task that already
         entered its working state (``in_progress`` — from ``assign()`` or a
         ``reassign()`` that kept it running) is announced with the
-        owner-nudge template instead, which carries no claim instruction
-        (claiming an owned task is a no-op and is rejected outright for a
-        PLAN_MODE member). Blocked assignments are left to the board, which
+        owner-nudge template instead, which carries no claim instruction.
+        Blocked assignments are left to the board, which
         wakes the member when it unblocks. A human_agent
         avatar sees the HITT-specific ``hitt.task_assigned_to_self_human``
         prompt, which frames the event as a notification for the
@@ -268,11 +255,7 @@ class TaskBoardHandler(BaseCoordinationHandler):
             payload.task_id,
             is_self_human,
         )
-        # The owner nudge only tells a member to keep pushing work it already
-        # holds, so it is appended rather than steered: steering would
-        # interrupt the very round doing that work (same discipline as
-        # ``StaleTaskHandler``). A pending notice is the start of the work and
-        # keeps steering so a running member pivots to it.
+        # Entered (owner nudge) assignments are appended, pending ones steer.
         entered = task is not None and task.status == TaskStatus.IN_PROGRESS.value
         await self._round.deliver_input(content, use_steer=not entered)
         if task is not None and (is_self_human or task.status == TaskStatus.PENDING.value):

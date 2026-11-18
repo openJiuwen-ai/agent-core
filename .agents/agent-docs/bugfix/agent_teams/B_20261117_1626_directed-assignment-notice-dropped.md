@@ -44,7 +44,7 @@ autonomous（自主）团队里，leader 用 `update_task(assignee=...)` 把任�
 - `pending` 通知只投给任务**当前** `assignee`：`assign()` 先写 assignee 再发事件，事件若输给一次更晚的交接，旧 owner 不能再被唤醒（无 assignee 的行保持原行为）。
 - 运行态 owner-nudge 以 `use_steer=False` 追加投递（与 `StaleTaskHandler` 自催同纪律）：要唤醒的是“已经在干这件活”的人，steer 会打断它正在跑的 round；`pending` 仍是 steer（那是工作的开始）。
 - 不新增任何提示词/i18n 文案：运行态复用既有模板，避免为一次缺陷修复引入产品文案变更。
-- `planning`（PLAN_MODE 入口态）保持静默属**本次之前就存在**的缺口：唤醒它需要一条面向 `submit_plan` 的文案，复用 claim 句式会给出无法执行的指令，故不在本 PR 内夹带，另行跟进。
+- `planning`（PLAN_MODE 入口态）不在本次放宽范围内，仍不投递。
 
 ## 验证
 

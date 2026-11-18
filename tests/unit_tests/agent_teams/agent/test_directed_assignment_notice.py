@@ -12,12 +12,8 @@ assignment: the member was never woken and the team round never finished.
 
 An ``in_progress`` notice renders the owner nudge (``stale_claim_self``) — it
 names the task and points at ``view_task`` instead of telling an owner to
-``claim`` work it already holds (claiming is a no-op for a build-mode member
-and is rejected outright for a plan-mode one). The plan gate (``planning``)
-stays silent exactly as before this widening: waking a plan-mode assignee
-needs a ``submit_plan``-shaped notice, and reusing a claim-style wording there
-would be unexecutable, so that pre-existing gap is tracked separately instead
-of shipping a wrong instruction.
+``claim`` work it already holds. The plan gate (``planning``) is not announced
+by this handler.
 
 Scheduled dispatch is deliberately excluded from the widening: the
 scheduler's handoff already mails the owner of an entered task its start
@@ -281,12 +277,7 @@ async def test_pending_notice_for_task_no_longer_owned_is_not_announced(db, bus)
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_plan_gate_assignment_is_not_announced(db, bus):
-    """A plan-gate assignment stays silent exactly as before the fix.
-
-    Waking a plan-mode assignee needs a ``submit_plan``-shaped notice; no
-    existing wording fits (claim_task rejects plan-mode members), so this
-    pre-existing gap is left to the stale sweep and tracked separately.
-    """
+    """A plan-gate assignment is not announced by this handler."""
     leader_infra = _infra(db, bus, LEADER)
     assert (
         await leader_infra.task_manager.add_graph(
