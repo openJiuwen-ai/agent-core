@@ -3,22 +3,19 @@
 
 """Directed assignment notices in autonomous dispatch (issues #6719 / #6720).
 
-``TeamTaskManager.assign`` moves a task into its entry state (``in_progress``,
-or ``planning`` for a PLAN_MODE assignee) *before* publishing TASK_CLAIMED,
-and ``reassign`` keeps a running task's state — so the assignee's
+``TeamTaskManager.assign`` moves a task into its entry state (``in_progress``)
+*before* publishing TASK_CLAIMED, and ``reassign`` keeps a running task's
+state — so the assignee's
 ``TaskBoardHandler.on_task_claimed`` must deliver the notice for an entered
 task too, not only for ``pending``. A pending-only gate dropped every directed
 assignment: the member was never woken and the team round never finished.
 
 An ``in_progress`` notice renders the owner nudge (``stale_claim_self``) — it
 names the task and points at ``view_task`` instead of telling an owner to
-``claim`` work it already holds. The plan gate (``planning``) is not announced
-by this handler.
+``claim`` work it already holds.
 
-Scheduled dispatch is deliberately excluded from the widening: the
-scheduler's handoff already mails the owner of an entered task its start
-instruction, so the scheduled handler keeps announcing pending assignments
-only.
+Scheduled dispatch is excluded from the widening: the scheduled handler keeps
+announcing ``pending`` assignments only.
 """
 
 from types import SimpleNamespace
@@ -276,39 +273,6 @@ async def test_pending_notice_for_task_no_longer_owned_is_not_announced(db, bus)
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_plan_gate_assignment_is_not_announced(db, bus):
-    """A plan-gate assignment is not announced by this handler."""
-    leader_infra = _infra(db, bus, LEADER)
-    assert (
-        await leader_infra.task_manager.add_graph(
-            [TaskGraphSpec(title="draft-plan", content="c", task_id="t-plan")]
-        )
-    ).ok
-    # Seed a plan-mode assignee directly: add_graph seeds PENDING, then a
-    # plain assign() would enter planning — but a plan-mode member cannot be
-    # seeded through the public path without one, so flip the row's assignee
-    # and status through the same DAO assign() uses.
-    await db.member.create_member(
-        member_name="planner",
-        team_name=TEAM,
-        display_name="planner",
-        agent_card=AgentCard().model_dump_json(),
-        status="READY",
-        mode=MemberMode.PLAN_MODE.value,
-    )
-    assigned = await leader_infra.task_manager.assign("t-plan", "planner")
-    assert assigned.ok, assigned.reason
-    stored = await leader_infra.task_manager.get("t-plan")
-    assert stored.status == "planning"
-
-    host, handler = _handler(TaskBoardHandler, db, bus, "planner")
-    await handler.on_task_claimed(_claimed_event("t-plan", "planner"))
-
-    assert host.delivered == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.level1
 async def test_blocked_assignment_is_not_announced(db, bus):
     """A blocked assignment stays silent; the board wakes the member on unblock."""
     leader_infra = _infra(db, bus, LEADER)
@@ -379,12 +343,7 @@ async def test_terminal_assignment_is_not_announced(db, bus):
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_scheduled_mode_does_not_announce_an_entered_assignment(db, bus):
-    """Scheduled dispatch keeps the pending-only gate (issues #6719 / #6720).
-
-    The scheduler's handoff already mails the owner of an entered task its
-    start instruction; announcing the transient TASK_CLAIMED next to that
-    mail would double-deliver and burn a second round.
-    """
+    """Scheduled dispatch announces ``pending`` only (issues #6719 / #6720)."""
     leader_infra = _infra(db, bus, LEADER)
     assert (
         await leader_infra.task_manager.add_graph(
