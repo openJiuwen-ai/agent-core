@@ -1,7 +1,7 @@
 ---
 title: 故障修复 B索引
-author: alan_cheng
-author_email: chengshuo5@huawei.com
+author: zhanglongmin
+author_email: zhanglongmin@huawei.com
 generated: true
 ---
 
@@ -16,17 +16,19 @@ generated: true
 | 模块 |
 |---|
 | [agent_teams](#module-1) |
-| [core/context_engine](#module-2) |
-| [core/controller](#module-3) |
-| [core/foundation/llm](#module-4) |
-| [core/runner/drunner/dmessage_queue](#module-5) |
-| [core/session](#module-6) |
-| [extensions/a2a](#module-7) |
-| [harness](#module-8) |
-| [harness/subagents](#module-9) |
-| [harness/tools/browser_move/decision](#module-10) |
-| [harness/tools/subagent](#module-11) |
-| [symphony/shared/fingerprint](#module-12) |
+| [agent_teams/workflow](#module-2) |
+| [core/context_engine](#module-3) |
+| [core/controller](#module-4) |
+| [core/foundation/llm](#module-5) |
+| [core/runner/drunner/dmessage_queue](#module-6) |
+| [core/session](#module-7) |
+| [extensions/a2a](#module-8) |
+| [extensions/observability](#module-9) |
+| [harness](#module-10) |
+| [harness/subagents](#module-11) |
+| [harness/tools/browser_move/decision](#module-12) |
+| [harness/tools/subagent](#module-13) |
+| [symphony/shared/fingerprint](#module-14) |
 
 <a id="module-1"></a>
 
@@ -52,8 +54,17 @@ generated: true
 | [B_20261105_0911_swarmflow-thirdparty-trajectory](agent_teams/B_20261105_0911_swarmflow-thirdparty-trajectory.md) | B | Swarmflow 三方 Agent 轨迹未绑定成员身份 | wangcan103 | openjiuwen/agent_teams | openjiuwen/agent_teams/external/member_runtime.py, openjiuwen/agent_teams/spawn/external_cli_spawn.py, openjiuwen/agent_teams/workflow/backends/team_worker_backend.py, openjiuwen/agent_teams/workflow/backends/avatar_session_backend.py, tests/unit_tests/agent_teams/external/test_member_runtime.py, tests/unit_tests/agent_teams/workflow/test_worker_backend.py, tests/unit_tests/agent_teams/workflow/test_avatar_session_backend.py | 无独立 D：小范围补齐既有 HarnessTrajectoryRecorder 的 Swarmflow 接线，不新增协议或公开 API。 |
 | [B_20261117_1240_swarmflow-fork-round-boundary-attachment](agent_teams/B_20261117_1240_swarmflow-fork-round-boundary-attachment.md) | B | Swarmflow fork 轮数边界被运行时附件消息整体前移一轮 | chenchunzhou | openjiuwen/agent_teams | openjiuwen/agent_teams/workflow/backends/avatar_session_backend.py, tests/unit_tests/agent_teams/workflow/test_avatar_session_backend.py | [SDD-0014](../designs/active/SDD-0014-swarmflow-session-fork/design.md) |
 | [B_20261117_1626_directed-assignment-notice-dropped](agent_teams/B_20261117_1626_directed-assignment-notice-dropped.md) | B | 定向指派/改派的通知被接收端 pending 判据丢弃，新 owner 永不唤醒 | xiajing | openjiuwen/agent_teams | openjiuwen/agent_teams/agent/coordination/handlers/task_board.py, tests/unit_tests/agent_teams/agent/test_directed_assignment_notice.py | 无独立 D：只改消费端投递判据，沿用 S_03 的 TASK_CLAIMED 定向投递契约 |
+| [B_20261118_1142_shared-templates-name-leader-only-tools](agent_teams/B_20261118_1142_shared-templates-name-leader-only-tools.md) | B | 全员共享提示词模板点名 leader 专属工具误导 teammate | zhanglongmin | openjiuwen/agent_teams | openjiuwen/agent_teams/prompts/cn/inbound_tags.md, openjiuwen/agent_teams/prompts/en/inbound_tags.md, openjiuwen/agent_teams/prompts/cn/hitt_teammate_anonymous.md, openjiuwen/agent_teams/prompts/en/hitt_teammate_anonymous.md, openjiuwen/agent_teams/prompts/cn/tool_namespace.md, openjiuwen/agent_teams/prompts/en/tool_namespace.md, tests/unit_tests/agent_teams/prompts/test_shared_template_tool_names.py | 无独立 D：日常文案修复，无独立设计文档；行为依据 F_76（提示词分层与渐进式披露）、F_122（framework 建队的 <team-policy> 投递）与 prompts/AGENTS.md 编辑规则 2。 |
 
 <a id="module-2"></a>
+
+## agent_teams/workflow
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [B_20261102_1120_avatar-child-session-trace-root](agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | openjiuwen/agent_teams/workflow, openjiuwen/extensions/observability | openjiuwen/agent_teams/workflow/backends/avatar_session_backend.py, openjiuwen/extensions/observability/span_context.py, tests/unit_tests/agent_teams/workflow/test_avatar_session_backend.py, tests/unit_tests/extensions/observability/test_span_context.py | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
+
+<a id="module-3"></a>
 
 ## core/context_engine
 
@@ -62,7 +73,7 @@ generated: true
 | [B_20261103_1050_grandocean-review-feedback](core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
 | [B_20261104_2030_cancellation-cause-lifecycle](core_runtime/B_20261104_2030_cancellation-cause-lifecycle.md) | B | 压缩取消一律误报 failed 及标记生命周期残留窗口缺陷 | CharlesWang2030 | openjiuwen/core/context_engine, openjiuwen/harness, openjiuwen/agent_teams | openjiuwen/core/context_engine/context/cancellation.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/context/processor_state_recorder.py, openjiuwen/core/context_engine/context/context_state.py, openjiuwen/core/context_engine/context_engine/__init__.py, openjiuwen/harness/deep_agent.py, openjiuwen/agent_teams/harness/native_harness.py, openjiuwen/agent_teams/runtime/manager.py, openjiuwen/extensions/observability/runtime.py, tests/unit_tests/core/context_engine/test_cancellation_cause.py, tests/unit_tests/core/context_engine/test_context_compression_state_stream.py, tests/unit_tests/harness/test_deep_agent_abort_cancellation_cause.py, tests/unit_tests/agent_teams/runtime/test_manager.py, tests/unit_tests/agent_teams/harness/test_abort.py | 无独立 D：c4e52b7c 引入 cancellation cause 注册表属于常规缺陷修复，未归档独立设计；本次为对该提交检视发现的标记生命周期缺陷的后续修复，沿用注册表现有契约（TTL、非消费式 resolve、前缀继承）。 |
 
-<a id="module-3"></a>
+<a id="module-4"></a>
 
 ## core/controller
 
@@ -70,16 +81,17 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261103_1050_grandocean-review-feedback](core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
 
-<a id="module-4"></a>
+<a id="module-5"></a>
 
 ## core/foundation/llm
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [B_20261110_2112_anthropic-disabled-thinking-fallback](core_runtime/B_20261110_2112_anthropic-disabled-thinking-fallback.md) | B | Anthropic Messages 支持图谱关闭思考失败后的回退 | lin-xiaoyu | openjiuwen/core/foundation/llm | openjiuwen/core/foundation/llm/model_clients/_disabled_thinking.py, openjiuwen/core/foundation/llm/model_clients/anthropic_model_client.py, openjiuwen/core/foundation/llm/model_clients/openai_model_client.py, tests/unit_tests/core/foundation/llm/test_anthropic_model_client.py | 无独立 D：补齐已有请求级关闭思考回退在 Anthropic 非流式调用中的接入。 |
+| [B_20261116_1636_glm53-flash-reasoning-levels](core_runtime/B_20261116_1636_glm53-flash-reasoning-levels.md) | B | GLM-5.3-Flash 推理强度与禁用编码修复 | lizhiyuan | core/foundation/llm | openjiuwen/core/foundation/llm/reasoning_profiles.py, openjiuwen/core/foundation/llm/reasoning.py, tests/unit_tests/core/foundation/llm/test_reasoning_profiles.py, tests/unit_tests/core/foundation/llm/test_reasoning_resolver.py | 无独立 D：用户已确认继续采用端点/模型族静态能力表；本次仅补齐既有 Zhipu 配置的一个模型族，无独立设计。 |
 | [B_20261116_1708_symphony-temperature-fallback](core_runtime/B_20261116_1708_symphony-temperature-fallback.md) | B | Symphony 构图在模型拒绝温度参数后恢复 | lin-xiaoyu | openjiuwen/core/foundation/llm | openjiuwen/core/foundation/llm/request_context.py, openjiuwen/core/foundation/llm/model_clients/anthropic_model_client.py, openjiuwen/core/foundation/llm/model_clients/openai_model_client.py, openjiuwen/core/foundation/llm/model_clients/openai_account_model_client.py, openjiuwen/core/foundation/llm/utils/request_parameter_fallback.py, openjiuwen/core/foundation/llm/utils/responses_transport.py, openjiuwen/core/foundation/llm/utils/responses_utils.py, openjiuwen/symphony/README.md, tests/unit_tests/symphony/test_model_temperature_fallback.py | 无独立 D：按已确认的发布线补丁方案扩展已有请求参数回退。 |
 
-<a id="module-5"></a>
+<a id="module-6"></a>
 
 ## core/runner/drunner/dmessage_queue
 
@@ -87,7 +99,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261103_1050_grandocean-review-feedback](core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
 
-<a id="module-6"></a>
+<a id="module-7"></a>
 
 ## core/session
 
@@ -95,7 +107,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261103_1050_grandocean-review-feedback](core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
 
-<a id="module-7"></a>
+<a id="module-8"></a>
 
 ## extensions/a2a
 
@@ -103,7 +115,15 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261103_1050_grandocean-review-feedback](core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
 
-<a id="module-8"></a>
+<a id="module-9"></a>
+
+## extensions/observability
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [B_20261102_1120_avatar-child-session-trace-root](agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | openjiuwen/agent_teams/workflow, openjiuwen/extensions/observability | openjiuwen/agent_teams/workflow/backends/avatar_session_backend.py, openjiuwen/extensions/observability/span_context.py, tests/unit_tests/agent_teams/workflow/test_avatar_session_backend.py, tests/unit_tests/extensions/observability/test_span_context.py | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
+
+<a id="module-10"></a>
 
 ## harness
 
@@ -112,7 +132,7 @@ generated: true
 | [B_20261104_2030_cancellation-cause-lifecycle](core_runtime/B_20261104_2030_cancellation-cause-lifecycle.md) | B | 压缩取消一律误报 failed 及标记生命周期残留窗口缺陷 | CharlesWang2030 | openjiuwen/core/context_engine, openjiuwen/harness, openjiuwen/agent_teams | openjiuwen/core/context_engine/context/cancellation.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/context/processor_state_recorder.py, openjiuwen/core/context_engine/context/context_state.py, openjiuwen/core/context_engine/context_engine/__init__.py, openjiuwen/harness/deep_agent.py, openjiuwen/agent_teams/harness/native_harness.py, openjiuwen/agent_teams/runtime/manager.py, openjiuwen/extensions/observability/runtime.py, tests/unit_tests/core/context_engine/test_cancellation_cause.py, tests/unit_tests/core/context_engine/test_context_compression_state_stream.py, tests/unit_tests/harness/test_deep_agent_abort_cancellation_cause.py, tests/unit_tests/agent_teams/runtime/test_manager.py, tests/unit_tests/agent_teams/harness/test_abort.py | 无独立 D：c4e52b7c 引入 cancellation cause 注册表属于常规缺陷修复，未归档独立设计；本次为对该提交检视发现的标记生命周期缺陷的后续修复，沿用注册表现有契约（TTL、非消费式 resolve、前缀继承）。 |
 | [B_20261114_1107_interactive-memory-turn](harness/B_20261114_1107_interactive-memory-turn.md) | B | 交互式中断恢复后记忆丢失修复 | robin1217 | openjiuwen/harness | openjiuwen/harness/rails/memory/jiuwen_memory_rail.py, tests/unit_tests/harness/rails/test_jiuwen_memory_rail.py, tests/unit_tests/harness/rails/test_jiuwen_memory_interrupts.py | 无独立 D：本次按对话中确认的 D3 收敛方案修复，未建立独立 D 文档；外部 F08 的 D3 是决策编号，不是设计资产标识。 |
 
-<a id="module-9"></a>
+<a id="module-11"></a>
 
 ## harness/subagents
 
@@ -120,7 +140,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261102_1733_browser-pr-contract-review](harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/test_deep_agent_terminal_stream.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
 
-<a id="module-10"></a>
+<a id="module-12"></a>
 
 ## harness/tools/browser_move/decision
 
@@ -128,7 +148,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261102_1733_browser-pr-contract-review](harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/test_deep_agent_terminal_stream.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
 
-<a id="module-11"></a>
+<a id="module-13"></a>
 
 ## harness/tools/subagent
 
@@ -136,7 +156,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261102_1733_browser-pr-contract-review](harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/test_deep_agent_terminal_stream.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
 
-<a id="module-12"></a>
+<a id="module-14"></a>
 
 ## symphony/shared/fingerprint
 
