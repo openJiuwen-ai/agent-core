@@ -202,7 +202,7 @@ class JiuwenMemoryCodingRail(DeepAgentRail):
             async with self._write_lock:
                 try:
                     await asyncio.wait_for(
-                        self._provider.sync_turn(query, output, **self._identity),
+                        self._sync_turn(query, output, owner.agent),
                         timeout=self.SYNC_TIMEOUT,
                     )
                 except Exception as exc:
@@ -211,6 +211,10 @@ class JiuwenMemoryCodingRail(DeepAgentRail):
         task = asyncio.create_task(sync())
         self._writes.add(task)
         task.add_done_callback(self._writes.discard)
+
+    async def _sync_turn(self, query: str, output: str, agent: Any) -> None:
+        """Scene hook; Coding continues to use the provider's ordinary extraction."""
+        await self._provider.sync_turn(query, output, **self._identity)
 
     async def drain(self) -> None:
         """Wait for writes already submitted by any owner."""

@@ -17,6 +17,8 @@ generated: true
 | [agent_evolving/trajectory](#module-agent_evolving-trajectory) |
 | [agent_evolving/ttse](#module-agent_evolving-ttse) |
 | [agent_teams](#module-agent_teams) |
+| [agent_teams/harness](#module-agent_teams-harness) |
+| [agent_teams/memory](#module-agent_teams-memory) |
 | [core.runner.resources_manager](#module-core-runner-resources_manager) |
 | [core.session.tracer](#module-core-session-tracer) |
 | [core/foundation/llm](#module-core-foundation-llm) |
@@ -209,6 +211,22 @@ generated: true
 | [F_98_native-checkpoint-and-endpoint-recovery](agent_teams/F_98_native-checkpoint-and-endpoint-recovery.md) | F | NativeHarness 冷恢复与原端点重连恢复 | alan_cheng | 待核实 |
 | [F_99_dsh-composition-capabilities](agent_teams/F_99_dsh-composition-capabilities.md) | F | DSH 启动能力适配与 SDK 升级 | alan_cheng | 待核实 |
 
+<a id="module-agent_teams-harness"></a>
+
+## agent_teams/harness
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F-20261118-1150-team-document-memory](F_20261118_1150_team-document-memory.md) | F | Team 接入 Jiuwen 文档记忆 | Wang Tao | 无独立 D：依据 D-20261113-2017-jiuwen-memory-team-upgrade 及已确认的跨仓 Team 方案。 |
+
+<a id="module-agent_teams-memory"></a>
+
+## agent_teams/memory
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F-20261118-1150-team-document-memory](F_20261118_1150_team-document-memory.md) | F | Team 接入 Jiuwen 文档记忆 | Wang Tao | 无独立 D：依据 D-20261113-2017-jiuwen-memory-team-upgrade 及已确认的跨仓 Team 方案。 |
+
 <a id="module-core-runner-resources_manager"></a>
 
 ## core.runner.resources_manager
@@ -333,6 +351,7 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [F-20261107-1700-coding-document-memory](F_20261107_1700_coding-document-memory.md) | F | Coding 文档记忆 Rail | Wang Tao | 无独立 D：依据本会话已确认的跨仓 Coding 文档记忆方案及后续交互轮次复用决定；AutoMemory 保留宿主原有开关。 |
+| [F-20261118-1150-team-document-memory](F_20261118_1150_team-document-memory.md) | F | Team 接入 Jiuwen 文档记忆 | Wang Tao | 无独立 D：依据 D-20261113-2017-jiuwen-memory-team-upgrade 及已确认的跨仓 Team 方案。 |
 
 <a id="module-harness-subagents"></a>
 
