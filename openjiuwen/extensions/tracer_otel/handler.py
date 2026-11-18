@@ -36,7 +36,7 @@ from openjiuwen.core.session.tracer.handler import (
 )
 from openjiuwen.core.session.tracer.span import TraceAgentSpan
 from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
-from openjiuwen.extensions.tracer_otel.redaction import redact
+from openjiuwen.extensions.tracer_otel.redaction import redact, truncate
 from openjiuwen.extensions.tracer_otel.semconv import (
     ERROR_TYPE,
     GEN_AI_AGENT_DESCRIPTION,
@@ -98,6 +98,7 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_STATUS,
     OJ_STREAM_INPUTS,
     OJ_STREAM_OUTPUTS,
+    OJ_STREAM_TRUNCATED,
     OJ_TRACE_ID,
     OJ_WORKFLOW_COMPONENT_ID,
     OJ_WORKFLOW_COMPONENT_NAME,
@@ -1252,15 +1253,27 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
 
         on_invoke_data = self._span_manager.get_on_invoke_data(invoke_id)
         if on_invoke_data:
-            state.span.set_attribute(OJ_WORKFLOW_INVOKE_DATA, _serialize(on_invoke_data))
+            state.span.set_attribute(
+                OJ_WORKFLOW_INVOKE_DATA, truncate(_serialize(on_invoke_data), self._config.max_attr_length)
+            )
 
         stream_inputs = self._span_manager.get_stream_inputs(invoke_id)
         if stream_inputs:
-            state.span.set_attribute(OJ_STREAM_INPUTS, _serialize(stream_inputs))
+            state.span.set_attribute(
+                OJ_STREAM_INPUTS, truncate(_serialize(stream_inputs), self._config.max_attr_length)
+            )
 
         stream_outputs = self._span_manager.get_stream_outputs(invoke_id)
         if stream_outputs:
-            state.span.set_attribute(OJ_STREAM_OUTPUTS, _serialize(stream_outputs))
+            state.span.set_attribute(
+                OJ_STREAM_OUTPUTS, truncate(_serialize(stream_outputs), self._config.max_attr_length)
+            )
+
+        # Surface any frames dropped by the bounded-buffer policy so callers can
+        # distinguish a complete diagnostic buffer from a truncated one.
+        dropped = self._span_manager.get_dropped_counts(invoke_id)
+        if dropped:
+            state.span.set_attribute(OJ_STREAM_TRUNCATED, _serialize(dropped))
 
     def _refresh_inputs_attribute(self, invoke_id: str) -> None:
         """Re-serialize OJ_WORKFLOW_INPUTS after transform callbacks mutated inputs.

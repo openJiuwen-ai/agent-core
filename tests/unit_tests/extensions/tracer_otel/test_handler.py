@@ -84,6 +84,7 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_STATUS,
     OJ_STREAM_INPUTS,
     OJ_STREAM_OUTPUTS,
+    OJ_STREAM_TRUNCATED,
     OJ_TRACE_ID,
     OJ_WORKFLOW_COMPONENT_ID,
     OJ_WORKFLOW_COMPONENT_NAME,
@@ -1275,6 +1276,49 @@ class TestOtelWorkflowHandler:
         assert len(finished) == 1
         assert OJ_STREAM_INPUTS in finished[0].attributes
         assert OJ_STREAM_OUTPUTS in finished[0].attributes
+
+    async def test_workflow_stream_buffers_flushed_with_length_cap(self):
+        """Serialized stream attributes are capped by max_attr_length (issue #2320)."""
+        config = OtelTracerConfig(redaction_enabled=False, max_attr_length=32)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="comp1",
+            metadata={"component_id": "comp1", "component_type": "LLM", "workflow_id": "wf1"},
+            parent_node_id="",
+        )
+        for i in range(5):
+            await handler.on_post_stream(invoke_id="comp1", chunk={"text": "word" + str(i)})
+        await handler.on_call_done(invoke_id="comp1")
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert OJ_STREAM_OUTPUTS in s.attributes
+        assert len(s.attributes[OJ_STREAM_OUTPUTS]) == config.max_attr_length + len("...<truncated>")
+        # Only 5 small frames — none dropped, so no truncation marker.
+        assert OJ_STREAM_TRUNCATED not in s.attributes
+
+    async def test_workflow_stream_buffer_drop_marker(self):
+        """Frames dropped by the bounded buffer are reported via OJ_STREAM_TRUNCATED."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="comp1",
+            metadata={"component_id": "comp1", "component_type": "LLM", "workflow_id": "wf1"},
+            parent_node_id="",
+        )
+        for i in range(105):
+            await handler.on_post_stream(invoke_id="comp1", chunk={"text": "chunk-" + str(i)})
+        await handler.on_call_done(invoke_id="comp1")
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert OJ_STREAM_TRUNCATED in s.attributes
+        dropped = json.loads(s.attributes[OJ_STREAM_TRUNCATED])
+        assert dropped == {"stream_outputs": 5}
 
     async def test_exception_safety(self):
         """Handler exceptions do not propagate to business flow."""
