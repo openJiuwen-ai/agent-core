@@ -230,6 +230,33 @@ def _is_dead_model_response(ai_message: Any) -> bool:
     )
 
 
+def _is_truncated_model_response(ai_message: Any) -> bool:
+    """检测"截断"假成功：finish_reason 缺失且 usage_metadata 缺失。
+
+    SSE 中途断开（无 DONE、无错误帧、无 finish_reason）时，流在传输层
+    "干净 EOF"，聚合把它当正常结束——部分内容被静默当完整终答（team 模式
+    零重试零错误零终止，member 连 retry/error 帧都全零）。
+
+    判据刻意取「finish_reason 缺失 AND usage_metadata 缺失」的交集：
+    - 合法收尾主流 provider 恒带 finish_reason（stop/tool_calls/length），
+      缺失=流没有走到收尾帧；
+    - 不上报 finish_reason 的 provider 用量兜底——只要带了用量就放过
+      （与 _is_dead_model_response 的「宁漏不误」同款保守）；
+    - finish_reason 与用量都不上报的 provider 无法区分截断与正常——
+      判为截断（宁可误报判死，不漏半截当真：静默错答比响亮失败危险）。
+      代价：此类 provider 的每次正常应答都会判死终态，接入前提是该
+      provider 至少上报 finish_reason 或用量之一（或开
+      tolerate_missing_stream_terminal 逃生阀）。
+
+    命中后由 ``_raise_truncated_model_response`` 判死（181006）——刻意
+    不进重试链：断流=模型服务异常，重发只会把完整答案拼在已下发的半截之后。
+    """
+    finish_reason = getattr(ai_message, "finish_reason", None)
+    if finish_reason not in (None, "", "null"):
+        return False
+    return getattr(ai_message, "usage_metadata", None) is None
+
+
 def _raise_dead_model_response(path: str, reason: str) -> None:
     """把死响应当模型调用失败抛出。
 
@@ -245,6 +272,25 @@ def _raise_dead_model_response(path: str, reason: str) -> None:
     raise build_error(
         StatusCode.MODEL_CALL_FAILED,
         error_msg=f"async {path} error: empty model response ({reason})",
+    )
+
+
+def _raise_truncated_model_response(reason: str) -> None:
+    """把流式截断判死抛出——不进重试链，直接穿透为轮次失败。
+
+    断流=模型服务异常，重试重发没意义：此刻半截增量已逐 chunk 下发，
+    重发只会把完整答案拼在半截之后（半截+完整重复）。专用错误码
+    181006（非 181001）：LLMRetryRail 对该码显式放行不重试，团队侧
+    StreamController 外层重驱只认 181001 同样不碰——穿透为轮次
+    task_failed → chat.error 终态，用户看到半截+错误提示。
+    """
+    from openjiuwen.core.common.exception.codes import StatusCode
+    from openjiuwen.core.common.exception.errors import build_error
+
+    logger.warning(f"[LLM] truncated model response: {reason}")
+    raise build_error(
+        StatusCode.MODEL_STREAM_TRUNCATED,
+        error_msg=reason,
     )
 
 
@@ -270,6 +316,15 @@ class ReActAgentConfig(BaseModel):
     )
 
     max_iterations: int = Field(default=5, description="Maximum iterations")
+
+    tolerate_missing_stream_terminal: bool = Field(
+        default=False,
+        description="Tolerate providers that report neither finish_reason nor "
+                    "usage on streams: truncation is indistinguishable from a "
+                    "legit ending there, so when True the truncation check only "
+                    "warns and accepts instead of failing the call. Default "
+                    "False keeps fail-loud retry semantics.",
+    )
 
     llm_return_token_ids: bool = Field(
         default=False,
@@ -1223,6 +1278,24 @@ class ReActAgent(BaseAgent):
             _raise_dead_model_response(
                 "stream", "no content/tool_calls/reasoning, zero token usage"
             )
+        if _is_truncated_model_response(ai_message):
+            if self._config.tolerate_missing_stream_terminal:
+                # 双缺 provider 逃生阀：finish_reason 与 usage 均不上报时截断与
+                # 正常收尾不可区分，判死=该 provider 每次调用都失败（可用性回归）。
+                # 按配置仅告警接受——代价=半截答案被当终答。
+                logger.warning(
+                    "[LLM] stream ended without finish_reason/usage; "
+                    "accepted per tolerate_missing_stream_terminal"
+                )
+            else:
+                # 此刻半截增量已逐 chunk 下发，重试重发只会把完整答案拼在
+                # 半截之后——拍板：判死但完全不重试（181006，rail 放行、
+                # 团队外驱只认 181001），穿透为轮次失败 chat.error 终态。
+                # 与 :1218 溢出路径「零 chunk 才重试」的不变量一致：
+                # 有增量的失败一律不重试。
+                _raise_truncated_model_response(
+                    "stream ended without finish_reason (truncated mid-stream)"
+                )
         ctx.inputs.response = ai_message
         if ai_message.usage_metadata:
 

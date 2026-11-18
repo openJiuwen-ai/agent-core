@@ -60,7 +60,7 @@ ChunkObserver = Callable[[OutputSchema], Awaitable[None]]
 # swallows the failed round's remaining chunks, and re-drives the round with a
 # retry query. Exhausted / non-retryable failures are forwarded so the consumer
 # sees the error (the supervisor model removed the old raise-based exhaustion).
-_MAX_RETRY_ATTEMPTS = 10
+_MAX_RETRY_ATTEMPTS = 2
 _RETRYABLE_ERROR_CODES = {181001}
 _RETRY_QUERY = "刚才有异常状况，继续执行"
 _TASK_FAILED_PAYLOAD_TYPE = "task_failed"
