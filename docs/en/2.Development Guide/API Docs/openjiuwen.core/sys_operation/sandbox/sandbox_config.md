@@ -64,7 +64,7 @@ Pre-deploy Launcher configuration for connecting to existing sandbox services.
 * **on_stop**(Literal["delete", "pause", "keep"], optional): Sandbox stop behavior strategy. Default: `"delete"`.
 * **idle_ttl_seconds**(int, optional): Idle timeout in seconds. Default: `None`.
 
-For ADX Ingress, set `SandboxGatewayConfig.auth_headers` with an `Authorization: Bearer …` header. In `extra_params`, use `runtime` (for example `"runsc"`) with `image` or a registered `rootfs_template`. Native `mounts` and `network` accept the ADX create request format. File transfers and byte streams use the native ADX binary routes. Single-file transfer does not copy source permissions, and `file.write` rejects append and atomic write conditions.
+For ADX Ingress, set `SandboxGatewayConfig.auth_headers` with an `Authorization: Bearer …` header. In `extra_params`, use `runtime` (for example `"runsc"`) with `image` or a registered `rootfs_template`. Native `mounts` and `network` accept the ADX create request format. File transfers and byte streams use the native ADX binary routes. Single-file transfer does not copy source permissions. The provider sends `append=true` on `file.write` to append. Atomic write conditions are unsupported.
 
 ## class SandboxGatewayConfig
 
