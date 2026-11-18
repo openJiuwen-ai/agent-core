@@ -367,10 +367,10 @@ async def test_handle_retry_swallows_and_redrives_retryable_failure() -> None:
     assert isinstance(retry_chunk, TeamOutputSchema)
     assert retry_chunk.type == "llm_output"
     assert retry_chunk.payload == {
-        "content": "\n\n[Retry 1/10] [181001] transient blip\n\n",
+        "content": "\n\n[Retry 1/2] [181001] transient blip\n\n",
         "retrying": True,
         "attempt": 1,
-        "max_attempts": 10,
+        "max_attempts": 2,
         "error_code": 181001,
     }
     assert observed == [retry_chunk]

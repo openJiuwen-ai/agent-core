@@ -818,6 +818,8 @@ class StatusCode(Enum):
     MODEL_CONFIG_ERROR = (181003, "model config error, reason: {error_msg}")
     MODEL_INVOKE_PARAM_ERROR = (181004, "model invoke parameter error, reason: {error_msg}")
     MODEL_CLIENT_CONFIG_INVALID = (181005, "model client_config is invalid, reason: {error_msg}")
+    # 流式中途截断（无 finish_reason/无用量干净 EOF）判死专用码
+    MODEL_STREAM_TRUNCATED = (181006, "model stream truncated, reason: {error_msg}")
 
     # 2. Foundation - Tool Definition and Execution 182000 - 182999
     # 0. basic tool
