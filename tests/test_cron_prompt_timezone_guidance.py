@@ -68,6 +68,22 @@ class CronPromptTimezoneGuidanceTests(unittest.TestCase):
         cn_field = FIELD_DESCRIPTIONS["cron_expr"]["cn"]
         self.assertIn("避开 00/15/30/45", cn_field)
 
+    def test_cron_tool_description_creates_without_asking_when_time_unspecified(self):
+        """Unspecified time: create in the same turn, never ask first;
+        when the user later replies with a preferred time, update the job."""
+        cn = DESCRIPTION["cn"]
+        en = DESCRIPTION["en"]
+
+        self.assertIn("不要追问", cn)
+        self.assertIn("当轮直接创建，不要等用户确认后再创建", cn)
+        self.assertIn("【cron 步长限制】等要求先确认的情形除外", cn)
+        self.assertIn("创建后在回复中告知所选时间", cn)
+        self.assertIn("用 action=update 改成用户的时间", cn)
+        self.assertIn("do NOT ask which time", en)
+        self.assertIn("create it in the same turn", en)
+        self.assertIn("unless [Cron step limits] requires confirmation", en)
+        self.assertIn("change it via action=update", en)
+
     def test_cron_tool_description_workbuddy_patterns(self):
         """Decision defaults and content guardrails borrowed from WorkBuddy."""
         cn = DESCRIPTION["cn"]
