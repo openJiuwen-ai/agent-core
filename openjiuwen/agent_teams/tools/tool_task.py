@@ -1390,7 +1390,7 @@ class ViewTaskToolV2(TeamTool):
         t: Translator,
         *,
         desc_key: str = "view_task",
-        language: str = "cn",
+        language: str | None = None,
     ):
         super().__init__(
             ToolCard(
@@ -1400,7 +1400,10 @@ class ViewTaskToolV2(TeamTool):
             )
         )
         self.task_manager = task_manager
-        self._language = language if language in ("cn", "en") else "cn"
+        # ``None`` and any code other than ``cn`` / ``en`` follow the process-global
+        # language. Callers that know the team language pass it explicitly so an
+        # English team does not render Chinese relative times.
+        self._language = language if language in ("cn", "en") else None
         self.card.input_params = {
             "type": "object",
             "properties": {
