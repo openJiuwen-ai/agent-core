@@ -1175,6 +1175,9 @@ class AnthropicModelClient(BaseModelClient):
             # retains thinking signatures so the next agent iteration can replay
             # the assistant turn exactly as Anthropic returned it.
             tool_use_acc: dict[int, dict] = {}
+            # Served model seen on message_start; message_delta's usage does
+            # not carry the model field, so the aggregate keeps this value.
+            served_model_acc: list[str] = []
             last_usage: Optional[UsageMetadata] = None
             final_stop_reason: Optional[str] = None
             accumulated_for_parser = ""
@@ -1188,7 +1191,7 @@ class AnthropicModelClient(BaseModelClient):
                     retry_count=self._sdk_retry_count(getattr(response_stream, "response", None)),
                 )
                 async for event in response_stream:
-                    chunk = self._event_to_chunk(event, tool_use_acc)
+                    chunk = self._event_to_chunk(event, tool_use_acc, served_model_acc)
                     if chunk is None:
                         continue
                     if chunk.usage_metadata is not None:
@@ -1430,6 +1433,7 @@ class AnthropicModelClient(BaseModelClient):
             self,
             event: Any,
             tool_use_acc: dict[int, dict],
+            served_model_acc: list[str] | None = None,
     ) -> Optional[AssistantMessageChunk]:
         """Map an Anthropic SSE event to ``AssistantMessageChunk``.
 
@@ -1443,9 +1447,10 @@ class AnthropicModelClient(BaseModelClient):
         if etype == "message_start":
             msg = getattr(event, "message", None)
             usage = getattr(msg, "usage", None) if msg is not None else None
-            usage_metadata = self._usage_from_anthropic(
-                usage, self._served_model_name(msg)
-            )
+            served_model = self._served_model_name(msg)
+            if served_model and served_model_acc is not None:
+                served_model_acc.append(served_model)
+            usage_metadata = self._usage_from_anthropic(usage, served_model)
             return AssistantMessageChunk(
                 content="",
                 reasoning_content=None,
@@ -1591,7 +1596,15 @@ class AnthropicModelClient(BaseModelClient):
                 finish_reason = "stop"
             elif stop_reason:
                 finish_reason = stop_reason
-            usage_metadata = self._usage_from_anthropic(usage) if usage is not None else None
+            # message_delta's usage block does not carry the model field;
+            # reuse the served model captured on message_start so the
+            # aggregate keeps the response-reported name.
+            served_model = served_model_acc[0] if served_model_acc else ""
+            usage_metadata = (
+                self._usage_from_anthropic(usage, served_model)
+                if usage is not None
+                else None
+            )
             return AssistantMessageChunk(
                 content="",
                 reasoning_content=None,
