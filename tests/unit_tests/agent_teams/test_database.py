@@ -13,7 +13,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.dialects import mysql as mysql_dialects
-from sqlalchemy.exc import SAWarning
+from sqlalchemy.dialects import sqlite as sqlite_dialects
+from sqlalchemy.exc import OperationalError, SAWarning
 
 from openjiuwen.agent_teams.context import (
     reset_session_id,
@@ -32,6 +33,7 @@ from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
 )
 from openjiuwen.agent_teams.tools.database.engine import (
+    _create_index_if_absent,
     _drop_index_if_present,
     _ensure_dynamic_table_indexes,
     _ensure_team_member_options_column,
@@ -672,6 +674,131 @@ class TestTeamDatabaseInit:
         sqls = [call.args[0] for call in sync_conn.exec_driver_sql.call_args_list]
         assert sqls == [f"DROP INDEX `{index_name}` ON `{table}`"]
         assert all("IF EXISTS" not in s for s in sqls)
+
+    @pytest.mark.level0
+    def test_drop_index_if_present_treats_mysql_1091_as_success(self):
+        """A peer that already dropped the index (errno 1091) does not fail the bind."""
+        table = "team_task_mysql01"
+        index_name = f"ix_{table}_team_name"
+        sync_conn = MagicMock()
+        sync_conn.dialect = mysql_dialects.dialect()
+        sync_conn.exec_driver_sql.side_effect = OperationalError(
+            "DROP INDEX",
+            {},
+            Exception(1091, "Can't DROP 'ix'; check that column/key exists"),
+        )
+
+        assert _drop_index_if_present(sync_conn, table, index_name, {index_name})
+
+        sql = sync_conn.exec_driver_sql.call_args.args[0]
+        assert sql == f"DROP INDEX `{index_name}` ON `{table}`"
+        assert "IF EXISTS" not in sql
+
+    @pytest.mark.level0
+    def test_create_index_if_absent_treats_mysql_1061_as_success(self):
+        """A peer that already created the index (errno 1061) does not fail the bind."""
+        table = "team_task_mysql01"
+        index_name = f"ix_{table}_assignee_status"
+        sync_conn = MagicMock()
+        sync_conn.dialect = mysql_dialects.dialect()
+        sync_conn.exec_driver_sql.side_effect = OperationalError(
+            "CREATE INDEX",
+            {},
+            Exception(1061, "Duplicate key name 'ix_team_task_mysql01_assignee_status'"),
+        )
+
+        assert _create_index_if_absent(
+            sync_conn, table, index_name, "assignee, status", set()
+        )
+
+        sql = sync_conn.exec_driver_sql.call_args.args[0]
+        assert sql == f"CREATE INDEX `{index_name}` ON `{table}` (assignee, status)"
+        assert "IF NOT EXISTS" not in sql
+
+    @pytest.mark.level0
+    @pytest.mark.parametrize("errno", [1050, 1146, 1062])
+    def test_mysql_index_ddl_reraises_unrelated_errno(self, errno):
+        """Table-exists, unknown-table, and duplicate-row errors stay fatal."""
+        table = "team_task_mysql01"
+        index_name = f"ix_{table}_team_name"
+        messages = {
+            1050: "Table 'team_task_mysql01' already exists",
+            1146: "Table 'team_task_mysql01' doesn't exist",
+            1062: "Duplicate entry '1' for key 'PRIMARY'",
+        }
+
+        drop_conn = MagicMock()
+        drop_conn.dialect = mysql_dialects.dialect()
+        drop_conn.exec_driver_sql.side_effect = OperationalError(
+            "DROP INDEX", {}, Exception(errno, messages[errno])
+        )
+        with pytest.raises(OperationalError):
+            _drop_index_if_present(drop_conn, table, index_name, {index_name})
+
+        create_conn = MagicMock()
+        create_conn.dialect = mysql_dialects.dialect()
+        create_conn.exec_driver_sql.side_effect = OperationalError(
+            "CREATE INDEX", {}, Exception(errno, messages[errno])
+        )
+        with pytest.raises(OperationalError):
+            _create_index_if_absent(create_conn, table, index_name, "team_name", set())
+
+    @pytest.mark.level0
+    def test_mysql_index_text_fallback_when_errno_missing(self):
+        """Without an errno, only the matching server phrase is treated as success."""
+        table = "team_task_mysql01"
+        index_name = f"ix_{table}_team_name"
+
+        drop_ok = MagicMock()
+        drop_ok.dialect = mysql_dialects.dialect()
+        drop_ok.exec_driver_sql.side_effect = OperationalError(
+            "DROP INDEX",
+            {},
+            Exception("Can't DROP 'ix'; check that it exists"),
+        )
+        assert _drop_index_if_present(drop_ok, table, index_name, {index_name})
+
+        create_ok = MagicMock()
+        create_ok.dialect = mysql_dialects.dialect()
+        create_ok.exec_driver_sql.side_effect = OperationalError(
+            "CREATE INDEX",
+            {},
+            Exception("Duplicate key name 'ix_team_task_mysql01_team_name'"),
+        )
+        assert _create_index_if_absent(create_ok, table, index_name, "team_name", set())
+
+        drop_bad = MagicMock()
+        drop_bad.dialect = mysql_dialects.dialect()
+        drop_bad.exec_driver_sql.side_effect = OperationalError(
+            "DROP INDEX", {}, Exception("disk I/O error")
+        )
+        with pytest.raises(OperationalError):
+            _drop_index_if_present(drop_bad, table, index_name, {index_name})
+
+        create_bad = MagicMock()
+        create_bad.dialect = mysql_dialects.dialect()
+        create_bad.exec_driver_sql.side_effect = OperationalError(
+            "CREATE INDEX", {}, Exception("disk I/O error")
+        )
+        with pytest.raises(OperationalError):
+            _create_index_if_absent(create_bad, table, index_name, "team_name", set())
+
+    @pytest.mark.level0
+    def test_create_index_if_absent_uses_if_not_exists_off_mysql(self):
+        """SQLite / PostgreSQL keep statement-level IF NOT EXISTS."""
+        table = "team_task_sqlite01"
+        index_name = f"ix_{table}_assignee_status"
+        sync_conn = MagicMock()
+        sync_conn.dialect = sqlite_dialects.dialect()
+
+        assert _create_index_if_absent(
+            sync_conn, table, index_name, "assignee, status", set()
+        )
+
+        sql = sync_conn.exec_driver_sql.call_args.args[0]
+        assert "IF NOT EXISTS" in sql
+        assert f'"{index_name}"' in sql
+        assert f'"{table}"' in sql
 
     @pytest.mark.level0
     def test_dynamic_index_migration_mysql_sql_uses_backticks_without_if_exists(self):

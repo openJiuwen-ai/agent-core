@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import NamedTuple, TypeVar
 
 from sqlalchemy import event, inspect
-from sqlalchemy.exc import NoSuchTableError, OperationalError
+from sqlalchemy.exc import NoSuchTableError, OperationalError, ProgrammingError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -339,6 +339,54 @@ def _widen_text_columns(
         )
 
 
+def _mysql_errno(exc: BaseException) -> int | None:
+    """Server errno from ``exc.orig.args[0]``, or None when the driver omitted it.
+
+    aiomysql/PyMySQL store the code on the DBAPI exception. The SQLAlchemy
+    wrapper's own ``args[0]`` is the SQL text, so it is not read here.
+    """
+    orig = getattr(exc, "orig", None)
+    args = getattr(orig, "args", ())
+    if not args or isinstance(args[0], bool) or not isinstance(args[0], int):
+        return None
+    return args[0]
+
+
+def _is_benign_mysql_index_error(exc: BaseException, *, missing: bool) -> bool:
+    """True when a MySQL/MariaDB index race has already reached the goal state.
+
+    ``missing=True`` is errno 1091: DROP of an index a peer already removed.
+    ``missing=False`` is errno 1061: CREATE of a name a peer already created.
+    Any other code (1062 duplicate row, 1050 table exists, 1146 unknown table)
+    stays fatal. Statement text is used only when no errno is present: a DROP
+    matches ``check that`` plus ``exists`` (MySQL ``column/key exists`` and
+    MariaDB ``check that it exists``); a CREATE matches ``Duplicate key name``.
+    """
+    errno = _mysql_errno(exc)
+    if errno is not None:
+        return errno == (1091 if missing else 1061)
+    orig = getattr(exc, "orig", None)
+    folded = str(orig if orig is not None else exc).casefold()
+    if missing:
+        return "check that" in folded and "exists" in folded
+    return "duplicate key name" in folded
+
+
+def _exec_mysql_index_ddl(sync_conn, sql: str, *, missing: bool) -> None:
+    """Run MySQL-family index DDL, treating the known race errno as success.
+
+    MySQL 8.0 rejects ``IF [NOT] EXISTS`` on these statements. A concurrent
+    binder that already finished the same step raises ``OperationalError``
+    (aiomysql) or, on some drivers, ``ProgrammingError``.
+    """
+    try:
+        sync_conn.exec_driver_sql(sql)
+    except (OperationalError, ProgrammingError) as exc:
+        if _is_benign_mysql_index_error(exc, missing=missing):
+            return
+        raise
+
+
 def _drop_index_if_present(
     sync_conn,
     table_name: str,
@@ -347,15 +395,17 @@ def _drop_index_if_present(
 ) -> bool:
     """Drop ``index_name`` when it appears in ``index_names``.
 
-    MySQL/MariaDB require ``DROP INDEX ... ON table``; SQLite / PostgreSQL
-    accept a bare ``DROP INDEX IF EXISTS``. Returns whether a DROP was issued.
+    The snapshot skips a useless DROP. MySQL/MariaDB have no
+    ``DROP INDEX IF EXISTS`` and use ``DROP INDEX ... ON table``; a peer that
+    already dropped it (errno 1091) counts as success. SQLite / PostgreSQL
+    keep ``DROP INDEX IF EXISTS``. Returns whether a DROP was issued.
     """
     if index_name not in index_names:
         return False
     q_idx = _quote_ident(sync_conn, index_name)
     if _is_mysql_family(sync_conn):
         q_table = _quote_ident(sync_conn, table_name)
-        sync_conn.exec_driver_sql(f"DROP INDEX {q_idx} ON {q_table}")
+        _exec_mysql_index_ddl(sync_conn, f"DROP INDEX {q_idx} ON {q_table}", missing=True)
     else:
         sync_conn.exec_driver_sql(f"DROP INDEX IF EXISTS {q_idx}")
     return True
@@ -370,14 +420,25 @@ def _create_index_if_absent(
 ) -> bool:
     """Create ``index_name`` when it is missing from ``index_names``.
 
-    Avoids ``CREATE INDEX IF NOT EXISTS``, which MySQL does not support.
-    Returns whether a CREATE was issued.
+    The snapshot skips a useless CREATE. MySQL/MariaDB have no
+    ``CREATE INDEX IF NOT EXISTS``; a peer that already created the name
+    (errno 1061) counts as success. SQLite / PostgreSQL keep statement-level
+    ``IF NOT EXISTS``. Returns whether a CREATE was issued.
     """
     if index_name in index_names:
         return False
     q_idx = _quote_ident(sync_conn, index_name)
     q_table = _quote_ident(sync_conn, table_name)
-    sync_conn.exec_driver_sql(f"CREATE INDEX {q_idx} ON {q_table} ({columns_sql})")
+    if _is_mysql_family(sync_conn):
+        _exec_mysql_index_ddl(
+            sync_conn,
+            f"CREATE INDEX {q_idx} ON {q_table} ({columns_sql})",
+            missing=False,
+        )
+    else:
+        sync_conn.exec_driver_sql(
+            f"CREATE INDEX IF NOT EXISTS {q_idx} ON {q_table} ({columns_sql})"
+        )
     return True
 
 
@@ -675,9 +736,11 @@ def _ensure_dynamic_table_indexes(
         dead ``updated_at`` index (no query filters/orders by it). ``status``
         keeps its standalone index.
 
-    Index DROP/CREATE is probe-then-act via ``inspector.get_indexes`` (no
-    ``IF [NOT] EXISTS`` index syntax — MySQL rejects those). Identifiers are
-    dialect-quoted so MySQL gets backticks instead of hard-coded double quotes.
+    Index DROP/CREATE probes ``inspector.get_indexes`` so an up-to-date table
+    skips DDL. MySQL/MariaDB have no ``IF [NOT] EXISTS`` on these statements;
+    a concurrent peer's 1091/1061 is treated as success. SQLite / PostgreSQL
+    keep ``IF [NOT] EXISTS``. Identifiers are dialect-quoted so MySQL gets
+    backticks instead of hard-coded double quotes.
 
     Scope: ``candidates`` are the current session's tables (computed from
     ``get_session_id``). ``existing_before_create`` is the snapshot of which of
