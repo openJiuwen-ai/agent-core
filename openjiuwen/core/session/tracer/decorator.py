@@ -293,7 +293,11 @@ def _model_display_name(model) -> str:
 
     Probes the client-config carriers first (the foundation ``Model`` keeps
     its ``ModelClientConfig`` at the top level; component configs nest it
-    under ``config``), then the request configs (``extra="allow"`` field).
+    under ``config``), then the request configs (``extra="allow"`` field),
+    and last a display name set directly on the model object by wiring
+    code — the same lowest-priority carrier the rail-side
+    ``_resolve_model_display_name`` probe reads, so both producers agree
+    on one name.
     Empty when absent — the probe result below stays untouched, so spans of
     models built without a display name are byte-identical to before.
     """
@@ -306,7 +310,7 @@ def _model_display_name(model) -> str:
         display = getattr(config, "model_display_name", None)
         if display:
             return str(display)
-    return ""
+    return str(getattr(model, "model_display_name", None) or "")
 
 
 def decorate_model_with_trace(model, agent_session, identity: dict | None = None):
