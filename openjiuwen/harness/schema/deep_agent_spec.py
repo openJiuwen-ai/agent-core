@@ -540,8 +540,14 @@ class DeepAgentSpec(BaseModel):
                 A per-build view is derived with the resolved workspace and card
                 id before rails / tools / sub-agents are built.
         """
+        from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
         from openjiuwen.harness.factory import resolve_deep_agent_parts
         from openjiuwen.harness.prompts import resolve_language
+
+        # Serialized member specs carry a dict; the runtime expects the config model.
+        context_engine_config = self.context_engine_config
+        if isinstance(context_engine_config, dict):
+            context_engine_config = ContextEngineConfig.model_validate(context_engine_config)
 
         llm_model = self.model.build() if self.model else None
         language = resolve_language(self.language)
@@ -623,7 +629,7 @@ class DeepAgentSpec(BaseModel):
             restrict_to_work_dir=self.restrict_to_sandbox,
             auto_create_workspace=self.auto_create_workspace,
             completion_timeout=self.completion_timeout,
-            context_engine_config=self.context_engine_config,
+            context_engine_config=context_engine_config,
             kv_cache_affinity_config=self.kv_cache_affinity_config,
             trajectory_span_processor=getattr(build_ctx, "trajectory_span_processor", None),
             **self._progressive_tool_kwargs(),

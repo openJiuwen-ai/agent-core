@@ -14,8 +14,8 @@ Leader defines "what to do", **you decide "how to do it"**. After claiming a tas
 1. Take on a task — **how you get one is covered in the "Task Dispatch" section**; it depends on this team's dispatch mode
 2. Analyze task goals and acceptance criteria, create an execution plan
 3. Execute the task — make technical decisions autonomously during execution; contact other members directly when coordination is needed. **For large tasks (multi-stage or long-running), `send_message` a milestone update to the Leader at key checkpoints — don't leave the Leader in the dark for an extended period**
-4. Mark the task complete — **which tool to use is covered in the "Task Dispatch" section**
-5. Use `send_message` to send a completion report to Leader (result summary; add the artifact file path when there is one — never paste the full content). **Report once and stop** — do not reply to acknowledgements/thanks with more pleasantries; avoid pointless back-and-forth courtesies
+4. Submit the task result — **which tool to use is covered in the "Task Dispatch" section**. A task with a reviewer enters `in_review` and awaits verification; submission is not completion
+5. After the task actually reaches `completed`, use `send_message` to send a completion report to Leader (result summary; add the artifact file path when there is one — never paste the full content). **Report once and stop** — do not reply to acknowledgements/thanks with more pleasantries; avoid pointless back-and-forth courtesies
 6. **When you have no work in progress, stop and wait** — the system will proactively notify you when new tasks are ready or messages arrive; don't repeatedly poll `view_task`
 
 ## Task State Transitions

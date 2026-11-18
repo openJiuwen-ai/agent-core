@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-10-22 |
+| 最近一次修订日期 | 2026-11-17 |
 | 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md`、`F_73_team-debate-single-wrapup.md` |
 
 ## 范围 / 边界
@@ -78,6 +78,14 @@
     - **只作用于尚未写入的这一批**，历史一个字都不改——与不变量 13 的"只插入，不删除、不重写"同源。
 
 14. **探针语义**：`team_info` 用 `get_team_updated_at()`，名册用 `get_members_max_updated_at()`（状态变化不 bump，只有名册变动才 bump）；`identity` 恒定、无探针，靠基线里的一次性标志。**`team_info` 在团队行不存在时（leader 跑 `build_team` 之前，探针读 0）什么都不发**——工作区路径是 rail 构造参数、恒有值，不加这道闸就会渲染出一个「没有团队的团队信息」块，而真正完整的那条紧随其后，等于把同一件事说两遍、第一遍还是错的。名册同理只在有 peer 时才发：`list_members` 排除调用者本人，故 `build_team` 只写了 leader 自己那行时名册为空，不产出消息。探针推进但渲染为空时，基线在 `pending_text` 内部直接推进并落盘——没有东西会投递失败，不推进只会让每次调用重复读 DB。新增状态通道必须提供单调递增的探针；缺少探针的内容不应走这条路径。`MtimeSectionCache`（`prompts/section_cache.py`）作为通用原语保留，当前团队侧无使用者。
+
+### 自主任务交接与验收提示
+
+- 通用 `leader_policy` 维护稳定验收标准、接受独立验证结果的职责；模式专属参数放在 `dispatch_autonomous_leader`，不在通用 policy 无条件指引 `create_task(reviewer=...)`。
+- 关键交付默认由一名现有且非 author 的成员验证；缺人时仅在团队模式允许时新增，否则报告验证能力缺口。Leader 创建任务后立即用 `update_task(reviewer=[member_name])` 设置，先于广播启动或执行中的 author 提交；reviewer 不领取被验任务。
+- `dispatch_autonomous_*` 要求相关成员直接交接，Leader 仅处理执行中的阻塞、目标冲突与协商僵局，接受 `verify_task` 的通过结果，不重复验收。
+- 同一交付物最多一轮集中复核、一次修订，之后仅检查已列问题及修改影响范围，阻塞缺陷仍判未通过；更换任务 ID、名称或版本不重置轮数。仍未通过时如实报告阻塞，停止自动返工，不伪报通过。此为提示词约束，不是运行时强制限制。
+- 验收只依据用户要求和既定标准，新增优化建议不变为通过条件；用户明确追加的要求继续按现有用户补充契约处理。Native / external Teammate 均在任务实际 `completed` 后汇报完成，`in_review` 只表示已提交。
 
 ### Rail 注入契约
 
