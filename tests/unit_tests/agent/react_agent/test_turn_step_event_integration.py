@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import uuid
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -79,7 +80,9 @@ async def _built_bus_recording_turn_step_core_inputs(
 def _rig(*, step_index: int | None = 0) -> tuple[ReActAgent, AgentCallbackContext, MagicMock]:
     agent = ReActAgent(card=AgentCard(id="step-agent"))
     agent.configure(ReActAgentConfig(model_name="fake", on_max_iterations="final_answer"))
-    session = create_agent_session(session_id="step-session", card=agent.card)
+    session = create_agent_session(
+        session_id=f"step-session-{uuid.uuid4().hex[:8]}", card=agent.card
+    )
     extra = {}
     if step_index is not None:
         extra["_turn_state"] = SimpleNamespace(turn_id="turn-1", step_index=step_index)

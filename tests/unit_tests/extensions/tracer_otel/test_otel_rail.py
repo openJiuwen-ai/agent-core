@@ -50,7 +50,6 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_USAGE_OUTPUT_TOKENS,
     OJ_GEN_AI_METADATA,
     OJ_GEN_AI_TRACE_NAME,
-    OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_GEN_AI_USER_ID,
     OJ_LLM_PREV_MESSAGE_COUNT,
 )
@@ -481,7 +480,7 @@ class TestOtelRailEndToEnd:
             # Agent root span
             await rail.before_invoke(_make_ctx(agent, session, InvokeInputs(query="hi")))
 
-            # LLM child span with params + usage/cost-bearing response
+            # LLM child span with params + usage-bearing response
             await rail.before_model_call(
                 _make_ctx(agent, session, ModelCallInputs(messages=["m1", "m2"]))
             )
@@ -528,7 +527,8 @@ class TestOtelRailEndToEnd:
             assert llm_span.attributes[GEN_AI_RESPONSE_MODEL] == "test-model"
             assert llm_span.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 10
             assert llm_span.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 20
-            assert llm_span.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == pytest.approx(0.3)
+            # Cost stays business data: usage carries it, the span must not.
+            assert "openjiuwen.gen_ai.usage.total_cost" not in llm_span.attributes
             assert llm_span.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.42)
             assert llm_span.attributes[GEN_AI_PROVIDER_NAME] == "openjiuwen"
             assert llm_span.attributes[OJ_GEN_AI_TRACE_NAME] == "E2EAgent"
