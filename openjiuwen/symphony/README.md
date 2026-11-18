@@ -87,11 +87,11 @@ async def plan_invoice(model):
 ```
 
 - `plan(query, type="skill", candidate_ids=...)` 使用已发布的关系图在指定能力层规划。`type` 默认为 `skill`，也可选 `expert`。`candidate_ids=None` 表示使用当前可见候选，传入 ID 列表可指定起始候选。列表为空或所有 ID 均无效时，返回 `no_plan`。
-- `plan_expert_tasks(query, candidate_ids=...)` 生成专家任务图。节点的 `metadata.type` 为 `expert` 时引用已安装专家，为 `inline` 时描述按任务生成的角色。没有已发布的专家图或可用专家时，也可以生成纯内联计划。两种接口都支持用 `expert_manifest_paths` 限定可用专家。
+- `plan_expert_tasks(query, candidate_ids=...)` 生成专家任务图。规划模型通过 `expert_id` 引用已安装专家，或通过含 `name`、`description` 的 `role` 定义内联角色，二者只能选一个。Core 据此生成节点的 `metadata.type`（`expert` 或 `inline`），模型无需填写任务类型。未知专家 ID 会触发校验错误，不按名称自动转为内联角色。没有已发布的专家图或可用专家时，也可以生成纯内联计划。两种接口都支持用 `expert_manifest_paths` 限定可用专家。
 - 两种接口均支持通过 `orchestration.plan.mode` 选择 `fast` 或 `beam`，并通过 `result["planned_graph"]["graph"]` 返回图。节点和依赖分别位于 `nodes` 和 `edges`。专家任务图的交接边引用本轮任务的 `source_output` 和 `target_input`。
 - 可选的 `inputs` 接收一组 `PlanningInput` 或等价字典。每项的 `name` 唯一，`kind` 为 `text` 或 `file`，`value` 为已知文本或宿主已校验的文件引用，`description` 可注明用途。直接使用 SDK 时，由宿主负责解析文件引用。
 
-专家任务图通过结构校验时返回 `graph.metadata.status=ready`。资料缺失记录在 `graph.metadata.missing_inputs`，由宿主判断如何继续。节点用 `metadata.external_inputs` 引用相关资料名。只报告资料缺项的空草稿会补试一次条件计划。无法生成有效计划时返回 `no_plan`，校验错误会写入 `graph.metadata.reason`。Skill 编排的 `needs_input` 表示需要补充输入。
+专家任务图通过结构校验时返回 `graph.metadata.status=ready`。资料缺失记录在 `graph.metadata.missing_inputs`，由宿主判断如何继续。节点用 `metadata.external_inputs` 引用相关资料名。草稿结构或任务图校验失败时，Core 保留原请求，将错误和限长的上一份草稿反馈给模型，补试一次；只报告资料缺项的空草稿与校验纠错共用这一次补试额度。再次失败时返回 `no_plan`，并在 `graph.metadata.reason` 说明原因。模型明确返回的 `no_plan`（无资料缺项）直接保留，模型调用异常和取消不触发规划层纠错。Skill 编排的 `needs_input` 表示需要补充输入。
 
 专家任务图的 `metadata.task` 是 Markdown 正文，包含节点目标、约束、产物内容和验收要求。产物的名称和类型由 `metadata.outputs` 声明。Core 根据交接边生成 `metadata.inputs`，接收端口默认沿用源产物名。交接用 `target_input` 指定别名或把多个产物汇入同一端口。
 
