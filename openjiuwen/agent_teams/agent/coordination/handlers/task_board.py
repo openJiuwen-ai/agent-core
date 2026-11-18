@@ -107,38 +107,34 @@ class TaskBoardHandler(BaseCoordinationHandler):
     _REVOKED_FROM_SELF_KEY: ClassVar[str] = "dispatcher.task_revoked_from_self"
     _CANCELLED_TO_SELF_KEY: ClassVar[str] = "dispatcher.task_cancelled_to_self"
 
-    # Whether a TASK_CLAIMED for a task already in its working state
-    # (``in_progress``) is still delivered to its owner. A dispatch mode whose
-    # scheduler hands entered work to its owner through another channel
-    # turns this off to avoid a double delivery.
-    _ANNOUNCE_ENTERED_ASSIGNMENTS: ClassVar[bool] = True
-
     def _is_announceable(self, task: TeamTaskBase | None, member_name: str) -> bool:
-        """Whether a self-addressed TASK_CLAIMED is announced to this member.
+        """Whether this member is told about a claim addressed to it.
 
-        ``pending`` is announced for the task's current assignee; own
-        ``in_progress`` is announced while ``_ANNOUNCE_ENTERED_ASSIGNMENTS``
-        is on. Any other status, and a row owned by another member, is not.
+        ``pending``: told when it is the task's assignee. ``in_progress``:
+        told when this dispatch mode announces such tasks. Nothing else is
+        told.
         """
         if task is None:
             return False
         if task.status == TaskStatus.PENDING.value:
-            # Only the current assignee is addressed; a row without one keeps
-            # the previous behaviour.
+            # A row without an assignee is announced as before.
             return not task.assignee or task.assignee == member_name
         if task.status != TaskStatus.IN_PROGRESS.value:
             return False
-        if not self._ANNOUNCE_ENTERED_ASSIGNMENTS:
+        if not self._announces_entered_assignments():
             return False
         return task.assignee == member_name
+
+    def _announces_entered_assignments(self) -> bool:
+        """Whether a task that is already running is announced on assignment."""
+        return True
 
     def _assignment_notice_body(self, task: TeamTaskBase) -> str:
         """Render the notice for an announceable directed assignment.
 
-        A pending task gets the full self-assignment prompt (body included,
-        no claim round-trip); an entered one gets the owner nudge, which
-        names the task and points at ``view_task`` instead of telling an
-        owner to claim work it already holds.
+        A ``pending`` task gets the self-assignment prompt with its body. A
+        running task gets the reminder wording instead, since its owner does
+        not need to claim it again.
         """
         if task.status == TaskStatus.PENDING.value:
             return t(
@@ -172,12 +168,12 @@ class TaskBoardHandler(BaseCoordinationHandler):
         Self-assignment rendering is role-aware: a teammate / leader
         sees the teammate-oriented ``dispatcher.task_assigned_to_self``
         prompt, which carries the task title and body and says to claim it —
-        only once the task is workable (``pending``); a task that already
-        entered its working state (``in_progress`` — from ``assign()`` or a
-        ``reassign()`` that kept it running) is announced with the
-        owner-nudge template instead, which carries no claim instruction.
-        Blocked assignments are left to the board, which
-        wakes the member when it unblocks. A human_agent
+        only once the task is workable (``pending``); a blocked assignment is
+        left to the board, which wakes the member when it unblocks. A task
+        that already entered its working state (``in_progress`` — from
+        ``assign()`` or a ``reassign()`` that kept it running) is announced
+        with a reminder that does not ask it to claim the task again. A
+        human_agent
         avatar sees the HITT-specific ``hitt.task_assigned_to_self_human``
         prompt, which frames the event as a notification for the
         controlling human and tells the avatar LLM not to autonomously
@@ -255,7 +251,8 @@ class TaskBoardHandler(BaseCoordinationHandler):
             payload.task_id,
             is_self_human,
         )
-        # Entered (owner nudge) assignments are appended, pending ones steer.
+        # A running task's owner is mid-round: queue the reminder behind that
+        # round instead of interrupting it.
         entered = task is not None and task.status == TaskStatus.IN_PROGRESS.value
         await self._round.deliver_input(content, use_steer=not entered)
         if task is not None and (is_self_human or task.status == TaskStatus.PENDING.value):
@@ -780,11 +777,9 @@ class ScheduledTaskBoardHandler(TaskBoardHandler):
     _REVOKED_FROM_SELF_KEY: ClassVar[str] = "dispatcher.task_revoked_from_self_scheduled"
     _CANCELLED_TO_SELF_KEY: ClassVar[str] = "dispatcher.task_cancelled_to_self_scheduled"
 
-    # In-progress assignments are not announced under scheduled dispatch: the
-    # scheduler's own handoff already mails the owner of an entered task its
-    # start instruction, so an event-driven announce next to it would
-    # double-deliver.
-    _ANNOUNCE_ENTERED_ASSIGNMENTS: ClassVar[bool] = False
+    def _announces_entered_assignments(self) -> bool:
+        """Scheduled dispatch announces only ``pending`` assignments."""
+        return False
 
     async def on_initial_task_poll(self, event: InnerEventMessage) -> None:
         """No startup board survey under scheduled dispatch (F_69).
