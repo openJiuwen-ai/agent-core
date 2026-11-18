@@ -32,6 +32,21 @@ class PreDeploymentLauncher(SandboxLauncher):
                 reason="teardown",
             )
 
+        elif sandbox_type == "adx-environment":
+            from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import (
+                build_adx_shared_scope_key,
+                delete_adx_environment,
+            )
+
+            shared_key = (
+                build_adx_shared_scope_key(str(base_url), str(isolation_key)) if base_url and isolation_key else None
+            )
+            await delete_adx_environment(
+                shared_key=shared_key,
+                base_url=str(base_url) if base_url and not shared_key else None,
+                reason="teardown",
+            )
+
         elif sandbox_type in ("jiuwenbox", "jiuwenbox-conch"):
             from openjiuwen.extensions.sys_operation.sandbox.providers.jiuwenbox import (
                 build_jiuwenbox_shared_scope_key,
