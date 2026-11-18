@@ -73,7 +73,9 @@ def load_template(name: str, language: str = _DEFAULT_LANGUAGE) -> PromptTemplat
     return PromptTemplate(name=name, content=delivery_mode_text(template.content))
 
 
-def make_template_loader(ws_cache: WorkspaceCache | None = None, *, message_delivery_modes: bool = False) -> TemplateLoader:
+def make_template_loader(
+    ws_cache: WorkspaceCache | None = None, *, message_delivery_modes: bool = False,
+) -> TemplateLoader:
     """Bind a per-team ``WorkspaceCache`` into a ``load_template``-signed loader.
 
     The closure checks the workspace's evolved A-class values first and falls
@@ -108,7 +110,9 @@ def bind_template_loader(infra: "TeamInfra") -> TemplateLoader:
     """
     backend = infra.team_backend
     ws_cache = backend.workspace_cache if backend is not None else None
-    return make_template_loader(ws_cache, message_delivery_modes=getattr(backend, "enable_message_delivery_modes", False) is True)
+    return make_template_loader(
+        ws_cache, message_delivery_modes=getattr(backend, "enable_message_delivery_modes", False) is True,
+    )
 
 
 __all__ = ["TemplateLoader", "bind_template_loader", "load_template", "make_template_loader"]

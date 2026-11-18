@@ -22,7 +22,7 @@ async def running_native():
     await Runner.start()
     harness = NativeHarness(make_spec())
     fake = await start_harness(harness, sleep_seconds=5)
-    harness._merge_follow_ups = True
+    harness.merge_follow_ups = True
     consumer = asyncio.create_task(drain_outputs(harness, []))
     try:
         await harness.send("working")

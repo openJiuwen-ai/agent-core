@@ -212,7 +212,7 @@ class NativeHarness(DeepAgent):
         self._owns_session: bool = False
         self._slow_round_log_after_seconds: float | None = parts.config.completion_timeout
         self._st = HarnessInternalState()
-        self._merge_follow_ups = False
+        self.merge_follow_ups = False
         self._control: asyncio.Queue = asyncio.Queue()
         # Harness-private event bus; consumers subscribe via
         # ``subscribe(on_state=, on_round=)``. Metrics/logging off — these fire
@@ -663,7 +663,7 @@ class NativeHarness(DeepAgent):
 
     def leader_stop(self) -> dict | None:
         """Return the persisted explicit-stop barrier, outside rollback state."""
-        if not (self._merge_follow_ups):
+        if not (self.merge_follow_ups):
             return None
         value = self._session.get_state("team_leader_stop") if self._session is not None else None
         return value if isinstance(value, dict) and value else None
@@ -1035,7 +1035,7 @@ class NativeHarness(DeepAgent):
           otherwise the started iteration (LLM + tools) runs to completion and
           the loop exits at the following model-call boundary.
         """
-        if cmd.immediate and (self._merge_follow_ups) and self._session is not None:
+        if cmd.immediate and (self.merge_follow_ups) and self._session is not None:
             self._drain_follow_ups_discard(self._session)
             if self.leader_stop() is not None:
                 await self._session.commit()
@@ -1066,7 +1066,7 @@ class NativeHarness(DeepAgent):
             await self._rollback_to_snapshot(
                 active.last_iter_snapshot or active.pre_round_snapshot,
             )
-            if (self._merge_follow_ups) and self._session is not None:
+            if (self.merge_follow_ups) and self._session is not None:
                 self._drain_follow_ups_discard(self._session)
             self._reset_coordinator()
             await self._emit_round_aborted(active.round_id, "abort")
@@ -1864,7 +1864,7 @@ class NativeHarness(DeepAgent):
     def _steer_with_follow_ups(self, msg):
         # The supervisor already owns and serializes this FIFO. Keep its inputs
         # until steering succeeds; no mailbox writes or second receipt protocol.
-        if not self._merge_follow_ups or not isinstance(msg.content, str):
+        if not self.merge_follow_ups or not isinstance(msg.content, str):
             self._push_steer(msg.content, run_context=msg.run_context)
             return
         if msg.run_context is None:

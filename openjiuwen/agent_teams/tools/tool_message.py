@@ -77,7 +77,9 @@ class _SendMessageBase(TeamTool, ABC):
             ToolCard(
                 id="team.send_message",
                 name="send_message",
-                description=delivery_mode_text(t(desc_key), getattr(team, "enable_message_delivery_modes", False) is True),
+                description=delivery_mode_text(
+                    t(desc_key), getattr(team, "enable_message_delivery_modes", False) is True,
+                ),
             )
         )
         self.message_manager = message_manager
@@ -94,11 +96,16 @@ class _SendMessageBase(TeamTool, ABC):
                 "type": "string",
                 "enum": list(MODES if team.is_leader else MODES[:2]),
                 "description": (
-                    "Private messages only. steer: information needed before the current task ends, delivered before the next model decision without stopping the current tool; "
-                    "follow_up: ONLY an independent later request that does not affect the current task and remains useful afterwards; do not defer current guidance, corrections or dependency readiness. abort (leader only): when execution itself must stop immediately, "
+                    "Private messages only. steer: information needed before the current task ends, "
+                    "delivered before the next model decision without stopping the current tool; "
+                    "follow_up: ONLY an independent later request that does not affect the current task "
+                    "and remains useful afterwards; do not defer current guidance, corrections or dependency readiness. "
+                    "abort (leader only): when execution itself must stop immediately, "
                     "discard queued follow-ups, and wait for a NEW direct leader message. The abort body "
                     "is NOT executed; send a separate message afterwards for further work or a report. "
-                    "Explicitly choose for every ordinary-team Agent private send. Omission is accepted only for legacy callers. Members request abort via a steer message to the leader."
+                    "Explicitly choose for every ordinary-team Agent private send. "
+                    "Omission is accepted only for legacy callers. "
+                    "Members request abort via a steer message to the leader."
                 ),
             }
         if targets_schema is not None:
@@ -187,7 +194,10 @@ class _SendMessageBase(TeamTool, ABC):
         )
 
     async def _broadcast(self, content: str, summary: str) -> ToolOutput:
-        receiver_routed = getattr(self._team, "enable_message_delivery_modes", False) is True and self._team.conversation_mode == "team"
+        receiver_routed = (
+            getattr(self._team, "enable_message_delivery_modes", False) is True
+            and self._team.conversation_mode == "team"
+        )
         if receiver_routed:
             msg_id = await self.message_manager.broadcast_message(content=content, receiver_routed=True)
         else:

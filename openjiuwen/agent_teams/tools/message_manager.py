@@ -415,9 +415,10 @@ class TeamMessageManager:
             return 0
 
         direct_ids = [m.message_id for m in messages if not m.broadcast]
-        tracked = [m for m in messages if m.broadcast and "delivery_feedback" in (
-            json.loads(m.meta) if isinstance(m.meta, str) and m.meta else (m.meta or {})
-        )]
+        tracked = []
+        for message in messages:
+            if message.broadcast and "delivery_feedback" in message_metadata(message):
+                tracked.append(message)
         broadcasts = [m for m in messages if m.broadcast and m not in tracked]
         ids = list(direct_ids) + [m.message_id for m in tracked]
         if broadcasts:

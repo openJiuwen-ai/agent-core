@@ -42,7 +42,9 @@ from openjiuwen.agent_teams.message_template import (
     revision_getters,
     task_links,
 )
-from openjiuwen.agent_teams.tools.message_manager import ACTIVE_TASKS, is_receiver_routed, message_metadata, read_delivery
+from openjiuwen.agent_teams.tools.message_manager import (
+    ACTIVE_TASKS, is_receiver_routed, message_metadata, read_delivery,
+)
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, bind_template_loader, load_template
 from openjiuwen.agent_teams.harness.state import follow_up_context
 from openjiuwen.agent_teams.schema.events import EventMessage, MessageEvent, TeamEvent
@@ -289,14 +291,18 @@ class MessageHandler(BaseCoordinationHandler):
             try:
                 for msg in new_messages:
                     seen_ids.add(msg.message_id)
-                    stopped = getattr(self._round, "leader_stop", lambda: None)() if self._delivery_modes_enabled() else None
+                    stopped = (
+                        getattr(self._round, "leader_stop", lambda: None)() if self._delivery_modes_enabled() else None
+                    )
                     resumed_by_leader = False
                     if stopped:
                         meta = message_metadata(msg)
                         leader = await backend.resolve_leader_member_name() if backend is not None else None
                         explicit_leader_input = (
                             msg.from_member_name == leader and not getattr(msg, "broadcast", False)
-                            and not (isinstance(meta, dict) and (meta.get("template") or meta.get("type") == "group_chat"))
+                            and not (
+                                isinstance(meta, dict) and (meta.get("template") or meta.get("type") == "group_chat")
+                            )
                             and getattr(msg, "timestamp", 0) > stopped.get("timestamp", 0)
                             and read_delivery(msg)[0] != "abort"
                         )
@@ -427,7 +433,8 @@ class MessageHandler(BaseCoordinationHandler):
                     message_steers = mode == "steer" if mode else use_steer
                     merged = []
                     snapshot = getattr(self._round, "active_input_snapshot", lambda: None)()
-                    if self._delivery_modes_enabled() and message_steers and snapshot is not None and not is_bridge:
+                    merge_follow_ups = self._delivery_modes_enabled() and message_steers and not is_bridge
+                    if merge_follow_ups and snapshot is not None:
                         for old in all_unread:
                             if old in delivered or old.timestamp >= msg.timestamp:
                                 continue
@@ -504,7 +511,8 @@ class MessageHandler(BaseCoordinationHandler):
         body = getattr(msg, "content", "") or ""
         if not body.strip() or msg.from_member_name == member_name:
             return "drop", {}
-        snapshot = self._round.active_input_snapshot() if callable(getattr(self._round, "active_input_snapshot", None)) else None
+        snapshot_getter = getattr(self._round, "active_input_snapshot", None)
+        snapshot = snapshot_getter() if callable(snapshot_getter) else None
         mode = await choose_delivery({
             "recipient": member_name,
             "role": self._blueprint.role.value,

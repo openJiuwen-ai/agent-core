@@ -205,7 +205,7 @@ async def test_leader_abort_blocks_goal_nudges_until_explicit_resume() -> None:
         try:
             await harness.goal_manager.set(_OBJECTIVE, max_attempts=2)
             await wait_invoke_running(fake)
-            harness._merge_follow_ups = True
+            harness.merge_follow_ups = True
             harness.set_leader_stop({"message_id": "abort-goal", "timestamp": 10})
             await harness.abort(immediate=True)
             assert await wait_for_state(harness, HarnessState.IDLE)

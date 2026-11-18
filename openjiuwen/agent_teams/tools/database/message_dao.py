@@ -398,8 +398,12 @@ class MessageDao:
             rows = result.scalars().all()
 
         if unread_only:
-            rows = [row for row in rows if (json.loads(row.meta) if row.meta else {}).get(
-                "delivery_feedback", {}).get(to_member_name, {}).get("state") != "merged"]
+            unread_rows = []
+            for row in rows:
+                meta = json.loads(row.meta) if row.meta else {}
+                if meta.get("delivery_feedback", {}).get(to_member_name, {}).get("state") != "merged":
+                    unread_rows.append(row)
+            rows = unread_rows
         return await self._hydrate_rows_off_loop(rows)
 
     async def get_unread_group_members(self, team_name: str) -> List[str]:
@@ -480,11 +484,14 @@ class MessageDao:
                     rows.append(row)
 
         if unread_only:
-            rows = [row for row in rows if (
-                self._feedback_unread(row.meta, member_name)
-                if self._feedback_unread(row.meta, member_name) is not None
-                else read_status is None or row.timestamp > read_status.read_at
-            )]
+            unread_rows = []
+            for row in rows:
+                unread = self._feedback_unread(row.meta, member_name)
+                if unread is None:
+                    unread = read_status is None or row.timestamp > read_status.read_at
+                if unread:
+                    unread_rows.append(row)
+            rows = unread_rows
         return await self._hydrate_rows_off_loop(rows)
 
     async def get_team_messages(self, team_name: str, broadcast: Optional[bool] = None) -> List[TeamMessageBase]:
@@ -615,7 +622,10 @@ class MessageDao:
             .exists()
         )
         stmt = (
-            select(message_model.meta, message_model.from_member_name, TeamMember.member_name, TeamMember.role, covered_by_watermark.label("covered"))
+            select(
+                message_model.meta, message_model.from_member_name,
+                TeamMember.member_name, TeamMember.role, covered_by_watermark.label("covered"),
+            )
             .join(TeamMember, TeamMember.team_name == message_model.team_name)
             .where(
                 message_model.team_name == team_name,
