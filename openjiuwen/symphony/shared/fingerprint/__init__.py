@@ -1,6 +1,11 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Capability fingerprint scanning, extraction, evaluation, and artifact I/O."""
 
+from openjiuwen.symphony.config import (
+    EVALUATION_PROTOCOL_VERSION,
+    EXTRACTION_PROTOCOL_VERSION,
+    FINGERPRINT_SCHEMA_VERSION,
+)
 from openjiuwen.symphony.shared.fingerprint.artifact import (
     FINGERPRINT_ARTIFACT_FILENAME,
     FingerprintArtifactStore,
@@ -46,12 +51,6 @@ from openjiuwen.symphony.shared.fingerprint.scanner import (
     build_source_snapshot,
 )
 from openjiuwen.symphony.shared.fingerprint.service import FingerprintService
-from openjiuwen.symphony.shared.fingerprint.settings import (
-    EVALUATION_PROTOCOL_VERSION,
-    EXTRACTION_PROTOCOL_VERSION,
-    FINGERPRINT_SCHEMA_VERSION,
-    FingerprintSettings,
-)
 
 __all__ = [
     "EVALUATION_PROTOCOL_VERSION",
@@ -68,7 +67,6 @@ __all__ = [
     "Fingerprint",
     "FingerprintLike",
     "FingerprintService",
-    "FingerprintSettings",
     "IONameResolution",
     "IONameTerm",
     "IONameVocabulary",

@@ -19,6 +19,8 @@ generated: true
 | [agent_evolving/ttse](#module-agent_evolving-ttse) |
 | [agent_teams](#module-agent_teams) |
 | [agent_teams/workflow](#module-agent_teams-workflow) |
+| [core.runner.resources_manager](#module-core-runner-resources_manager) |
+| [core.session.tracer](#module-core-session-tracer) |
 | [core/context_engine](#module-core-context_engine) |
 | [core/controller](#module-core-controller) |
 | [core/foundation/llm](#module-core-foundation-llm) |
@@ -26,10 +28,12 @@ generated: true
 | [core/session](#module-core-session) |
 | [core/session/tracer](#module-core-session-tracer) |
 | [core/sys_operation](#module-core-sys_operation) |
+| [extensions.tracer_otel](#module-extensions-tracer_otel) |
 | [extensions/a2a](#module-extensions-a2a) |
 | [extensions/observability](#module-extensions-observability) |
 | [extensions/tracer_otel](#module-extensions-tracer_otel) |
 | [harness](#module-harness) |
+| [harness/rails](#module-harness-rails) |
 | [harness/subagents](#module-harness-subagents) |
 | [harness/tools/browser_move](#module-harness-tools-browser_move) |
 | [harness/tools/browser_move/decision](#module-harness-tools-browser_move-decision) |
@@ -254,6 +258,7 @@ generated: true
 | [B_20261104_2030_cancellation-cause-lifecycle](bugfix/core_runtime/B_20261104_2030_cancellation-cause-lifecycle.md) | B | 压缩取消一律误报 failed 及标记生命周期残留窗口缺陷 | CharlesWang2030 | 无独立 D：c4e52b7c 引入 cancellation cause 注册表属于常规缺陷修复，未归档独立设计；本次为对该提交检视发现的标记生命周期缺陷的后续修复，沿用注册表现有契约（TTL、非消费式 resolve、前缀继承）。 |
 | [B_20261104_2054_recovered-context-seed-and-execution-environment](bugfix/agent_teams/B_20261104_2054_recovered-context-seed-and-execution-environment.md) | B | 冷恢复后成员策略 seed 与执行环境传递修复 | alan_cheng | 无独立 D：无独立 D；修复 F_20261104_1720_tool-execution-environment / F_20261104_1721_session-execution-settings 在冷恢复与远程调用路径上的遗漏。 |
 | [B_20261105_0911_swarmflow-thirdparty-trajectory](bugfix/agent_teams/B_20261105_0911_swarmflow-thirdparty-trajectory.md) | B | Swarmflow 三方 Agent 轨迹未绑定成员身份 | wangcan103 | 无独立 D：小范围补齐既有 HarnessTrajectoryRecorder 的 Swarmflow 接线，不新增协议或公开 API。 |
+| [B_20261117_1626_directed-assignment-notice-dropped](bugfix/agent_teams/B_20261117_1626_directed-assignment-notice-dropped.md) | B | 定向指派/改派的通知被接收端 pending 判据丢弃，新 owner 永不唤醒 | xiajing | 无独立 D：缺陷修复只改消费端投递判据，不新增契约与机制；依据见 S_03（TASK_CLAIMED 定向投递）与 jiuwenswarm 问题 |
 | [S_01_public-api-and-spec-flow](specs/agent_teams/S_01_public-api-and-spec-flow.md) | S | S_01 公开 API 表面与 Spec 流 | alan_cheng | — |
 | [S_02_team-agent-architecture](specs/agent_teams/S_02_team-agent-architecture.md) | S | TeamAgent 架构规约 | alan_cheng | — |
 | [S_03_coordination-protocol](specs/agent_teams/S_03_coordination-protocol.md) | S | Coordination Protocol | alan_cheng | — |
@@ -310,6 +315,22 @@ generated: true
 | [SDD-0031](designs/proposals/SDD-0031-teammate-swarmflow-orchestration/design.md) | D | 集群模式teammate支持swarmflow工具 | @xiajing | — |
 | [B_20261102_1120_avatar-child-session-trace-root](bugfix/agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
 
+<a id="module-core-runner-resources_manager"></a>
+
+## core.runner.resources_manager
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261105_1405_otel-decorator-llm-telemetry](features/F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
+
+<a id="module-core-session-tracer"></a>
+
+## core.session.tracer
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261105_1405_otel-decorator-llm-telemetry](features/F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
+
 <a id="module-core-context_engine"></a>
 
 ## core/context_engine
@@ -338,6 +359,7 @@ generated: true
 | [D-20261112-1120-goal-assessment-isolation](designs/active/D-20261112-1120-goal-assessment-isolation/design.md) | D | Goal 独立评估的轨迹与执行上下文隔离 | alan_cheng | — |
 | [F_20261103_0928_model-group-routed-model](features/F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | 无独立 D：issue |
 | [F_20261112_1120_goal-assessment-isolation](features/F_20261112_1120_goal-assessment-isolation.md) | F | Goal 评估调用的观测隔离实施 | alan_cheng | [D-20261112-1120-goal-assessment-isolation](designs/active/D-20261112-1120-goal-assessment-isolation/design.md) |
+| [B_20261105_1628_llm-usage-model-name-response-first](bugfix/core_runtime/B_20261105_1628_llm-usage-model-name-response-first.md) | B | LLM usage.model_name 改为响应体 model 优先 | yidaaichixia | 无独立 D：语义纠错类修复；依据 GenAI 语义约定对 gen_ai.response.model 的定义（生成响应的模型名）与同文件 response_model 既有响应体优先取法，无独立方案取舍需要设计文档。 |
 
 <a id="module-core-runner-drunner-dmessage_queue"></a>
 
@@ -374,6 +396,14 @@ generated: true
 | [F_20261104_1720_tool-execution-environment](features/F_20261104_1720_tool-execution-environment.md) | F | 工具执行环境作用域 | alan_cheng | 无独立 D：无独立 D；在现有 harness 工具调用与 team 会话存储契约上的小范围扩展。 |
 | [B_20261104_2054_recovered-context-seed-and-execution-environment](bugfix/agent_teams/B_20261104_2054_recovered-context-seed-and-execution-environment.md) | B | 冷恢复后成员策略 seed 与执行环境传递修复 | alan_cheng | 无独立 D：无独立 D；修复 F_20261104_1720_tool-execution-environment / F_20261104_1721_session-execution-settings 在冷恢复与远程调用路径上的遗漏。 |
 
+<a id="module-extensions-tracer_otel"></a>
+
+## extensions.tracer_otel
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261105_1405_otel-decorator-llm-telemetry](features/F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
+
 <a id="module-extensions-a2a"></a>
 
 ## extensions/a2a
@@ -393,6 +423,7 @@ generated: true
 | [SDD-0022](designs/proposals/SDD-0022-trajectory-observability-framework/design.md) | D | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | @alan_cheng | — |
 | [SDD-0023](designs/proposals/SDD-0023-trajectory-export-langfuse-otel/design.md) | D | 轨迹导出：Langfuse 适配与 OTel 兼容平台上报（含文件 WAL 与离线导入） | @alan_cheng | — |
 | [F_20261103_0928_model-group-routed-model](features/F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | 无独立 D：issue |
+| [F_20261104_1638_drop-llm-span-cost-attrs](features/F_20261104_1638_drop-llm-span-cost-attrs.md) | F | LLM span 去掉 usage cost 属性（openjiuwen.gen_ai.usage.*_cost） | weixin_39960157 | 无独立 D：纯删减类变更（去掉一处已定属性的发射），无方案级取舍需要独立设计；键的引入背景与命名迁移见 |
 | [F_20261112_1120_goal-assessment-isolation](features/F_20261112_1120_goal-assessment-isolation.md) | F | Goal 评估调用的观测隔离实施 | alan_cheng | [D-20261112-1120-goal-assessment-isolation](designs/active/D-20261112-1120-goal-assessment-isolation/design.md) |
 | [B_20261102_1120_avatar-child-session-trace-root](bugfix/agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
 
@@ -402,6 +433,8 @@ generated: true
 
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
+| [F_20261104_1638_drop-llm-span-cost-attrs](features/F_20261104_1638_drop-llm-span-cost-attrs.md) | F | LLM span 去掉 usage cost 属性（openjiuwen.gen_ai.usage.*_cost） | weixin_39960157 | 无独立 D：纯删减类变更（去掉一处已定属性的发射），无方案级取舍需要独立设计；键的引入背景与命名迁移见 |
+| [F_20261104_2034_converge-tpot-attr-key](features/F_20261104_2034_converge-tpot-attr-key.md) | F | TPOT 属性键收敛（inter_token_latency_ms → tpot_ms） | weixin_39960157 | 无独立 D：键名纠错类变更；"one fact, one key / no reader fallback chain" 的规范依据为 observability/semconv.py 成文评注（b0134c30d 引入、544ea2838 重申），无独立方案取舍需要设计文档。 |
 | [B_20261108_2028_llm-span-model-display-name](bugfix/core_runtime/B_20261108_2028_llm-span-model-display-name.md) | B | llm span 的 gen_ai.request.model 与 span 名显示网关服务 ID 而非模型名缺陷 | yidaaichixia | 无独立 D：常规缺陷修复（遥测展示层纯增量可选字段），无方案取舍与公开契约变更，未归档独立设计。 |
 
 <a id="module-harness"></a>
@@ -487,6 +520,14 @@ generated: true
 | [S_18_subagents-and-lifecycle](specs/harness/S_18_subagents-and-lifecycle.md) | S | S_18 SubAgent 预设与生命周期 | yangzequ | — |
 | [S_19_harness-providers](specs/harness/S_19_harness-providers.md) | S | S_19 Harness Providers（协议实现、IO Adapter 与 Manifest 工厂） | alan_cheng | — |
 
+<a id="module-harness-rails"></a>
+
+## harness/rails
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F-20261107-1700-coding-document-memory](features/F_20261107_1700_coding-document-memory.md) | F | Coding 文档记忆 Rail | Wang Tao | 无独立 D：依据本会话已确认的跨仓 Coding 文档记忆方案及后续交互轮次复用决定；AutoMemory 保留宿主原有开关。 |
+
 <a id="module-harness-subagents"></a>
 
 ## harness/subagents
@@ -527,6 +568,7 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [D-20261110-1839-leader-external-harness](designs/active/D-20261110-1839-leader-external-harness/design.md) | D | Leader 三方 Harness 插拔设计方案 | alan_cheng | — |
+| [F_20261104_1638_drop-llm-span-cost-attrs](features/F_20261104_1638_drop-llm-span-cost-attrs.md) | F | LLM span 去掉 usage cost 属性（openjiuwen.gen_ai.usage.*_cost） | weixin_39960157 | 无独立 D：纯删减类变更（去掉一处已定属性的发射），无方案级取舍需要独立设计；键的引入背景与命名迁移见 |
 
 <a id="module-unclassified"></a>
 

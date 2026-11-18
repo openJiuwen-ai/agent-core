@@ -41,7 +41,7 @@ from openjiuwen.symphony.flow.render import (
 )
 from openjiuwen.symphony.flow.review import PackageReviewGate
 from openjiuwen.symphony.flow.store import FlowStore
-from openjiuwen.symphony.orchestration.config import SymphonyFlowConfig
+from openjiuwen.symphony.config import OrchestrationExperienceConfig
 
 
 @dataclass
@@ -62,14 +62,16 @@ class SymphonyFlowEngine:
         self,
         flow_dir: str | Any,
         *,
-        config: Any | None = None,
+        config: OrchestrationExperienceConfig | None = None,
         llm_client: Any | None = None,
         store: FlowStore | None = None,
         packager: CapabilityPackager | None = None,
         gate: PackageReviewGate | None = None,
         skill_adapter: SkillArtifactAdapter | None = None,
     ) -> None:
-        self.config = config or SymphonyFlowConfig()
+        if config is not None and not isinstance(config, OrchestrationExperienceConfig):
+            raise TypeError("config must be an OrchestrationExperienceConfig")
+        self.config = config or OrchestrationExperienceConfig()
         self.llm_client = llm_client
         self.store = store or FlowStore(flow_dir)
         self.packager = packager or CapabilityPackager()
@@ -259,14 +261,14 @@ class SymphonyFlowEngine:
             record.trace_id for record in records if record.trace_id not in grouped_traces
         ]
         stats = aggregate_edges(records)
-        max_examples = getattr(self.config, "max_narrative_examples", 5)
+        max_examples = self.config.narrative.max_examples
 
         for _signature, group in sorted(groups.items()):
             result = distill_group(
                 group,
                 stats,
-                min_successes=getattr(self.config, "min_successes", 1),
-                min_pack_success_rate=getattr(self.config, "min_pack_success_rate", 0.8),
+                min_successes=self.config.acceptance.min_successes,
+                min_pack_success_rate=self.config.acceptance.min_pack_success_rate,
             )
             existing = self.store.read_recipe(result.recipe_id)
             if (
@@ -587,17 +589,6 @@ class SymphonyFlowEngine:
         """评审结果按包存储；v1 返回最近一次（幂等输入 → 幂等评审）。"""
 
         return [ReviewResult.from_dict(value) for value in self.store.read_reviews(package_id)]
-
-    @classmethod
-    def from_symphony_config(
-        cls,
-        flow_dir: str | Any,
-        config: Any,
-        *,
-        llm_client: Any | None = None,
-    ) -> "SymphonyFlowEngine":
-        return cls(flow_dir, config=config, llm_client=llm_client)
-
 
 __all__ = [
     "DistillReport",

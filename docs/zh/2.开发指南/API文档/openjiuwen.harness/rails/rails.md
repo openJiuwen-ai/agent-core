@@ -57,13 +57,14 @@ Rails 的回调根据事件类型自动路由：
 
 ## 交互式对话的外部记忆
 
-`JiuwenMemoryRail` 与 `AskUserRail` 一起挂载时，将原始请求、用户补充和已接受的提问回答
+`JiuwenMemoryRail` 或 `JiuwenMemoryCodingRail` 与 `AskUserRail` 一起挂载时，将原始请求、用户补充和已接受的提问回答
 作为一个逻辑轮次，在最终回复后提交一次 `sync_turn`。连续中断期间只暂存；恢复调用需沿用
 同一个 Session 或 `conversation_id`。普通新任务不会继承已结束轮次的材料。
 
 暂存用户文本最多 16,000 字符，超限保留原请求首尾和最近能放入的完整问答，并标记截断。
-每个 rail 最多缓存 128 个会话；30 分钟未活动的记录在后续前台调用中淘汰。
-暂存不持久化，rail 重建、进程重启或调用 `end_session()` 后无法续接此前未完成轮次。
+Work 每个 Rail、Coding 每个挂载 Agent 最多缓存 128 个会话；30 分钟未活动的记录在后续前台调用中淘汰。
+Coding 即使共用 Provider 也分别保留各 Agent 的未完成轮次；卸载只清理对应 Agent。
+暂存不持久化，rail 重建、进程重启或 Work 调用 `end_session()` 后无法续接此前未完成轮次。
 记忆服务的抽取、超时和失败处理仍由既有 provider 链路负责。
 
 ## 在线 Skill 演进

@@ -166,12 +166,14 @@ def document_modules(doc: Document) -> list[str]:
     return names or [generate_index.UNCLASSIFIED]
 
 
-def index_row(doc: Document, parent: Path, designs: dict[str, Document], with_files: bool) -> str:
+def index_row(doc: Document, parent: Path, designs: dict[str, Document]) -> str:
     """Render one source document without altering author or design metadata.
 
     The module column is omitted because rows are already grouped by module and a
     cross-module document is repeated in every group; listing modules again would
-    make one metadata edit rewrite every copy of the row.
+    make one metadata edit rewrite every copy of the row. Code files stay in the
+    source frontmatter only: they are long, change often and would be repeated
+    for every module group.
     """
     data = doc.metadata
     label = cell(data.get("id", doc.path.stem))
@@ -182,14 +184,12 @@ def index_row(doc: Document, parent: Path, designs: dict[str, Document], with_fi
         cell(data.get("type", "说明")),
         cell(data.get("title")),
         author,
+        relation,
     ]
-    if with_files:
-        fields.append(cell(data.get("files")))
-    fields.append(relation)
     return "| " + " | ".join(fields) + " |"
 
 
-def render_index(path: Path, title: str, docs: list[Document], designs: dict[str, Document], with_files: bool) -> str:
+def render_index(path: Path, title: str, docs: list[Document], designs: dict[str, Document]) -> str:
     """Generate module navigation and document listings without global totals.
 
     Args:
@@ -197,8 +197,6 @@ def render_index(path: Path, title: str, docs: list[Document], designs: dict[str
         title: Index title used for both frontmatter and heading.
         docs: Source documents to list.
         designs: Design documents keyed by id, used to resolve design links.
-        with_files: Whether to include the code-file column; the root index omits
-            it and leaves file details to the per-section indexes.
     """
     unique_docs = list({doc.path: doc for doc in docs}.values())
     grouped: dict[str, list[Document]] = {}
@@ -206,7 +204,7 @@ def render_index(path: Path, title: str, docs: list[Document], designs: dict[str
         for name in document_modules(doc):
             grouped.setdefault(name, []).append(doc)
     names = sorted(grouped, key=lambda name: (name == generate_index.UNCLASSIFIED, name))
-    columns = ["ID / 文档", "类型", "标题", "作者"] + (["代码文件"] if with_files else []) + ["关联 D"]
+    columns = ["ID / 文档", "类型", "标题", "作者", "关联 D"]
     lines = [
         generate_index.index_header(title).rstrip(), "", f"# {title}", "",
         "由 sync_documents.py 从文档 frontmatter 自动生成；请修改源文档后重新生成，不手工维护。", "",
@@ -231,7 +229,7 @@ def render_index(path: Path, title: str, docs: list[Document], designs: dict[str
             str(doc.metadata.get("id", doc.path.stem)),
             doc.path.as_posix(),
         ))
-        lines.extend(index_row(doc, path.parent, designs, with_files) for doc in ordered)
+        lines.extend(index_row(doc, path.parent, designs) for doc in ordered)
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -259,9 +257,9 @@ def synchronize(root: Path, identity: GitIdentity, current_document: Path | None
     for section in ("features", "bugfix", "specs"):
         path = root / section / "INDEX.md"
         section_docs = [doc for doc in docs if doc.section == section]
-        writes[path] = render_index(path, _NAMES[section] + "索引", section_docs, designs, with_files=True)
+        writes[path] = render_index(path, _NAMES[section] + "索引", section_docs, designs)
     root_docs = [doc for doc in docs if doc.section != "testing"]
-    writes[root / "INDEX.md"] = render_index(root / "INDEX.md", "D/F/B/S 文档总索引", root_docs, designs, with_files=False)
+    writes[root / "INDEX.md"] = render_index(root / "INDEX.md", "D/F/B/S 文档总索引", root_docs, designs)
     design_root = root / "designs"
     if design_root.is_dir():
         records = lib_frontmatter.iter_docs(design_root)

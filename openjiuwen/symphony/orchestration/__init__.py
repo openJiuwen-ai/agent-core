@@ -1,6 +1,5 @@
 """Capability orchestration public APIs."""
 
-from openjiuwen.symphony.orchestration.config import OrchestrationConfig, SymphonyFlowConfig
 from openjiuwen.symphony.orchestration.contracts import (
     CapabilityGraph,
     GraphArtifactStatus,
@@ -18,10 +17,8 @@ __all__ = [
     "GraphBuildResult",
     "GraphMutationDelta",
     "GraphMutationResult",
-    "OrchestrationConfig",
     "OrchestrationPlan",
     "OrchestrationProgress",
     "OrchestrationService",
     "PrepareArtifactHook",
-    "SymphonyFlowConfig",
 ]
