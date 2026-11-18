@@ -85,6 +85,18 @@ class InteractiveNode(WorkflowComponent):
         yield result
 
 
+class StreamNodeWithFinalOutput(WorkflowComponent):
+    """Streams frames and also exposes get_stream_output, mirroring the
+    LLMComponent / SubWorkflowComponent surface (bug #2319 coverage)."""
+
+    async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
+        for v in inputs.get("array"):
+            yield {"output": v}
+
+    def get_stream_output(self) -> dict:
+        return {"output": "final-answer"}
+
+
 class FinalizeRecorderHandler(TraceExtWorkflowHandler):
     """Extension handler recording every workflow tracer event per invoke_id.
 
@@ -172,7 +184,8 @@ class TestTraceWorkflow:
                                                        'outputs': None, 'streamOutputs': None, 'workflowId': 'test',
                                                        'componentId': 'end'},
                          {'invokeId': 'end', 'status': 'finish', 'inputs': None,
-                          'streamInputs': [{'output': 1}, {'output': 2}, {'output': 3}], 'outputs': None,
+                          'streamInputs': [{'output': 1}, {'output': 2}, {'output': 3}],
+                          'outputs': {'output': [{'output': 1}, {'output': 2}, {'output': 3}]},
                           'streamOutputs': [
                               {'type': 'end node stream', 'index': 0, 'payload': {'output': {'output': 1}}},
                               {'type': 'end node stream', 'index': 1, 'payload': {'output': {'output': 2}}},
@@ -197,6 +210,100 @@ class TestTraceWorkflow:
 
             chunks.append(payload)
         assert chunks == expect_chunks
+
+    async def test_stream_component_traces_final_output(self):
+        """Streaming nodes exposing get_stream_output must emit on_post_invoke with the final result (bug #2319)."""
+        handler = FinalizeRecorderHandler()
+        TracerHandlerRegistry.register_handler("finalize_recorder", handler)
+        try:
+            workflow = Workflow(card=WorkflowCard(id="test"))
+            workflow.set_start_comp("start", Start())
+            workflow.add_workflow_comp("producer", StreamNodeWithFinalOutput(), inputs_schema={"array": "${inputs}"})
+            workflow.set_end_comp(
+                "end", End(), stream_inputs_schema={"output": "${producer.output}"}, response_mode="streaming"
+            )
+            workflow.add_connection("start", "producer")
+            workflow.add_stream_connection("producer", "end")
+
+            async for _ in workflow.stream(
+                inputs={"inputs": [1, 2, 3]}, session=create_workflow_session(), stream_modes=[BaseStreamMode.TRACE]
+            ):
+                pass
+        finally:
+            TracerHandlerRegistry.unregister_handler("finalize_recorder")
+
+        post_invokes = [
+            kwargs
+            for name, kwargs in handler.events
+            if name == "on_post_invoke" and kwargs.get("invoke_id") == "producer"
+        ]
+        assert len(post_invokes) == 1
+        assert post_invokes[0].get("outputs") == {"output": "final-answer"}
+
+    async def test_end_node_traces_final_output(self):
+        """Streaming end node (deferred span) exposes its final output via on_post_invoke (bug #2319)."""
+        handler = FinalizeRecorderHandler()
+        TracerHandlerRegistry.register_handler("finalize_recorder", handler)
+        try:
+            workflow = Workflow(card=WorkflowCard(id="test"))
+            workflow.set_start_comp("start", Start())
+            workflow.add_workflow_comp("producer", Producer(), inputs_schema={"array": "${inputs}"})
+            workflow.set_end_comp(
+                "end", End({"responseTemplate": "结果{{output}}"}),
+                stream_inputs_schema={"output": "${producer.output}"},
+                response_mode="streaming",
+            )
+            workflow.add_connection("start", "producer")
+            workflow.add_stream_connection("producer", "end")
+
+            async for _ in workflow.stream(
+                inputs={"inputs": [1, 2, 3]}, session=create_workflow_session(), stream_modes=[BaseStreamMode.TRACE]
+            ):
+                pass
+        finally:
+            TracerHandlerRegistry.unregister_handler("finalize_recorder")
+
+        post_invokes = [
+            kwargs
+            for name, kwargs in handler.events
+            if name == "on_post_invoke" and kwargs.get("invoke_id") == "end"
+        ]
+        assert len(post_invokes) == 1
+        assert post_invokes[0].get("outputs") == {"response": "结果123"}
+
+    async def test_end_node_outputs_no_cross_run_leak(self):
+        """A reused End instance must not leak a previous run's fragments into its output."""
+        handler = FinalizeRecorderHandler()
+        TracerHandlerRegistry.register_handler("finalize_recorder", handler)
+        try:
+            workflow = Workflow(card=WorkflowCard(id="test"))
+            workflow.set_start_comp("start", Start())
+            workflow.add_workflow_comp("producer", Producer(), inputs_schema={"array": "${inputs}"})
+            workflow.set_end_comp(
+                "end", End(), stream_inputs_schema={"output": "${producer.output}"}, response_mode="streaming"
+            )
+            workflow.add_connection("start", "producer")
+            workflow.add_stream_connection("producer", "end")
+
+            async def run(inputs):
+                async for _ in workflow.stream(
+                    inputs={"inputs": inputs}, session=create_workflow_session(), stream_modes=[BaseStreamMode.TRACE]
+                ):
+                    pass
+
+            await run([1, 2, 3])
+            await run([4, 5])
+        finally:
+            TracerHandlerRegistry.unregister_handler("finalize_recorder")
+
+        end_outputs = [
+            kwargs.get("outputs")
+            for name, kwargs in handler.events
+            if name == "on_post_invoke" and kwargs.get("invoke_id") == "end"
+        ]
+        assert len(end_outputs) == 2
+        # Second run's output must not carry the first run's [1, 2, 3] fragments.
+        assert end_outputs[-1] == {"output": [{"output": 4}, {"output": 5}]}
 
     async def test_seq_exec_stream_workflow_with_tracer(self):
         """
@@ -744,7 +851,7 @@ class TestTraceWorkflow:
                          {'invokeId': 'end', 'status': 'start', 'inputs': {'output': 'hello'}, 'streamInputs': None,
                           'outputs': None, 'streamOutputs': None, 'workflowId': 'test', 'componentId': 'end'},
                          {'invokeId': 'end', 'status': 'finish', 'inputs': {'output': 'hello'},
-                          'streamInputs': None, 'outputs': None,
+                          'streamInputs': None, 'outputs': {'output': [{'output': 'hello'}]},
                           'streamOutputs': [
                               {'type': 'end node stream', 'index': 0, 'payload': {'output': {'output': 'hello'}}}],
                           'workflowId': 'test', 'componentId': 'end'},

@@ -49,12 +49,42 @@ class End(WorkflowComponent):
             self._template = None
         self._batch_template = None
         self._mix = False
+        # Streaming final-output accumulation (bug #2319): lets the end node
+        # expose a canonical output on the stream path (STREAM/TRANSFORM) so
+        # on_post_invoke can trace it, matching the batch path (invoke/collect).
+        # Template ends accumulate response fragments keyed by render index;
+        # template-less ends accumulate output chunks in emission order.
+        self._stream_response_parts: dict[int, str] = {}
+        self._stream_chunks: list = []
 
     def set_mix(self):
         self._mix = True
         if self._template:
             self._template.set_data_source_count(2)
             self._template.reset()
+
+    def get_stream_output(self) -> Output:
+        """Return the final output accumulated during streaming, or None.
+
+        Aligns the stream path's canonical output with the batch path:
+        template ends produce ``{"response": <joined fragments>}``, template-less
+        ends produce ``{"output": <chunks>}`` (as ``collect`` does).
+
+        Consume-once: the accumulated fragments/chunks are cleared after being
+        assembled, so a reused End instance never leaks a previous run's
+        fragments into the current run's canonical output.
+        """
+        if self._template is not None:
+            if not self._stream_response_parts:
+                return None
+            parts = [self._stream_response_parts[i] for i in sorted(self._stream_response_parts)]
+            self._stream_response_parts.clear()
+            return {"response": "".join(parts)}
+        if not self._stream_chunks:
+            return None
+        chunks = list(self._stream_chunks)
+        self._stream_chunks.clear()
+        return {"output": chunks}
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         workflow_logger.debug(
@@ -110,14 +140,19 @@ class End(WorkflowComponent):
                                                          )
                 async for frame in generator:
                     frame_count += 1
-                    yield OutputSchema(type=END_NODE_STREAM, index=frame.get("index"),
-                                       payload=dict(response=frame.get("data")))
+                    index = frame.get("index")
+                    data = frame.get("data")
+                    if data is not None:
+                        self._stream_response_parts[index] = str(data)
+                    yield OutputSchema(type=END_NODE_STREAM, index=index, payload=dict(response=data))
             else:
                 if isinstance(inputs, dict):
                     for key, value in inputs.items():
+                        self._stream_chunks.append({key: value})
                         yield dict(output={key: value})
                         frame_count += 1
                 else:
+                    self._stream_chunks.append({"output": inputs})
                     yield dict(output=inputs)
                     frame_count += 1
             workflow_logger.debug(
@@ -157,16 +192,21 @@ class End(WorkflowComponent):
                                                      session.get_env(END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY)
                                                      )
             async for frame in generator:
-                yield OutputSchema(type=END_NODE_STREAM, index=frame.get("index"),
-                                   payload=dict(response=frame.get("data")))
+                index = frame.get("index")
+                data = frame.get("data")
+                if data is not None:
+                    self._stream_response_parts[index] = str(data)
+                yield OutputSchema(type=END_NODE_STREAM, index=index, payload=dict(response=data))
                 frame_count += 1
         else:
             for (path, value) in extract_leaf_nodes(inputs):
                 if isinstance(value, AsyncGenerator):
                     async for frame in value:
+                        self._stream_chunks.append({format_path(path): frame})
                         yield dict(output={format_path(path): frame})
                         frame_count += 1
                 else:
+                    self._stream_chunks.append({format_path(path): value})
                     yield dict(output={format_path(path): value})
                     frame_count += 1
         workflow_logger.debug(
