@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""End-to-end tests for the yuanrong shell-execution paths.
+"""End-to-end tests for the ADX shell-execution paths.
 
 Gated on ``RUN_YUANRONG_TEST=1``.
 """
@@ -20,14 +20,14 @@ from openjiuwen.core.sys_operation.config import ContainerScope, PreDeployLaunch
 from openjiuwen.core.sys_operation.result import ExecuteCmdStreamResult
 from openjiuwen.core.sys_operation.sandbox.gateway.gateway_client import SandboxGatewayClient
 
-requires_yuanrong = pytest.mark.skipif(
+requires_adx = pytest.mark.skipif(
     os.environ.get("RUN_YUANRONG_TEST") != "1",
-    reason="Requires running YuanRong cluster",
+    reason="Requires a running ADX HTTP service",
 )
 
 
 def _stdout_tail(stdout: Optional[str], n: int = 1) -> str:
-    """YuanRong execute may prepend banner lines; use trailing non-empty lines as payload."""
+    """ADX execute may prepend banner lines; use trailing non-empty lines as payload."""
     lines = [line for line in (stdout or "").splitlines() if line.strip()]
     if not lines:
         return ""
@@ -66,7 +66,7 @@ async def _remove_sys_operation_with_sandbox_release(sys_operation_id: str) -> N
 @pytest_asyncio.fixture(name="sys_op")
 async def sys_op_fixture() -> AsyncIterator[SysOperation]:
     await Runner.start()
-    card_id = f"yuanrong_shell_op_{uuid.uuid4().hex[:8]}"
+    card_id = f"adx_shell_op_{uuid.uuid4().hex[:8]}"
     card = SysOperationCard(
         id=card_id,
         mode=OperationMode.SANDBOX,
@@ -77,7 +77,7 @@ async def sys_op_fixture() -> AsyncIterator[SysOperation]:
             ),
             launcher_config=PreDeployLauncherConfig(
                 base_url=_base_url(),
-                sandbox_type="yuanrong",
+                sandbox_type="adx",
                 idle_ttl_seconds=600,
                 extra_params=_extra_params(),
             ),
@@ -94,7 +94,7 @@ async def sys_op_fixture() -> AsyncIterator[SysOperation]:
 
 
 @pytest.mark.asyncio
-@requires_yuanrong
+@requires_adx
 async def test_shell_basic_execution(sys_op):
     res = await sys_op.shell().execute_cmd(command="echo hello world")
     assert res.code == StatusCode.SUCCESS.code
@@ -111,7 +111,7 @@ async def test_shell_basic_execution(sys_op):
 
 
 @pytest.mark.asyncio
-@requires_yuanrong
+@requires_adx
 async def test_shell_environment_variables(sys_op):
     env = {"TEST_VAR": "custom_value"}
     res = await sys_op.shell().execute_cmd(command="echo $TEST_VAR", environment=env)
@@ -120,16 +120,16 @@ async def test_shell_environment_variables(sys_op):
 
 
 @pytest.mark.asyncio
-@requires_yuanrong
+@requires_adx
 async def test_shell_cwd(sys_op):
-    await sys_op.shell().execute_cmd(command="mkdir -p /tmp/yuanrong_shell_cwd/subdir")
-    res = await sys_op.shell().execute_cmd(command="pwd", cwd="/tmp/yuanrong_shell_cwd/subdir")
+    await sys_op.shell().execute_cmd(command="mkdir -p /tmp/adx_shell_cwd/subdir")
+    res = await sys_op.shell().execute_cmd(command="pwd", cwd="/tmp/adx_shell_cwd/subdir")
     assert res.code == StatusCode.SUCCESS.code
-    assert _stdout_tail(res.data.stdout) == "/tmp/yuanrong_shell_cwd/subdir"
+    assert _stdout_tail(res.data.stdout) == "/tmp/adx_shell_cwd/subdir"
 
 
 @pytest.mark.asyncio
-@requires_yuanrong
+@requires_adx
 async def test_shell_timeout(sys_op):
     res = await sys_op.shell().execute_cmd(command="python3 -c \"import time; time.sleep(5)\"", timeout=1)
     assert res.code == StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.code
@@ -137,7 +137,7 @@ async def test_shell_timeout(sys_op):
 
 
 @pytest.mark.asyncio
-@requires_yuanrong
+@requires_adx
 async def test_shell_list_tools(sys_op):
     tools = sys_op.shell().list_tools()
     assert len(tools) == 3
@@ -148,7 +148,7 @@ async def test_shell_list_tools(sys_op):
 
 
 @pytest.mark.asyncio
-@requires_yuanrong
+@requires_adx
 async def test_execute_cmd_stream_basic(sys_op):
     cmd = "echo chunk1; echo chunk2; echo error_chunk 1>&2"
     stream_results = []
@@ -172,7 +172,7 @@ async def test_execute_cmd_stream_basic(sys_op):
 
 
 @pytest.mark.asyncio
-@requires_yuanrong
+@requires_adx
 async def test_execute_cmd_stream_timeout(sys_op):
     stream_results = []
     async for result in sys_op.shell().execute_cmd_stream(command="sleep 10", timeout=1):
@@ -188,7 +188,7 @@ async def test_execute_cmd_stream_timeout(sys_op):
 
 
 @pytest.mark.asyncio
-@requires_yuanrong
+@requires_adx
 async def test_execute_cmd_stream_empty_command(sys_op):
     stream_results = []
     async for result in sys_op.shell().execute_cmd_stream(command=""):
@@ -203,7 +203,7 @@ async def test_execute_cmd_stream_empty_command(sys_op):
 
 
 @pytest.mark.asyncio
-@requires_yuanrong
+@requires_adx
 async def test_execute_cmd_empty_command(sys_op):
     res = await sys_op.shell().execute_cmd(command="   ")
     assert res.code == StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.code

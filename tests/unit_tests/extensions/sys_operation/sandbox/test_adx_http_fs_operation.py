@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""FS provider tests for yuanrong.
+"""FS provider tests for ADX.
 
 Unit helpers are ungated. End-to-end FS paths require ``RUN_YUANRONG_TEST=1``.
 """
@@ -20,9 +20,9 @@ from openjiuwen.core.sys_operation import OperationMode, SandboxGatewayConfig, S
 from openjiuwen.core.sys_operation.config import ContainerScope, PreDeployLauncherConfig, SandboxIsolationConfig
 from openjiuwen.core.sys_operation.sandbox.gateway.gateway_client import SandboxGatewayClient
 
-requires_yuanrong = pytest.mark.skipif(
+requires_adx = pytest.mark.skipif(
     os.environ.get("RUN_YUANRONG_TEST") != "1",
-    reason="Requires running YuanRong cluster",
+    reason="Requires a running ADX HTTP service",
 )
 
 SANDBOX_BASE_PATH = "/tmp"
@@ -60,7 +60,7 @@ async def _remove_sys_operation_with_sandbox_release(sys_operation_id: str) -> N
 @pytest_asyncio.fixture(name="sys_op")
 async def sys_op_fixture() -> AsyncIterator[SysOperation]:
     await Runner.start()
-    card_id = f"yuanrong_fs_op_{uuid.uuid4().hex[:8]}"
+    card_id = f"adx_fs_op_{uuid.uuid4().hex[:8]}"
     card = SysOperationCard(
         id=card_id,
         mode=OperationMode.SANDBOX,
@@ -71,7 +71,7 @@ async def sys_op_fixture() -> AsyncIterator[SysOperation]:
             ),
             launcher_config=PreDeployLauncherConfig(
                 base_url=_base_url(),
-                sandbox_type="yuanrong",
+                sandbox_type="adx",
                 idle_ttl_seconds=600,
                 extra_params=_extra_params(),
             ),
@@ -88,7 +88,7 @@ async def sys_op_fixture() -> AsyncIterator[SysOperation]:
 
 
 @pytest.mark.asyncio
-@requires_yuanrong
+@requires_adx
 async def test_fs_read_write(sys_op):
     file_name = f"{SANDBOX_BASE_PATH}/test_basics_{uuid.uuid4().hex[:8]}.txt"
     content = "Hello, world!\nLine 2"
@@ -124,7 +124,7 @@ async def test_fs_read_write(sys_op):
 
 
 @pytest.mark.asyncio
-@requires_yuanrong
+@requires_adx
 async def test_fs_read_head_tail(sys_op):
     multi_line_file = f"{SANDBOX_BASE_PATH}/test_head_tail_{uuid.uuid4().hex[:8]}.txt"
     multi_content = "Line 1\nLine 2\nLine 3\nLine 4\nLine 5"
@@ -140,10 +140,10 @@ async def test_fs_read_head_tail(sys_op):
 
 
 @pytest.mark.asyncio
-@requires_yuanrong
+@requires_adx
 async def test_fs_list_and_search(sys_op):
     marker = uuid.uuid4().hex[:8]
-    root = f"{SANDBOX_BASE_PATH}/yuanrong_fs_list_{marker}"
+    root = f"{SANDBOX_BASE_PATH}/adx_fs_list_{marker}"
     await sys_op.shell().execute_cmd(f"mkdir -p {root}/sub")
     await sys_op.fs().write_file(f"{root}/a.py", "print(1)", prepend_newline=False)
     await sys_op.fs().write_file(f"{root}/b.txt", "hello", prepend_newline=False)
@@ -168,12 +168,12 @@ async def test_fs_list_and_search(sys_op):
 
 
 @pytest.mark.asyncio
-@requires_yuanrong
+@requires_adx
 async def test_fs_upload_download(sys_op, tmp_path: Path):
     marker = uuid.uuid4().hex[:8]
     local_src = tmp_path / f"upload_{marker}.txt"
     local_dst = tmp_path / f"download_{marker}.txt"
-    remote = f"{SANDBOX_BASE_PATH}/yuanrong_upload_{marker}.txt"
+    remote = f"{SANDBOX_BASE_PATH}/adx_upload_{marker}.txt"
     payload = f"upload-payload-{marker}"
     local_src.write_text(payload, encoding="utf-8")
 
@@ -185,10 +185,10 @@ async def test_fs_upload_download(sys_op, tmp_path: Path):
     assert local_dst.read_text(encoding="utf-8") == payload
 
 
-def test_adx_create_body_matches_sdk_kwargs():
+def test_adx_http_request_and_response_contract():
     import json
 
-    from openjiuwen.extensions.sys_operation.sandbox.providers.yuanrong import (
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx import (
         _adx_create_body,
         _decode_read_payload,
         _exec_args,
@@ -219,7 +219,8 @@ def test_adx_create_body_matches_sdk_kwargs():
         "mounts": [{"source": "/host", "target": "/ws"}],
     }
     assert "image" not in body
-    assert "mounts" not in body
+    assert body["mounts"] == [{"type": "bind", "host_path": "/host", "target": "/ws", "options": ["rw"]}]
+    assert body["cwd"] == "/ws"
     assert "workdir" not in body
 
     overridden = _adx_create_body(
@@ -239,6 +240,25 @@ def test_adx_create_body_matches_sdk_kwargs():
     assert plain["runtime"] == "supervisor"
     quoted = _adx_create_body({}, "docker'")
     assert quoted["runtime"] == "docker"
+
+    native = _adx_create_body({
+        "runtime": "runsc",
+        "rootfs_template": "tool-runtime",
+        "cpu_limit": 2000,
+        "mem_limit": 2048,
+        "user": 1001,
+        "group": 1002,
+        "mounts": [{"type": "bind", "host_path": "/shared/workspace", "target": "/workspace", "options": ["rw"]}],
+        "network": {"blockNetwork": True},
+        "env": {"MODE": "test"},
+    }, "supervisor")
+    assert native["runtime"] == "runsc"
+    assert native["rootfs"] == {"type": "template", "name": "tool-runtime"}
+    assert native["cpu_limit"] == 2000 and native["mem_limit"] == 2048
+    assert (native["user"], native["group"]) == ("1001", "1002")
+    assert native["mounts"][0]["host_path"] == "/shared/workspace"
+    assert native["network"] == {"blockNetwork": True}
+    assert native["env"] == {"MODE": "test"}
 
     args = _exec_args("echo hi", cwd="/tmp", timeout=3, environment={"FOO": "bar"})
     assert args["cwd"] == "/tmp"
@@ -290,10 +310,11 @@ def test_adx_create_body_matches_sdk_kwargs():
         raise AssertionError("search error envelope should raise")
 
 
+@pytest.mark.parametrize("sandbox_type", ["adx", "yuanrong"])
 @pytest.mark.asyncio
-async def test_launcher_delete_dispatches_yuanrong(monkeypatch):
+async def test_launcher_delete_dispatches_adx(monkeypatch, sandbox_type):
     from openjiuwen.core.sys_operation.sandbox.launchers.pre_deployment_launcher import PreDeploymentLauncher
-    from openjiuwen.extensions.sys_operation.sandbox.providers import yuanrong as yr_mod
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
 
     calls: list[dict] = []
 
@@ -301,14 +322,30 @@ async def test_launcher_delete_dispatches_yuanrong(monkeypatch):
         calls.append(kwargs)
         return []
 
-    monkeypatch.setattr(yr_mod, "delete_yuanrong_sandbox", _fake_delete)
+    monkeypatch.setattr(adx, "delete_adx_sandbox", _fake_delete)
     launcher = PreDeploymentLauncher()
     await launcher.delete(
         "",
-        sandbox_type="yuanrong",
+        sandbox_type=sandbox_type,
         base_url="http://127.0.0.1:18093",
-        isolation_key="custom_pre_deploy_yuanrong_agent1",
+        isolation_key=f"custom_pre_deploy_{sandbox_type}_agent1",
     )
     assert len(calls) == 1
-    assert calls[0]["shared_key"] == "http://127.0.0.1:18093|custom_pre_deploy_yuanrong_agent1"
+    assert calls[0]["shared_key"] == f"http://127.0.0.1:18093|custom_pre_deploy_{sandbox_type}_agent1"
     assert calls[0]["reason"] == "teardown"
+
+
+def test_legacy_adx_provider_aliases():
+    from openjiuwen.core.sys_operation.sandbox.sandbox_registry import SandboxRegistry
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx, yuanrong
+
+    for operation, provider in (
+        ("fs", adx.AdxFSProvider),
+        ("shell", adx.AdxShellProvider),
+        ("code", adx.AdxCodeProvider),
+    ):
+        assert SandboxRegistry.get_provider_cls("adx", operation) is provider
+        assert SandboxRegistry.get_provider_cls("yuanrong", operation) is provider
+
+    assert yuanrong.build_yuanrong_shared_scope_key is adx.build_adx_shared_scope_key
+    assert yuanrong.delete_yuanrong_sandbox is adx.delete_adx_sandbox
