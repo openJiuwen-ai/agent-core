@@ -314,6 +314,7 @@ async def test_an_empty_time_filter_falls_back_to_all_deliverables(tmp_path, mon
     await pipeline.score_workspace("t", tmp_path, {}, RewardOptions(since_ns=1, until_ns=2))
     assert seen["deliverable"] == {"old.md": "old body"}
     assert any("时间范围" in warning for warning in seen["options"].warnings)
+    assert (seen["options"].since_ns, seen["options"].until_ns) == (None, None)   # checks read the same files
 
 
 @pytest.mark.asyncio
