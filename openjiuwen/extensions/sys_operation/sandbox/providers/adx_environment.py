@@ -15,6 +15,14 @@ with ``ingress_url`` and optional ``node_id``. It is read before every environme
 lookup; malformed or missing configured context is an error. Node changes select
 a fresh SDK connection scope even when bridge URLs are identical. Serialized
 traffic and DNS policies are rehydrated through the public SDK types.
+
+Idle lifecycle settings are passed through to the SDK create call:
+``idle_action`` (``delete`` or ``pause``), ``pause_policy`` (``retention``,
+``timeoutSeconds`` and ``storage``) and ``failover``. Non-default lifecycle
+settings participate in the environment scope, so changing them selects a new
+environment instead of silently keeping an environment created with the old
+settings. A ``paused`` environment stays cached: the first data-plane operation
+wakes it and keeps the retained checkpoint.
 """
 
 from __future__ import annotations
@@ -58,6 +66,76 @@ def _restart_policy(value: Any) -> Any:
         initial_backoff_seconds=value["initialBackoffSeconds"],
         max_backoff_seconds=value["maxBackoffSeconds"],
     )
+
+
+_IDLE_ACTIONS = ("delete", "pause")
+_PAUSE_STORAGE = ("configured", "local", "shared")
+
+
+def _idle_action(value: Any) -> Any:
+    """Convert a serializable idle action into the public SDK enum."""
+    from adx_environment import IdleAction
+
+    if not isinstance(value, str) or value not in _IDLE_ACTIONS:
+        raise ValueError("ADX tool idle_action must be one of: " + ", ".join(_IDLE_ACTIONS))
+    return IdleAction(value)
+
+
+def _pause_policy(value: Any) -> Any:
+    """Convert serializable pause settings into the public SDK policy types."""
+    from adx_environment import CheckpointStorage, PausePolicy, RetentionPolicy
+
+    if not isinstance(value, dict):
+        raise ValueError("ADX tool pause_policy must be a mapping")
+    unknown = sorted(set(value) - {"retention", "timeoutSeconds", "storage"})
+    if unknown:
+        raise ValueError("ADX tool pause_policy has unsupported fields: " + ", ".join(unknown))
+    arguments: dict[str, Any] = {}
+    retention = value.get("retention")
+    if retention is not None:
+        if not isinstance(retention, dict) or set(retention) - {"kind", "ttlSeconds"}:
+            raise ValueError("ADX tool pause_policy.retention must contain kind and optional ttlSeconds")
+        kind = retention.get("kind")
+        ttl = retention.get("ttlSeconds")
+        if kind == "forever" and "ttlSeconds" not in retention:
+            arguments["retention"] = RetentionPolicy.forever()
+        elif kind == "ttl" and isinstance(ttl, int) and not isinstance(ttl, bool):
+            arguments["retention"] = RetentionPolicy.for_seconds(ttl)
+        else:
+            raise ValueError("ADX tool pause_policy.retention requires kind 'forever' or 'ttl' with ttlSeconds")
+    storage = value.get("storage")
+    if storage is not None:
+        if storage not in _PAUSE_STORAGE:
+            raise ValueError("ADX tool pause_policy.storage must be one of: " + ", ".join(_PAUSE_STORAGE))
+        arguments["storage"] = CheckpointStorage(storage)
+    if "timeoutSeconds" in value:
+        timeout = value["timeoutSeconds"]
+        if isinstance(timeout, bool) or not isinstance(timeout, int):
+            raise ValueError("ADX tool pause_policy.timeoutSeconds must be a positive integer")
+        arguments["timeout_seconds"] = timeout
+    return PausePolicy(**arguments)
+
+
+def _failover(value: Any) -> bool:
+    """Validate the same-node recovery flag before handing it to the SDK."""
+    if not isinstance(value, bool):
+        raise ValueError("ADX tool failover must be a boolean")
+    return value
+
+
+def _lifecycle_signature(settings: dict[str, Any]) -> str:
+    """Separate cached environments when create-time lifecycle settings change."""
+    lifecycle: dict[str, Any] = {}
+    if settings.get("idle_action") not in (None, "delete"):
+        lifecycle["idle_action"] = settings["idle_action"]
+        if settings.get("pause_policy") is not None:
+            lifecycle["pause_policy"] = settings["pause_policy"]
+    if settings.get("failover") not in (None, False):
+        lifecycle["failover"] = settings["failover"]
+    if not lifecycle:
+        return ""
+    payload = json.dumps(lifecycle, sort_keys=True, separators=(",", ":"))
+    return "|lifecycle=" + hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _network_policy(configuration: dict[str, Any]) -> Any:
@@ -135,6 +213,10 @@ class _AdxEnvironmentBackend:
             artifact = json.dumps({"type": "local", "path": path}, sort_keys=True)
             self._scope_suffix += "|rootfs=" + hashlib.sha256(artifact.encode()).hexdigest()
             self._scope = build_adx_shared_scope_key(endpoint.base_url, endpoint.isolation_key) + self._scope_suffix
+        lifecycle = _lifecycle_signature(self._extra)
+        if lifecycle:
+            self._scope_suffix += lifecycle
+            self._scope = build_adx_shared_scope_key(endpoint.base_url, endpoint.isolation_key) + self._scope_suffix
 
     def _resolve_endpoint(self) -> tuple[SplitResult, str]:
         base_url = self.endpoint.base_url
@@ -179,6 +261,10 @@ class _AdxEnvironmentBackend:
                 f"ADX tool Environment {instance.id} is failed; ADX owns automatic restart; "
                 "retry after recovery or inspect the Environment after retry exhaustion"
             )
+        if state == "paused":
+            # The retained checkpoint belongs to this execution. Keep the
+            # cached Environment so the first data-plane operation wakes it.
+            return False
         return state in ("stopped", "deleted", "failed")
 
     def _get_environment(self) -> Any:
@@ -187,6 +273,7 @@ class _AdxEnvironmentBackend:
             ConnectionConfig,
             Environment,
             EnvironmentNotFound,
+            IdleAction,
             Mount,
         )
 
@@ -243,6 +330,19 @@ class _AdxEnvironmentBackend:
             if not kwargs.get("image"):
                 kwargs.pop("image", None)
             kwargs.setdefault("runtime", "runsc")
+            if "idle_action" in self._extra:
+                kwargs["idle_action"] = _idle_action(self._extra["idle_action"])
+            if "pause_policy" in self._extra:
+                kwargs["pause_policy"] = _pause_policy(self._extra["pause_policy"])
+            if "failover" in self._extra:
+                kwargs["failover"] = _failover(self._extra["failover"])
+            if kwargs.get("idle_action") == IdleAction.PAUSE:
+                if kwargs.get("runtime") == "conch":
+                    raise ValueError("ADX tool idle_action=pause is not supported by the conch runtime")
+                if "idle_timeout" in kwargs:
+                    idle_timeout = kwargs["idle_timeout"]
+                    if isinstance(idle_timeout, bool) or not isinstance(idle_timeout, int) or idle_timeout <= 0:
+                        raise ValueError("ADX tool idle_action=pause requires a positive idle_timeout")
             identity = self._scope + self._incarnations.get(self._scope, "")
             kwargs["name"] = "tools-" + hashlib.sha256(identity.encode()).hexdigest()[:40]
             kwargs["mounts"] = [Mount(**mount) for mount in self._extra.get("mounts", [])]
@@ -261,7 +361,13 @@ class _AdxEnvironmentBackend:
             return True
         if shared_key:
             return key.startswith(
-                (shared_key + "|identity=", shared_key + "|node=", shared_key + "|rootfs=", shared_key + "|endpoint=")
+                (
+                    shared_key + "|identity=",
+                    shared_key + "|node=",
+                    shared_key + "|rootfs=",
+                    shared_key + "|endpoint=",
+                    shared_key + "|lifecycle=",
+                )
             )
         if base_url:
             return key.startswith(base_url.rstrip("/") + "|")
