@@ -13,6 +13,7 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_INPUT_MESSAGES,
     GEN_AI_SYSTEM_INSTRUCTIONS,
 )
+from openjiuwen.extensions.observability.sequence_registry import materialize_stated_value
 
 
 def test_system_prompt_is_complete_in_standard_and_trajectory_views() -> None:
@@ -39,8 +40,8 @@ def test_system_prompt_is_complete_in_standard_and_trajectory_views() -> None:
             source_metadata=(None, None),
         )
 
-        instructions = json.loads(span.attributes[GEN_AI_SYSTEM_INSTRUCTIONS])
-        input_messages = json.loads(span.attributes[GEN_AI_INPUT_MESSAGES])
+        instructions = json.loads(materialize_stated_value(span.attributes[GEN_AI_SYSTEM_INSTRUCTIONS]))
+        input_messages = json.loads(materialize_stated_value(span.attributes[GEN_AI_INPUT_MESSAGES]))
         assert instructions[0]["content"] == system_prompt
         assert trajectory_messages[0]["content"] == system_prompt
         assert "OTel attribute truncated" not in trajectory_messages[0]["content"]

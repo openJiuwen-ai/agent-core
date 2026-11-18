@@ -14,10 +14,12 @@ from google.protobuf import json_format
 from opentelemetry.exporter.otlp.proto.common._internal.trace_encoder import encode_spans
 from opentelemetry.sdk.trace import ReadableSpan
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.extensions.observability.content_addressing import (
     AddressedSequence,
     addressable_attributes,
     build_sequence,
+    parse_sequence_reference,
     sequence_reference,
 )
 from openjiuwen.extensions.observability.gen_ai_semconv import (
@@ -25,6 +27,11 @@ from openjiuwen.extensions.observability.gen_ai_semconv import (
     GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_SYSTEM_INSTRUCTIONS,
     GEN_AI_TOOL_DEFINITIONS,
+)
+from openjiuwen.extensions.observability.sequence_registry import (
+    lookup_sequence,
+    materialize_stated_value,
+    unresolvable_placeholder,
 )
 
 
@@ -56,7 +63,27 @@ def _encode_readable_span(span: ReadableSpan) -> bytes:
     request = encode_spans([span])
     payload = json_format.MessageToDict(request, use_integers_for_enums=True)
     _fix_hex_ids(payload)
+    _materialize_addressed_attributes(payload)
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+def _materialize_addressed_attributes(payload: Any) -> None:
+    """State the full value of every restated attribute the payload references.
+
+    The readable encode feeds the JSONL exporter and the live snapshot path,
+    whose consumers receive standalone OTLP documents: a sequence reference
+    names content held by this process's registry, which a standalone
+    document cannot carry along, so this path states what the reference
+    says rather than the reference itself.
+    """
+    for attribute in addressable_attributes(payload, ADDRESSED_ATTRIBUTE_KEYS):
+        value = attribute.get("value")
+        if not isinstance(value, dict):
+            continue
+        stated = value.get("stringValue")
+        if not isinstance(stated, str) or parse_sequence_reference(stated) is None:
+            continue
+        value["stringValue"] = materialize_stated_value(stated)
 
 
 def encode_span_to_otlp_json(span: ReadableSpan) -> bytes:
@@ -90,6 +117,11 @@ def encode_span_with_addressed_sequences(
     already builds a decoded document, so addressing costs one pass over its
     attributes rather than a second parse downstream.
 
+    An attribute the callback handler attached as a sequence reference is
+    resolved from the registry instead of being rebuilt: its content was
+    registered before the reference was stated, so resolving yields the same
+    chain building the value from scratch would.
+
     Args:
         span: The frozen span to encode.
 
@@ -107,6 +139,24 @@ def encode_span_with_addressed_sequences(
             continue
         stated = value.get("stringValue")
         if not isinstance(stated, str):
+            continue
+        referenced = parse_sequence_reference(stated)
+        if referenced is not None:
+            # Attached as a reference at capture time: the registry holds the
+            # content, so resolve it here and the record carries what its
+            # readers rebuild. Stating the reference itself is already done.
+            resolved = lookup_sequence(referenced[0])
+            if resolved is None:
+                # The registry no longer holds the content (TTL reclaimed it
+                # with no consumer touching it for hours). State the shared
+                # placeholder so every encode path declares the same loss.
+                logger.warning(
+                    "sequence reference {} is not registered; stating an unresolvable placeholder",
+                    referenced[0],
+                )
+                value["stringValue"] = unresolvable_placeholder(referenced[0], referenced[1])
+            else:
+                sequences.append(resolved)
             continue
         sequence = build_sequence(str(attribute.get("key") or ""), stated)
         if sequence is None:
