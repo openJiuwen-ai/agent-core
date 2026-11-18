@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
@@ -17,6 +17,10 @@ class GraphArtifactStatus:
     generated_at: str | None = None
     schema_version: str | None = None
     building: bool = False
+    enabled: bool = True
+    build_id: str = ""
+    counts: dict[str, int] = field(default_factory=dict)
+    diagnostics: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -26,6 +30,9 @@ class GraphBuildResult:
     version: str
     graph_path: Path
     generated_at: str
+    build_id: str = ""
+    counts: dict[str, int] = field(default_factory=dict)
+    diagnostics: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
