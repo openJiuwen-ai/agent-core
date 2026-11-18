@@ -6,7 +6,7 @@
 from typing import TYPE_CHECKING, Any, Callable
 
 from openjiuwen.agent_teams.message_template import task_links, upstream_lines
-from openjiuwen.agent_teams.schema.status import MEMBER_DEPARTED_STATUSES, MemberStatus, TaskStatus
+from openjiuwen.agent_teams.schema.status import MEMBER_DEPARTED_STATUSES, MemberMode, MemberStatus, TaskStatus
 from openjiuwen.agent_teams.schema.task import TaskGraphSpec
 from openjiuwen.agent_teams.timefmt import format_time_context
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
@@ -2076,7 +2076,8 @@ class ClaimTaskTool(TeamTool):
                 return ToolOutput(success=False, error=error)
             complete_result = await self.task_manager.complete(task_id=task_id, summary=summary, note=note)
             if not complete_result.ok:
-                return ToolOutput(success=False, error=complete_result.reason)
+                hint = await self._unstarted_assignment_hint(task_id)
+                return ToolOutput(success=False, error=complete_result.reason + hint)
             # A reviewer-carrying task enters IN_REVIEW instead of completing.
             settled = await self.task_manager.get(task_id)
             to_status = (
@@ -2097,6 +2098,29 @@ class ClaimTaskTool(TeamTool):
                 "status_change": status_change,
                 **extra,
             },
+        )
+
+    async def _unstarted_assignment_hint(self, task_id: str) -> str:
+        """Recovery steps for completing a task assigned to the caller but never claimed.
+
+        Returned only when ``claim_task(status=claimed)`` would succeed right
+        now: the task is still pending under the caller, the caller is not a
+        plan-mode member (its entry gate is ``submit_plan``) and holds no other
+        active task. Any other rejection keeps the original reason as is.
+        """
+        member_name = self.task_manager.member_name
+        task = await self.task_manager.get(task_id)
+        if task is None or task.status != TaskStatus.PENDING.value or task.assignee != member_name:
+            return ""
+        member = await self.task_manager.db.member.get_member(member_name, self.task_manager.team_name)
+        if member is None or member.mode == MemberMode.PLAN_MODE.value:
+            return ""
+        if await self.task_manager.get_other_active_task_id(member_name, task_id):
+            return ""
+        return (
+            "\nIt is assigned to you but not started yet. Run this first:\n"
+            f"claim_task(task_id='{task_id}', status='claimed')\n"
+            f"then submit claim_task(task_id='{task_id}', status='completed') again with your summary/note."
         )
 
     def render_for_llm(self, output: ToolOutput) -> str:
