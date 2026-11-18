@@ -485,7 +485,8 @@ async def run_check(check, root, tools, number=1, since_ns=None, until_ns=None):
             return {**facts, "skipped": "the source of a page is not read: use the page in the browser; find the names "
                                         "a probe needs with a probe (Object.keys(window), the page's buttons)"}, []
         if file_too_large(path):
-            return {**facts, "path": check.get("path"), "skipped": "file too large"}, []
+            return {**facts, "path": check.get("path"), "too_large": True,
+                    "output": "[file too large, not shown]"}, []
         if path.suffix.lower() in IMAGE_SUFFIXES:   # a picture is looked at: it goes to the Judge as a picture
             found = await asyncio.to_thread(picture_or_none, path)
             if found is None:
@@ -496,10 +497,11 @@ async def run_check(check, root, tools, number=1, since_ns=None, until_ns=None):
             return facts, [(f"file {check['path']}", data)]
         text = extract_text(path.name, path.read_bytes())
         if text is None:
-            return {**facts, "path": check.get("path"), "skipped": "binary file"}, []
+            return {**facts, "path": check.get("path"), "binary": True,
+                    "output": "[binary file, not shown]"}, []
         lines = text.splitlines()
         if check.get("pattern"):
-            pattern = re.compile(check["pattern"], re.I)
+            pattern = re.compile(check.get("pattern", ""), re.I)
             context = max(0, min(5, int(check.get("context") or 0)))
             hits = [i for i, line in enumerate(lines) if pattern.search(line)][:60]
             shown = sorted({j for i in hits for j in range(max(0, i - context), min(len(lines), i + context + 1))})

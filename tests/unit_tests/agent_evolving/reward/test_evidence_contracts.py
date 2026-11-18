@@ -281,8 +281,10 @@ async def test_auto_read_skips_binary_files_and_keeps_at_most_four_pictures(tmp_
         (tmp_path / f"p{number}.png").write_bytes(b"x")
     facts, shots = await checks.run_check({"tool": "read"}, tmp_path, ["read"])
     assert "readable notes" in facts["output"] and "abc" not in facts["output"]
-    assert "skipped: binary file" in facts["output"]
+    assert "[binary file, not shown]" in facts["output"]
     assert len(shots) == 4 and facts["output"].count("at most 4 pictures") == 2
+    binary, _ = await checks.run_check({"tool": "read", "path": "blob.bin"}, tmp_path, ["read"])
+    assert not evidence_agent.check_failed(binary)   # a binary receipt is not a failed check
 
 
 @pytest.mark.asyncio
@@ -295,11 +297,31 @@ async def test_auto_read_stops_at_the_character_budget(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_an_empty_time_filter_falls_back_to_all_deliverables(tmp_path, monkeypatch):
+    def filtered_files(root, since_ns=None, until_ns=None):
+        return ({}, {}) if since_ns is not None else ({"old.md": "old body"}, {})
+
+    seen = {}
+
+    async def fake_score_with(task, root, config, options, **kwargs):
+        seen["options"] = options
+        seen["deliverable"] = kwargs["deliverable"]
+        return {}
+
+    monkeypatch.setattr(pipeline, "workspace_files", filtered_files)
+    monkeypatch.setattr(pipeline, "score_with", fake_score_with)
+    monkeypatch.setattr(checks, "available_tools", lambda root, config: [])
+    await pipeline.score_workspace("t", tmp_path, {}, RewardOptions(since_ns=1, until_ns=2))
+    assert seen["deliverable"] == {"old.md": "old body"}
+    assert any("时间范围" in warning for warning in seen["options"].warnings)
+
+
+@pytest.mark.asyncio
 async def test_oversized_files_are_not_read_into_context(tmp_path):
     large = tmp_path / "large.txt"
     large.write_bytes(b"x" * (files.MAX_FILE_BYTES + 1))
     facts, _ = await checks.run_check({"tool": "read", "path": "large.txt"}, tmp_path, ["read"])
-    assert facts["skipped"] == "file too large"
+    assert facts["too_large"] is True and facts["output"] == "[file too large, not shown]"
     deliverable, _ = workspace.workspace_files(tmp_path)
     assert deliverable == {"large.txt": files.TOO_LARGE}
 

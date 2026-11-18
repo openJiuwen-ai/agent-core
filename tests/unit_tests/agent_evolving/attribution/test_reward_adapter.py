@@ -99,6 +99,13 @@ def test_claims_become_dimensions_with_tiers_and_unknowns_are_counted() -> None:
 def test_event_time_range_spans_the_visible_trajectory() -> None:
     assert adapter.event_time_range(_nodes()) == (10, 96)
 
+    class Sliced(dict):
+        pass
+
+    sliced = Sliced({LEADER: [_node(LEADER, 1, 50, "team_leader")]})
+    sliced.whole = _nodes()
+    assert adapter.event_time_range(sliced) == (10, 96)   # the whole trajectory, not the selected slice
+
 
 def test_final_reply_is_the_last_message_the_user_got(tmp_path: Any) -> None:
     assert adapter.final_reply(_task_parse(tmp_path), _nodes()) == "最终答复"

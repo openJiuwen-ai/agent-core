@@ -317,14 +317,14 @@ class Model:
         stream_error = None
         try:
             # Streamed: a long non-streamed reply leaves the connection silent and gets cut.
-            text = "".join([
-                _answer_text(chunk)
-                async for chunk in self._model.stream(
-                    messages,
-                    extra_body=self.extra or None,
-                    response_format={"type": "json_object"},
-                )
-            ])
+            parts = []
+            async for chunk in self._model.stream(
+                messages,
+                extra_body=self.extra or None,
+                response_format={"type": "json_object"},
+            ):
+                parts.append(_answer_text(chunk))
+            text = "".join(parts)
             return json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip()))
         except Exception as failure:  # noqa: BLE001 - providers may reject streamed JSON
             stream_error = failure

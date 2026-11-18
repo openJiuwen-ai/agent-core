@@ -29,7 +29,7 @@ def suggestion_policy(config, guides):
         raise ValueError("unknown suggestion fields: " + ", ".join(sorted(unknown)))
     enabled = setting.get("enabled", True)
     domains = setting.get("domains", DEFAULT_DOMAINS)
-    if type(enabled) is not bool:
+    if not isinstance(enabled, bool):
         raise TypeError("suggestion.enabled must be a boolean")
     if not isinstance(domains, list) or any(not isinstance(name, str) or not name.strip() for name in domains):
         raise TypeError("suggestion.domains must be a list of nonempty domain identifiers")
@@ -74,22 +74,25 @@ def _claims(result):
     return rows
 
 
-def _checks(result):
+def _checks(result=None, rows=None):
     """The scoring's check receipts, each output clipped; the same check serving several criteria is listed once."""
-    seen, rows = set(), []
-    for facts in (result.get("evidence") or {}).values():
-        for row in facts or []:
-            if not isinstance(row, dict):
-                continue
-            key = json.dumps(row, ensure_ascii=False, sort_keys=True)
-            if key in seen:
-                continue
-            seen.add(key)
-            output = row.get("output")
-            if isinstance(output, str) and len(output) > CHECK_OUTPUT:
-                row = {**row, "output": output[:CHECK_OUTPUT] + f"[cut {len(output) - CHECK_OUTPUT} characters]"}
-            rows.append(row)
-    return rows
+    if rows is None:
+        rows = []
+        for facts in ((result or {}).get("evidence") or {}).values():
+            rows.extend(facts or [])
+    seen, found = set(), []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = json.dumps(row, ensure_ascii=False, sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        output = row.get("output")
+        if isinstance(output, str) and len(output) > CHECK_OUTPUT:
+            row = {**row, "output": output[:CHECK_OUTPUT] + f"[cut {len(output) - CHECK_OUTPUT} characters]"}
+        found.append(row)
+    return found
 
 
 def _source(deliverable):
@@ -126,9 +129,11 @@ def _design_brief(advice, zh):
                 if item.get(field):
                     lines.append(name + ": " + str(item[field]))
             parts.append("\n\n".join(lines))
-            facts = [name + ": " + str(item[field]) for field, name in (
-                ("existing", "当前基线" if zh else "Baseline"), ("evidence", "依据" if zh else "Evidence"))
-                if item.get(field)]
+            facts = []
+            for field, name in (("existing", "当前基线" if zh else "Baseline"),
+                                ("evidence", "依据" if zh else "Evidence")):
+                if item.get(field):
+                    facts.append(name + ": " + str(item[field]))
             if facts:
                 evidence.append("### " + str(item.get("idea", "")) + "\n\n" + "\n\n".join(facts))
             if item.get("check"):
@@ -175,7 +180,7 @@ async def suggest(result, model, language="zh", materials=None, final_reply="") 
         "metric": materials.get("knowledge") or "",
         "summary": (result.get("total") or {}).get("summary") or "",
         "claims": _claims(result),
-        "checks": _checks(result),
+        "checks": _checks(result, materials.get("checks")),
         "final_reply": final_reply or "",
         "deliverable_text": _source(materials.get("deliverable")),
         "seeing_screenshots": seeing,

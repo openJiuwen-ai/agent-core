@@ -50,11 +50,16 @@ def extract_text(name, data):
                            if info.filename.startswith(prefix) and info.filename.endswith(".xml")]
                 if sum(info.file_size for info in members) > MAX_OFFICE_UNCOMPRESSED:
                     return None
-                parts = []
+                parts, remaining = [], MAX_OFFICE_UNCOMPRESSED
                 for info in sorted(members, key=lambda item: item.filename):
-                    if info.file_size > MAX_OFFICE_UNCOMPRESSED:
+                    if info.file_size > remaining:
                         return None
-                    xml = archive.read(info).decode("utf-8", "ignore")
+                    with archive.open(info) as handle:
+                        raw = handle.read(remaining + 1)   # trust bytes read, not the archive header
+                    if len(raw) > remaining:
+                        return None
+                    remaining -= len(raw)
+                    xml = raw.decode("utf-8", "ignore")
                     words = re.findall(r">([^<>]+)<", xml)
                     if words:
                         parts.append(info.filename + "\n" + " ".join(w.strip() for w in words if w.strip()))
