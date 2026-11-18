@@ -744,6 +744,7 @@ class TeamAgent(BaseAgent):
                 admission_reasons = {
                     "interrupt_resume_busy",
                     "interrupt_resume_unavailable",
+                    "interrupt_already_resolved",
                     "unsupported_interactive_input",
                 }
                 reason = _interrupt_admission_failure_reason(exc, admission_reasons)
