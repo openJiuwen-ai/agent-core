@@ -494,10 +494,11 @@ async def score_workspace(task, root, config, options=None):
     if not deliverable and (options.since_ns is not None or options.until_ns is not None):
         fallback, fallback_inputs = workspace_files(root)
         if fallback:
-            warning = "交付物修改时间不在轨迹时间范围内，已回退为读取全部交付物。"
+            warning = "交付物修改时间不在轨迹时间范围内，已回退为读取全部交付物并取消取证时间限制。"
             options.warnings.append(warning)
             options.log(WARNING + warning)
             deliverable, inputs = fallback, fallback_inputs
+            options.since_ns = options.until_ns = None
     tools = checks.available_tools(root, config)
     has_pictures = "browser" in tools or any(p.suffix.lower() in checks.IMAGE_SUFFIXES for p in root.rglob("*")
                                            if checks.INPUTS_DIR not in p.parts)
