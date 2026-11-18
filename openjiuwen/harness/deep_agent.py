@@ -189,6 +189,21 @@ _ROUND_BOUNDARY = object()
 FreshInputContextFactory = Callable[[], AbstractAsyncContextManager[None]]
 
 
+def _coerce_context_engine_config(value: Any) -> Any:
+    """Normalize a JSON-round-tripped dict back into ``ContextEngineConfig``.
+
+    ``DeepAgentSpec.context_engine_config`` is ``Optional[Any]`` so team specs
+    can survive ``model_dump(mode="json")`` / ``model_validate``. Restoring a
+    dict as-is would later fail on attribute access inside ReActAgent, so
+    coerce it at the single assignment point instead.
+    """
+    if isinstance(value, dict):
+        from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
+
+        return ContextEngineConfig.model_validate(value)
+    return value
+
+
 def _render_identity_prompt(prompt_builder: SystemPromptBuilder, language: str) -> str:
     """Render the identity section alone, for ReActAgent's prompt template.
 
@@ -491,7 +506,9 @@ class DeepAgent(BaseAgent):
         new_react_config.on_max_iterations = config.on_max_iterations
         new_react_config.max_iterations_hard_limit = config.max_iterations_hard_limit
         if config.context_engine_config is not None:
-            new_react_config.context_engine_config = config.context_engine_config
+            new_react_config.context_engine_config = _coerce_context_engine_config(
+                config.context_engine_config
+            )
         if config.kv_cache_affinity_config is not None:
             new_react_config.kv_cache_affinity_config = config.kv_cache_affinity_config
         self._react_agent.configure(new_react_config)
@@ -968,7 +985,9 @@ class DeepAgent(BaseAgent):
             sys.maxsize if cfg.enable_task_loop else cfg.max_iterations
         )
         if cfg.context_engine_config is not None:
-            react_config.context_engine_config = cfg.context_engine_config
+            react_config.context_engine_config = _coerce_context_engine_config(
+                cfg.context_engine_config
+            )
         if cfg.kv_cache_affinity_config is not None:
             react_config.kv_cache_affinity_config = cfg.kv_cache_affinity_config
         react_config.workspace = cfg.workspace
