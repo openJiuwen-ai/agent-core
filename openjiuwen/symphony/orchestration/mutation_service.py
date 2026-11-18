@@ -11,7 +11,6 @@ from typing import Any, Awaitable, Callable, Sequence
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.symphony.models import CapabilityFingerprint, SourceSnapshot
-from openjiuwen.symphony._tasks import run_artifact_io
 from openjiuwen.symphony.orchestration.artifacts import GraphArtifactStore
 from openjiuwen.symphony.orchestration.contracts import GraphMutationDelta, GraphMutationResult
 from openjiuwen.symphony.orchestration.graph.matcher.ontology import OntologyMatcher
@@ -36,6 +35,7 @@ from openjiuwen.symphony.orchestration.mutations import (
     validate_mutation_against_inventory,
 )
 from openjiuwen.symphony.shared.fingerprint import Fingerprint
+from openjiuwen.symphony.shared.storage import run_artifact_io
 
 InventoryLoader = Callable[
     [],

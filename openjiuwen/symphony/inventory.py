@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from openjiuwen.symphony._tasks import run_artifact_io
 from openjiuwen.symphony.config import CapabilityConfig
 from openjiuwen.symphony.discovery.models import SkillRecord
 from openjiuwen.symphony.shared.fingerprint import ScanResult, SkillFolderScanner, SkillManifestParser
 from openjiuwen.symphony.shared.fingerprint._io import atomic_write_json
+from openjiuwen.symphony.shared.storage import run_artifact_io
 from openjiuwen.symphony.runtime_storage import RuntimeStorage
 
 

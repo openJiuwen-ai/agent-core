@@ -15,7 +15,6 @@ from uuid import uuid4
 
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.symphony.models import CapabilityFingerprint, SourceSnapshot
-from openjiuwen.symphony._tasks import run_artifact_io
 from openjiuwen.symphony.orchestration.artifacts import (
     SCHEMA_VERSION,
     GraphArtifactStore,
@@ -72,6 +71,7 @@ from openjiuwen.symphony.orchestration.mutations import (
 from openjiuwen.symphony.orchestration.planning.beam import BidirectionalBeamPlanner
 from openjiuwen.symphony.orchestration.planning.fast import FastOneShotPlanner
 from openjiuwen.symphony.shared.fingerprint import Fingerprint, FingerprintService, coerce_fingerprint
+from openjiuwen.symphony.shared.storage import run_artifact_io
 
 if TYPE_CHECKING:
     from openjiuwen.symphony.interfaces.capability import CapabilityProvider
