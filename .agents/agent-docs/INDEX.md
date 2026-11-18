@@ -19,12 +19,15 @@ generated: true
 | [agent_evolving/ttse](#module-agent_evolving-ttse) |
 | [agent_teams](#module-agent_teams) |
 | [agent_teams/workflow](#module-agent_teams-workflow) |
+| [core.runner.resources_manager](#module-core-runner-resources_manager) |
+| [core.session.tracer](#module-core-session-tracer) |
 | [core/context_engine](#module-core-context_engine) |
 | [core/controller](#module-core-controller) |
 | [core/foundation/llm](#module-core-foundation-llm) |
 | [core/runner/drunner/dmessage_queue](#module-core-runner-drunner-dmessage_queue) |
 | [core/session](#module-core-session) |
 | [core/sys_operation](#module-core-sys_operation) |
+| [extensions.tracer_otel](#module-extensions-tracer_otel) |
 | [extensions/a2a](#module-extensions-a2a) |
 | [extensions/observability](#module-extensions-observability) |
 | [extensions/tracer_otel](#module-extensions-tracer_otel) |
@@ -309,6 +312,22 @@ generated: true
 | [SDD-0031](designs/proposals/SDD-0031-teammate-swarmflow-orchestration/design.md) | D | 集群模式teammate支持swarmflow工具 | @xiajing | — |
 | [B_20261102_1120_avatar-child-session-trace-root](bugfix/agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
 
+<a id="module-core-runner-resources_manager"></a>
+
+## core.runner.resources_manager
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261105_1405_otel-decorator-llm-telemetry](features/F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
+
+<a id="module-core-session-tracer"></a>
+
+## core.session.tracer
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261105_1405_otel-decorator-llm-telemetry](features/F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
+
 <a id="module-core-context_engine"></a>
 
 ## core/context_engine
@@ -365,6 +384,14 @@ generated: true
 |---|---|---|---|---|
 | [F_20261104_1720_tool-execution-environment](features/F_20261104_1720_tool-execution-environment.md) | F | 工具执行环境作用域 | alan_cheng | 无独立 D：无独立 D；在现有 harness 工具调用与 team 会话存储契约上的小范围扩展。 |
 | [B_20261104_2054_recovered-context-seed-and-execution-environment](bugfix/agent_teams/B_20261104_2054_recovered-context-seed-and-execution-environment.md) | B | 冷恢复后成员策略 seed 与执行环境传递修复 | alan_cheng | 无独立 D：无独立 D；修复 F_20261104_1720_tool-execution-environment / F_20261104_1721_session-execution-settings 在冷恢复与远程调用路径上的遗漏。 |
+
+<a id="module-extensions-tracer_otel"></a>
+
+## extensions.tracer_otel
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261105_1405_otel-decorator-llm-telemetry](features/F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
 
 <a id="module-extensions-a2a"></a>
 
