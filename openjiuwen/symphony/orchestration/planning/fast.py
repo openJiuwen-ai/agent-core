@@ -26,6 +26,8 @@ from openjiuwen.symphony.orchestration.planning.utils import (
 
 FAST_PLANNER_SYSTEM_PROMPT = """You are Symphony's fast Skill planner.
 Return strict JSON only.
+Prioritize low latency. Decide directly from supplied data with the minimum internal reasoning
+necessary. Do not perform or output step-by-step analysis or chain-of-thought.
 
 You receive:
 - The user's query.

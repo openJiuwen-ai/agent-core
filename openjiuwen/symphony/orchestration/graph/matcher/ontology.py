@@ -107,7 +107,11 @@ class OntologyMatcher:
         self.diagnostics = []
         self.stats = RelationCacheStats()
         if self.cache is None:
-            matches = await self._resolve(registry, candidate_list)
+            matches = await self._resolve(
+                registry,
+                candidate_list,
+                total_candidate_count=len(candidate_list),
+            )
             self.stats = RelationCacheStats(resolved_count=len(candidate_list))
             return matches
 
@@ -124,9 +128,18 @@ class OntologyMatcher:
                 diagnostics_by_index[index] = cached_diagnostics
 
         resolved_by_index: dict[int, list[LLMMatch]] = {}
+        reused_candidate_count = len(cached_matches)
+        completed_candidate_count = reused_candidate_count
         for window in chunked(misses, matcher_window_size(self)):
             miss_candidates = [candidate for _, candidate in window]
-            resolved = await self._resolve(registry, miss_candidates)
+            resolved = await self._resolve(
+                registry,
+                miss_candidates,
+                completed_candidate_count=completed_candidate_count,
+                total_candidate_count=len(candidate_list),
+                reused_candidate_count=reused_candidate_count,
+            )
+            completed_candidate_count += len(miss_candidates)
             resolved_diagnostics = list(self.diagnostics)
             grouped_diagnostics = diagnostics_by_candidate(miss_candidates, resolved_diagnostics)
             resolved_by_candidate = matches_by_candidate(miss_candidates, resolved)
@@ -158,9 +171,14 @@ class OntologyMatcher:
         self,
         registry: SkillRegistry,
         candidate_list: List[RelationCandidate],
+        *,
+        completed_candidate_count: int = 0,
+        total_candidate_count: int | None = None,
+        reused_candidate_count: int = 0,
     ) -> List[LLMMatch]:
         matches: List[LLMMatch] = []
         self.diagnostics = []
+        global_total = len(candidate_list) if total_candidate_count is None else total_candidate_count
         total_batches = (len(candidate_list) + self.batch_size - 1) // self.batch_size if candidate_list else 0
         self._emit_progress(
             "matching_start",
@@ -171,6 +189,9 @@ class OntologyMatcher:
                 "batch_size": self.batch_size,
                 "max_workers": self.max_workers,
                 "consensus_runs": 2 if self.require_consensus else 1,
+                "completed_candidate_count": completed_candidate_count,
+                "total_candidate_count": global_total,
+                "reused_candidate_count": reused_candidate_count,
             },
         )
         batches = []
@@ -190,17 +211,22 @@ class OntologyMatcher:
                     batch_index,
                     total_batches,
                     request_semaphore=request_semaphore,
+                    completed_candidate_count=completed_candidate_count,
+                    total_candidate_count=global_total,
+                    reused_candidate_count=reused_candidate_count,
                 )
                 for batch_index, batch in batches
             )
         )
 
+        completed_in_window = 0
         for batch_index, batch_matches, batch_diagnostics in sorted(
             results,
             key=lambda item: item[0],
         ):
             self.diagnostics.extend(batch_diagnostics)
             matches.extend(batch_matches)
+            completed_in_window += batch_sizes[batch_index]
             self._emit_progress(
                 "batch_done",
                 batch_index,
@@ -210,6 +236,9 @@ class OntologyMatcher:
                     "match_count": len(batch_matches),
                     "accepted_count": len([match for match in batch_matches if match.accepted]),
                     "diagnostics_count": len(batch_diagnostics),
+                    "completed_candidate_count": completed_candidate_count + completed_in_window,
+                    "total_candidate_count": global_total,
+                    "reused_candidate_count": reused_candidate_count,
                 },
             )
         self._emit_progress(
@@ -220,6 +249,9 @@ class OntologyMatcher:
                 "match_count": len(matches),
                 "accepted_count": len([match for match in matches if match.accepted]),
                 "diagnostics_count": len(self.diagnostics),
+                "completed_candidate_count": completed_candidate_count + len(candidate_list),
+                "total_candidate_count": global_total,
+                "reused_candidate_count": reused_candidate_count,
             },
         )
         return matches
@@ -258,6 +290,9 @@ class OntologyMatcher:
         total_batches: int,
         *,
         request_semaphore: asyncio.Semaphore,
+        completed_candidate_count: int,
+        total_candidate_count: int,
+        reused_candidate_count: int,
     ) -> tuple[int, List[LLMMatch], List[GraphDiagnostic]]:
         self._emit_progress(
             "batch_start",
@@ -267,6 +302,9 @@ class OntologyMatcher:
                 "candidate_count": len(batch),
                 "candidate_ids": [candidate.key for candidate in batch],
                 "consensus_runs": 2 if self.require_consensus else 1,
+                "completed_candidate_count": completed_candidate_count,
+                "total_candidate_count": total_candidate_count,
+                "reused_candidate_count": reused_candidate_count,
             },
         )
 

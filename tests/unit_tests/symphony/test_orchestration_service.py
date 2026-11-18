@@ -9,8 +9,8 @@ import pytest
 
 from openjiuwen.symphony import (
     ArtifactSpec,
-    CapabilityGraph,
     CapabilityFingerprint,
+    CapabilityGraph,
     GraphArtifactStatus,
     GraphBuildResult,
     OrchestrationConfig,
@@ -20,11 +20,11 @@ from openjiuwen.symphony import (
     ParameterSpec,
     SymphonyRuntime,
 )
-from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline
-from openjiuwen.symphony.orchestration.graph.models import GraphDiagnostic, LLMMatch
 from openjiuwen.symphony.orchestration.artifacts import load_graph_artifacts
 from openjiuwen.symphony.orchestration.execution_graph import build_execution_graph
+from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline
 from openjiuwen.symphony.orchestration.graph.matcher.ontology import OntologyMatcher
+from openjiuwen.symphony.orchestration.graph.models import GraphDiagnostic, LLMMatch
 
 
 def test_public_artifact_contract_uses_graph_terminology() -> None:
@@ -647,7 +647,7 @@ async def test_async_build_progress_is_serial_and_completed_before_return(tmp_pa
             return await super().invoke(messages, **kwargs)
 
     llm = _BlockingMatcherLLM()
-    events: list[tuple[str, str | None]] = []
+    progress_events: list[OrchestrationProgress] = []
     live_matcher_progress = asyncio.Event()
     active_callbacks = 0
     max_active_callbacks = 0
@@ -658,7 +658,7 @@ async def test_async_build_progress_is_serial_and_completed_before_return(tmp_pa
         active_callbacks += 1
         max_active_callbacks = max(max_active_callbacks, active_callbacks)
         await asyncio.sleep(0)
-        events.append((item.event, item.get("matcher_event")))
+        progress_events.append(item)
         if item.get("matcher_event") == "batch_start":
             live_matcher_progress.set()
         if item.event == "build_published":
@@ -679,15 +679,23 @@ async def test_async_build_progress_is_serial_and_completed_before_return(tmp_pa
     llm.release.set()
     await task
 
-    event_names = [event for event, _matcher_event in events]
+    event_names = [item.event for item in progress_events]
     resolve_start = event_names.index("graph.resolve.start")
     resolve_done = event_names.index("graph.resolve.done")
     matcher_progress = [
-        matcher_event
-        for event, matcher_event in events[resolve_start + 1 : resolve_done]
-        if event == "graph.resolve.progress"
+        item.get("matcher_event")
+        for item in progress_events[resolve_start + 1 : resolve_done]
+        if item.event == "graph.resolve.progress"
     ]
     assert matcher_progress == ["matching_start", "batch_start", "batch_done", "matching_done"]
+    matching_done = next(
+        item
+        for item in progress_events
+        if item.event == "graph.resolve.progress" and item.get("matcher_event") == "matching_done"
+    )
+    assert matching_done["completed_candidate_count"] == 1
+    assert matching_done["total_candidate_count"] == 1
+    assert matching_done["reused_candidate_count"] == 0
     assert event_names[-1] == "build_published"
     assert max_active_callbacks == 1
     assert published_completed is True
