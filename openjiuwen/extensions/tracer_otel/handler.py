@@ -527,13 +527,16 @@ class OtelAgentHandler(TraceExtAgentHandler):
         instance_info: dict | None = None,
     ) -> None:
         invoke_type_val = agent_span.invoke_type or invoke_type
-        name_val = agent_span.name or (instance_info.get("class_name", "") if instance_info else "")
+        entity_name = agent_span.name or (
+            instance_info.get("class_name", "") if instance_info else ""
+        )
+        # openjiuwen.agent.name 与 openjiuwen.workflow.name 同义：执行 agent 业务名，
+        # 供下游按 agent 维度聚合；无身份（直连 handler / 成员缺 metadata）回退实体名。
+        name_val = ((instance_info or {}).get("agent_name") or "") or entity_name
         otel_span.set_attribute(OJ_AGENT_INVOKE_TYPE, invoke_type_val)
         otel_span.set_attribute(OJ_AGENT_NAME, name_val)
-        # Trace display name: the executing agent (rail-forwarded), falling
-        # back to the span entity name.
-        trace_name = ((instance_info or {}).get("agent_name") or "") or name_val
-        otel_span.set_attribute(OJ_GEN_AI_TRACE_NAME, str(trace_name))
+        # Trace display name: same executing-agent name as OJ_AGENT_NAME.
+        otel_span.set_attribute(OJ_GEN_AI_TRACE_NAME, str(name_val))
         # Agent identity + conversation facts, forwarded by OtelRail
         self._set_agent_identity_attrs(otel_span, instance_info)
 
@@ -558,10 +561,15 @@ class OtelAgentHandler(TraceExtAgentHandler):
             # LLM-specific OTel attributes
             state.span.set_attribute(GEN_AI_REQUEST_MODEL, instance_info.get("class_name", ""))
             state.span.set_attribute(GEN_AI_OPERATION_NAME, _OPERATION_NAME_CHAT)
-            # Trace display name: the executing agent (rail-forwarded), falling
-            # back to the model name for direct on_llm_start callers.
-            agent_name = instance_info.get("agent_name") or instance_info.get("class_name", "")
-            state.span.set_attribute(OJ_GEN_AI_TRACE_NAME, str(agent_name))
+            # Trace display name and agent dimension name share one source: the
+            # executing agent (rail-forwarded), falling back to the span entity
+            # name, then the model class name, for direct on_llm_start callers.
+            name_val = (
+                instance_info.get("agent_name")
+                or span.name
+                or instance_info.get("class_name", "")
+            )
+            state.span.set_attribute(OJ_GEN_AI_TRACE_NAME, str(name_val))
             # Agent identity + conversation facts, forwarded by OtelRail
             self._set_agent_identity_attrs(state.span, instance_info)
             # GenAI request parameters, forwarded by OtelRail.before_model_call
@@ -581,7 +589,9 @@ class OtelAgentHandler(TraceExtAgentHandler):
                 state.span.set_attribute(OJ_LLM_PREV_MESSAGE_COUNT, int(message_count))
             # Agent base fields (use span values if present, otherwise set ourselves)
             invoke_type_val = span.invoke_type or InvokeType.LLM.value
-            name_val = span.name or instance_info.get("class_name", "")
+            # openjiuwen.agent.name 与 openjiuwen.workflow.name 同义：执行 agent 业务名，
+            # 供下游按 agent 维度聚合；模型名由 GEN_AI_REQUEST_MODEL 承载，信息不丢。
+            # name_val 与 OJ_GEN_AI_TRACE_NAME 同源，避免同一 span 上两个 agent 名分叉。
             state.span.set_attribute(OJ_AGENT_INVOKE_TYPE, invoke_type_val)
             state.span.set_attribute(OJ_AGENT_NAME, name_val)
             if inputs is not None:
@@ -729,9 +739,14 @@ class OtelAgentHandler(TraceExtAgentHandler):
             tool_type = instance_info.get("tool_type")
             if tool_type:
                 extra_attrs[GEN_AI_TOOL_TYPE] = str(tool_type)
-            # Agent executing the tool; OtelRail forwards it, fall back to the
-            # tool name for direct on_plugin_start callers.
-            agent_name = instance_info.get("agent_name") or instance_info.get("class_name", "")
+            # Agent executing the tool; OtelRail forwards it, fall back to the span
+            # entity name, then class_name, for direct on_plugin_start callers.
+            # Same source as OJ_AGENT_NAME so both agent-name fields agree.
+            agent_name = (
+                instance_info.get("agent_name")
+                or span.name
+                or instance_info.get("class_name", "")
+            )
             extra_attrs[GEN_AI_AGENT_NAME] = str(agent_name)
             # Tool-call id rides instance_info (forwarded by OtelRail.before_tool_call).
             tool_call_id = instance_info.get("tool_call_id", "")

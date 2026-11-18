@@ -484,7 +484,11 @@ class TestOtelAgentHandler:
         assert s.attributes[OJ_AGENT_NAME] == "TestChain"
 
     async def test_agent_chain_span_name_uses_agent_name(self):
-        """Chain span 名用执行 agent 真实名（agent_name），无前缀；缺省回退类名。"""
+        """Chain span 名用执行 agent 真实名（agent_name），无前缀；缺省回退类名。
+
+        口径2：openjiuwen.agent.name 与 span 展示名同源（均取执行 agent 业务名），
+        因此带 agent_name 时 OJ_AGENT_NAME 也是业务名，不再是实体类名。
+        """
         config = OtelTracerConfig(redaction_enabled=False)
         handler = OtelAgentHandler(_OTEL_TRACER, config)
 
@@ -503,7 +507,7 @@ class TestOtelAgentHandler:
         s = finished[0]
         assert s.name == "天气预测"
         assert s.attributes[OJ_AGENT_INVOKE_TYPE] == InvokeType.CHAIN.value
-        assert s.attributes[OJ_AGENT_NAME] == "TestChain"
+        assert s.attributes[OJ_AGENT_NAME] == "天气预测"
         assert s.attributes[OJ_GEN_AI_TRACE_NAME] == "天气预测"
 
     async def test_agent_plugin_fields_set_when_span_empty(self):
@@ -585,6 +589,164 @@ class TestOtelAgentHandler:
         assert s.attributes[OJ_AGENT_INVOKE_TYPE] == "llm"
         # Use span.name = "MyLLMModel", not instance_info.class_name
         assert s.attributes[OJ_AGENT_NAME] == "MyLLMModel"
+        # 同源契约：无 agent_name 时 agent 维度名与 trace 显示名必须一致，
+        # 不能一个回退 span.name、另一个回退 class_name。
+        assert s.attributes[OJ_GEN_AI_TRACE_NAME] == "MyLLMModel"
+
+    # -----------------------------------------------------------------
+    # 口径2 契约：agent_name 优先，实体名回退，且实体信息不丢
+    # -----------------------------------------------------------------
+
+    async def test_agent_name_contract_llm_span_keeps_model_name(self):
+        """LLM span：OJ_AGENT_NAME / trace name 取执行 agent 业务名，
+        模型名继续由 gen_ai.request.model（+ span 名 llm.<class>）承载，信息不丢。"""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs=None,
+            instance_info={"class_name": "TestLLM", "agent_name": "天气预测"},
+        )
+        await handler.on_llm_end(span=agent_span, outputs=None)
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.attributes[OJ_AGENT_NAME] == "天气预测"
+        assert s.attributes[GEN_AI_REQUEST_MODEL] == "TestLLM"
+        assert s.attributes[OJ_GEN_AI_TRACE_NAME] == "天气预测"
+        assert s.name == "llm.TestLLM"
+
+    async def test_agent_name_contract_tool_span_keeps_tool_name(self):
+        """plugin/tool span：OJ_AGENT_NAME 与 gen_ai.agent.name 取执行 agent
+        业务名，工具名仍由 gen_ai.tool.name（+ span 名 tool.<class>）承载。"""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        agent_span.name = "MyTool"
+
+        await handler.on_plugin_start(
+            span=agent_span,
+            inputs=None,
+            instance_info={"class_name": "MyTool", "agent_name": "天气预测"},
+        )
+        await handler.on_plugin_end(span=agent_span, outputs="ok")
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.attributes[OJ_AGENT_NAME] == "天气预测"
+        assert s.attributes[GEN_AI_TOOL_NAME] == "MyTool"
+        assert s.attributes[GEN_AI_AGENT_NAME] == "天气预测"
+        assert s.attributes[OJ_GEN_AI_TRACE_NAME] == "天气预测"
+        assert s.name == "tool.MyTool"
+
+    async def test_agent_name_contract_priority_agent_name_over_entity_name(self):
+        """优先级：agent_name > agent_span.name > instance_info.class_name。
+
+        无 agent_name（直连 handler / 成员缺 metadata）时回退实体名，
+        且 agent_span.name 优先于 class_name——旧语义完全保留。
+        """
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+
+        # (1) 有 agent_name：业务名胜出，实体名不参与
+        span_with_identity = span_manager.create_agent_span()
+        span_with_identity.name = "实体名"
+        await handler.on_chain_start(
+            span=span_with_identity,
+            inputs=None,
+            instance_info={"class_name": "ClassX", "agent_name": "业务名A"},
+        )
+        await handler.on_chain_end(span=span_with_identity, outputs=None)
+
+        # (2) 无 agent_name：回退实体名（agent_span.name 优先于 class_name）
+        span_without_identity = span_manager.create_agent_span()
+        span_without_identity.name = "实体名"
+        await handler.on_chain_start(
+            span=span_without_identity,
+            inputs=None,
+            instance_info={"class_name": "ClassX"},
+        )
+        await handler.on_chain_end(span=span_without_identity, outputs=None)
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 2
+        with_identity = next(s for s in finished if s.attributes[OJ_AGENT_NAME] == "业务名A")
+        without_identity = next(s for s in finished if s.attributes[OJ_AGENT_NAME] == "实体名")
+        assert with_identity.attributes[OJ_AGENT_NAME] == "业务名A"
+        assert with_identity.attributes[OJ_GEN_AI_TRACE_NAME] == "业务名A"
+        assert without_identity.attributes[OJ_AGENT_NAME] == "实体名"
+        assert without_identity.attributes[OJ_GEN_AI_TRACE_NAME] == "实体名"
+        # 回退分支不带任何业务身份属性（agent_name 缺失即不写）
+        assert GEN_AI_AGENT_NAME not in without_identity.attributes
+
+    async def test_agent_name_contract_prompt_and_llm_request(self):
+        """prompt 事件复用同一个 _set_non_llm_attrs，口径2 对其同样生效；
+        on_llm_request 只追加 event，不改写 agent 名。"""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+
+        prompt_span = span_manager.create_agent_span()
+        await handler.on_prompt_start(
+            span=prompt_span,
+            inputs=None,
+            instance_info={"class_name": "PromptX", "agent_name": "天气预测"},
+        )
+        await handler.on_prompt_end(span=prompt_span, outputs="done")
+
+        llm_span = span_manager.create_agent_span()
+        await handler.on_llm_start(
+            span=llm_span,
+            inputs=None,
+            instance_info={"class_name": "TestLLM", "agent_name": "天气预测"},
+        )
+        await handler.on_llm_request(span=llm_span, request={"model": "m"})
+        await handler.on_llm_end(span=llm_span, outputs=None)
+
+        finished = _EXPORTER.get_finished_spans()
+        # 展示名来自 class_name（prompt.<class_name>），与 span.name 无关；
+        # 用默认值查找并显式断言，避免 StopIteration 被包装成不可读的 RuntimeError。
+        prompt_result = next((s for s in finished if s.name == "prompt.PromptX"), None)
+        assert prompt_result is not None
+        assert prompt_result.attributes[OJ_AGENT_NAME] == "天气预测"
+        assert prompt_result.attributes[OJ_GEN_AI_TRACE_NAME] == "天气预测"
+        assert [e.name for e in prompt_result.events] == []
+
+        llm_result = next(s for s in finished if s.name == "llm.TestLLM")
+        assert [e.name for e in llm_result.events] == ["llm.request"]
+        assert llm_result.attributes[OJ_AGENT_NAME] == "天气预测"
+
+    @pytest.mark.parametrize(
+        "event",
+        ["on_prompt_start", "on_chain_start", "on_retriever_start", "on_plugin_start"],
+    )
+    async def test_start_failures_never_propagate(self, event, monkeypatch):
+        """模块契约：OTel 失败绝不上抛业务链路（每个事件方法都 try/except 兜底）。"""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError(f"{event} boom")
+
+        monkeypatch.setattr(handler, "_start_non_llm_span", _boom)
+        span = SpanManager("test-trace-id").create_agent_span()
+
+        # 不抛出异常，且不留下半成品 span
+        await getattr(handler, event)(
+            span=span, inputs=None, instance_info={"class_name": "X", "agent_name": "A"},
+        )
+        assert _EXPORTER.get_finished_spans() == []
 
 
 # ---------------------------------------------------------------------------
