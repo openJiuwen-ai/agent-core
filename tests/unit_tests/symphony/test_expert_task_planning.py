@@ -1,6 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Behavior tests for expert task plans and their handoff constraints."""
 
+import asyncio
+import copy
 import json
 from types import SimpleNamespace
 
@@ -15,6 +17,7 @@ class _TaskModel:
         self.draft = draft
         self.request = None
         self.planning_prompts = []
+        self.planning_requests = []
 
     async def invoke(self, messages, **kwargs):
         request = json.loads(messages[-1]["content"])
@@ -27,6 +30,7 @@ class _TaskModel:
             }))
         self.request = request
         self.planning_prompts.append(messages[0]["content"])
+        self.planning_requests.append(request)
         draft = self.draft(request, messages[0]["content"]) if callable(self.draft) else self.draft
         return SimpleNamespace(content=json.dumps(draft))
 
@@ -45,8 +49,8 @@ def _task(task_id, *, expert_id=None, inputs=(), outputs=()):
     if inputs:
         task["inputs"] = list(inputs)
     if expert_id is not None:
-        return {**task, "type": "expert", "expert_id": expert_id}
-    return {**task, "type": "inline", "role": {"name": task_id, "description": f"Handle {task_id}."}}
+        return {**task, "expert_id": expert_id}
+    return {**task, "role": {"name": task_id, "description": f"Handle {task_id}."}}
 
 
 def _handoff(source, target, output="evidence", target_input="evidence"):
@@ -116,6 +120,31 @@ async def test_missing_expert_graph_allows_inline_plan(mode, tmp_path, monkeypat
     assert graph["metadata"]["status"] == "ready"
     assert graph["nodes"]["task-1"]["metadata"]["role"]["name"] == "verify"
     assert graph["edges"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_type", [False, True])
+async def test_expert_task_plan_derives_type_from_assignment(tmp_path, monkeypatch, expert_artifacts, legacy_type):
+    tasks = [_task("report", expert_id="report"), _task("research")]
+    if legacy_type:
+        tasks[0]["type"] = "expert"
+        tasks[1]["type"] = "inline"
+    service, model = _service(tmp_path, {"status": "ready", "tasks": tasks}, monkeypatch, expert_artifacts)
+
+    graph = (await service.plan_expert_tasks("Write a report and verify its evidence"))["planned_graph"]["graph"]
+
+    assert graph["metadata"]["status"] == "ready"
+    expert = graph["nodes"]["task-1"]["metadata"]
+    inline = graph["nodes"]["task-2"]["metadata"]
+    assert expert["type"] == "expert"
+    assert expert["expert_id"] == "report"
+    assert "role" not in expert
+    assert inline["type"] == "inline"
+    assert inline["role"]["name"] == "research"
+    assert "expert_id" not in inline
+    assert len(model.planning_prompts) == 1
+    assert '"type": "expert"' not in model.planning_prompts[0]
+    assert '"type": "inline"' not in model.planning_prompts[0]
 
 
 @pytest.mark.asyncio
@@ -294,6 +323,10 @@ async def test_expert_task_plan_groups_types_by_target_alias(tmp_path, monkeypat
         "duplicate handoff",
     ),
     ([_task("first", expert_id="removed")], [], "visible installed expert"),
+    ([{**_task("first"), "expert_id": "research"}], [], "exactly one of expert_id or role"),
+    ([{key: value for key, value in _task("first").items() if key != "role"}], [],
+     "exactly one of expert_id or role"),
+    ([{**_task("first", expert_id="research"), "type": "inline"}], [], "Task type is derived"),
 ])
 async def test_expert_task_plan_rejects_invalid_assignments(
     tasks, handoffs, reason, tmp_path, monkeypatch, expert_artifacts,
@@ -308,11 +341,12 @@ async def test_expert_task_plan_rejects_invalid_assignments(
     assert reason in graph["metadata"]["reason"]
     assert graph["nodes"] == {}
     assert graph["edges"] == []
-    assert len(model.planning_prompts) == 1
+    assert len(model.planning_prompts) == 2
+    assert reason in model.planning_requests[1]["validation_feedback"]["error"]
 
 
 @pytest.mark.asyncio
-async def test_invalid_expert_draft_reports_field_without_retry(tmp_path, monkeypatch):
+async def test_invalid_expert_draft_reports_field_after_one_retry(tmp_path, monkeypatch):
     draft = {
         "status": "ready",
         "tasks": [_task("research", outputs=[{"name": "evidence"}])],
@@ -325,7 +359,99 @@ async def test_invalid_expert_draft_reports_field_without_retry(tmp_path, monkey
     assert "tasks.0.outputs.0.type" in graph["metadata"]["reason"]
     assert graph["nodes"] == {}
     assert graph["edges"] == []
+    assert len(model.planning_prompts) == 2
+    feedback = model.planning_requests[1]["validation_feedback"]
+    assert "tasks.0.outputs.0.type" in feedback["error"]
+    assert json.loads(feedback["previous_output"]) == draft
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["expert_in_type", "unknown_expert", "handoff", "schema", "empty"])
+async def test_expert_task_plan_corrects_invalid_draft(failure, tmp_path, monkeypatch, expert_artifacts):
+    valid = {
+        "status": "ready",
+        "tasks": [_task("research", expert_id="research"), _task("report", expert_id="report")],
+        "handoffs": [_handoff("research", "report", "result", "result")],
+    }
+    invalid = copy.deepcopy(valid)
+    if failure == "expert_in_type":
+        invalid["tasks"][1]["type"] = invalid["tasks"][1].pop("expert_id")
+    elif failure == "unknown_expert":
+        invalid["tasks"][1]["expert_id"] = "report-typo"
+    elif failure == "handoff":
+        invalid["handoffs"][0]["source_output"] = "undeclared"
+    elif failure == "schema":
+        invalid["tasks"][1]["outputs"][0].pop("type")
+    else:
+        invalid["tasks"] = []
+        invalid["handoffs"] = []
+
+    def draft(request, system_prompt):
+        feedback = request.get("validation_feedback")
+        if feedback is None:
+            return invalid
+        assert json.loads(feedback["previous_output"]) == invalid
+        assert feedback["error"]
+        return valid
+
+    service, model = _service(tmp_path, draft, monkeypatch, expert_artifacts)
+    source = PlanningInput(name="facts", kind="file", value="attachment/facts.md")
+    graph = (await service.plan_expert_tasks("Research and report with the supplied facts", inputs=[source]))[
+        "planned_graph"
+    ]["graph"]
+
+    assert graph["metadata"]["status"] == "ready"
+    assert len(graph["nodes"]) == 2
+    assert graph["nodes"]["task-2"]["metadata"]["expert_id"] == "report"
+    assert graph["nodes"]["task-2"]["metadata"]["inputs"] == [_port("result", "text")]
+    assert len(model.planning_requests) == 2
+    first, second = model.planning_requests
+    assert {key: value for key, value in second.items() if key != "validation_feedback"} == first
+    assert second["inputs"] == [source.model_dump(exclude_none=True)]
+
+
+@pytest.mark.asyncio
+async def test_expert_task_plan_keeps_explicit_no_plan_without_retry(tmp_path, monkeypatch):
+    service, model = _service(tmp_path, {"status": "no_plan", "reason": "Required expert is unavailable."}, monkeypatch)
+
+    graph = (await service.plan_expert_tasks("Use the required expert"))["planned_graph"]["graph"]
+
+    assert graph["metadata"]["status"] == "no_plan"
+    assert graph["metadata"]["reason"] == "Required expert is unavailable."
+    assert graph["nodes"] == {}
     assert len(model.planning_prompts) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [TimeoutError, asyncio.CancelledError])
+async def test_expert_task_plan_does_not_retry_model_failure(tmp_path, monkeypatch, error):
+    def draft(request, system_prompt):
+        raise error("model interrupted")
+
+    service, model = _service(tmp_path, draft, monkeypatch)
+    expected_error = asyncio.CancelledError if error is asyncio.CancelledError else RuntimeError
+
+    with pytest.raises(expected_error, match="model interrupted"):
+        await service.plan_expert_tasks("Research the evidence")
+
+    assert len(model.planning_prompts) == 1
+
+
+@pytest.mark.asyncio
+async def test_expert_task_plan_shares_retry_budget_with_missing_inputs(tmp_path, monkeypatch):
+    def draft(request, system_prompt):
+        if "validation_feedback" not in request:
+            return {"status": "needs_input", "missing_inputs": ["facts"]}
+        return {"status": "ready", "tasks": [_task("report", expert_id="unavailable")]}
+
+    service, model = _service(tmp_path, draft, monkeypatch)
+
+    graph = (await service.plan_expert_tasks("Plan the report even if some facts are missing"))["planned_graph"]["graph"]
+
+    assert graph["metadata"]["status"] == "no_plan"
+    assert "visible installed expert" in graph["metadata"]["reason"]
+    assert graph["nodes"] == {}
+    assert len(model.planning_prompts) == 2
 
 
 @pytest.mark.asyncio
