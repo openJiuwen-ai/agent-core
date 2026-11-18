@@ -419,3 +419,339 @@ class TestDecator:
         for item in results:
             print(item)
         assert results[0][2].get("inputs", {}) == {'inputs': [BaseMessage(role='aa', content='', name=None)]}
+
+    async def test_decorate_model_identity_passthrough(self):
+        """identity= merges definition-scoped keys flat into instance_info.
+
+        Empty values are filtered; without identity= the wire format stays
+        exactly class_name/type (callers that pass nothing are unaffected).
+        """
+        model = MagicMock(LLMExecutable)
+        type(model).llm = property(lambda self: self._llm, lambda self, val: setattr(self, '_llm', val))
+        type(model).config = property(lambda self: self._config, lambda self, val: setattr(self, '_config', val))
+        model.llm = MockModel()
+        model.config = get_llm_config()
+        model.invoke = model.llm.invoke
+        results = []
+
+        async def mock_trigger(handler_class_name: str, event_name: str, **kwargs):
+            results.append([handler_class_name, event_name, kwargs])
+
+        mock_tracer = MagicMock()
+        mock_tracer.trigger = mock_trigger
+        mock_session = MagicMock()
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+        mock_inner_session.span.return_value = MagicMock()
+
+        mocked_model = decorate_model_with_trace(
+            model, mock_session,
+            identity={"workflow_id": "wf-1", "component_id": "node-2",
+                      "agent_id": "", "conversation_id": None},
+        )
+        await mocked_model.invoke(messages=[BaseMessage(role="aa")])
+        instance_info = results[0][2]["instance_info"]
+        assert instance_info["workflow_id"] == "wf-1"
+        assert instance_info["component_id"] == "node-2"
+        # Falsy identity values must not land as empty-string keys.
+        assert "agent_id" not in instance_info
+        assert "conversation_id" not in instance_info
+        # Base keys survive the merge untouched.
+        assert instance_info["class_name"] == "Qwen/Qwen3-32B"
+        assert instance_info["type"] == "llm"
+
+        # Without identity= the decorator keeps the exact pre-identity format.
+        results.clear()
+        plain_model = decorate_model_with_trace(model, mock_session)
+        await plain_model.invoke(messages=[BaseMessage(role="aa")])
+        assert results[0][2]["instance_info"] == {
+            "class_name": "Qwen/Qwen3-32B", "type": "llm",
+            "request_params": {},
+            "message_count": 1,
+        }
+
+    async def test_decorate_model_stream_frame_selection(self):
+        """Stream path picks TTFT from the first chunk and usage from the
+        LAST usage-bearing frame; an engine-stamped ttft wins over the
+        wrapper's own measurement."""
+        from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata
+
+        class _StreamModel:
+            def __init__(self):
+                self.config = MagicMock()
+
+            async def stream(self, messages, **kwargs):
+                yield AssistantMessage(content="partial-1")
+                yield AssistantMessage(
+                    content="partial-2",
+                    usage_metadata=UsageMetadata(input_tokens=10, output_tokens=5),
+                )
+                yield AssistantMessage(content="partial-3")
+                yield AssistantMessage(
+                    content="final",
+                    usage_metadata=UsageMetadata(
+                        input_tokens=11, output_tokens=7, ttft_seconds=0.1
+                    ),
+                )
+
+            async def invoke(self, messages, **kwargs):
+                raise AssertionError("stream test must not hit invoke")
+
+        results = []
+
+        async def mock_trigger(handler_class_name: str, event_name: str, **kwargs):
+            results.append([handler_class_name, event_name, kwargs])
+
+        mock_tracer = MagicMock()
+        mock_tracer.trigger = mock_trigger
+        mock_agent_span_manager = MagicMock()
+        mock_tracer.tracer_agent_span_manager = mock_agent_span_manager
+
+        mock_session = MagicMock()
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+        mock_inner_session.span.return_value = MagicMock()
+
+        mocked_model = decorate_model_with_trace(_StreamModel(), mock_session)
+
+        consumed = [item async for item in mocked_model.stream([BaseMessage(role="user", content="hi")])]
+        assert len(consumed) == 4  # wrapper passes every chunk through
+
+        events = [r[1] for r in results]
+        assert events == ["on_llm_start", "on_llm_end"]
+        end_payload = results[1][2]["outputs"]
+        usage = end_payload["usage_metadata"]
+        # Usage comes from the LAST usage-bearing frame, not the first.
+        assert usage["input_tokens"] == 11
+        assert usage["output_tokens"] == 7
+        if "ttft_seconds" in UsageMetadata.model_fields:
+            # Engine-stamped ttft is authoritative, never overwritten.
+            assert usage["ttft_seconds"] == pytest.approx(0.1)
+        else:
+            # Older schema without the engine-stamp field: the wrapper's
+            # measured first-chunk time fills the ttft in.
+            assert usage["ttft_seconds"] >= 0
+
+    @staticmethod
+    def _tpot_mock_env(results):
+        """Shared mock tracer/session for the TPOT stream tests."""
+        async def mock_trigger(handler_class_name: str, event_name: str, **kwargs):
+            results.append([handler_class_name, event_name, kwargs])
+
+        mock_tracer = MagicMock()
+        mock_tracer.trigger = mock_trigger
+        mock_tracer.tracer_agent_span_manager = MagicMock()
+        mock_session = MagicMock()
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+        mock_inner_session.span.return_value = MagicMock()
+        return mock_session
+
+    async def test_decorate_model_stream_tpot_measured(self):
+        """Streamed LLM calls carry inter_token_latency_ms (TPOT): token-level
+        denominator (output_tokens - 1) when usage reports tokens; a
+        non-streaming invoke has no first-token event and stays honestly
+        absent."""
+        import asyncio
+
+        from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata
+
+        class _StreamModel:
+            def __init__(self):
+                self.config = MagicMock()
+
+            async def stream(self, messages, **kwargs):
+                yield AssistantMessage(content="partial-1")
+                await asyncio.sleep(0.02)
+                yield AssistantMessage(
+                    content="final",
+                    usage_metadata=UsageMetadata(input_tokens=10, output_tokens=7),
+                )
+
+            async def invoke(self, messages, **kwargs):
+                return AssistantMessage(
+                    content="all-at-once",
+                    usage_metadata=UsageMetadata(input_tokens=3, output_tokens=5),
+                )
+
+        results = []
+        mocked_model = decorate_model_with_trace(
+            _StreamModel(), self._tpot_mock_env(results)
+        )
+
+        consumed = [
+            item
+            async for item in mocked_model.stream([BaseMessage(role="user", content="hi")])
+        ]
+        assert len(consumed) == 2
+        usage = results[1][2]["outputs"]["usage_metadata"]
+        # Measured span (~20 ms) over output_tokens - 1 == 6: a small positive
+        # token-level TPOT, never 0 (that would mean "instant generation").
+        assert 0 < usage["inter_token_latency_ms"] < 100
+
+        results.clear()
+        await mocked_model.invoke([BaseMessage(role="user", content="hi")])
+        usage = results[1][2]["outputs"]["usage_metadata"]
+        # Non-streaming: TPOT is undefined, absent rather than fabricated.
+        # model_dump may carry the key as None on schemas that declare it.
+        assert usage.get("inter_token_latency_ms") is None
+
+    async def test_decorate_model_stream_tpot_precedence_and_absence(self):
+        """A TPOT already stamped by a streaming producer wins (same rule as
+        ttft); a single-chunk stream has no inter-token interval and stays
+        honestly absent."""
+        import asyncio
+
+        from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata
+
+        stamp_kwargs = {"input_tokens": 10, "output_tokens": 7}
+        if "inter_token_latency_ms" in UsageMetadata.model_fields:
+            stamp_kwargs["inter_token_latency_ms"] = 42.0
+
+        class _StampedStreamModel:
+            def __init__(self):
+                self.config = MagicMock()
+
+            async def stream(self, messages, **kwargs):
+                yield AssistantMessage(content="partial")
+                await asyncio.sleep(0.02)
+                yield AssistantMessage(
+                    content="final",
+                    usage_metadata=UsageMetadata(**stamp_kwargs),
+                )
+
+            async def invoke(self, messages, **kwargs):
+                raise AssertionError("stamp test must not hit invoke")
+
+        class _SingleChunkModel:
+            def __init__(self):
+                self.config = MagicMock()
+
+            async def stream(self, messages, **kwargs):
+                yield AssistantMessage(
+                    content="all-in-one",
+                    usage_metadata=UsageMetadata(input_tokens=3, output_tokens=5),
+                )
+
+            async def invoke(self, messages, **kwargs):
+                raise AssertionError("single-chunk test must not hit invoke")
+
+        results = []
+        mock_session = self._tpot_mock_env(results)
+
+        stamped = decorate_model_with_trace(_StampedStreamModel(), mock_session)
+        consumed = [
+            item
+            async for item in stamped.stream([BaseMessage(role="user", content="hi")])
+        ]
+        assert len(consumed) == 2
+        usage = results[1][2]["outputs"]["usage_metadata"]
+        if "inter_token_latency_ms" in UsageMetadata.model_fields:
+            # Engine-stamped TPOT is authoritative, never overwritten.
+            assert usage["inter_token_latency_ms"] == pytest.approx(42.0)
+        else:
+            # Older schema without the field: the wrapper's own measurement
+            # fills the gap in.
+            assert 0 < usage["inter_token_latency_ms"] < 100
+
+        results.clear()
+        single = decorate_model_with_trace(_SingleChunkModel(), mock_session)
+        consumed = [
+            item
+            async for item in single.stream([BaseMessage(role="user", content="hi")])
+        ]
+        assert len(consumed) == 1
+        usage = results[1][2]["outputs"]["usage_metadata"]
+        # One chunk: first == last timestamp, no interval to average — absent.
+        assert usage.get("inter_token_latency_ms") is None
+
+    async def test_decorate_model_stream_abandoned_fires_end(self):
+        """Mid-stream abandonment must not leave the llm span half open.
+
+        GeneratorExit is a BaseException: it bypasses the except-Exception
+        branch, and without the finally compensation the span's ambient
+        context leaks and later spans mis-parent onto it. Abandonment here =
+        caller aclose() after one chunk; the end event must still fire with
+        whatever was seen (partial chunks + their usage).
+
+        Drives the trace handler directly: through the full proxy chain the
+        inner generator's finalization is scheduled by asyncio's asyncgen
+        hooks (GC timing), which is best-effort-by-design in production but
+        non-deterministic in a test. The handler's own finally is the unit
+        under contract.
+        """
+        from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata
+        from openjiuwen.core.session.tracer.data import InvokeType
+        from openjiuwen.core.session.tracer.decorator import _make_trace_stream_wrap_handler
+
+        class _StreamModel:
+            def __init__(self):
+                self.config = MagicMock()
+
+            async def stream(self, messages, **kwargs):
+                yield AssistantMessage(
+                    content="partial-1",
+                    usage_metadata=UsageMetadata(input_tokens=10, output_tokens=5),
+                )
+                yield AssistantMessage(content="partial-2")
+                yield AssistantMessage(content="never-reaches-caller")
+
+            async def invoke(self, messages, **kwargs):
+                raise AssertionError("abandonment test must not hit invoke")
+
+        results = []
+        mock_session = self._tpot_mock_env(results)
+        handler = _make_trace_stream_wrap_handler(
+            mock_session._inner, InvokeType.LLM, {"class_name": "abandoned", "type": "llm"}
+        )
+        model = _StreamModel()
+
+        async def call_next(*args, **kwargs):
+            async for item in model.stream(*args, **kwargs):
+                yield item
+
+        agen = handler(call_next, [BaseMessage(role="user", content="hi")])
+        first = await agen.__anext__()
+        assert first.content == "partial-1"
+        await agen.aclose()
+
+        events = [r[1] for r in results]
+        # Compensation fires on_llm_end — not on_llm_error: abandonment is
+        # the caller's choice, not a model failure.
+        assert events == ["on_llm_start", "on_llm_end"]
+        end_payload = results[1][2]["outputs"]
+        assert [m.content for m in end_payload["outputs"]] == ["partial-1"]
+        # Usage seen before abandonment travels with the closing event.
+        assert end_payload["usage_metadata"]["input_tokens"] == 10
+
+    async def test_decorate_model_invoke_cancelled_fires_end(self):
+        """CancelledError bypasses except Exception; the finally compensation
+        must still close the span instead of leaving it half open, and the
+        cancellation itself must propagate unchanged."""
+        import asyncio
+
+        class _CancelledModel:
+            def __init__(self):
+                self.config = MagicMock()
+
+            async def invoke(self, messages, **kwargs):
+                raise asyncio.CancelledError()
+
+            async def stream(self, messages, **kwargs):
+                raise AssertionError("cancel test must not hit stream")
+
+        results = []
+        mocked_model = decorate_model_with_trace(
+            _CancelledModel(), self._tpot_mock_env(results)
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await mocked_model.invoke([BaseMessage(role="user", content="hi")])
+
+        events = [r[1] for r in results]
+        assert events == ["on_llm_start", "on_llm_end"]
+        # No partial result existed: the closing event says so honestly.
+        assert results[1][2]["outputs"] == {"outputs": None}
