@@ -24,6 +24,7 @@ generated: true
 | [extensions.tracer_otel](#module-extensions-tracer_otel) |
 | [extensions/observability](#module-extensions-observability) |
 | [harness](#module-harness) |
+| [harness/rails](#module-harness-rails) |
 | [harness/subagents](#module-harness-subagents) |
 | [harness/tools/browser_move](#module-harness-tools-browser_move) |
 
@@ -312,6 +313,14 @@ generated: true
 | [F_28_browser-source-and-local-continuity](harness/F_28_browser-source-and-local-continuity.md) | F | Browser source retention and local continuity after develop integration | ShowHsiang | 待核实 |
 | [F_29_browser-shared-state-and-source-delivery](harness/F_29_browser-shared-state-and-source-delivery.md) | F | Browser shared-state lifecycle and complete retained-source delivery | ShowHsiang | 待核实 |
 | [F_30_browser-output-and-dispatch-contracts](F_30_browser-output-and-dispatch-contracts.md) | F | Browser output limits and local dispatch contracts | ShowHsiang | 无独立 D：Implements the approved multiversion analysis section 19 using existing browser contracts. |
+
+<a id="module-harness-rails"></a>
+
+## harness/rails
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F-20261107-1700-coding-document-memory](F_20261107_1700_coding-document-memory.md) | F | Coding 文档记忆 Rail | Wang Tao | 无独立 D：依据本会话已确认的跨仓 Coding 文档记忆方案及后续交互轮次复用决定；AutoMemory 保留宿主原有开关。 |
 
 <a id="module-harness-subagents"></a>
 

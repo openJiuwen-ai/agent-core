@@ -17,8 +17,8 @@ author_email: yangzequ1@huawei.com
 | 项 | 值 |
 |---|---|
 | 类型 | spec |
-| 关联模块 | `openjiuwen/harness/rails/`（70 文件，7 个子目录） |
-| 最近一次修订日期 | 2026-11-14 |
+| 关联模块 | `openjiuwen/harness/rails/` |
+| 最近一次修订日期 | 2026-11-18 |
 | 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_21_cua-desktop-subagent.md`、`F_22_cli-jiuwen-memory-rail-mount-and-switch.md` |
 
 ## 范围 / 边界
@@ -75,7 +75,7 @@ author_email: yangzequ1@huawei.com
    BaseSecurityRail / VerificationRail` → `85 AgentModeRail / SafetyPromptRail /
    ContextAssembleRail / Context*ProcessorRail / MultimodalContextSummarizerRail / Skill*CreateRail` →
    `80 MemoryRail / CodingMemoryRail / HeartbeatRail / Skill*EvolutionRail` →
-   `75 ExternalMemoryRail / JiuwenMemoryRail`（外接记忆 rail，在 MemoryRail(80) 之后、
+   `75 ExternalMemoryRail / JiuwenMemoryRail / JiuwenMemoryCodingRail`（外接记忆 rail，在 MemoryRail(80) 之后、
    LLMRetry(70) 之前） →
    `70 LLMRetryRail / ToolCallResilienceRail` → `60 EvolutionRail / LspRail` →
    `50 core 默认`（含 `tools/cua/rails.py` 的 Cua*Rail） → `10 TrajectoryRail / TaskCompletionRail`。
@@ -153,8 +153,10 @@ author_email: yangzequ1@huawei.com
       `after_tool_call`（带结果）；答复后的调用不再经过 `before_tool_call`。
     - 宿主可用 `pending_interrupts(state)` 列出暂停的中断，用 `match_answers(user_input, pending)`
       按处理器同一规则换算 `InteractiveInput` 并找出过期答复。
-15. **JiuwenMemoryRail 按逻辑轮次沉淀交互输入**：
-    - 以实际 `Session.get_session_id()` 隔离暂存，缺失时退到 `InvokeInputs.conversation_id`；
+15. **JiuwenMemoryRail 与 JiuwenMemoryCodingRail 共用逻辑轮次聚合**：
+    - `memory/memory_turn.py` 的 `MemoryTurnBuffer` 统一处理开始、回答收集和结束；
+      Coding 每个挂载 Agent 独立持有缓冲，并将内层 ReAct 回调归属到对应外层 Agent。
+      以实际 `Session.get_session_id()` 隔离暂存，缺失时退到 `InvokeInputs.conversation_id`；
       provider 的 `session_id=""` 仍表示跨会话共享，不作暂存键。无标识时普通轮次照常沉淀，
       中断轮次不暂存。
     - 保存用户原始请求；存在待处理中断时普通文本属于续接，追加而不覆盖原请求。
@@ -167,11 +169,12 @@ author_email: yangzequ1@huawei.com
       不等于 task 取消；本 rail 不改写宿主的交互控制语义，也不保证抽取器总能排除这些标记。
     - 用户侧聚合文本上限 16,000 字符（含截断标记）。超长原请求保留首尾；
       加入问答需腾出空间时原请求最多占剩余预算的一半，补充按完整条目保留最近内容，
-      单条放不下则跳过。缓存最多 128 个会话、每轮最多记住最近 128 个回答标识，
+      单条放不下则跳过。每个缓冲最多 128 个会话、每轮最多记住最近 128 个回答标识，
       30 分钟未活动的暂存于下一次前台调用时淘汰。后台心跳和 cron 不读写暂存；
-      熔断期间仍维护轮次，结束后清理，仅跳过提交。
-    - 暂存仅属于 rail 实例，不进入 checkpoint；`end_session()` 和 `uninit()` 清空该 rail
-      的暂存。既有超时、失败处理及 provider 接口不变，不承诺外部写入成功或重启续接。
+      Work 的熔断期间仍维护轮次，结束后清理，仅跳过提交。
+    - 暂存不进入 checkpoint；Work 的 `end_session()` 和 `uninit()` 清空其缓冲；
+      Coding 的 `uninit(agent)` 仅清空对应 Agent 的缓冲，其余使用者继续运行。
+      既有超时、失败处理及 provider 接口不变，不承诺外部写入成功或重启续接。
 
 ## 接口契约
 
@@ -180,7 +183,7 @@ author_email: yangzequ1@huawei.com
 AgentModeRail, AskUserPayload, AskUserRail, BaseInterruptRail, BaseSecurityRail,
 CodingMemoryRail, ConfirmInterruptRail, ContextEvolutionRail, DeepAgentRail,
 EvolutionRail, EvolutionInterruptRail, ExternalMemoryRail, HeartbeatRail,
-JiuwenMemoryRail, ModelAnomalyDetectionRail, LspRail, McpRail, MemoryRail, MemberSkillEvolutionRail,
+JiuwenMemoryRail, JiuwenMemoryCodingRail, ModelAnomalyDetectionRail, LspRail, McpRail, MemoryRail, MemberSkillEvolutionRail,
 MultimodalContextSummarizerRail, ARCHIVED_SCREEN_PLACEHOLDER,
 PermissionInterruptRail, ProgressiveToolRail, SafetyPromptRail, SecurityAllow,
 SecurityCheckContext, SecurityDecision, SecurityInterrupt, SecurityReject, SecurityRail,
@@ -262,3 +265,22 @@ class BaseSecurityRail(AgentRail):
   `request_retry` / `request_force_finish`）在 `openjiuwen/core/single_agent/rail/base.py`，
   属 core 规约管辖，不在本 spec 展开。
 - 子模块本地扩展（每一个坑的展开、加 rail 清单）见 `openjiuwen/harness/rails/AGENTS.md`。
+
+
+## Coding 文档记忆
+
+`JiuwenMemoryCodingRail(provider, *, user_id="__default__", scope_id="__default__", agent_id="jiuwenswarm", session_id="")` 从 `openjiuwen.harness.rails` 导出。
+
+- init 注册 Provider 工具和静态提示词；首次 before_invoke 初始化 Provider，普通调用 prefetch(top_k=5)，后台调用传 background=True。
+- 同一轮只召回一次；before_model_call 向对应 Agent 的 PromptAttachmentManager 写入记忆来源上下文，整体召回预算 6 秒。
+- before_invoke 保存原始请求，after_tool_call 收集有效 ask_user 回答；after_invoke 按不变量 15 聚合完整轮次，仅正常完成且问答非空、非后台时排队 sync_turn。中断只暂存，异常或取消清理；同一 Provider 的写入串行，每次最多 130 秒。
+- `attached_agents` 是当前使用者快照。每个 Agent 的工具、静态/动态提示词及缓存独立；移除工具核对 card 身份。
+- `uninit(agent)` 不阻塞事件循环；`drain()` 等待写入，`wait_closed()` 等待清理，`aclose()` 卸载全部使用者并等待关闭。Provider 只在最后使用者退出后关闭。
+- Provider 初始化失败不会回退到其他 Rail；此处不决定宿主的模式选择、项目标识或数据迁移。
+
+
+### Coding 记忆异常隔离与共享辅助入口
+
+`JiuwenMemoryCodingRail.init` 跳过没有有效名称的工具 schema；工具注册或静态提示词装配异常时，撤回该 owner 的部分注册，Agent 主流程继续运行。卸载单项工具、静态提示词或动态上下文失败，不中断其余清理及最后一个 owner 的排空写入、关闭 Provider。
+
+`JiuwenMemoryRail` 提供静态辅助入口 `resolve_user_text_for_memory`、`is_background_run`、`build_memory_context_block`、`extract_assistant_output`、`unwrap_jiuwenswarm_envelope`，供同层记忆 Rail 共享上下文解析；保留原带下划线名称兼容既有调用，解析与返回语义不变。

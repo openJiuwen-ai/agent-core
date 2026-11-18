@@ -18,6 +18,8 @@ from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.single_agent.rail.base import RunKind
 from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserPayload, AskUserRail
 from openjiuwen.harness.rails.memory import jiuwen_memory_rail as memory_module
+from openjiuwen.harness.rails.memory import memory_turn as turn_module
+from openjiuwen.harness.rails.memory.jiuwen_memory_coding_rail import JiuwenMemoryCodingRail
 from openjiuwen.harness.rails.memory.jiuwen_memory_rail import JiuwenMemoryRail
 from tests.unit_tests.fixtures.deep_agent_interrupts import (
     APPROVE, ask_permissions, by_call_id, by_interrupt_id,
@@ -75,12 +77,24 @@ async def drive(agent, query, streaming, session_id="memory-e2e"):
     return next(chunk.payload for chunk in reversed(chunks) if getattr(chunk, "type", None) == "answer")
 
 
+@pytest.fixture(params=[JiuwenMemoryRail, JiuwenMemoryCodingRail], ids=["work", "coding"])
+def rail_type(request):
+    return request.param
+
+
+async def wait_for_sync(rail):
+    if isinstance(rail, JiuwenMemoryCodingRail):
+        await rail.drain()
+    elif rail._sync_task is not None:
+        await rail._sync_task
+
+
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("address", ["call", "interrupt"])
 @pytest.mark.parametrize("shape", ["answers", "answer", "text", "payload"])
-async def test_real_ask_user_turn_is_synced_once(tmp_path, runner, streaming, address, shape):
+async def test_real_ask_user_turn_is_synced_once(tmp_path, runner, rail_type, streaming, address, shape):
     provider = MockMemoryProvider()
-    rail = JiuwenMemoryRail(provider)
+    rail = rail_type(provider)
     agent = make_deep_agent(tmp_path, rails=[AskUserRail(), rail])
     llm = MockLLMModel()
     llm.set_responses([ask(), create_text_response("已发送"), create_text_response("下一轮回复")])
@@ -96,24 +110,23 @@ async def test_real_ask_user_turn_is_synced_once(tmp_path, runner, streaming, ad
         reply = by_call_id(call_id, value) if address == "call" else by_interrupt_id(request, value)
         result = await drive(agent, reply, streaming)
         assert result["result_type"] == "answer"
-        await rail._sync_task
+        await wait_for_sync(rail)
         assert len(provider.sync_calls) == 1
         user_text, output = provider.sync_calls[0]
         assert REQUEST in user_text
         assert QUESTION in user_text
         assert user_text.count(ANSWER) == 1
         assert output == "已发送"
-        assert rail._memory_turns == {}
         await drive(agent, "新任务", streaming)
-        await rail._sync_task
+        await wait_for_sync(rail)
         assert provider.sync_calls[-1] == ("新任务", "下一轮回复")
 
 
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("plain_text", [False, True])
-async def test_repeated_interrupt_preserves_original_and_both_answers(tmp_path, runner, streaming, plain_text):
+async def test_repeated_interrupt_preserves_original_and_both_answers(tmp_path, runner, rail_type, streaming, plain_text):
     provider = MockMemoryProvider()
-    rail = JiuwenMemoryRail(provider)
+    rail = rail_type(provider)
     agent = make_deep_agent(tmp_path, rails=[AskUserRail(), rail])
     llm = MockLLMModel()
     llm.set_responses([ask(), ask("文档名称？", "ask_2"), create_text_response("已发送")])
@@ -123,7 +136,7 @@ async def test_repeated_interrupt_preserves_original_and_both_answers(tmp_path, 
         [(_, second)] = pending(await drive(agent, reply, streaming))
         assert provider.sync_calls == []
         await drive(agent, by_interrupt_id(second, {"answers": {"文档名称？": "report.pdf"}}), streaming)
-        await rail._sync_task
+        await wait_for_sync(rail)
     assert len(provider.sync_calls) == 1
     text, _ = provider.sync_calls[0]
     assert REQUEST in text and QUESTION in text and ANSWER in text and "report.pdf" in text
@@ -132,10 +145,10 @@ async def test_repeated_interrupt_preserves_original_and_both_answers(tmp_path, 
 
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("unanswered", ["用户已取消本次问答，未作答。", "用户已跳过此题，未选择任何选项。"])
-async def test_unanswered_question_preserves_request_without_ending_the_task(tmp_path, runner, streaming, unanswered):
+async def test_unanswered_question_preserves_request_without_ending_the_task(tmp_path, runner, rail_type, streaming, unanswered):
     """A host's textual cancellation is an answer, not an execution abort."""
     provider = MockMemoryProvider()
-    rail = JiuwenMemoryRail(provider)
+    rail = rail_type(provider)
     agent = make_deep_agent(tmp_path, rails=[AskUserRail(), rail])
     llm = MockLLMModel()
     llm.set_responses([
@@ -145,21 +158,20 @@ async def test_unanswered_question_preserves_request_without_ending_the_task(tmp
         [(_, question)] = pending(await drive(agent, REQUEST, streaming))
         assert provider.sync_calls == []
         await drive(agent, by_interrupt_id(question, {"answers": {QUESTION: unanswered}}), streaming)
-        await rail._sync_task
+        await wait_for_sync(rail)
         assert len(provider.sync_calls) == 1
         user_text, reply = provider.sync_calls[0]
         assert REQUEST in user_text
         assert user_text.count(unanswered) == 1
         assert reply == "缺少授权码，邮件未发送"
-        assert rail._memory_turns == {}
         await drive(agent, ANSWER, streaming)
-        await rail._sync_task
+        await wait_for_sync(rail)
     assert provider.sync_calls[1] == (ANSWER, "已收到补充信息")
 
 
-async def test_permission_and_stale_answers_are_not_user_facts(tmp_path, runner):
+async def test_permission_and_stale_answers_are_not_user_facts(tmp_path, runner, rail_type):
     provider = MockMemoryProvider()
-    rail = JiuwenMemoryRail(provider)
+    rail = rail_type(provider)
     agent = make_deep_agent(tmp_path, rails=[AskUserRail(), rail], permissions=ask_permissions("ask_user"))
     llm = MockLLMModel()
     llm.set_responses([ask(), create_text_response("已发送")])
@@ -171,7 +183,7 @@ async def test_permission_and_stale_answers_are_not_user_facts(tmp_path, runner)
         assert pending(await run(agent, stale, "permission-memory"))
         assert provider.sync_calls == []
         await run(agent, by_interrupt_id(question, {"answers": {QUESTION: ANSWER}}), "permission-memory")
-        await rail._sync_task
+        await wait_for_sync(rail)
     text, _ = provider.sync_calls[0]
     assert REQUEST in text and ANSWER in text
     assert "approved" not in text and "STALE-SECRET" not in text
@@ -201,9 +213,9 @@ async def test_background_does_not_touch_pending_turn(run_kind):
     session = MemorySession()
     session.interruption = object()
     await invoke_hook(rail, session, REQUEST, {"result_type": "interrupt"})
-    before = rail._memory_turns[session.session_id].render()
+    before = rail._turn_buffer.turns[session.session_id].render()
     await invoke_hook(rail, session, "background", {"output": "background"}, run_kind=run_kind)
-    assert rail._memory_turns[session.session_id].render() == before
+    assert rail._turn_buffer.turns[session.session_id].render() == before
     await invoke_hook(rail, session, "补充", {"output": "已完成"})
     assert REQUEST in provider.sync_calls[0][0]
     assert "background" not in provider.sync_calls[0][0]
@@ -225,10 +237,10 @@ async def test_breaker_maintains_interrupted_turn_and_consumes_finished_turn():
     session = MemorySession()
     session.interruption = object()
     await invoke_hook(rail, session, REQUEST, {"result_type": "interrupt"})
-    assert session.session_id in rail._memory_turns
+    assert session.session_id in rail._turn_buffer.turns
     await invoke_hook(rail, session, InteractiveInput(), {"output": "已完成"})
     assert provider.sync_calls == []
-    assert rail._memory_turns == {}
+    assert rail._turn_buffer.turns == {}
 
 
 @pytest.mark.parametrize("result,exception", [
@@ -238,7 +250,7 @@ async def test_breaker_maintains_interrupted_turn_and_consumes_finished_turn():
 async def test_empty_and_failed_calls_do_not_leave_a_turn(result, exception):
     rail, provider = unit_rail()
     await invoke_hook(rail, MemorySession(), REQUEST, result, exception=exception)
-    assert rail._memory_turns == {}
+    assert rail._turn_buffer.turns == {}
     assert provider.sync_calls == []
 
 
@@ -247,7 +259,7 @@ async def test_streaming_empty_interrupt_and_missing_cache():
     session = MemorySession()
     session.interruption = object()
     await invoke_hook(rail, session, REQUEST, None)
-    assert session.session_id in rail._memory_turns
+    assert session.session_id in rail._turn_buffer.turns
     await invoke_hook(rail, MemorySession("missing"), InteractiveInput(), {"output": "完成"})
     assert provider.sync_calls == []
 
@@ -273,7 +285,7 @@ async def test_cancelled_invoke_clears_turn_even_with_old_interrupt_state():
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert rail._memory_turns == {}
+    assert rail._turn_buffer.turns == {}
     assert provider.sync_calls == []
 
 
@@ -285,7 +297,7 @@ async def test_cancelled_result_with_empty_output_clears_stale_interrupted_turn(
     await invoke_hook(rail, session, REQUEST, {"result_type": "interrupt"})
 
     await invoke_hook(rail, session, InteractiveInput(), {"result_type": result_type})
-    assert rail._memory_turns == {}
+    assert rail._turn_buffer.turns == {}
 
     await invoke_hook(rail, session, InteractiveInput(), {"output": "迟到的回答"})
     assert provider.sync_calls == []
@@ -302,7 +314,7 @@ async def test_carried_and_replayed_answers_are_not_appended_twice():
         request=SimpleNamespace(interrupt_id="answer-1"),
     )
     tool_ctx = SimpleNamespace(
-        session=session, extra={memory_module.RESUME_INTERRUPT_ANSWERS_KEY: {"call": {"owner": answer}}},
+        session=session, extra={turn_module.RESUME_INTERRUPT_ANSWERS_KEY: {"call": {"owner": answer}}},
         inputs=SimpleNamespace(tool_name="ask_user", tool_call=SimpleNamespace(id="call"), tool_result=ANSWER),
         exception=None, is_paused=False,
     )
@@ -310,12 +322,12 @@ async def test_carried_and_replayed_answers_are_not_appended_twice():
     await rail.after_tool_call(tool_ctx)
     answer.carried = True
     await rail.after_tool_call(tool_ctx)
-    assert rail._memory_turns[session.session_id].render().count(ANSWER) == 1
+    assert rail._turn_buffer.turns[session.session_id].render().count(ANSWER) == 1
 
 
 async def test_pending_turn_size_expiration_and_capacity(monkeypatch):
     rail, _ = unit_rail()
-    turn = memory_module._MemoryTurn("HEAD" + "x" * 20000 + "TAIL")
+    turn = turn_module._MemoryTurn("HEAD" + "x" * 20000 + "TAIL")
     for i in range(100):
         turn.append(f"question-{i}:" + "y" * 300)
     rendered = turn.render()
@@ -327,16 +339,16 @@ async def test_pending_turn_size_expiration_and_capacity(monkeypatch):
     assert "question-99:" in turn.render()
     assert "oversize-answer:" not in turn.render()
     assert len(turn.render()) <= 16000
-    monkeypatch.setattr(memory_module, "_TURN_MAX_SESSIONS", 2)
+    monkeypatch.setattr(turn_module, "_TURN_MAX_SESSIONS", 2)
     for sid in ["one", "two", "three"]:
         await invoke_hook(rail, MemorySession(sid), REQUEST, {"result_type": "interrupt"})
-    assert set(rail._memory_turns) == {"two", "three"}
-    for pending_turn in rail._memory_turns.values():
-        pending_turn.updated -= memory_module._TURN_TTL
+    assert set(rail._turn_buffer.turns) == {"two", "three"}
+    for pending_turn in rail._turn_buffer.turns.values():
+        pending_turn.updated -= turn_module._TURN_TTL
     await invoke_hook(rail, MemorySession("four"), REQUEST, {"result_type": "interrupt"})
-    assert set(rail._memory_turns) == {"four"}
+    assert set(rail._turn_buffer.turns) == {"four"}
     await rail.end_session()
-    assert rail._memory_turns == {}
+    assert rail._turn_buffer.turns == {}
 
 
 async def test_conversation_id_fallback_and_missing_identity():
@@ -352,4 +364,4 @@ async def test_conversation_id_fallback_and_missing_identity():
     await rail._sync_task
     assert provider.sync_calls == [(REQUEST, "完成")]
     await invoke_hook(rail, None, "无会话", {"result_type": "interrupt"})
-    assert rail._memory_turns == {}
+    assert rail._turn_buffer.turns == {}
