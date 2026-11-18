@@ -71,7 +71,7 @@ async def sys_op_fixture() -> AsyncIterator[SysOperation]:
             ),
             launcher_config=PreDeployLauncherConfig(
                 base_url=_base_url(),
-                sandbox_type="adx",
+                sandbox_type="adx-environment",
                 idle_ttl_seconds=600,
                 extra_params=_extra_params(),
             ),
@@ -310,7 +310,7 @@ def test_adx_http_request_and_response_contract():
         raise AssertionError("search error envelope should raise")
 
 
-@pytest.mark.parametrize("sandbox_type", ["adx", "yuanrong"])
+@pytest.mark.parametrize("sandbox_type", ["adx-environment", "yuanrong"])
 @pytest.mark.asyncio
 async def test_launcher_delete_dispatches_adx(monkeypatch, sandbox_type):
     from openjiuwen.core.sys_operation.sandbox.launchers.pre_deployment_launcher import PreDeploymentLauncher
@@ -344,7 +344,7 @@ def test_legacy_adx_provider_aliases():
         ("shell", adx.AdxShellProvider),
         ("code", adx.AdxCodeProvider),
     ):
-        assert SandboxRegistry.get_provider_cls("adx", operation) is provider
+        assert SandboxRegistry.get_provider_cls("adx-environment", operation) is provider
         assert SandboxRegistry.get_provider_cls("yuanrong", operation) is provider
 
     assert yuanrong.build_yuanrong_shared_scope_key is adx.build_adx_shared_scope_key

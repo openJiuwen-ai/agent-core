@@ -85,7 +85,7 @@ class PreDeployLauncherConfig(SandboxLauncherConfig)
 **参数**：
 
 * **launcher_type**(Literal["pre_deploy"])：Launcher 类型，固定为 `"pre_deploy"`。
-* **sandbox_type**(str, 可选)：沙箱提供者类型。默认值：`"aio"`。 设为 `"adx"` 时，通过 `base_url` 调用 ADX HTTP API。旧名称 `"yuanrong"` 仍指向同一个 provider。
+* **sandbox_type**(str, 可选)：沙箱提供者类型。默认值：`"aio"`。 设为 `"adx-environment"` 时，通过 `base_url` 调用 ADX HTTP API。旧名称 `"yuanrong"` 仍指向同一个 provider。
 * **base_url**(str)：沙箱服务基础 URL（`http://` 或 `ws://`）。
 * **on_stop**(Literal["delete", "pause", "keep"], 可选)：沙箱停止时的行为策略。默认值：`"delete"`。
 * **idle_ttl_seconds**(int, 可选)：空闲超时时间（秒）。默认值：`None`。

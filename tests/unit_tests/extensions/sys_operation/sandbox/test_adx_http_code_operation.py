@@ -79,7 +79,7 @@ class TestAdxCodeOperation:
                 ),
                 launcher_config=PreDeployLauncherConfig(
                     base_url=_base_url(),
-                    sandbox_type="adx",
+                    sandbox_type="adx-environment",
                     idle_ttl_seconds=600,
                     extra_params=_extra_params(),
                 ),

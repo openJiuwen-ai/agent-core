@@ -59,7 +59,7 @@ Pre-deploy Launcher configuration for connecting to existing sandbox services.
 **Parameters**:
 
 * **launcher_type**(Literal["pre_deploy"]): Launcher type, fixed as `"pre_deploy"`.
-* **sandbox_type**(str, optional): Sandbox provider type. Default: `"aio"`. Use `"adx"` for an ADX HTTP endpoint at `base_url`. Existing `"yuanrong"` settings select the same provider.
+* **sandbox_type**(str, optional): Sandbox provider type. Default: `"aio"`. Use `"adx-environment"` for an ADX HTTP endpoint at `base_url`. Existing `"yuanrong"` settings select the same provider.
 * **base_url**(str): Sandbox service base URL (`http://` or `ws://`).
 * **on_stop**(Literal["delete", "pause", "keep"], optional): Sandbox stop behavior strategy. Default: `"delete"`.
 * **idle_ttl_seconds**(int, optional): Idle timeout in seconds. Default: `None`.

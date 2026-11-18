@@ -393,6 +393,13 @@ def _adx_create_body(extra: dict[str, Any], executor: str) -> dict[str, Any]:
     for key in ("cpu_limit", "mem_limit", "env", "network"):
         if extra.get(key) is not None:
             body[key] = extra[key]
+    for config_key, request_key in (
+        ("restart_policy", "restartPolicy"),
+        ("create_timeout", "createTimeoutSeconds"),
+        ("schedule_timeout", "scheduleTimeoutSeconds"),
+    ):
+        if extra.get(config_key) is not None:
+            body[request_key] = extra[config_key]
     user = extra.get("user")
     group = extra.get("group")
     if user is not None and group is not None:
@@ -614,6 +621,10 @@ class _AdxProviderMixin:
         self._auth_headers = dict(getattr(config, "auth_headers", None) or {})
         self._timeout_seconds = int(getattr(config, "timeout_seconds", 30) or 30)
         extra = self._launcher_extra_params()
+        token_env = extra.get("token_env")
+        token = os.getenv(token_env) if token_env else None
+        if token:
+            self._auth_headers.setdefault("Authorization", f"Bearer {token}")
         self._executor = _normalize_executor(extra.get("executor"))
 
     def _base_url(self) -> str:
@@ -658,7 +669,7 @@ class _AdxProviderMixin:
             f"{self._base_url()}{_ADX_ENVIRONMENTS}",
             payload=body,
             headers=self._auth_headers,
-            timeout=self._request_timeout(),
+            timeout=self._request_timeout(body.get("createTimeoutSeconds")),
         )
         if status != 200:
             raise AdxHttpError(status, _http_error_message(response))
@@ -985,7 +996,7 @@ async def delete_adx_sandbox(
     return deleted
 
 
-@SandboxRegistry.provider("adx", "fs")
+@SandboxRegistry.provider("adx-environment", "fs")
 @SandboxRegistry.provider("yuanrong", "fs")
 class AdxFSProvider(_AdxProviderMixin, BaseFSProvider):
     """ADX FS provider via ADX ``file.read`` / ``file.write`` / ``file.list`` / ``file.search``."""
@@ -1383,7 +1394,7 @@ class AdxFSProvider(_AdxProviderMixin, BaseFSProvider):
             return _build_fs_error_result("search_files", str(exc), SearchFilesResult)
 
 
-@SandboxRegistry.provider("adx", "shell")
+@SandboxRegistry.provider("adx-environment", "shell")
 @SandboxRegistry.provider("yuanrong", "shell")
 class AdxShellProvider(_AdxProviderMixin, BaseShellProvider):
     def __init__(self, endpoint: SandboxEndpoint, config: Optional[SandboxGatewayConfig] = None):
@@ -1475,7 +1486,7 @@ class AdxShellProvider(_AdxProviderMixin, BaseShellProvider):
         )
 
 
-@SandboxRegistry.provider("adx", "code")
+@SandboxRegistry.provider("adx-environment", "code")
 @SandboxRegistry.provider("yuanrong", "code")
 class AdxCodeProvider(_AdxProviderMixin, BaseCodeProvider):
     def __init__(self, endpoint: SandboxEndpoint, config: Optional[SandboxGatewayConfig] = None):

@@ -53,7 +53,7 @@ def _build_card(
     card_id: str,
     *,
     custom_id: Optional[str] = None,
-    sandbox_type: str = "adx",
+    sandbox_type: str = "adx-environment",
 ) -> SysOperationCard:
     return SysOperationCard(
         id=card_id,
@@ -188,7 +188,7 @@ async def test_docker_executor_smoke():
         await Runner.stop()
 
 
-@pytest.mark.parametrize("sandbox_type", ["adx", "yuanrong"])
+@pytest.mark.parametrize("sandbox_type", ["adx-environment", "yuanrong"])
 @pytest.mark.asyncio
 async def test_sys_operation_uses_the_adx_http_provider(monkeypatch, sandbox_type, tmp_path):
     requests = []
@@ -200,10 +200,13 @@ async def test_sys_operation_uses_the_adx_http_provider(monkeypatch, sandbox_typ
     async def create(request):
         requests.append("create")
         body = await request.json()
-        if sandbox_type == "adx":
+        if sandbox_type == "adx-environment":
             assert body["runtime"] == "runsc"
             assert body["rootfs"] == {"type": "template", "name": "tool-runtime"}
             assert body["network"] == {"blockNetwork": True}
+            assert body["restartPolicy"] == {"maxAttempts": 2}
+            assert body["createTimeoutSeconds"] == 60
+            assert body["scheduleTimeoutSeconds"] == 20
         else:
             assert body["runtime"] == "conch"
             assert body["mounts"] == [
@@ -282,12 +285,17 @@ async def test_sys_operation_uses_the_adx_http_provider(monkeypatch, sandbox_typ
     card_id = f"adx_rest_{uuid.uuid4().hex[:8]}"
     try:
         card = _build_card(card_id, custom_id=card_id, sandbox_type=sandbox_type)
-        card.gateway_config.auth_headers = {"Authorization": "Bearer local-test"}
         extra = card.gateway_config.launcher_config.extra_params
-        if sandbox_type == "adx":
+        if sandbox_type == "adx-environment":
+            monkeypatch.setenv("TEST_ADX_PROVIDER_TOKEN", "local-test")
             extra.clear()
-            extra.update(runtime="runsc", rootfs_template="tool-runtime", network={"blockNetwork": True})
+            extra.update(
+                runtime="runsc", rootfs_template="tool-runtime", network={"blockNetwork": True},
+                restart_policy={"maxAttempts": 2}, create_timeout=60, schedule_timeout=20,
+                token_env="TEST_ADX_PROVIDER_TOKEN",
+            )
         else:
+            card.gateway_config.auth_headers = {"Authorization": "Bearer local-test"}
             extra.update(executor="conch", workdir="/workspace", mounts=[{"source": "/host", "target": "/workspace"}])
         assert Runner.resource_mgr.add_sys_operation(card).is_ok()
         sys_op = Runner.resource_mgr.get_sys_operation(card_id)

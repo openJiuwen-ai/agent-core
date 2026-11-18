@@ -16,7 +16,7 @@ class PreDeploymentLauncher(SandboxLauncher):
         isolation_key = kwargs.get("isolation_key")
         base_url = kwargs.get("base_url")
 
-        if sandbox_type in ("adx", "yuanrong"):
+        if sandbox_type in ("adx-environment", "yuanrong"):
             from openjiuwen.extensions.sys_operation.sandbox.providers.adx import (
                 build_adx_shared_scope_key,
                 delete_adx_sandbox,
