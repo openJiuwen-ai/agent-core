@@ -835,15 +835,21 @@ class _AdxProviderMixin:
 
         return self._call_with_recreate(_do)
 
-    def _fs_write_sync(self, path: str, data: Any, *, mode: str = "wb") -> None:
+    def _fs_write_sync(
+        self, path: str, data: Any, *, mode: str = "wb", create_if_not_exist: bool = True
+    ) -> None:
         binary = "b" in mode
-        payload = _write_file_data(data, binary=binary)
+        args = {"path": path, "data": _write_file_data(data, binary=binary), "binary": binary}
+        if "a" in mode:
+            args["append"] = True
+        if not create_if_not_exist:
+            args["create_if_missing"] = False
 
         def _do(environment_id: str) -> None:
             result = self._invoke(
                 environment_id,
                 "file.write",
-                {"path": path, "data": payload, "binary": binary},
+                args,
                 timeout=self._request_timeout(),
             )
             if isinstance(result, dict):
@@ -907,9 +913,6 @@ class _AdxProviderMixin:
         if not isinstance(result, dict) or not isinstance(result.get("exists"), bool):
             raise OSError("ADX file.exists returned no existence result")
         return result["exists"]
-
-    def _fs_path_exists_sync(self, path: str) -> bool:
-        return self._call_with_recreate(lambda environment_id: self._file_exists(environment_id, path))
 
     @asynccontextmanager
     async def _file_request(
@@ -1093,19 +1096,12 @@ class AdxFSProvider(_AdxProviderMixin, BaseFSProvider):
         create_if_not_exist = kwargs.get("create_if_not_exist", True)
         encoding = kwargs.get("encoding", "utf-8")
         try:
-            if append:
-                raise ValueError("ADX file.write does not support append")
             options = kwargs.get("options") or {}
             if options.get("create_if_absent") or options.get("expected_content_sha256") is not None:
                 raise ValueError("ADX file.write does not support conditional writes")
-            if not create_if_not_exist:
-                exists = await asyncio.to_thread(self._fs_path_exists_sync, path)
-                if not exists:
-                    raise FileNotFoundError(f"File does not exist: {path}")
-
             if mode == "bytes":
                 raw: str | bytes = content if isinstance(content, bytes) else bytes(content)
-                open_mode = "wb"
+                open_mode = "ab" if append else "wb"
             else:
                 text = content.decode(encoding) if isinstance(content, bytes) else str(content)
                 if prepend_newline:
@@ -1113,9 +1109,11 @@ class AdxFSProvider(_AdxProviderMixin, BaseFSProvider):
                 if append_newline:
                     text += "\n"
                 raw = text
-                open_mode = "w"
+                open_mode = "a" if append else "w"
 
-            await asyncio.to_thread(self._fs_write_sync, path, raw, mode=open_mode)
+            await asyncio.to_thread(
+                self._fs_write_sync, path, raw, mode=open_mode, create_if_not_exist=create_if_not_exist
+            )
             size = len(raw) if isinstance(raw, bytes) else len(raw.encode(encoding))
             return WriteFileResult(
                 code=StatusCode.SUCCESS.code,

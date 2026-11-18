@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import shlex
 import uuid
+from types import SimpleNamespace
 from typing import AsyncIterator, Optional
 
 import pytest
@@ -16,6 +17,8 @@ import pytest_asyncio
 from aiohttp import web
 
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.memory.lite.memory_tool_context import MemoryToolContext
+from openjiuwen.core.memory.lite.memory_tool_ops import write_memory_with_context
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import OperationMode, SandboxGatewayConfig, SysOperation, SysOperationCard
 from openjiuwen.core.sys_operation.config import ContainerScope, PreDeployLauncherConfig, SandboxIsolationConfig
@@ -220,6 +223,15 @@ async def test_sys_operation_uses_the_adx_http_provider(monkeypatch, sandbox_typ
             return web.json_response({"exists": args["path"] in remote})
         if action == "file.read":
             return web.json_response({"data": "workspace"})
+        if action == "file.write":
+            path = args["path"]
+            if not args.get("create_if_missing", True) and path not in remote:
+                return web.json_response({"error": "No such file"}, status=400)
+            data = bytes.fromhex(args["data"]) if args["binary"] else args["data"].encode()
+            if args.get("append", False):
+                data = remote.get(path, b"") + data
+            remote[path] = data
+            return web.json_response({"size": len(data), "error": None})
         raise AssertionError(f"Unexpected action: {action}")
 
     async def file_transfer(request):
@@ -314,10 +326,27 @@ async def test_sys_operation_uses_the_adx_http_provider(monkeypatch, sandbox_typ
         assert local_target.read_bytes() == payload
         assert sorted(path.name for path in tmp_path.iterdir()) == ["download.bin", "source.bin"]
 
-        append = await fs.write_file(remote_path, "extra", append=True)
-        assert append.code != StatusCode.SUCCESS.code and "does not support append" in append.message
-        assert "file.write" not in requests
-        assert remote[remote_path] == payload
+        append = await fs.write_file(
+            remote_path, b"\x00\xff", mode="bytes", append=True, create_if_not_exist=False
+        )
+        assert append.code == StatusCode.SUCCESS.code
+        assert append.data.size == 2 and remote[remote_path] == payload + b"\x00\xff"
+
+        missing_path = "/workspace/missing.bin"
+        missing = await fs.write_file(missing_path, b"extra", mode="bytes", append=True, create_if_not_exist=False)
+        assert missing.code != StatusCode.SUCCESS.code and missing_path not in remote
+        overwritten = await fs.write_file(remote_path, "replacement", prepend_newline=False)
+        assert overwritten.code == StatusCode.SUCCESS.code and remote[remote_path] == b"replacement"
+
+        context = MemoryToolContext(
+            workspace=SimpleNamespace(get_node_path=lambda _: "/workspace"),
+            sys_operation=sys_op,
+        )
+        memory_path = "/workspace/notes.md"
+        remote[memory_path] = b"original memory"
+        memory = await write_memory_with_context(context, "notes.md", "extra memory", append=True)
+        assert memory["success"], memory
+        assert remote[memory_path] == b"original memory\nextra memory"
     finally:
         try:
             await _remove_sys_operation_with_sandbox_release(card_id)
