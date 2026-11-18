@@ -556,6 +556,7 @@ class NativeHarness(DeepAgent):
         from openjiuwen.core.runner import Runner
 
         config = self.deep_config
+        await self.close_team_memory()
         await self._close_memory_managers(config)
         sys_op = config.sys_operation if config is not None else None
         if sys_op is None:
@@ -564,6 +565,20 @@ class NativeHarness(DeepAgent):
         # (or a dispose after Runner.stop already cleared everything) is a no-op.
         if Runner.resource_mgr.get_sys_operation(sys_op.id) is not None:
             Runner.resource_mgr.remove_sys_operation(sys_op.id)
+
+    async def close_team_memory(self) -> None:
+        """Drain this responder's memory rails and return their runtime leases.
+
+        Also used before replacing a terminated native; unlike dispose, this
+        preserves sys_operation and other resources reused by the next cycle.
+        """
+        from openjiuwen.harness.rails.memory.jiuwen_team_memory_rail import JiuwenTeamMemoryRail
+
+        for rail in self.find_rails_by_type((JiuwenTeamMemoryRail,)):
+            try:
+                await rail.aclose()
+            except Exception:
+                logger.exception("[NativeHarness] closing team memory failed")
 
     async def _close_memory_managers(self, config: Any) -> None:
         """Release the memory index managers this member's rails opened.
