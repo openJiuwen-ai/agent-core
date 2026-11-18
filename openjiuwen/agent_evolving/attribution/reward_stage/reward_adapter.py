@@ -165,7 +165,8 @@ def event_time_range(nodes_by_subagent: Mapping[str, Sequence[TrajectoryNode]]) 
     Nodes without a timestamp are ignored. (None, None) when the trajectory carries no time at all, so Reward
     reads the deliverables as before.
     """
-    nodes = [node for rows in nodes_by_subagent.values() for node in rows]
+    source = getattr(nodes_by_subagent, "whole", None) or nodes_by_subagent
+    nodes = [node for rows in source.values() for node in rows]
     starts = [node.start_ts_ns for node in nodes if node.start_ts_ns > 0]
     ends = [node.end_ts_ns or node.start_ts_ns for node in nodes if (node.end_ts_ns or node.start_ts_ns) > 0]
     return (min(starts) if starts else None, max(ends) if ends else None)

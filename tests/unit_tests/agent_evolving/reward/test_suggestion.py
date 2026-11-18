@@ -36,7 +36,8 @@ async def test_the_designer_sees_what_the_scoring_saw():
                                       "comment": "目标在画面外", "type": "floor"}],
               "evidence": {"play": [{"tool": "browser", "output": "点了开始，敌人从桥上来" + "。" * 3000}]}}
     materials = {"screenshots": [("check 1, after start", "aGk=")], "knowledge": "塔防要有路线取舍",
-                 "deliverable": {"tower.html": "function buildRoads() {}"}}
+                 "deliverable": {"tower.html": "function buildRoads() {}"},
+                 "checks": [{"tool": "browser", "output": "materials receipt" + "。" * 2000}]}
 
     class Model:
         vision = True
@@ -46,7 +47,8 @@ async def test_the_designer_sees_what_the_scoring_saw():
             assert "AAA-game creative director" in system
             assert sent["deliverable_text"]["tower.html"] == "function buildRoads() {}"
             assert sent["metric"] == "塔防要有路线取舍" and sent["final_reply"] == "做好了"
-            assert "[cut" in sent["checks"][0]["output"] and images == [("check 1, after start", "aGk=")]
+            assert sent["checks"][0]["output"].startswith("materials receipt") and "[cut" in sent["checks"][0]["output"]
+            assert images == [("check 1, after start", "aGk=")]
             return {"design_plan": {"target": "开局在桥南分出两条路，玩家先决定放行哪一条。",
                                     "realization": "复用 buildRoads，加一个分岔点。",
                                     "validation": "同一开局分别放行两条路，比较敌人路线。"},

@@ -39,7 +39,8 @@ def read_guide(path):
 
 def by_keywords(task, config):
     """([(name, body)] with a keyword in the Task, [(name, body)] without keywords). The first list is only
-    candidates for the model, not a decision; see for_task."""
+    candidates for the model, not a decision; see for_task.
+    """
     text = (task or "").lower()
     chosen, undecided = [], []
     for path in guide_files(config.get("metric_guides")):

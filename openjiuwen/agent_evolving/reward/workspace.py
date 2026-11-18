@@ -79,8 +79,12 @@ def walk_files(root):
     """Files under root in path order, skipping hidden/scratch folders, hidden files and symlinks."""
     root = Path(root)
     for base, dirs, names in os.walk(root):
-        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")
-                         and not (Path(base) / d).is_symlink())
+        kept = []
+        for name in dirs:
+            path = Path(base) / name
+            if name not in SKIP_DIRS and not name.startswith(".") and not path.is_symlink():
+                kept.append(name)
+        dirs[:] = sorted(kept)
         for name in sorted(names):
             path = Path(base) / name
             if name.startswith(".") or path.is_symlink():
