@@ -7,9 +7,10 @@ import tempfile
 from pathlib import Path
 from urllib.parse import unquote
 
-from .files import extract_text
+from .files import TOO_LARGE, extract_text, file_too_large, modified_between
 
 INPUTS_DIR = "_inputs"   # used only when a batch caller explicitly supplies reference texts
+SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__"}
 
 
 def copy_work_folder(source, root):
@@ -74,16 +75,38 @@ def inside(root, relative):
     return target
 
 
-def workspace_files(root):
-    """({deliverable name: text}, {input name: text}) of a workspace."""
+def walk_files(root):
+    """Files under root in path order, skipping hidden/scratch folders, hidden files and symlinks."""
+    root = Path(root)
+    for base, dirs, names in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")
+                         and not (Path(base) / d).is_symlink())
+        for name in sorted(names):
+            path = Path(base) / name
+            if name.startswith(".") or path.is_symlink():
+                continue
+            yield path
+
+
+def workspace_files(root, since_ns=None, until_ns=None):
+    """({deliverable name: text}, {input name: text}) of a workspace.
+
+    Deliverables are only read when their mtime is inside the task's time range (when bounds are given);
+    explicit reference inputs under _inputs/ are kept.
+    """
+    root = Path(root)
     deliverable, inputs = {}, {}
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.name.startswith(".check_"):
-            continue
+    for path in walk_files(root):
         relative = path.relative_to(root)
-        text = extract_text(path.name, path.read_bytes())
-        body = "[binary file, not shown]" if text is None else text
-        if relative.parts[0] == INPUTS_DIR:
+        is_input = relative.parts[0] == INPUTS_DIR
+        if not is_input and not modified_between(path, since_ns, until_ns):
+            continue
+        if file_too_large(path):
+            body = TOO_LARGE
+        else:
+            text = extract_text(path.name, path.read_bytes())
+            body = "[binary file, not shown]" if text is None else text
+        if is_input:
             inputs[str(Path(*relative.parts[1:]))] = body
         else:
             deliverable[str(relative)] = body

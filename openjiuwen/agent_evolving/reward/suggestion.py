@@ -1,6 +1,6 @@
 """Domain-gated revision text for one scored deliverable.
 
-The suggestion reads the saved score, it does not score again. A personal-assistant
+The suggestion reads the score it is given, it does not score again. A personal-assistant
 result stays with attribution. Only a result whose single selected guide is game
 receives this text. One model call sees what the scoring saw: the screenshots, the
 check receipts, the deliverable source and the guide.
@@ -9,7 +9,6 @@ check receipts, the deliverable source and the guide.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from . import models
 from .next_version_prompt import PROMPT
@@ -50,22 +49,6 @@ def suggestion_policy(config, guides):
         reason = None
     return {"enabled": enabled, "domain": domain, "domains": list(domains),
             "status": "skipped" if reason else "enabled", "reason": reason}
-
-
-def write_evidence(directory, result) -> Path:
-    """Persist the score the suggestion will read."""
-    folder = Path(directory)
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / "result.json"
-    path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
-
-
-def read_evidence(directory) -> dict:
-    record = json.loads((Path(directory) / "result.json").read_text(encoding="utf-8"))
-    if not isinstance(record, dict):
-        raise ValueError("reward evidence result must be an object")
-    return record
 
 
 def spread(shots, count=SCREENSHOTS):
@@ -180,9 +163,10 @@ def render(advice, language="zh") -> str:
     return text
 
 
-async def suggest(evidence_dir, model, language="zh", materials=None, final_reply="") -> str:
-    """Read result.json, and what the scoring kept in `materials`, and ask for the next-version design."""
-    result = read_evidence(evidence_dir)
+async def suggest(result, model, language="zh", materials=None, final_reply="") -> str:
+    """Read the score and what the scoring kept in `materials`, then ask for the next-version design."""
+    if not isinstance(result, dict):
+        raise ValueError("reward evidence result must be an object")
     materials = materials or {}
     images = spread(materials.get("screenshots"))
     seeing = bool(images) and await models.can_see(model)
