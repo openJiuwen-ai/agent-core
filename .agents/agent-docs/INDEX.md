@@ -24,6 +24,7 @@ generated: true
 | [core/context_engine](#module-core-context_engine) |
 | [core/controller](#module-core-controller) |
 | [core/foundation/llm](#module-core-foundation-llm) |
+| [core/foundation/tool](#module-core-foundation-tool) |
 | [core/runner/drunner/dmessage_queue](#module-core-runner-drunner-dmessage_queue) |
 | [core/session](#module-core-session) |
 | [core/sys_operation](#module-core-sys_operation) |
@@ -255,6 +256,7 @@ generated: true
 | [B_20261104_2030_cancellation-cause-lifecycle](bugfix/core_runtime/B_20261104_2030_cancellation-cause-lifecycle.md) | B | 压缩取消一律误报 failed 及标记生命周期残留窗口缺陷 | CharlesWang2030 | 无独立 D：c4e52b7c 引入 cancellation cause 注册表属于常规缺陷修复，未归档独立设计；本次为对该提交检视发现的标记生命周期缺陷的后续修复，沿用注册表现有契约（TTL、非消费式 resolve、前缀继承）。 |
 | [B_20261104_2054_recovered-context-seed-and-execution-environment](bugfix/agent_teams/B_20261104_2054_recovered-context-seed-and-execution-environment.md) | B | 冷恢复后成员策略 seed 与执行环境传递修复 | alan_cheng | 无独立 D：无独立 D；修复 F_20261104_1720_tool-execution-environment / F_20261104_1721_session-execution-settings 在冷恢复与远程调用路径上的遗漏。 |
 | [B_20261105_0911_swarmflow-thirdparty-trajectory](bugfix/agent_teams/B_20261105_0911_swarmflow-thirdparty-trajectory.md) | B | Swarmflow 三方 Agent 轨迹未绑定成员身份 | wangcan103 | 无独立 D：小范围补齐既有 HarnessTrajectoryRecorder 的 Swarmflow 接线，不新增协议或公开 API。 |
+| [B_20261117_1626_directed-assignment-notice-dropped](bugfix/agent_teams/B_20261117_1626_directed-assignment-notice-dropped.md) | B | 定向指派/改派的通知被接收端 pending 判据丢弃，新 owner 永不唤醒 | xiajing | 无独立 D：缺陷修复只改消费端投递判据，不新增契约与机制；依据见 S_03（TASK_CLAIMED 定向投递）与 jiuwenswarm 问题 |
 | [S_01_public-api-and-spec-flow](specs/agent_teams/S_01_public-api-and-spec-flow.md) | S | S_01 公开 API 表面与 Spec 流 | alan_cheng | — |
 | [S_02_team-agent-architecture](specs/agent_teams/S_02_team-agent-architecture.md) | S | TeamAgent 架构规约 | alan_cheng | — |
 | [S_03_coordination-protocol](specs/agent_teams/S_03_coordination-protocol.md) | S | Coordination Protocol | alan_cheng | — |
@@ -286,7 +288,6 @@ generated: true
 | [S_27_external-harness-member-runtime](specs/agent_teams/S_27_external-harness-member-runtime.md) | S | S_27 External Harness Member Runtime | alan_cheng | — |
 | [S_28_group-conversation-and-delegation](specs/agent_teams/S_28_group-conversation-and-delegation.md) | S | S_28 群聊输入与文件归档 | openJiuwen-bot | — |
 | [S_29_team-organization](specs/agent_teams/S_29_team-organization.md) | S | Team Organization | ZezeChang | — |
-| [B_20261117_1626_directed-assignment-notice-dropped](bugfix/agent_teams/B_20261117_1626_directed-assignment-notice-dropped.md) | B | 定向指派/改派的通知被接收端 pending 判据丢弃，新 owner 永不唤醒 | xiajing | openjiuwen/agent_teams | openjiuwen/agent_teams/agent/coordination/handlers/task_board.py, tests/unit_tests/agent_teams/agent/test_directed_assignment_notice.py | 无独立 D：只改消费端投递判据，沿用 S_03 的 TASK_CLAIMED 定向投递契约 |
 
 <a id="module-agent_teams-workflow"></a>
 
@@ -356,6 +357,14 @@ generated: true
 | [D-20261112-1120-goal-assessment-isolation](designs/active/D-20261112-1120-goal-assessment-isolation/design.md) | D | Goal 独立评估的轨迹与执行上下文隔离 | alan_cheng | — |
 | [F_20261103_0928_model-group-routed-model](features/F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | 无独立 D：issue |
 | [F_20261112_1120_goal-assessment-isolation](features/F_20261112_1120_goal-assessment-isolation.md) | F | Goal 评估调用的观测隔离实施 | alan_cheng | [D-20261112-1120-goal-assessment-isolation](designs/active/D-20261112-1120-goal-assessment-isolation/design.md) |
+
+<a id="module-core-foundation-tool"></a>
+
+## core/foundation/tool
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261118_1133_tool-enum-schema](bugfix/core_runtime/B_20261118_1133_tool-enum-schema.md) | B | 工具枚举参数的 JSON 类型推断修复 | liaojunzhuo-sefonsoft | 无独立 D：单模块修复既有 Enum 类型注解的 Schema 生成错误，不新增公开接口或改变枚举合法值契约。 |
 
 <a id="module-core-runner-drunner-dmessage_queue"></a>
 
