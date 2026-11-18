@@ -41,6 +41,7 @@ from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.state import (
     INTERRUPTION_KEY,
+    can_retarget_stale_permission_answer,
     match_answers,
     pending_interrupts,
 )
@@ -369,6 +370,17 @@ class TeamHarness:
             run_context=run_context,
         )
 
+    async def resume_interrupt(
+        self, content: Any, *, run_context: RunContext | None = None,
+    ) -> Any:
+        """Forward Team-directed answers without falling back to ordinary send."""
+        if self._native is None:
+            raise_error(
+                StatusCode.AGENT_TEAM_EXECUTION_ERROR,
+                error_msg="TeamHarness interrupt resume before start().",
+            )
+        return await self._native.resume_interrupt(content, run_context=run_context)
+
     async def abort(self, *, immediate: bool = False) -> None:
         """Abort the active round: graceful (False) or hard+rollback (True).
 
@@ -443,9 +455,14 @@ class TeamHarness:
         session = self._interrupt_session()
         if session is None:
             return False
-        # Any answer to something no longer pending makes the input stale.
-        matched = match_answers(user_input, pending_interrupts(session.get_state(INTERRUPTION_KEY)))
-        return bool(matched.answers) and not matched.unmatched
+        # Any answer to something no longer pending makes the input stale,
+        # except one permission card whose interrupt id was replaced and is
+        # the only permission interrupt still waiting.
+        pending = pending_interrupts(session.get_state(INTERRUPTION_KEY))
+        matched = match_answers(user_input, pending)
+        if bool(matched.answers) and not matched.unmatched:
+            return True
+        return can_retarget_stale_permission_answer(user_input, pending)
 
     def _interrupt_session(self) -> Optional[Any]:
         if self._native is None:

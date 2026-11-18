@@ -266,6 +266,8 @@ generated: true
 | [S_28_group-conversation-and-delegation](specs/agent_teams/S_28_group-conversation-and-delegation.md) | S | S_28 群聊输入与文件归档 | openJiuwen-bot | openjiuwen/agent_teams | — | — |
 | [S_29_team-organization](specs/agent_teams/S_29_team-organization.md) | S | Team Organization | ZezeChang | openjiuwen/agent_teams | — | — |
 
+| [B_20261117_1240_swarmflow-fork-round-boundary-attachment](bugfix/agent_teams/B_20261117_1240_swarmflow-fork-round-boundary-attachment.md) | B | Swarmflow fork 轮数边界被运行时附件消息整体前移一轮 | chenchunzhou | openjiuwen/agent_teams | openjiuwen/agent_teams/workflow/backends/avatar_session_backend.py, tests/unit_tests/agent_teams/workflow/test_avatar_session_backend.py | [SDD-0014](designs/active/SDD-0014-swarmflow-session-fork/design.md) |
+| [B_20261117_1626_directed-assignment-notice-dropped](bugfix/agent_teams/B_20261117_1626_directed-assignment-notice-dropped.md) | B | 定向指派/改派的通知被接收端 pending 判据丢弃，新 owner 永不唤醒 | xiajing | openjiuwen/agent_teams | openjiuwen/agent_teams/agent/coordination/handlers/task_board.py, tests/unit_tests/agent_teams/agent/test_directed_assignment_notice.py | 无独立 D：只改消费端投递判据，沿用 S_03 的 TASK_CLAIMED 定向投递契约 |
 <a id="module-4"></a>
 
 ## agent_teams/workflow
