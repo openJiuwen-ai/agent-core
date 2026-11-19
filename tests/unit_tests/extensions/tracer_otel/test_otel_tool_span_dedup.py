@@ -266,7 +266,10 @@ class TestToolSpanSingleEmission:
         assert len(spans) == 1, f"expected 1 execute_tool span, got {len(spans)}"
         span = spans[0]
         assert OJ_AGENT_ERROR_MESSAGE in span.attributes
-        assert span.attributes[OJ_AGENT_NAME] == "get_weather"
+        # 口径2：openjiuwen.agent.name 是执行 agent 业务名（rail 转发的 agent_name），
+        # 工具名仍由 gen_ai.tool.name 承载，信息不丢。
+        assert span.attributes[OJ_AGENT_NAME] == "failing_agent"
+        assert span.attributes[GEN_AI_TOOL_NAME] == "get_weather"
 
     async def test_dedupe_probe_failure_fails_open(self):
         """A raising dedupe probe must fail open — the rail's tool span is
