@@ -15,7 +15,7 @@ def detach_terminal() -> None:
     import termios
 
     try:
-        terminal = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        terminal = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK, mode=0o600)
     except OSError as exc:
         if exc.errno not in {errno.ENXIO, errno.ENODEV, errno.ENOENT}:
             raise

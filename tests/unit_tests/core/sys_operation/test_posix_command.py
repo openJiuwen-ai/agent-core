@@ -30,7 +30,7 @@ def terminal(monkeypatch):
 
 def test_detaches_only_the_command_and_closes_the_terminal(terminal):
     module.detach_terminal()
-    module.os.open.assert_called_once_with("/dev/tty", module.os.O_RDWR | 0x100 | 0x800)
+    module.os.open.assert_called_once_with("/dev/tty", module.os.O_RDWR | 0x100 | 0x800, mode=0o600)
     terminal.assert_called_once_with(7, 123)
     module.os.close.assert_called_once_with(7)
 
