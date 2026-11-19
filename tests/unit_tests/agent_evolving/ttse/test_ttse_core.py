@@ -11,17 +11,17 @@ from typing import Callable
 import pytest
 
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
-from openjiuwen.agent_evolving.ttse.capabilities import (
+from openjiuwen.agent_evolving.ttse.evidence.capabilities import (
     BASIC_TOOLS,
     list_capability_names,
     parse_capability_names_from_text,
     render_capabilities,
 )
-from openjiuwen.agent_evolving.ttse.catalog import project_catalog, render_catalog_markdown
-from openjiuwen.agent_evolving.ttse.categories import OTHER_CATEGORY
-from openjiuwen.agent_evolving.ttse.classify import classify_rules, parse_assignments
+from openjiuwen.agent_evolving.ttse.bank.catalog import project_catalog, render_catalog_markdown
+from openjiuwen.agent_evolving.ttse.taxonomy.categories import OTHER_CATEGORY
+from openjiuwen.agent_evolving.ttse.taxonomy.classify import classify_rules, parse_assignments
 from openjiuwen.agent_evolving.ttse.config import TTSEConfig
-from openjiuwen.agent_evolving.ttse.induction import (
+from openjiuwen.agent_evolving.ttse.evolve.induction import (
     blame,
     induce,
     induce_batch,
@@ -32,19 +32,19 @@ from openjiuwen.agent_evolving.ttse.induction import (
     parse_verdict,
     synthesize,
 )
-from openjiuwen.agent_evolving.ttse.stores import TTSERecordStore, _new_record
-from openjiuwen.agent_evolving.ttse.success import (
+from openjiuwen.agent_evolving.ttse.bank.stores import TTSERecordStore, _new_record
+from openjiuwen.agent_evolving.ttse.evolve.success import (
     SignalBasedSuccessDetector,
     _outcome_from_judge,
     _parse_judge_json,
 )
-from openjiuwen.agent_evolving.ttse.trajectory_adapter import (
+from openjiuwen.agent_evolving.ttse.evidence.trajectory_adapter import (
     count_tool_calls,
     extract_final_reply,
     extract_output_paths,
     messages_to_trajectory_text,
 )
-from openjiuwen.agent_evolving.ttse.induce_context import (
+from openjiuwen.agent_evolving.ttse.evidence.induce_context import (
     BANK_SECTION_MAX_CHARS,
     build_induce_evidence,
     format_bank_section,

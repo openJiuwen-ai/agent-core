@@ -32,7 +32,7 @@ from openjiuwen.extensions.observability.semconv import (
 )
 from openjiuwen.harness.rails.evolution import team_ttse_rail as team_ttse_module
 from openjiuwen.harness.rails.evolution import ttse_rail as ttse_rail_module
-from openjiuwen.agent_evolving.ttse.categories import category_ids
+from openjiuwen.agent_evolving.ttse.taxonomy.categories import category_ids
 from openjiuwen.agent_evolving.ttse.render import DISK_CATALOG_GUIDANCE_CN
 from openjiuwen.harness.rails.evolution.team_ttse_rail import (
     TeamTTSERail,

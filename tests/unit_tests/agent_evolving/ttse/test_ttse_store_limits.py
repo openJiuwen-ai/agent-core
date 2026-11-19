@@ -7,7 +7,7 @@ import json
 import pytest
 
 from openjiuwen.agent_evolving.ttse.config import TTSEConfig
-from openjiuwen.agent_evolving.ttse.stores import TTSERecordStore, _new_record
+from openjiuwen.agent_evolving.ttse.bank.stores import TTSERecordStore, _new_record
 
 
 @pytest.mark.asyncio

@@ -52,40 +52,40 @@ from openjiuwen.harness.rails.evolution.evolution_rail import (
     PreparedEvolutionInput,
 )
 
-from openjiuwen.agent_evolving.ttse.capabilities import (
+from openjiuwen.agent_evolving.ttse.evidence.capabilities import (
     list_capability_names,
     parse_capability_names_from_text,
     render_capabilities,
 )
-from openjiuwen.agent_evolving.ttse.catalog import project_catalog, render_catalog_markdown
-from openjiuwen.agent_evolving.ttse.classify import classify_rules
+from openjiuwen.agent_evolving.ttse.bank.catalog import project_catalog, render_catalog_markdown
+from openjiuwen.agent_evolving.ttse.taxonomy.classify import classify_rules
 from openjiuwen.agent_evolving.ttse.config import TTSEConfig
-from openjiuwen.agent_evolving.ttse.consult import TTSE_CONSULT_TOOL_NAME, create_ttse_consult_tools
+from openjiuwen.agent_evolving.ttse.recall.consult import TTSE_CONSULT_TOOL_NAME, create_ttse_consult_tools
 from openjiuwen.agent_evolving.ttse.dream import (
     bump_dream_session_count,
     load_dream_state,
     run_dream_pass,
 )
-from openjiuwen.agent_evolving.ttse.induction import (
+from openjiuwen.agent_evolving.ttse.evolve.induction import (
     blame,
     induce,
     induce_batch,
     match_duplicate_rule,
     synthesize,
 )
-from openjiuwen.agent_evolving.ttse.induce_context import build_induce_evidence
+from openjiuwen.agent_evolving.ttse.evidence.induce_context import build_induce_evidence
 from openjiuwen.agent_evolving.ttse.render import (
     DISK_CATALOG_GUIDANCE_CN,
     DISK_CATALOG_GUIDANCE_EN,
     rules_numbered,
 )
-from openjiuwen.agent_evolving.ttse.stores import _norm, shared_store
-from openjiuwen.agent_evolving.ttse.success import (
+from openjiuwen.agent_evolving.ttse.bank.stores import _norm, shared_store
+from openjiuwen.agent_evolving.ttse.evolve.success import (
     SignalBasedSuccessDetector,
     SuccessDetector,
     SuccessOutcome,
 )
-from openjiuwen.agent_evolving.ttse.trajectory_adapter import count_tool_calls
+from openjiuwen.agent_evolving.ttse.evidence.trajectory_adapter import count_tool_calls
 
 _TTSE_CATALOG_SECTION = "ttse_catalog"
 _TTSE_CATALOG_PRIORITY = 200

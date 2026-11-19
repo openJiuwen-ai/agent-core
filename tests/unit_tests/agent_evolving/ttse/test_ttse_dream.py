@@ -14,8 +14,6 @@ import pytest
 from openjiuwen.agent_evolving.ttse import TTSEConfig, TTSERecordStore
 from openjiuwen.agent_evolving.ttse.dream import (
     DreamState,
-    _cap_cluster_by_count,
-    _sample_rules,
     bump_dream_session_count,
     load_dream_clusters,
     load_dream_state,
@@ -29,8 +27,9 @@ from openjiuwen.agent_evolving.ttse.dream import (
     save_dream_state,
     should_run_dream,
 )
-from openjiuwen.agent_evolving.ttse.tip_parse import parse_tip
-from openjiuwen.agent_evolving.ttse.stores import _new_record, format_ts, parse_ts
+from openjiuwen.agent_evolving.ttse.dream.dream import _cap_cluster_by_count, _sample_rules
+from openjiuwen.agent_evolving.ttse.dream.tip_parse import parse_tip
+from openjiuwen.agent_evolving.ttse.bank.stores import _new_record, format_ts, parse_ts
 
 
 class ScriptedLLM:
@@ -376,7 +375,7 @@ async def test_save_dumps_snapshot_when_live_lists_mutate(tmp_path, monkeypatch)
         store.retired.append({"text": "gone", "rtype": "fact", "reason": "race", "retired_at_task": 1})
         return real_dump(obj, fh, **kwargs)
 
-    monkeypatch.setattr("openjiuwen.agent_evolving.ttse.stores.json.dump", dump_while_mutating)
+    monkeypatch.setattr("openjiuwen.agent_evolving.ttse.bank.stores.json.dump", dump_while_mutating)
     await store.save()
 
     saved = json.loads(path.read_text(encoding="utf-8"))
@@ -1300,7 +1299,7 @@ def test_sample_rules_random_cap(monkeypatch):
         seq[:] = list(reversed(seq))
 
     monkeypatch.setattr(
-        "openjiuwen.agent_evolving.ttse.dream.random.shuffle",
+        "openjiuwen.agent_evolving.ttse.dream.dream.random.shuffle",
         _fixed_shuffle,
     )
     kept, omitted = _sample_rules(records, max_rules=2)
@@ -1416,7 +1415,7 @@ async def test_dream_category_max_rules_truncates_phase1(tmp_path, monkeypatch):
         pass
 
     monkeypatch.setattr(
-        "openjiuwen.agent_evolving.ttse.dream.random.shuffle",
+        "openjiuwen.agent_evolving.ttse.dream.dream.random.shuffle",
         _keep_low_indices,
     )
 
