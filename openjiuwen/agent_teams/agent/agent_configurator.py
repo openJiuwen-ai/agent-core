@@ -664,6 +664,13 @@ class AgentConfigurator:
             self.team_backend.register_cleanup_path(workspace_root_path)
 
         model_config = ctx.member_model or agent_spec.model
+        # Write back the resolved model so checkpoint serialization carries it
+        # forward. Without this, ``ctx.member_model`` stays ``None`` after the
+        # first build when the per-agent fallback was used, and cold recovery
+        # later sees ``context.member_model is None`` → falls through to
+        # ``current_pool[0]`` for every concurrent team (issue #115 现象 5).
+        if ctx.member_model is None and model_config is not None:
+            ctx.member_model = model_config
 
         sys_operation_spec = agent_spec.sys_operation or SysOperationSpec(
             id=f"{self._card.id}.sys_operation",

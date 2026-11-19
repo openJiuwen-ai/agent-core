@@ -15,6 +15,18 @@ class DatabaseType(StrEnum):
     POSTGRESQL = "postgresql"
     MYSQL = "mysql"
 
+    @property
+    def is_client_server(self) -> bool:
+        """Whether this backend is a client/server DB with native write concurrency.
+
+        SQLite (file or ``:memory:``) is the only embedded backend: it needs
+        process-level write serialisation (see ``DbSessions``). PostgreSQL /
+        MySQL have row-level locking and MVCC, so the process-level write lock
+        is unnecessary and harmful (it serialises writes that the DB would
+        otherwise run concurrently).
+        """
+        return self in (DatabaseType.POSTGRESQL, DatabaseType.MYSQL)
+
 
 class DatabaseConfig(BaseModel):
     """Database configuration class."""

@@ -43,6 +43,22 @@ def get_current_time() -> int:
     return int(round(time.time() * 1000))
 
 
+def _db_type_is_client_server(db_type: "DatabaseType | str | None") -> bool:
+    """Return whether ``db_type`` is a client/server backend (PostgreSQL / MySQL).
+
+    ``None`` defaults to SQLite (legacy callers that don't pass ``db_type``),
+    so the process-level write lock and the SQLite watchdog still apply.
+    """
+    if db_type is None:
+        return False
+    if isinstance(db_type, DatabaseType):
+        return db_type.is_client_server
+    try:
+        return DatabaseType(str(db_type)).is_client_server
+    except ValueError:
+        return False
+
+
 _T = TypeVar("_T")
 
 # Retry budget for write operations that hit a transient ``database is
@@ -60,7 +76,14 @@ _DB_RETRY_BASE_DELAY = 0.5
 # permanent. Team DB transactions are small (single-row reads / batched
 # mailbox flushes), so 30s is far beyond any legitimate block; hitting it
 # means the driver is stuck, and a loud TimeoutError beats an eternal hang.
-_DB_SESSION_WATCHDOG_SECONDS = 30.0
+#
+# For client/server backends (PostgreSQL / MySQL) the watchdog is widened to
+# 60s: cross-network round-trips + transient slow queries make 30s a tight
+# ceiling under load, and the process-level write lock is skipped (the DB
+# itself is the arbiter), so watchdog contention cannot pile up the way
+# queued writers do on SQLite.
+_DB_SESSION_WATCHDOG_SECONDS_SQLITE = 30.0
+_DB_SESSION_WATCHDOG_SECONDS_CLIENT_SERVER = 60.0
 
 # Error types ``retry_on_transient`` may back off on: SQLite contention
 # (``OperationalError``), write-pool checkout timeouts (``SATimeoutError``)
@@ -79,34 +102,57 @@ _WATCHDOG_RETRY_ATTEMPTS = 2
 
 
 class DbSessions:
-    """Read/write session provider with process-wide write serialisation.
+    """Read/write session provider.
 
-    SQLite permits a single writer at a time (a database-level lock), so a
-    process-wide ``asyncio.Lock`` funnels every write through one logical
-    writer slot — writers never contend on the SQLite lock. For file-backed
-    SQLite the reads and writes run on *separate* engines (a dedicated
-    single-writer pool + a larger reader pool), so a slow write never starves
-    reader-connection availability. For ``:memory:`` and PostgreSQL / MySQL the
-    two factories are the same object (no split), and ``read()`` / ``write()``
-    still differ only by whether the write lock is held.
+    For SQLite (file or ``:memory:``) a process-wide ``asyncio.Lock`` funnels
+    every write through one logical writer slot — SQLite permits a single
+    writer at a time (a database-level lock), so writers never contend on
+    the SQLite lock. For file-backed SQLite the reads and writes run on
+    *separate* engines (a dedicated single-writer pool + a larger reader
+    pool), so a slow write never starves reader-connection availability. For
+    ``:memory:`` the two factories are the same object (no split).
+
+    For PostgreSQL / MySQL the process-level write lock is **skipped**: the
+    DB itself provides row-level locking + MVCC, so serialising writes at the
+    process level only throttles throughput. Reads and writes still run under
+    the watchdog so a wedged driver surfaces as a loud ``TimeoutError``.
     """
 
     def __init__(
         self,
         write_session_local: async_sessionmaker,
         read_session_local: async_sessionmaker | None = None,
+        *,
+        db_type: "DatabaseType | str | None" = None,
     ) -> None:
-        """Bind the write / read session factories and create the write lock.
+        """Bind the write / read session factories.
 
         Args:
             write_session_local: Session factory bound to the writer engine.
             read_session_local: Session factory bound to the reader engine.
                 Defaults to ``write_session_local`` when no split exists
                 (``:memory:`` / PostgreSQL / MySQL).
+            db_type: Database backend. When set to a client/server backend
+                (PostgreSQL / MySQL) the process-level write lock is skipped
+                and a wider watchdog applies. ``None`` keeps the legacy
+                SQLite behaviour (write lock + 30s watchdog) for backward
+                compatibility.
         """
         self._write_session_local = write_session_local
         self._read_session_local = read_session_local or write_session_local
         self._write_lock = asyncio.Lock()
+        # Skip the process-level write lock for client/server backends:
+        # PostgreSQL / MySQL provide native write concurrency (row locks +
+        # MVCC), so serialising writes in-process only throttles throughput.
+        # SQLite (file / :memory:) still needs the lock — it allows a single
+        # writer at a time and the app-level lock avoids the SQLite lock
+        # contention path entirely.
+        self._use_write_lock = not _db_type_is_client_server(db_type)
+        self._watchdog_seconds = (
+            _DB_SESSION_WATCHDOG_SECONDS_CLIENT_SERVER
+            if _db_type_is_client_server(db_type)
+            else _DB_SESSION_WATCHDOG_SECONDS_SQLITE
+        )
 
     @property
     def write_locked(self) -> bool:
@@ -117,43 +163,61 @@ class DbSessions:
     async def read(self) -> AsyncIterator[AsyncSession]:
         """Yield a session for read-only work; the write lock is not held.
 
-        The whole block runs under ``_DB_SESSION_WATCHDOG_SECONDS`` so a
-        wedged driver surfaces as a loud ``TimeoutError`` instead of hanging
-        the caller forever.
+        The whole block runs under the watchdog so a wedged driver surfaces
+        as a loud ``TimeoutError`` instead of hanging the caller forever.
         """
         try:
-            async with asyncio.timeout(_DB_SESSION_WATCHDOG_SECONDS):
+            async with asyncio.timeout(self._watchdog_seconds):
                 async with self._read_session_local() as session:
                     yield session
         except TimeoutError:
             team_logger.warning(
                 "DbSessions.read() exceeded the %.0fs watchdog; the DB driver may be wedged",
-                _DB_SESSION_WATCHDOG_SECONDS,
+                self._watchdog_seconds,
             )
             raise
 
     @asynccontextmanager
     async def write(self) -> AsyncIterator[AsyncSession]:
-        """Yield a session while holding the process-wide write lock.
+        """Yield a session for write work.
 
-        The lock is non-reentrant: a write must not open a nested
-        ``write()`` or it will deadlock. Compose multi-step writes inside a
-        single ``write()`` block, and keep the lock on the outermost public
-        method when one write helper delegates to another.
+        For SQLite (file / ``:memory:``) the process-wide write lock is held:
+        SQLite allows a single writer at a time, so the lock funnels writers
+        through one logical slot and avoids the SQLite lock contention path.
+        For PostgreSQL / MySQL the lock is **skipped**: the DB itself is the
+        arbiter (row locks + MVCC), and an in-process lock would only
+        serialise writes the DB would otherwise run concurrently.
+
+        The lock is non-reentrant: a write must not open a nested ``write()``
+        or it will deadlock. Compose multi-step writes inside a single
+        ``write()`` block, and keep the lock on the outermost public method
+        when one write helper delegates to another.
 
         The session block (not the lock wait — writers legitimately queue
-        behind each other) runs under ``_DB_SESSION_WATCHDOG_SECONDS`` so a
-        wedged driver surfaces as a loud ``TimeoutError``.
+        behind each other on SQLite) runs under the watchdog so a wedged
+        driver surfaces as a loud ``TimeoutError``.
         """
-        async with self._write_lock:
+        if not self._use_write_lock:
             try:
-                async with asyncio.timeout(_DB_SESSION_WATCHDOG_SECONDS):
+                async with asyncio.timeout(self._watchdog_seconds):
                     async with self._write_session_local() as session:
                         yield session
             except TimeoutError:
                 team_logger.warning(
                     "DbSessions.write() exceeded the %.0fs watchdog; the DB driver may be wedged",
-                    _DB_SESSION_WATCHDOG_SECONDS,
+                    self._watchdog_seconds,
+                )
+                raise
+            return
+        async with self._write_lock:
+            try:
+                async with asyncio.timeout(self._watchdog_seconds):
+                    async with self._write_session_local() as session:
+                        yield session
+            except TimeoutError:
+                team_logger.warning(
+                    "DbSessions.write() exceeded the %.0fs watchdog; the DB driver may be wedged",
+                    self._watchdog_seconds,
                 )
                 raise
 

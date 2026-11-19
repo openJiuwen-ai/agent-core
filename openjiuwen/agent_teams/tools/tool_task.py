@@ -2020,6 +2020,13 @@ class ClaimTaskTool(TeamTool):
                 id="team.claim_task",
                 name="claim_task",
                 description=t("claim_task"),
+                # Claim a task may queue behind other concurrent writes (DAO
+                # write lock / DB row lock) and the upstream task_links query
+                # can be slow on a saturated backend. The default 300s
+                # (``DEFAULT_TOOL_CALL_TIMEOUT``) was hit by issue #115 under
+                # 5-way concurrent advocate load; widen to 600s so a transient
+                # stall does not abort the whole teammate round.
+                properties={"resilience": {"timeout_s": 600.0}},
             )
         )
         self.task_manager = task_manager
