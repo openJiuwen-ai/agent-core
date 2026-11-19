@@ -17,10 +17,16 @@ from typing import Any, AsyncIterator, List
 
 import pytest
 
+from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard, ToolInfo
 from openjiuwen.core.session import NodeSession, WorkflowSession
 from openjiuwen.core.session.node import Session
-from openjiuwen.core.session.tracer import Tracer, TracerHandlerRegistry, decorate_tool_with_trace
+from openjiuwen.core.session.tracer import (
+    Tracer,
+    TracerHandlerRegistry,
+    decorate_model_with_trace,
+    decorate_tool_with_trace,
+)
 from openjiuwen.core.session.tracer.handler import TraceExtAgentHandler
 
 pytestmark = pytest.mark.asyncio
@@ -38,6 +44,12 @@ class _RecordingAgentHandler(TraceExtAgentHandler):
 
     async def on_plugin_error(self, span, error, **kwargs):
         self.events.append(("on_plugin_error", span, error))
+
+    async def on_llm_start(self, span, inputs: Any, instance_info: dict, **kwargs):
+        self.events.append(("on_llm_start", span, inputs, instance_info))
+
+    async def on_llm_end(self, span, outputs, **kwargs):
+        self.events.append(("on_llm_end", span, outputs))
 
 
 # Only the plugin pair is observed here; Tracer.trigger dispatches by
@@ -217,3 +229,38 @@ async def test_tool_astream_coroutine_raise_surfaces_as_error_event(recording_ha
             chunks.append(chunk)
     assert chunks == []
     assert [e[0] for e in recording_handler.events] == ["on_plugin_start", "on_plugin_error"]
+
+
+async def test_model_decorated_through_node_session_fires_llm_events(recording_handler):
+    """Gate sharing is intentional: models fetched with a node session also
+    decorate once NodeSession passes the span-protocol gate, so LLM spans
+    inside workflows go from absent to present. This anchors that expansion
+    (review P3: without an anchor a future gate change regresses silently).
+    """
+    tracer = Tracer()
+    tracer.init()
+    session = _make_node_session(tracer)
+
+    class _StubModel:
+        def __init__(self):
+            self.model_config = ModelRequestConfig(model="qwen3-max")
+
+        async def invoke(self, messages, **kwargs):
+            return {"ok": True}
+
+        async def stream(self, messages, **kwargs):
+            yield {"ok": True}
+
+    raw_model = _StubModel()
+    wrapped = decorate_model_with_trace(raw_model, session)
+    assert wrapped is not raw_model, "node session must pass the shared decoration gate"
+
+    assert await wrapped.invoke([{"role": "user", "content": "hi"}]) == {"ok": True}
+
+    assert [e[0] for e in recording_handler.events] == ["on_llm_start", "on_llm_end"]
+    _, start_span, start_inputs, instance_info = recording_handler.events[0]
+    assert instance_info["class_name"] == "qwen3-max"
+    assert instance_info["type"] == "llm"
+    # Same parenting as the tool path: parentless span, OTel falls back to
+    # the ambient node-span context.
+    assert start_span.parent_invoke_id is None
