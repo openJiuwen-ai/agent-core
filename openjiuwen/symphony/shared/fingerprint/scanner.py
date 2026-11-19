@@ -472,6 +472,8 @@ def _discover_entrypoints(
     max_entrypoints: int,
     budget: _ScanBudget,
     excluded_paths: tuple[Path, ...] = (),
+    filename: str = "SKILL.md",
+    stop_at_entrypoint: bool = False,
 ) -> tuple[list[Path], list[ScanDiagnostic]]:
     entrypoints: list[Path] = []
     diagnostics: list[ScanDiagnostic] = []
@@ -499,10 +501,13 @@ def _discover_entrypoints(
             continue
 
         subdirectories: list[Path] = []
+        found_entrypoint = False
         for entry in children:
             child = directory / entry.name
             if child in excluded_paths:
                 continue
+            if entry.name == filename:
+                found_entrypoint = True
             child_mode = entry.mode
             if child_mode is None:
                 diagnostics.append(
@@ -523,7 +528,7 @@ def _discover_entrypoints(
                     )
                 )
                 continue
-            if stat.S_ISREG(child_mode) and child.name == "SKILL.md":
+            if stat.S_ISREG(child_mode) and child.name == filename:
                 if len(entrypoints) >= max_entrypoints:
                     _raise_inventory_error("Skill discovery exceeds the configured entrypoint limit")
                 entrypoints.append(child)
@@ -533,7 +538,8 @@ def _discover_entrypoints(
             if max_depth is None or depth < max_depth:
                 subdirectories.append(child)
 
-        pending.extend((child, depth + 1) for child in reversed(subdirectories))
+        if not (stop_at_entrypoint and found_entrypoint):
+            pending.extend((child, depth + 1) for child in reversed(subdirectories))
 
     entrypoints.sort(key=lambda item: (_relative_display(item, root).casefold(), _relative_display(item, root)))
     return entrypoints, diagnostics
