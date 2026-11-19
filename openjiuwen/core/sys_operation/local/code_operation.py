@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any, Literal, AsyncIterator, Callable, Tuple
 import sys
 
 from openjiuwen.core.common.logging import sys_operation_logger, LogEventType
+from openjiuwen.core.sys_operation.local.process_launcher import create_process
 from openjiuwen.core.sys_operation.local.utils import OperationUtils, StreamEvent, StreamEventType
 from openjiuwen.core.sys_operation.result.base_result import build_operation_error_result
 from openjiuwen.core.sys_operation.result.code_operation_result import ExecuteCodeChunkData
@@ -152,7 +153,8 @@ class CodeOperation(BaseCodeOperation):
             elif language == "python":
                 env["PYTHONIOENCODING"] = "utf-8"
                 env["PYTHONUTF8"] = "1"
-            process = await asyncio.create_subprocess_exec(
+            process = await create_process(
+                asyncio.create_subprocess_exec,
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -295,7 +297,8 @@ class CodeOperation(BaseCodeOperation):
             elif language == "python":
                 env["PYTHONIOENCODING"] = "utf-8"
                 env["PYTHONUTF8"] = "1"
-            process = await asyncio.create_subprocess_exec(
+            process = await create_process(
+                asyncio.create_subprocess_exec,
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

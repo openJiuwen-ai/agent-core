@@ -29,12 +29,18 @@ class PermissionConfirmResponse:
       的 ``__interrupt_auto_confirm__``，不写磁盘。
     - ``approved and not auto_confirm``：仅本次放行。
     - ``not approved``：拒绝。
+
+    ``authorization_mode`` / ``authorization_scope`` 供运行时沙箱（agent-shield DLL Guard）
+    生成授权凭据；为 ``None`` 时由权限引擎按 subject 选择默认 scope。工具级权限路径不使用
+    这两个字段，保持向后兼容。
     """
 
     approved: bool
     feedback: str = ""
     auto_confirm: bool = False
     persist_allow: bool = False
+    authorization_mode: str | None = None
+    authorization_scope: str | None = None
 
 
 class ApprovalOverrideEntry(TypedDict, total=False):

@@ -23,6 +23,16 @@ class ConfirmPayload(BaseModel):
         description="Whether to persist the allow rule to disk. "
         "auto_confirm=True + persist_allow=False means session-only remember.",
     )
+    authorization_mode: Optional[str] = Field(
+        default=None,
+        description="Authorization mode for runtime sandbox grants; None lets the "
+        "permission engine choose the default.",
+    )
+    authorization_scope: Optional[str] = Field(
+        default=None,
+        description="Authorization scope for runtime sandbox grants; None lets the "
+        "permission engine choose the default.",
+    )
 
     @classmethod
     def to_schema(cls) -> dict:
