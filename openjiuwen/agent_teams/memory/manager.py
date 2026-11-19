@@ -112,6 +112,7 @@ class TeamMemoryManager:
             embedding_config=self._embedding_config,
             sys_operation=self._sys_operation,
             read_only=bool(self._read_only_source),
+            language=self._language,
         )
 
         success = await self._toolkit.initialize()

@@ -2002,6 +2002,8 @@ class WriteFileTool(Tool):
             _history_path = self._build_history_path(_session)
             await _append_op_history(_history_path, path, "write", old_content, content)
 
+        # Keep pre-read + op history for diff/rollback; omit original_file from
+        # ToolOutput so the model is not charged a second full-file copy.
         return ToolOutput(
             success=True,
             data={
@@ -2009,7 +2011,6 @@ class WriteFileTool(Tool):
                 "bytes_written": len(content.encode(encoding, errors="replace")),
                 "type": operation_type,
                 "created": operation_type == "create",
-                "original_file": old_content,
             }
         )
 

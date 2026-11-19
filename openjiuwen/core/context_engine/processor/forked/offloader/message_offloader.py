@@ -39,6 +39,11 @@ class MessageSummaryOffloaderConfig(BaseModel):
     add_message_threshold_ratio: float = Field(default=0.1, gt=0)
     """Context-token-capacity ratio above which a newly added tool message is processed."""
 
+    add_message_abs_token_threshold: int = Field(default=8_000, gt=0)
+    """Absolute token cap for on-add offload. Effective threshold is
+    ``min(context_window × add_message_threshold_ratio, this value)`` so a 1M
+    window with ratio 0.1 still offloads around 8K tokens instead of 100K."""
+
     ttl_seconds: int = Field(default=300, ge=0)
     """Idle time between LLM context-window requests before TTL processing is eligible."""
 
@@ -473,13 +478,19 @@ class MessageSummaryOffloader(ContextProcessor):
         return resolve_ratio_token_threshold(self._context_max(context), self._ttl_context_occupancy_ratio())
 
     def _add_message_token_threshold(self, context: ModelContext) -> int:
-        return resolve_ratio_token_threshold(self._context_max(context), self._add_message_threshold_ratio())
+        ratio_threshold = resolve_ratio_token_threshold(
+            self._context_max(context),
+            self._add_message_threshold_ratio(),
+        )
+        return min(ratio_threshold, self._add_message_abs_token_threshold())
 
     def _ttl_message_token_threshold(self, context: ModelContext) -> int:
         return resolve_ratio_token_threshold(self._context_max(context), self._ttl_message_threshold_ratio())
 
     def _add_message_max_chars(self, context: ModelContext) -> int:
-        return self._character_budget(context, self._add_message_threshold_ratio())
+        # Keep rule-compression / preview char budget aligned with the effective
+        # token threshold (same ~3 chars/token heuristic as _character_budget).
+        return max(self._add_message_token_threshold(context) * 3, 1)
 
     def _ttl_message_max_chars(self, context: ModelContext) -> int:
         return self._character_budget(context, self._ttl_message_threshold_ratio())
@@ -525,6 +536,9 @@ class MessageSummaryOffloader(ContextProcessor):
 
     def _add_message_threshold_ratio(self) -> float:
         return float(getattr(self.config, "add_message_threshold_ratio", 0.2))
+
+    def _add_message_abs_token_threshold(self) -> int:
+        return int(getattr(self.config, "add_message_abs_token_threshold", 8_000))
 
     def _ttl_context_occupancy_ratio(self) -> float:
         return float(getattr(self.config, "ttl_context_occupancy_ratio", 0.5))

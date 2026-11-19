@@ -450,7 +450,7 @@ async def test_write_file_tool_updates_existing_file_after_read(sys_op, temp_dir
     assert res.success is True
     assert res.data["type"] == "update"
     assert res.data["created"] is False
-    assert res.data["original_file"] == "old content"
+    assert "original_file" not in res.data
     assert _FILE_READ_REGISTRY[file_path].content == "new content\n"
 
 

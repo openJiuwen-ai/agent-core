@@ -233,6 +233,7 @@ async def test_init_preset_defaults(tmp_path: Path):
     assert "tokens_threshold" not in type(off).model_fields
     assert "model" not in type(off).model_fields
     assert off.add_message_threshold_ratio == 0.1
+    assert off.add_message_abs_token_threshold == 8_000
     assert off.ttl_seconds == 300
     assert off.ttl_context_occupancy_ratio == 0.5
     assert off.ttl_message_threshold_ratio == 0.05
