@@ -4,6 +4,7 @@
 """POSIX group ownership contracts, also runnable on Windows without processes."""
 
 import signal
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
@@ -70,9 +71,9 @@ def test_linux_procfs_ignores_zombies_and_handles_parentheses(monkeypatch):
     scan.__enter__.return_value = entries
     monkeypatch.setattr(module.os, "scandir", Mock(return_value=scan))
     monkeypatch.setattr(module.sys, "platform", "linux")
-    monkeypatch.setattr(module.Path, "read_text", Mock(side_effect=[
-        "10 (name with ) parens) S 1 45 10", "11 (zombie) Z 1 45 10",
-        "12 (other group) S 1 46 10", FileNotFoundError(), "14 (live) R 1 45 10",
+    monkeypatch.setattr(module.Path, "read_bytes", Mock(side_effect=[
+        b"10 (name with ) parens\xff) S 1 45 10", b"11 (zombie) Z 1 45 10",
+        b"12 (other group) S 1 46 10", FileNotFoundError(), b"14 (live) R 1 45 10",
     ]))
     assert module._posix_members(45) == {10, 14}
 
@@ -82,7 +83,57 @@ def test_macos_group_enumeration_uses_only_numeric_fields(monkeypatch):
     query = Mock(return_value="10 45 S\n11 45 Z\n12 46 S\n14 45 R\n")
     monkeypatch.setattr(module.subprocess, "check_output", query)
     assert module._posix_members(45) == {10, 14}
-    query.assert_called_once_with(["ps", "-axo", "pid=,pgid=,stat="], text=True, timeout=2)
+    query.assert_called_once_with(
+        ["/bin/ps", "-axo", "pid=,pgid=,stat="], text=True, encoding="ascii", timeout=2,
+    )
+
+
+@pytest.mark.parametrize("stat", [b"truncated", b"10 (name) S 1 invalid", PermissionError("denied")])
+def test_linux_unknown_membership_does_not_produce_an_empty_snapshot(monkeypatch, stat):
+    scan = MagicMock()
+    scan.__enter__.return_value = [SimpleNamespace(name="10", path="/proc/10")]
+    monkeypatch.setattr(module.os, "scandir", Mock(return_value=scan))
+    monkeypatch.setattr(module.sys, "platform", "linux")
+    monkeypatch.setattr(module.Path, "read_bytes", Mock(side_effect=[stat]))
+    with pytest.raises(OSError):
+        module._posix_members(45)
+
+
+@pytest.mark.parametrize("output", ["", "10 45", "10 invalid S", "invalid 45 S", "10 45 S extra"])
+def test_macos_malformed_rows_invalidate_the_snapshot(monkeypatch, output):
+    monkeypatch.setattr(module.sys, "platform", "darwin")
+    monkeypatch.setattr(module.subprocess, "check_output", Mock(return_value=output))
+    with pytest.raises(OSError, match="invalid ps output"):
+        module._posix_members(45)
+
+
+def test_macos_decode_failure_invalidates_the_snapshot(monkeypatch):
+    monkeypatch.setattr(module.sys, "platform", "darwin")
+    error = UnicodeDecodeError("ascii", b"\xff", 0, 1, "invalid byte")
+    monkeypatch.setattr(module.subprocess, "check_output", Mock(side_effect=error))
+    with pytest.raises(OSError, match="invalid ps output"):
+        module._posix_members(45)
+
+
+def test_failed_observation_restarts_the_empty_group_quiet_interval(guardian, monkeypatch):
+    members = Mock(side_effect=[{4567}, OSError("scan failed"), {4567}, {4567}])
+    monkeypatch.setattr(module, "_posix_members", members)
+    monkeypatch.setattr(module.time, "monotonic", Mock(side_effect=[0, 5, 6.1]))
+    owner = module.PosixProcessOwner()
+    assert not owner.is_empty()
+    with pytest.raises(OSError, match="scan failed"):
+        owner.is_empty()
+    assert not owner.is_empty()
+    assert owner.is_empty()
+
+
+def test_posix_exec_wrapper_preserves_argv_and_uses_a_standalone_helper():
+    arguments = ["/bin/sh", "-c", "printf '%s' 'spaces; $HOME'"]
+    wrapped = module.wrap_posix_command(arguments)
+    assert wrapped[:3] == [module.sys.executable, "-I", "-S"]
+    assert Path(wrapped[3]).is_absolute()
+    assert Path(wrapped[3]).name == "_posix_command.py"
+    assert wrapped[4:] == arguments
 
 
 @pytest.mark.parametrize("value", ["false", "0", "no", "off"])

@@ -24,12 +24,27 @@ def kernel(monkeypatch):
     monkeypatch.setattr(module.ctypes, "WinError", lambda code: OSError(f"Win32 error {code}"), raising=False)
 
     def first_thread(snapshot, pointer):
-        pointer._obj.th32OwnerProcessID = 123
-        pointer._obj.th32ThreadID = 456
+        assert pointer._obj.size == module.ctypes.sizeof(module._ThreadEntry)
+        pointer._obj.owner_process_id = 123
+        pointer._obj.thread_id = 456
         return True
 
     api.Thread32First.side_effect = first_thread
     return api
+
+
+def test_thread_entry_preserves_win32_field_order_and_types():
+    fields = module._ThreadEntry._fields_
+    assert [name for name, _ in fields] == [
+        "size", "usage", "thread_id", "owner_process_id", "base_priority", "delta_priority", "flags",
+    ]
+    assert [kind for _, kind in fields] == [
+        module.wintypes.DWORD, module.wintypes.DWORD, module.wintypes.DWORD, module.wintypes.DWORD,
+        module.wintypes.LONG, module.wintypes.LONG, module.wintypes.DWORD,
+    ]
+    assert module._ThreadEntry.size.offset == 0
+    assert module._ThreadEntry.thread_id.offset == 2 * module.ctypes.sizeof(module.wintypes.DWORD)
+    assert module._ThreadEntry.owner_process_id.offset == 3 * module.ctypes.sizeof(module.wintypes.DWORD)
 
 
 def test_windows_command_is_suspended_hidden_and_resumed_after_assignment(kernel):

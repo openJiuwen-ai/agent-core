@@ -8,6 +8,7 @@ import http.client
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -284,3 +285,41 @@ async def test_redirected_shell_background_preview_is_retained(runtime, tmp_path
     assert _request(lease) == 200
     registry.kill_session_tree("lifecycle_preview")
     await _wait_for(lease, alive=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX controlling terminal and process groups")
+async def test_owned_commands_do_not_inherit_the_sdk_controlling_terminal(tmp_path):
+    helper = Path(__file__).with_name("_terminal_session.py")
+    host = await asyncio.create_subprocess_exec(
+        sys.executable, str(helper), str(tmp_path), start_new_session=True,
+        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        output, error = await asyncio.wait_for(host.communicate(), timeout=60)
+        assert host.returncode == 0, (output + error).decode("utf-8", errors="replace")
+        assert {path.stem for path in tmp_path.glob("*.json")} == {"invoke", "stream", "background"}
+    finally:
+        if host.returncode is None:
+            os.killpg(host.pid, signal.SIGKILL)
+        await asyncio.wait_for(host.wait(), timeout=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX sessions cannot share process groups")
+async def test_a_guardian_in_another_session_cannot_accept_command_siblings():
+    guardian = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", "import time; time.sleep(30)", start_new_session=True,
+        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        with pytest.raises(PermissionError):
+            await asyncio.create_subprocess_exec(
+                sys.executable, "-c", "pass", process_group=guardian.pid,
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+    finally:
+        if guardian.returncode is None:
+            guardian.kill()
+        await asyncio.wait_for(guardian.wait(), timeout=5)

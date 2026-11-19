@@ -65,13 +65,30 @@ def test_empty_execution_is_reaped_without_waiting_for_session_stop(registry):
     assert not registry._processes
 
 
-def test_inspection_failure_preserves_preview_but_does_not_prevent_stop(registry):
+@pytest.mark.parametrize("error", [
+    OSError("enumeration unavailable"), ValueError("invalid process data"),
+    UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid byte"),
+])
+def test_inspection_failure_preserves_preview_but_does_not_prevent_stop(registry, error):
     _, owner = _adopt(registry)
-    owner.is_empty.side_effect = OSError("enumeration unavailable")
+    owner.is_empty.side_effect = error
     registry.reap_completed()
     owner.close.assert_not_called()
     assert registry.kill_session("session") == 1
     owner.close.assert_called_once()
+    assert not registry._owners
+
+
+def test_reaper_continues_after_a_malformed_snapshot(registry, monkeypatch):
+    _, owner = _adopt(registry)
+    owner.is_empty.side_effect = [ValueError("invalid snapshot"), True]
+    tick = Mock()
+    monkeypatch.setattr(registry_module.threading, "Event", Mock(return_value=tick))
+    registry._reap_loop()
+    assert owner.is_empty.call_count == 2
+    assert tick.wait.call_count == 2
+    owner.close.assert_called_once()
+    assert registry._reaper is None
     assert not registry._owners
 
 
@@ -246,3 +263,25 @@ async def test_assignment_precedes_resume_and_registration_is_retained(registry,
     assert [call[0] for call in calls.mock_calls] == ["attach", "start"]
     assert registry._owners[process] is owner
     assert not registry._pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_shell", [False, True])
+async def test_posix_shell_and_exec_plans_both_detach_terminal(spawn_runtime, monkeypatch, use_shell):
+    shell, process, owner = spawn_runtime
+    arguments = "echo 'literal $HOME ; text'" if use_shell else ["/bin/bash", "-lc", "echo hi"]
+    monkeypatch.setattr(shell, "_resolve_execution_plan", Mock(return_value=(arguments, use_shell, "sh")))
+    wrapped = ["python", "helper.py", "command"]
+    wrapper = Mock(return_value=wrapped)
+    monkeypatch.setattr(shell_module, "wrap_posix_command", wrapper)
+    execute = AsyncMock(return_value=process)
+    monkeypatch.setattr(shell_module.asyncio, "create_subprocess_exec", execute)
+    owner.spawn_options.return_value = {"process_group": 4567}
+    with pytest.MonkeyPatch.context() as local:
+        local.setattr(shell_module.os, "name", "posix")
+        assert await shell._create_subprocess("unused", ".", {}) is process
+    wrapper.assert_called_once_with(["/bin/sh", "-c", arguments] if use_shell else arguments)
+    assert execute.call_args.args == tuple(wrapped)
+    assert execute.call_args.kwargs["process_group"] == 4567
+    assert "start_new_session" not in execute.call_args.kwargs
+    assert "preexec_fn" not in execute.call_args.kwargs
