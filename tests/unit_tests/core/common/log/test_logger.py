@@ -597,6 +597,55 @@ class TestLogConfig:
         assert agent_config["output"] == ["console"]
         assert agent_config["log_file"] == os.path.join(temp_config_dir.name, "agent.log")
 
+    def test_propagate_passes_through_to_built_logger_config(self, temp_config_dir):
+        """Root ``propagate`` must flow into each built per-logger config.
+
+        ``build_default_logger_config`` materializes the config consumed by
+        ``DefaultLogger``, which reads ``config.get("propagate", True)``.
+        Without pass-through, setting ``propagate: false`` at the root has no
+        effect and every built-in logger keeps propagating to the stdlib root
+        handler (DEF-05)."""
+        from openjiuwen.core.common.logging.default.config_provider import (
+            build_default_logger_config,
+            load_default_backend_config,
+        )
+
+        normalized = load_default_backend_config(
+            {
+                "level": "INFO",
+                "output": ["file"],
+                "log_path": temp_config_dir.name,
+                "propagate": False,
+            }
+        )
+
+        for log_type in ("common", "interface", "prompt_builder", "performance"):
+            built = build_default_logger_config(normalized, log_type)
+            assert "propagate" in built, f"{log_type} config missing propagate key"
+            assert built["propagate"] is False, f"{log_type} propagate not False"
+
+    def test_propagate_defaults_to_true_when_unset(self, temp_config_dir):
+        """When ``propagate`` is unset, built configs default to True.
+
+        Preserves existing behavior (``DefaultLogger`` reads
+        ``config.get("propagate", True)``) so loggers that did propagate keep
+        doing so unless a caller explicitly opts out."""
+        from openjiuwen.core.common.logging.default.config_provider import (
+            build_default_logger_config,
+            load_default_backend_config,
+        )
+
+        normalized = load_default_backend_config(
+            {
+                "level": "INFO",
+                "output": ["file"],
+                "log_path": temp_config_dir.name,
+            }
+        )
+
+        built = build_default_logger_config(normalized, "common")
+        assert built.get("propagate") is True
+
     def test_invalid_per_logger_level_falls_back_to_warning(self, temp_config_dir):
         """Invalid per-logger levels should fall back to WARNING."""
         from openjiuwen.core.common.logging.log_config import LogConfig
@@ -875,6 +924,294 @@ class TestDefaultLogger:
         output = stdout_capture.getvalue()
         assert "plain error without exc info" in output
         assert "Traceback" not in output
+
+    def test_log_method_forwards_exc_info(self, initialized_logger, stdout_capture):
+        """``logger.log(level, msg, exc_info=True)`` forwards exc_info through
+        the generic ``log()`` entry so the traceback is not silently dropped."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.ERROR)
+
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
+
+        try:
+            raise ValueError("boom-via-log-entry")
+        except ValueError:
+            logger.log(logging.ERROR, "crash via log", exc_info=True)
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+
+        output = stdout_capture.getvalue()
+        assert "crash via log" in output
+        assert "Traceback" in output
+        assert "ValueError: boom-via-log-entry" in output
+
+    def test_log_method_forwards_stack_info(self, initialized_logger, stdout_capture):
+        """``logger.log(level, msg, stack_info=True)`` forwards stack_info so
+        stdlib appends the call stack to the record."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.INFO)
+
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
+
+        logger.log(logging.INFO, "with stack info", stack_info=True)
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+
+        output = stdout_capture.getvalue()
+        assert "with stack info" in output
+        assert "Stack (most recent call last)" in output
+
+    def test_log_method_pops_control_params_before_event_build(self, initialized_logger, stdout_capture):
+        """exc_info/stack_info are control params, not structured-event fields:
+        they must be popped before ``_process_log_message`` so they cannot reach
+        ``create_log_event`` (whose unknown-field filtering would mask the
+        regression) and trigger an "undefined fields" warning."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.INFO)
+
+        with mock.patch.object(
+            logger, "_process_log_message", wraps=logger._process_log_message
+        ) as spy:
+            logger.log(logging.INFO, "isolated", exc_info=False, stack_info=True)
+
+        assert spy.called
+        assert "exc_info" not in spy.call_args.kwargs
+        assert "stack_info" not in spy.call_args.kwargs
+
+    def test_exc_info_false_does_not_print_traceback(self, initialized_logger, stdout_capture):
+        """``exc_info=False`` is an explicit boundary: no traceback captured,
+        mirroring stdlib semantics where only a truthy exc_info captures it."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.ERROR)
+
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
+
+        try:
+            raise ValueError("should-not-print")
+        except ValueError:
+            logger.error("boundary exc info false", exc_info=False)
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+
+        output = stdout_capture.getvalue()
+        assert "boundary exc info false" in output
+        assert "Traceback" not in output
+
+    def test_browser_agent_mirror_forwards_control_params(self, initialized_logger, stdout_capture):
+        """In browser-agent log context the mirrored browser logger receives
+        exc_info/stack_info via the shared control-param dict (mirror off so
+        only the browser branch runs)."""
+        import openjiuwen.core.common.logging.default.default_impl as default_impl_mod
+
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.ERROR)
+
+        browser_logger = logging.getLogger("openjiuwen.browser_agent")
+        for handler in browser_logger.handlers[:]:
+            browser_logger.removeHandler(handler)
+        browser_logger.setLevel(logging.DEBUG)
+        browser_capture = StringIO()
+        browser_handler = logging.StreamHandler(browser_capture)
+        browser_logger.addHandler(browser_handler)
+
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
+
+        with mock.patch.object(default_impl_mod, "is_browser_agent_log_context", return_value=True), \
+             mock.patch.dict(os.environ, {"OPENJIUWEN_BROWSER_AGENT_LOG_MIRROR_COMMON": "0"}):
+            try:
+                raise ValueError("browser-mirror-boom")
+            except ValueError:
+                logger.error("browser mirror crash", exc_info=True, stack_info=True)
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+        browser_handler.flush()
+        browser_out = browser_capture.getvalue()
+        browser_logger.removeHandler(browser_handler)
+
+        assert "browser mirror crash" in browser_out
+        assert "Traceback" in browser_out
+        assert "ValueError: browser-mirror-boom" in browser_out
+        assert "Stack (most recent call last)" in browser_out
+
+    def test_fresh_context_trace_id_slot_is_empty_not_sentinel(self, initialized_logger, stdout_capture):
+        """DEF-05: with no request context, the trace_id slot is empty.
+
+        The internal ``default_trace_id`` sentinel marks "no context set" in
+        the contextvar, but must NOT leak into the formatted log line — the
+        fixed outer layer requires an empty slot. ``initialized_logger`` leaves
+        the context at the sentinel (no real request), so this is the
+        fresh-process / pre-request state."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.INFO)
+
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
+        logger.info("fresh-trace-slot-test")
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+
+        output = stdout_capture.getvalue()
+        assert "fresh-trace-slot-test" in output
+        # the sentinel must not appear in the formatted line
+        assert "default_trace_id" not in output
+
+    def test_exc_info_none_omits_traceback(self, initialized_logger, stdout_capture):
+        """B01: exc_info=None is a boundary — no traceback captured (same as
+        not passing exc_info)."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.ERROR)
+
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
+        try:
+            raise ValueError("none-case-boom")
+        except ValueError:
+            logger.error("exc info none", exc_info=None)
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+        output = stdout_capture.getvalue()
+        assert "exc info none" in output
+        assert "Traceback" not in output
+
+    def test_exc_info_tuple_prints_specified_traceback(self, initialized_logger, stdout_capture):
+        """B01: exc_info=(type, value, tb) prints that specific exception's
+        traceback through the stdlib logger."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.ERROR)
+
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
+        try:
+            raise RuntimeError("tuple-case-boom")
+        except RuntimeError as e:
+            logger.error("exc info tuple", exc_info=(type(e), e, e.__traceback__))
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+        output = stdout_capture.getvalue()
+        assert "exc info tuple" in output
+        assert "Traceback" in output
+        assert "RuntimeError: tuple-case-boom" in output
+
+    def test_log_method_exc_info_none_omits_traceback(self, initialized_logger, stdout_capture):
+        """B01 (generic log() entry): exc_info=None through log() does not capture
+        a traceback (boundary parity with the .error entry)."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.ERROR)
+
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
+        try:
+            raise ValueError("log-none-case")
+        except ValueError:
+            logger.log(logging.ERROR, "log exc info none", exc_info=None)
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+        output = stdout_capture.getvalue()
+        assert "log exc info none" in output
+        assert "Traceback" not in output
+
+    def test_log_method_exc_info_tuple_prints_specified_traceback(self, initialized_logger, stdout_capture):
+        """B01 (generic log() entry): exc_info=(type, value, tb) through log()
+        prints that specific exception's traceback."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.ERROR)
+
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
+        try:
+            raise RuntimeError("log-tuple-case")
+        except RuntimeError as e:
+            logger.log(logging.ERROR, "log exc info tuple", exc_info=(type(e), e, e.__traceback__))
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+        output = stdout_capture.getvalue()
+        assert "log exc info tuple" in output
+        assert "Traceback" in output
+        assert "RuntimeError: log-tuple-case" in output
+
+    def test_propagate_true_config_reaches_logger_and_routes_to_parent(self, temp_config_dir):
+        """B02: root propagate=True flows config -> build_default_logger_config ->
+        DefaultLogger instance ._logger.propagate (no manual toggle), and the
+        parent (root) logger receives records."""
+        config = {
+            "logging": {
+                "level": "INFO",
+                "output": ["console"],
+                "log_path": temp_config_dir.name,
+                "propagate": True,
+                "format": "%(asctime)s | %(log_type)s | %(trace_id)s | %(levelname)s | %(message)s",
+            }
+        }
+        config_file_path = os.path.join(temp_config_dir.name, "propagate_true.yaml")
+        write_yaml_config(config_file_path, config)
+        with patched_logging_config(config_file_path):
+            logger = LogManager.get_logger("common")
+            assert logger._logger.propagate is True  # config -> instance (not manual)
+
+            root = logging.getLogger()
+            root.setLevel(logging.DEBUG)
+            seen = []
+
+            class _Capture(logging.Handler):
+                def emit(self, record):
+                    seen.append(record.getMessage())
+
+            cap = _Capture()
+            root.addHandler(cap)
+            try:
+                logger.info("propagate-true-config")
+            finally:
+                root.removeHandler(cap)
+            assert any("propagate-true-config" in m for m in seen)
+
+    def test_propagate_false_config_reaches_logger_and_blocks_parent(self, temp_config_dir):
+        """B02: root propagate=False flows config -> instance ._logger.propagate,
+        and the parent (root) logger does NOT receive records. Verifies the
+        config_provider -> DefaultLogger chain (7fd8c944); deleting that pass-through
+        would make this fail (propagate stuck at True)."""
+        config = {
+            "logging": {
+                "level": "INFO",
+                "output": ["console"],
+                "log_path": temp_config_dir.name,
+                "propagate": False,
+                "format": "%(asctime)s | %(log_type)s | %(trace_id)s | %(levelname)s | %(message)s",
+            }
+        }
+        config_file_path = os.path.join(temp_config_dir.name, "propagate_false.yaml")
+        write_yaml_config(config_file_path, config)
+        with patched_logging_config(config_file_path):
+            logger = LogManager.get_logger("common")
+            assert logger._logger.propagate is False  # config -> instance (not manual)
+
+            root = logging.getLogger()
+            root.setLevel(logging.DEBUG)
+            seen = []
+
+            class _Capture(logging.Handler):
+                def emit(self, record):
+                    seen.append(record.getMessage())
+
+            cap = _Capture()
+            root.addHandler(cap)
+            try:
+                logger.info("propagate-false-config")
+            finally:
+                root.removeHandler(cap)
+            assert not any("propagate-false-config" in m for m in seen)
 
 
 class TestLogManagerReset:
