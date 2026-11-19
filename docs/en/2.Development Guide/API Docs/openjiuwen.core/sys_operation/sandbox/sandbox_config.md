@@ -149,14 +149,14 @@ Local work configuration for LOCAL mode security boundaries and command restrict
 * **dangerous_patterns**(List[str], optional): Dangerous command regex pattern list. If `None`, uses built-in default patterns. Default: `None`.
 
 
-### ADX registered Local rootfs
+### ADX Local rootfs
 
-The `adx-environment` provider accepts `rootfs_template` in launcher `extra_params`
-with SDK 0.1.0rc5 or newer. This selects a deployment-registered Local artifact;
-when configured, the provider omits `image` from the SDK request. Template names
-are part of the environment cache scope, so changing the selected artifact does
-not reuse a tool environment created from a different rootfs. Artifact import,
-image-reference mapping and distribution belong to deployment tooling.
+The `adx-environment` provider accepts `{"type": "local", "path": "/var/lib/agentos/images/tools/rootfs"}`
+in launcher `extra_params.rootfs` with SDK 0.1.0rc11 or newer. The existing provider
+passes the path as SDK `LocalRootfs`, omits `image`, and forwards `env`.
+ADX enforces read-only access. The cache scope includes the rootfs type and path,
+so changing the path creates a separate environment. The integration layer converts
+and distributes the image. The selected execution node must have the prepared path.
 
 ### ADX tool restart policy
 
