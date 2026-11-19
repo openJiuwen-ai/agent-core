@@ -159,6 +159,19 @@ def existing_paths(paths: Sequence[str]) -> list[str]:
     return [path for path in paths if Path(path).exists()]
 
 
+def event_time_range(nodes_by_subagent: Mapping[str, Sequence[TrajectoryNode]]) -> tuple[int | None, int | None]:
+    """The first start and last end of the visible trajectory rows, in ns since the epoch.
+
+    Nodes without a timestamp are ignored. (None, None) when the trajectory carries no time at all, so Reward
+    reads the deliverables as before.
+    """
+    source = getattr(nodes_by_subagent, "whole", None) or nodes_by_subagent
+    nodes = [node for rows in source.values() for node in rows]
+    starts = [node.start_ts_ns for node in nodes if node.start_ts_ns > 0]
+    ends = [node.end_ts_ns or node.start_ts_ns for node in nodes if (node.end_ts_ns or node.start_ts_ns) > 0]
+    return (min(starts) if starts else None, max(ends) if ends else None)
+
+
 def final_reply(task_parse: TaskParseResult, nodes_by_subagent: Mapping[str, Sequence[TrajectoryNode]]) -> str:
     """The text the user got last: the latest message artifact, else the latest reply in the trajectory.
 
@@ -441,6 +454,7 @@ async def run_reward(
     status_sink: Any = None,
     model_name: str = "",
     status_counter: list[int] | None = None,
+    generate_improvements: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Score the stage-one deliverables with Reward.
 
@@ -475,11 +489,14 @@ async def run_reward(
         )
 
     lines = _ProgressLines(say, language)
+    since_ns, until_ns = event_time_range(nodes_by_subagent)
     language_token = reward_models.set_requested_language(language)
     try:
         try:
             with progress.using(lines):  # Reward's own per-run progress slot, restored on exit
-                options = RewardOptions(txt_response=reply, user_note=user_attribution or "", log=lines.log)
+                materials = {} if generate_improvements else None
+                options = RewardOptions(txt_response=reply, user_note=user_attribution or "", log=lines.log,
+                                        materials=materials, since_ns=since_ns, until_ns=until_ns)
                 result = await pipeline.reward(task, artifacts, config, options)
         finally:
             reward_models.reset_requested_language(language_token)
@@ -506,6 +523,27 @@ async def run_reward(
         "claims": len(result.get("sub_category_items") or ()),
         "warnings": list((result.get("meta") or {}).get("warnings") or ()),
     }
+    if generate_improvements:
+        from openjiuwen.agent_evolving.reward import suggestion
+
+        saved = result.get("meta") or {}
+        evidence = {**result, "meta": {**saved, "task": task}}
+        try:
+            policy = suggestion.suggestion_policy(config, saved.get("guides") or [])
+        except (TypeError, ValueError) as exc:
+            meta["suggestion_failed"] = f"{type(exc).__name__}: {exc}"
+        else:
+            if policy["status"] != "enabled":
+                meta["suggestion_skipped"] = policy
+            else:
+                try:
+                    from openjiuwen.agent_evolving.reward.models import Model
+
+                    meta["artifact_improvement"] = await suggestion.suggest(
+                        evidence, Model(config["producer"]), language,
+                        materials=materials, final_reply=reply)
+                except Exception as exc:  # noqa: BLE001 - a suggestion failure must not erase the score
+                    meta["suggestion_failed"] = f"{type(exc).__name__}: {exc}"
     return payload, meta
 
 

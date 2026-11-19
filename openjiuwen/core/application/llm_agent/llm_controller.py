@@ -813,7 +813,11 @@ class LLMController(BaseController):
             self.config.model.model_provider
         )
 
-        model = await Runner.resource_mgr.get_model(model_id=model_id, session=session)
+        model = await Runner.resource_mgr.get_model(
+            model_id=model_id,
+            session=session,
+            identity={"agent_id": "core.llm_controller", "agent_name": "core.llm_controller"},
+        )
 
         if model is None:
             model_client_config = ModelClientConfig(
@@ -838,7 +842,11 @@ class LLMController(BaseController):
 
             Runner.resource_mgr.add_model(model_id=model_id, model=model_provider)
 
-        return await Runner.resource_mgr.get_model(model_id=model_id, session=session)
+        return await Runner.resource_mgr.get_model(
+            model_id=model_id,
+            session=session,
+            identity={"agent_id": "core.llm_controller", "agent_name": "core.llm_controller"},
+        )
 
     def _get_workflow_id_from_schema(self, workflow_name: str) -> Optional[str]:
         """Get workflow_id from workflow schema by name

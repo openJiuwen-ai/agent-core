@@ -1,16 +1,20 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Session-state tests for DeepAgent runtime state methods."""
+
 from __future__ import annotations
 
+import pytest
+
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.schema import state as state_schema
 from openjiuwen.harness.schema.state import DeepAgentState
 from openjiuwen.harness.schema.task import (
+    TaskPlan,
     TodoItem,
     TodoStatus,
-    TaskPlan,
 )
-from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 
 class FakeSession:
@@ -118,3 +122,89 @@ def test_pending_follow_ups_defaults_empty() -> None:
     )
     loaded = agent.load_state(session)
     assert loaded.pending_follow_ups == []
+
+
+def test_turn_state_round_trip() -> None:
+    """Turn identity and next step survive session persistence."""
+    agent = _make_agent()
+    session = FakeSession()
+    state = DeepAgentState(
+        turn_state=state_schema.TurnState(
+            turn_id="turn-1",
+            step_index=3,
+        ),
+    )
+
+    agent.save_state(session, state)
+    agent.clear_state(session)
+
+    loaded = agent.load_state(session)
+    assert loaded.turn_state == state_schema.TurnState(
+        turn_id="turn-1",
+        step_index=3,
+    )
+
+
+def test_start_turn_overwrites_runtime_turn_state() -> None:
+    """A new logical task replaces the previous turn in runtime; dict updates on exit save."""
+    agent = _make_agent()
+    session = FakeSession()
+    agent.save_state(
+        session,
+        DeepAgentState(
+            turn_state=state_schema.TurnState(
+                turn_id="previous",
+                step_index=4,
+            ),
+        ),
+    )
+
+    started = agent._start_turn(session)
+    assert started.turn_id != "previous"
+    assert started.step_index == 0
+    assert agent.load_state(session).turn_state == started
+
+    agent.save_state(session)
+    agent.clear_state(session)
+
+    loaded = agent.load_state(session)
+    assert loaded.turn_state == started
+
+
+@pytest.mark.parametrize("step_index", [0, 3])
+def test_turn_state_accepts_non_negative_int_step_index(step_index: int) -> None:
+    """A persisted non-negative int step index restores with the same turn."""
+    restored = state_schema.TurnState.from_dict({"turn_id": "turn-1", "step_index": step_index})
+
+    assert restored == state_schema.TurnState(turn_id="turn-1", step_index=step_index)
+
+
+def test_turn_state_missing_step_index_defaults_to_zero() -> None:
+    """Older snapshots without step_index resume at the first step."""
+    restored = state_schema.TurnState.from_dict({"turn_id": "turn-1"})
+
+    assert restored == state_schema.TurnState(turn_id="turn-1", step_index=0)
+
+
+@pytest.mark.parametrize(
+    "step_index",
+    ["nope", "3", True, False, -1, 1.5, None],
+)
+def test_turn_state_rejects_unusable_step_index(step_index: object) -> None:
+    """Illegal step indexes are dropped instead of raising or restoring a dead turn."""
+    restored = state_schema.TurnState.from_dict({"turn_id": "turn-1", "step_index": step_index})
+
+    assert restored is None
+
+
+def test_session_snapshot_with_bad_step_index_drops_turn() -> None:
+    """Session restore must not leak ValueError from a corrupt step index."""
+    loaded = DeepAgentState.from_session_dict(
+        {
+            "iteration": 1,
+            "turn_state": {"turn_id": "turn-1", "step_index": "-1"},
+        }
+    )
+
+    assert loaded.iteration == 1
+    assert loaded.turn_state is None

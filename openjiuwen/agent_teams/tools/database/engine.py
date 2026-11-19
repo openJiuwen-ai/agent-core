@@ -127,8 +127,7 @@ class DbSessions:
                     yield session
         except TimeoutError:
             team_logger.warning(
-                "DbSessions.read() exceeded the %.0fs watchdog; "
-                "the DB driver may be wedged",
+                "DbSessions.read() exceeded the %.0fs watchdog; the DB driver may be wedged",
                 _DB_SESSION_WATCHDOG_SECONDS,
             )
             raise
@@ -153,8 +152,7 @@ class DbSessions:
                         yield session
             except TimeoutError:
                 team_logger.warning(
-                    "DbSessions.write() exceeded the %.0fs watchdog; "
-                    "the DB driver may be wedged",
+                    "DbSessions.write() exceeded the %.0fs watchdog; the DB driver may be wedged",
                     _DB_SESSION_WATCHDOG_SECONDS,
                 )
                 raise
@@ -393,15 +391,36 @@ def _ensure_team_info_capability_columns(sync_conn) -> None:
         return
     columns = {col["name"] for col in inspector.get_columns("team_info")}
     if "dispatch_mode" not in columns:
-        sync_conn.exec_driver_sql(
-            "ALTER TABLE team_info ADD COLUMN dispatch_mode TEXT NOT NULL DEFAULT 'autonomous'"
-        )
+        sync_conn.exec_driver_sql("ALTER TABLE team_info ADD COLUMN dispatch_mode TEXT NOT NULL DEFAULT 'autonomous'")
         team_logger.info("Migrated legacy team_info table: added dispatch_mode column")
     if "enable_task_verification" not in columns:
         sync_conn.exec_driver_sql(
             "ALTER TABLE team_info ADD COLUMN enable_task_verification BOOLEAN NOT NULL DEFAULT 0"
         )
         team_logger.info("Migrated legacy team_info table: added enable_task_verification column")
+
+
+def _has_table(sync_conn, table_name: str) -> bool:
+    """Return whether one table exists (a single has_table call, no PRAGMAs)."""
+    return inspect(sync_conn).has_table(table_name)
+
+
+async def cur_session_table_exists(sessions: DbSessions, table_kind: str) -> bool:
+    """Read-only existence check for the bound session's dynamic tables.
+
+    ``table_kind`` is ``"task"`` or ``"message"``: each kind's tables are
+    created together per session, so one representative table per kind is
+    enough. Read paths use this to answer empty for sessions that never
+    ran a team — reads never run DDL.
+    """
+    session_id = get_session_id()
+    if not session_id:
+        return False
+    model_factory = {"task": _get_task_model, "message": _get_message_model}[table_kind]
+    table_name = model_factory().__table__.name
+    async with sessions.read() as session:
+        conn = await session.connection()
+        return await conn.run_sync(_has_table, table_name)
 
 
 def _ensure_message_protocol_column(sync_conn) -> None:
@@ -431,9 +450,7 @@ def _ensure_message_protocol_column(sync_conn) -> None:
         return
     if "protocol" in columns:
         return
-    sync_conn.exec_driver_sql(
-        f"ALTER TABLE {table_name} ADD COLUMN protocol TEXT NOT NULL DEFAULT 'plain'"
-    )
+    sync_conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN protocol TEXT NOT NULL DEFAULT 'plain'")
     team_logger.info(
         "Migrated legacy message table %s: added protocol column",
         table_name,
@@ -809,7 +826,7 @@ async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
             )
             read_engine = write_engine
         else:
-            db_path = Path(conn_str).expanduser()
+            db_path = await asyncio.to_thread(Path(conn_str).expanduser)
             conn_str = str(db_path)
             if not db_path.parent.exists():
                 db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -930,11 +947,11 @@ async def _ensure_session_tables(session: AsyncSession) -> None:
         await conn.run_sync(model.__table__.create, checkfirst=True)
     await conn.run_sync(_ensure_message_protocol_column)
     await conn.run_sync(_ensure_message_meta_column)
-    await conn.run_sync(
-        _ensure_dynamic_table_indexes, candidates, existing_before_create
-    )
+    await conn.run_sync(_ensure_dynamic_table_indexes, candidates, existing_before_create)
 
 
+# Preserve the shared DDL retry/drop layout while develop updates its write protocol.
+# fmt: off
 async def create_cur_session_tables(sessions: DbSessions) -> bool:
     """Create dynamic tables for current session under the process-wide write lock.
 
@@ -1012,6 +1029,7 @@ async def drop_cur_session_tables(sessions: DbSessions) -> None:
     team_logger.info("Dropped dynamic tables for session %s", session_id)
 
 
+# fmt: on
 async def cleanup_all_runtime_state(
     sessions: DbSessions,
 ) -> tuple[list[str], list[str]]:

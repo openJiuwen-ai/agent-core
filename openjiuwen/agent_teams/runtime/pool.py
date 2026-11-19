@@ -32,6 +32,7 @@ from openjiuwen.agent_teams.runtime.gate import InteractGate
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+    from openjiuwen.agent_teams.extensions.monitor_event_bridge import TeamMonitorEventBridge
     from openjiuwen.agent_teams.interaction.passive_tool_executor import PassiveToolExecutor
 
 
@@ -58,6 +59,14 @@ class ActiveTeam:
     (per-sender ``TeamTaskManager`` / ``TeamMessageManager`` caches). Born
     on the first relayed tool call, dies with this pool entry — the same
     lifecycle as the leader runtime whose ``TeamBackend`` it reads."""
+
+    monitor_event_bridge: "TeamMonitorEventBridge | None" = None
+    """Extension monitor-event bridge for this entry, or None without host wiring.
+
+    Born with the entry (``TeamRuntimeManager.activate`` mounts it only
+    when an extension bus was injected), dies with it in ``stop_team`` /
+    the finalize stop path. A paused entry keeps its bridge: pause is not
+    a stop, best-effort notifications continue."""
 
 
 @dataclass(frozen=True, slots=True)

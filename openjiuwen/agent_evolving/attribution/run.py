@@ -185,6 +185,43 @@ class NodeBackedRuntime:
     def record_experience_cause(self, signal_id: str, entries: list[dict[str, Any]]) -> str:
         return self._record_bucket(self.experience_attributions, signal_id, entries)
 
+    @property
+    def attributions(self) -> dict[str, list[dict[str, Any]]]:
+        """Old single bucket, still read by the develop diagnosis host.
+
+        Release stores causes in ``reward_attributions``, ``skill_attributions``
+        and ``experience_attributions``. The host at develop 9133102 reads
+        ``runtime.attributions`` after the run.
+        """
+        merged: dict[str, list[dict[str, Any]]] = {}
+        for bucket in (
+            self.reward_attributions,
+            self.skill_attributions,
+            self.experience_attributions,
+        ):
+            for signal_id, entries in bucket.items():
+                merged.setdefault(signal_id, []).extend(entries)
+        return merged
+
+    def record_attribution(self, signal_id: str, entries: list[dict[str, Any]]) -> str:
+        """Accept the develop host's old recorder and keep the reward bucket."""
+        return self.record_reward_failure(signal_id, entries)
+
+    @property
+    def skill_improvements(self) -> dict[str, str]:
+        """Old skill text map. Release stores ``skill_evolutions`` objects."""
+        texts: dict[str, str] = {}
+        for key, value in self.skill_evolutions.items():
+            if isinstance(value, dict):
+                texts[key] = str(value.get("md_string") or "")
+            else:
+                texts[key] = str(value or "")
+        return texts
+
+    def record_skill_improvement(self, key: str, md: str) -> str:
+        """Accept the develop host's old skill recorder."""
+        return self.record_skill_evolution(key, md)
+
     def mark_signal_invalid(self, signal_id: str) -> str:
         self.invalid_signals.add(signal_id)
         return "marked"
@@ -345,6 +382,7 @@ async def run_diagnosis(
     status_sink: StatusSink | None = None,
     model_name: str = "",
     status_counter: list[int] | None = None,
+    generate_improvements: bool = False,
 ) -> DiagnosisResult:
     """Run stage two: keyword signals, then Reward when artifacts exist.
 
@@ -394,6 +432,7 @@ async def run_diagnosis(
                 status_sink=status_sink,
                 model_name=model_name,
                 status_counter=counter,
+                generate_improvements=generate_improvements,
             )
             reward = RewardResult.from_payload(payload)
         except Exception as exc:  # noqa: BLE001 - fallback to rule/Jev signals, as for the Reward agent

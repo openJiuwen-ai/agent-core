@@ -18,7 +18,8 @@ import pytest
 from openjiuwen.core.memory.external.provider import MemoryProvider
 from openjiuwen.core.single_agent.rail.base import RunKind
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
-from openjiuwen.harness.rails.memory.jiuwen_memory_rail import JiuwenMemoryRail, _MemoryTurn
+from openjiuwen.harness.rails.memory.jiuwen_memory_rail import JiuwenMemoryRail
+from openjiuwen.harness.rails.memory.memory_turn import _MemoryTurn
 
 
 class MockInputs:
@@ -172,9 +173,9 @@ class TestInitUninit:
         assert card.id == "jiuwen_memory_memory_search"
         assert agent.system_prompt_builder.added_sections, "provider 提示词段应注入"
 
-        rail._memory_turns["pending"] = _MemoryTurn("未结束的请求")
+        rail._turn_buffer.turns["pending"] = _MemoryTurn("未结束的请求")
         rail.uninit(agent)
-        assert rail._memory_turns == {}
+        assert rail._turn_buffer.turns == {}
         assert agent.ability_manager.names() == set()
         assert agent.system_prompt_builder.removed_sections
         assert provider.shutdown_called

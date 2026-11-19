@@ -43,16 +43,17 @@ Rails are executed in registration order. A rail may short-circuit by returning 
 
 ## External Memory for Interactive Turns
 
-When mounted with `AskUserRail`, `JiuwenMemoryRail` combines the original request, user follow-ups,
+When mounted with `AskUserRail`, `JiuwenMemoryRail` or `JiuwenMemoryCodingRail` combines the original request, user follow-ups,
 and accepted answers into one logical turn. It submits one `sync_turn` after the final reply, buffering
 across intermediate interrupts. Resume with the same Session or `conversation_id`.
 New tasks do not inherit material from completed turns.
 
 Buffered user text is limited to 16,000 characters. Truncation retains the ends of the original request
-and recent complete answers that fit, with an explicit truncation marker. Each rail buffers up to
-128 sessions; entries inactive for 30 minutes are evicted on subsequent foreground invocations.
-Buffers are not persisted and cannot be recovered after rail reconstruction, process restart, or
-`end_session()`. Existing provider extraction, timeout, and failure handling still apply.
+and recent complete answers that fit, with an explicit truncation marker. Each Work rail or Coding
+agent buffers up to 128 sessions; entries inactive for 30 minutes are evicted on subsequent foreground invocations.
+Coding agents keep separate pending turns even when sharing a provider; unmounting clears only
+that agent’s buffer. Buffers are not persisted and cannot be recovered after rail reconstruction,
+process restart, or Work’s `end_session()`. Existing provider extraction, timeout, and failure handling still apply.
 
 ## Online Skill Evolution
 
