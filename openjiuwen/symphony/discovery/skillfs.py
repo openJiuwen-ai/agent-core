@@ -20,11 +20,14 @@ from openjiuwen.symphony.retrieval.search.artifacts import CatalogRecord, build_
 from openjiuwen.symphony.retrieval.search.runtime.lexical import LexicalDocument, LexicalIndex
 
 from openjiuwen.symphony.config import RetrievalConfig
+from openjiuwen.symphony.shared.fingerprint import FingerprintService
+
+from .capability_search import fingerprint_text, read_fingerprints
 from .models import SkillInventory, SkillRecord, inventory_from_records, sanitize_model_text
 
 SkillRecordsProvider = Callable[[], Iterable[SkillRecord]]
 VisibleSkillNames = set[str] | frozenset[str] | Callable[[], set[str] | frozenset[str] | None] | None
-_PINNED_INDEX_SNAPSHOT_UNSET = object()
+_UNSET_SNAPSHOT = object()
 _INDEX_LOCK_FILENAME = ".skill-index.publish.lock"
 _OVERLAY_SEGMENT = "newly_installed_skills"
 _OVERLAY_NODE_ID = "__SYMPHONY_LIVE_SKILL_OVERLAY__"
@@ -401,17 +404,26 @@ class SkillFS:
         artifact_root: Path | str,
         index_root: Path | str | None = None,
         pin_index_revision: bool = False,
-        pinned_index_snapshot: SkillIndexSnapshot | Mapping[str, Any] | None | object = _PINNED_INDEX_SNAPSHOT_UNSET,
+        pinned_index_snapshot: SkillIndexSnapshot | Mapping[str, Any] | None | object = _UNSET_SNAPSHOT,
+        pinned_expert_index_snapshot: SkillIndexSnapshot | None = None,
+        fingerprint_service: FingerprintService | None = None,
+        fingerprint_source_root: str = "",
+        fingerprint_source_roots: tuple[str, ...] = (),
+        index_snapshot_loader: Callable[[], SkillIndexSnapshot | None] | None = None,
         **_: Any,
     ) -> None:
         if not callable(records_provider):
             raise TypeError("records_provider must be callable")
         self._records_provider = records_provider
+        self._pinned_expert_index_snapshot = pinned_expert_index_snapshot
         self._settings = settings
         self._visible_skill_names = visible_skill_names
+        self._fingerprint_service = fingerprint_service
+        self._fingerprint_source_roots = frozenset(fingerprint_source_roots or (fingerprint_source_root,))
         self._artifact_root = Path(artifact_root).expanduser().resolve()
         self._index_root = Path(index_root).expanduser().resolve() if index_root is not None else self._artifact_root
-        snapshot_provided = pinned_index_snapshot is not _PINNED_INDEX_SNAPSHOT_UNSET
+        self._load_index_snapshot = index_snapshot_loader or (lambda: capture_index_snapshot(self._index_root))
+        snapshot_provided = pinned_index_snapshot is not _UNSET_SNAPSHOT
         supplied = (
             SkillIndexSnapshot.from_dict(pinned_index_snapshot)
             if isinstance(pinned_index_snapshot, Mapping)
@@ -425,7 +437,7 @@ class SkillFS:
         self._index_snapshot = (
             supplied
             if snapshot_provided
-            else capture_index_snapshot(self._index_root)
+            else self._load_index_snapshot()
             if self._pin_index_revision and settings.use_existing_index
             else None
         )
@@ -447,6 +459,14 @@ class SkillFS:
     @property
     def pinned_index_snapshot(self) -> SkillIndexSnapshot | None:
         return self._index_snapshot
+
+    @property
+    def pinned_expert_index_snapshot(self) -> SkillIndexSnapshot | None:
+        return self._pinned_expert_index_snapshot
+
+    def records(self) -> tuple[SkillRecord, ...]:
+        """Read the current source inventory before applying prompt visibility."""
+        return tuple(self._records_provider())
 
     @property
     def directory(self) -> SkillDirectoryView:
@@ -563,7 +583,7 @@ class SkillFS:
                             LexicalDocument(
                                 item.worker_id,
                                 item.name,
-                                item.description,
+                                self._search_descriptions.get(item.worker_id, item.description),
                                 self.read_body(item),
                                 item.aliases,
                                 self._view.category_text(item.worker_id),
@@ -605,13 +625,27 @@ class SkillFS:
         return self._lexical_index.missing_terms(query)
 
     def _refresh(self) -> None:
-        inventory = inventory_from_records(self._records_provider())
+        inventory = inventory_from_records(self.records())
         visible = self._visible_skill_names() if callable(self._visible_skill_names) else self._visible_skill_names
         visible_set = None if visible is None else {str(item) for item in visible}
         items = tuple(item for item in inventory.items if visible_set is None or item.worker_id in visible_set)
+        scoped = tuple(item for item in items if item.source_root in self._fingerprint_source_roots)
+        fingerprints = read_fingerprints(self._fingerprint_service) if scoped else {}
+        descriptions = {}
+        for item in scoped:
+            summary, text = fingerprint_text(
+                fingerprints.get(("skill", item.worker_id)), item.content_hash, item.description,
+            )
+            if summary != item.description or text != item.description:
+                descriptions[item.worker_id] = (sanitize_model_text(summary), text)
+        self._search_descriptions = {key: text for key, (_, text) in descriptions.items()}
+        items = tuple(
+            replace(item, description=descriptions[item.worker_id][0])
+            if item.worker_id in descriptions else item for item in items
+        )
         snapshot = self._index_snapshot
         if self._settings.use_existing_index and not self._pin_index_revision:
-            snapshot = capture_index_snapshot(self._index_root)
+            snapshot = self._load_index_snapshot()
         current_hashes = {item.worker_id: item.content_hash for item in inventory.items}
         index_state = (
             "missing" if snapshot is None else "fresh" if dict(snapshot.record_hashes) == current_hashes else "stale"
@@ -625,6 +659,8 @@ class SkillFS:
             "taxonomy": snapshot.taxonomy_fingerprint if snapshot is not None else "",
             "state": index_state,
         }
+        if descriptions:
+            fingerprint_payload["descriptions"] = descriptions
         fingerprint = hashlib.sha256(
             json.dumps(fingerprint_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
         ).hexdigest()
@@ -665,6 +701,34 @@ def capture_index_snapshot(root: Path | str) -> SkillIndexSnapshot | None:
             validator=lambda candidate: _load_index_snapshot(candidate) is not None,
         )
         return _load_index_snapshot(index_dir) if recovered else None
+
+
+def project_index_snapshot(snapshot: SkillIndexSnapshot | None, kind: str) -> SkillIndexSnapshot | None:
+    """Project one committed taxonomy to the bare IDs used by a typed session view."""
+    if snapshot is None:
+        return None
+    prefix = kind + ":"
+    hashes = tuple((key.removeprefix(prefix), value) for key, value in snapshot.record_hashes if key.startswith(prefix))
+    if not hashes:
+        return None
+    leaves = {
+        node["cid"]: {**node, "worker_id": node["worker_id"].removeprefix(prefix)}
+        for node in snapshot.nodes
+        if node.get("type") == "leaf" and node.get("worker_id", "").startswith(prefix)
+    }
+    parents = set()
+    for cid in leaves:
+        parent, _, _ = cid.rpartition(".")
+        while parent and parent not in parents:
+            parents.add(parent)
+            parent, _, _ = parent.rpartition(".")
+    nodes = tuple(
+        leaves[node["cid"]] if node["cid"] in leaves else {
+            **node, "description": "", "select_when": "", "dont_select_when": "",
+        }
+        for node in snapshot.nodes if node["cid"] in leaves or node["cid"] in parents
+    )
+    return SkillIndexSnapshot(nodes, hashes, snapshot.fingerprint)
 
 
 def _load_index_snapshot(index_dir: Path) -> SkillIndexSnapshot | None:
@@ -728,15 +792,32 @@ def _load_index_snapshot(index_dir: Path) -> SkillIndexSnapshot | None:
 def _build_live_tree(
     items: tuple[SkillRecord, ...],
     snapshot: SkillIndexSnapshot | None,
+    *,
+    item_label: str = "Skills",
+    categories_by_id: Mapping[str, str] | None = None,
 ) -> tuple[RetrieverNode, dict[str, CatalogRecord]]:
     if snapshot is None:
+        groups: dict[str, list[RetrieverItem]] = {}
+        categories = {
+            identifier: " > ".join(part.strip() for part in label.split(">") if part.strip())
+            for identifier, label in (categories_by_id or {}).items()
+        }
+        for item in items:
+            category = categories.get(item.worker_id, "")
+            if category in {"/", "ROOT"}:
+                category = ""
+            groups.setdefault(category, []).append(
+                RetrieverItem(item.worker_id, item.worker_id, item.name or item.worker_id, item.description)
+            )
+        ungrouped = groups.pop("", [])
         root = RetrieverNode(
             node_id="ROOT",
             label="ROOT",
-            description="Installed Skills",
-            items=tuple(
-                RetrieverItem(item.worker_id, item.worker_id, item.name or item.worker_id, item.description)
-                for item in items
+            description=f"Installed {item_label}",
+            items=tuple(ungrouped),
+            children=tuple(
+                RetrieverNode(node_id=f"category:{label}", label=label, items=tuple(members))
+                for label, members in sorted(groups.items())
             ),
         )
         return root, {
@@ -812,8 +893,8 @@ def _build_live_tree(
             node_id=_OVERLAY_NODE_ID,
             label=_OVERLAY_SEGMENT,
             description=(
-                f"{len(overlay_items)} of {len(items)} Skills are not in the other categories. "
-                "Search here or omit category to search all Skills, including these."
+                f"{len(overlay_items)} of {len(items)} {item_label} are not in the other categories. "
+                f"Search here or omit category to search all {item_label}, including these."
             ),
             items=tuple(sorted(overlay_items, key=lambda item: (item.item_id.casefold(), item.item_id))),
         )

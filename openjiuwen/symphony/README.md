@@ -1,6 +1,6 @@
 # Symphony
 
-Symphony 从一个能力目录构建分类树与关系图，提供会话发现、在线编排和执行观测 / Flow。统一入口为 `SymphonyRuntime(model, config)`；扫描、指纹和服务组装由 Core 管理。
+Symphony 提供 Skill、专家和 MCP 检索，以及 Skill 编排和执行观测 / Flow。统一入口为 `SymphonyRuntime(model, config)`；扫描、指纹和服务组装由 Core 管理。
 
 ## 配置与调用
 
@@ -26,14 +26,14 @@ runtime = SymphonyRuntime(model=model, config=config)
 try:
     await runtime.retrieval.build(force=False, progress=on_progress)
     await runtime.orchestration.build(force=False, progress=on_progress)
-    session = runtime.retrieval.create_session(
+    runtime.retrieval.bind_search(
         session_scope="conversation-1",
         visible_capability_ids=lambda: {"extract", "summarize"},
         disabled_capability_ids=lambda: disabled_ids,
         source_by_id={"extract": "installed"},
         pin_index_revision=True,
     )
-    candidates = await session.skill_index(operation="search", query=["summarize documents"])
+    candidates = await runtime.retrieval.search(type=["skill"], query="summarize documents")
     plan = await runtime.orchestration.plan(
         "Summarize the document", candidate_ids=["extract", "summarize"],
         disabled_capability_ids=disabled_ids,
@@ -44,7 +44,7 @@ finally:
 
 `on_progress` 可以是同步或异步回调。构造函数只保存独立配置快照并固定相对路径，不扫描、构建、请求模型或启动任务。配置模型使用 Pydantic v2，支持 `model_validate`、`model_dump_json`、`model_validate_json` 和中文 JSON Schema。
 
-`capability.sources` 是非空目录列表，每项声明 `type` 和 `root`，整组共用 `scan`、`fingerprint` 和 `storage.artifact_root`。配置可声明多个同类或不同类型的目录。当前 Runtime 要求单个来源，并提供 `skill` 读取器。旧的 `capability.root` 和 `capability.type` 会被校验拒绝。
+`capability.sources` 是非空目录列表，每项声明 `type` 和 `root`，整组共用 `scan`、`fingerprint` 和 `storage.artifact_root`。多个 `skill` 和 `expert` 目录可共用一棵分类树。专家读取器从独立专家包的 `manifest.json` 投影 `name`（ID 和默认显示名）、`description` 及 `package_type: agent_template`。关系图与 Flow 只使用 Skill，并要求恰有一个 Skill 目录。
 
 顶层配置包含 `capability`、`storage`、`retrieval` 和 `orchestration`；Flow 策略位于 `orchestration.experience`。公共配置树及默认值见 [config.tree.txt](config.tree.txt)。
 
@@ -52,7 +52,7 @@ finally:
 
 | 入口 | 能力 |
 |---|---|
-| `runtime.retrieval` | `status()` / `read()` / `await build()` / `await cancel_build()` / `create_session()` |
+| `runtime.retrieval` | `status()` / `read()` / `await build()` / `await cancel_build()` / `search()` / `get_tools()` / `bind_search()` |
 | `runtime.orchestration` | `status()` / `read()` / `await build()` / `await cancel_build()` / `await plan()` |
 | `runtime.flow` | 惰性默认 Flow；`status()`、`await start()`、提交和候选操作，以及 `create_scope(store=...)` |
 
@@ -72,15 +72,30 @@ finally:
 
 构图和 fast / beam 规划共用 `orchestration.min_edge_confidence`。`candidate_ids=None` 表示未限制候选；显式空列表或全部无效 ID 返回空计划，不扩大到全量。`dynamic_graph_enabled` 只决定规划是否使用已收集的观测，不关闭观测写入。
 
-## Discovery 会话
+## 能力检索
 
-`create_session` 的会话标识、目录范围、可见对象、禁用对象、来源和索引快照属于调用上下文，不放进配置，也没有 Source 构造层。来源以对象 ID 为键。返回的 `DiscoverySession` 同时服务工具和提示 Rail；动态禁用实时生效，冻结的预算和索引版本不随后续配置修改漂移。
+直接调用 `runtime.retrieval.search(query="invoice")`，默认搜索当前会话可见的 Skill、专家和 MCP 服务。用 `type=["expert", "mcp"]` 可将搜索限定在专家和 MCP。模型工具 `capability_search` 通过 `runtime.retrieval.get_tools()` 获取，使用 JSON 数组选择类型。Python 也接受元组和单个类型字符串。两个入口共用检索范围、已查看记录和游标。
 
-可通过 `create_session(config=...)` 传入 `RetrievalConfig` 来覆盖单个会话的提示、输出和索引读取策略。Runtime 持有统一的检索开关与构树策略。
+宿主可先调用 `runtime.retrieval.bind_search(session_scope=..., visible_capability_ids=..., disabled_capability_ids=..., pin_index_revision=True)` 绑定当前 Agent 的实时可见范围和索引版本。返回的 `SkillFS` 供提示词和状态面板读取。并发会话或团队成员各用自己的 Runtime。重新绑定后，旧工具和游标失效，宿主应重新注册工具。
 
-`retrieval.use_existing_index=True` 在已有索引时读取分类树。尚无索引时使用确定性目录发现，不创建占用 Runtime 布局的临时目录。单次返回数量受 `retrieval.output.max_results` 限制，列表同时受 `max_list_entries` 限制。续页继续使用同一会话游标。会话附加目录只改变发现视图，宿主全局构建使用稳定目录。
+| 操作 | 接口与返回值 |
+|---|---|
+| 构建分类树 | `await runtime.retrieval.build()` 返回包含 `success`、`version` 和 `diagnostics` 的字典。设置 `retrieval.use_existing_index=True` 后，会话可使用已发布的树。 |
+| 查找多种能力 | `await runtime.retrieval.search(query="invoice", type=["skill", "expert"])` 返回 `matches` 和 `next_cursor`。用 `(type, id)` 区分同名的 Skill 和专家。 |
+| 只查 Skill | `await runtime.retrieval.search(query="invoice", type=["skill"])` 返回文本结果。用 `result.detailed_output["observed_skill_ids"]` 读取本页 Skill ID。 |
+| 只查专家 | `await runtime.retrieval.search(query="invoice", type=["expert"])` 从专家目录返回 `matches` 和 `next_cursor`。 |
+| 只查 MCP 服务 | `await runtime.retrieval.search(type=["mcp"], query=["代码仓库", "代码执行"])` 返回匹配的服务及当前会话可用的工具和 Skill。 |
+| 浏览分类和续页 | `operation="list"` 列出子分类和条目，`category` 可限定范围。混合页的分类带有 `capability_type`。传 `cursor` 即可续页，沿用原类型和操作。只查 Skill 时游标在 `detailed_output["next_cursor"]` 中。 |
+
+多个 Skill 或专家目录可以共用分类树。专家来源配置为 `type="expert"`，独立专家包的 `manifest.json` 需声明 `package_type="agent_template"`、`name` 和 `description`。`name` 用作专家 ID。
+
+宿主通过 `runtime.retrieval.bind_search(catalog_candidates=...)` 提供异步回调。每次搜索、列举或续页时，Core 按 `expert` 或 `mcp` 请求一份当前会话可见的 `CapabilityCandidate` 列表。配置了专家目录时按 manifest 路径取交集。MCP 服务和连接器统一用 `type="mcp"`，按候选声明的 `classification` 浏览，未分类服务直接列在根目录。分类树只扫描 Skill 和专家目录。
+
+三种类型的 `query` 均可传一个字符串或 1 至 8 条查询组成的列表。每类目录轮流取各条查询的命中并去重，混合页按所选类型的顺序轮流取结果。`top_k` 限制整页的总条数，搜索和列举都受 `retrieval.output.max_results` 限制，列举还受 `max_list_entries` 限制。同一 MCP 服务被多条查询命中时，结果会一起展示匹配的操作示例。
 
 ## 产物与版本
+
+单 Skill 目录继续使用以下布局。多目录及专家集合的分类树位于 `taxonomy_collections/<scope_id>/tree`，集合身份由排序去重的绝对来源路径和类型确定，来源重排复用同一棵树。添加专家来源可直接在原产物根下构建新树。
 
 ```text
 storage.artifact_root/

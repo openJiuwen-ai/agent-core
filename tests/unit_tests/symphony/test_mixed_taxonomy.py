@@ -1,0 +1,315 @@
+"""Exercise mixed collections through published artifacts and the model-facing tool."""
+
+import asyncio
+import json
+
+import pytest
+
+from openjiuwen.symphony import CapabilityDescriptor, SymphonyConfig, SymphonyRuntime
+from openjiuwen.symphony.discovery import CapabilityAction, CapabilityCandidate
+from openjiuwen.symphony.shared.fingerprint import FingerprintArtifactStore
+from tests.unit_tests.symphony.test_runtime_config_integration import GraphModel
+
+
+def _config(root, sources):
+    return SymphonyConfig(
+        capability={"sources": [{"type": kind, "root": str(path)} for kind, path in sources]},
+        storage={"artifact_root": str(root / "runtime")},
+        retrieval={"enabled": True, "use_existing_index": True, "index_build": {"output": {"show_tree": False}}},
+        orchestration={"enabled": True},
+    )
+
+
+def _skill(root, name, description="Reconcile invoices"):
+    package = root / name
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {description}\n---\nBody.\n")
+
+
+def _expert(root, name, description="Reconcile invoices", **fields):
+    root.mkdir(parents=True, exist_ok=True)
+    manifest = root / "manifest.json"
+    manifest.write_text(json.dumps({
+        "package_type": "agent_template", "name": name, "description": description, **fields,
+    }))
+    return manifest
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra_skill_source", [False, True])
+async def test_shared_tree_projects_typed_results_and_preserves_legacy_collection(tmp_path, extra_skill_source):
+    skills, experts, more_experts = (tmp_path / name for name in ("skills", "experts", "more-experts"))
+    _skill(skills, "ledger")
+    _expert(experts / "ledger", "ledger", persona={"file": "missing.md"})
+    _expert(experts / "ledger" / "subagents" / "hidden", "nested")
+    _expert(more_experts / "invoice", "invoice")
+    legacy = SymphonyRuntime(None, _config(tmp_path, [("skill", skills)]))
+    old_tree = await legacy.retrieval.build()
+    await legacy.aclose()
+    marker = tmp_path / "runtime" / "runtime.json"
+    old_marker = marker.read_bytes()
+    sources = [("skill", skills), ("expert", experts), ("expert", more_experts)]
+    expected_leaves = {("skill", "ledger"), ("expert", "ledger"), ("expert", "invoice")}
+    if extra_skill_source:
+        more_skills = tmp_path / "more-skills"
+        _skill(more_skills, "receipts")
+        sources.append(("skill", more_skills))
+        expected_leaves.add(("skill", "receipts"))
+    runtime = SymphonyRuntime(None, _config(tmp_path, sources))
+    try:
+        assert runtime.retrieval.artifact_root != tmp_path / "runtime" / "tree"
+        if extra_skill_source:
+            with pytest.raises(ValueError, match="exactly one skill"):
+                runtime.orchestration.status()
+        else:
+            assert not runtime.orchestration.status().exists
+        runtime.retrieval.bind_search(pin_index_revision=True)
+        flat, = runtime.retrieval.get_tools()
+        queries = ["ledger", "invoice", "invoices"]
+        flat_hits = await flat.invoke({"type": "expert", "query": queries})
+        assert [hit["id"] for hit in flat_hits["matches"]] == ["ledger", "invoice"]
+        assert {hit["category"] for hit in flat_hits["matches"]} == {"ROOT"}
+
+        built = await runtime.retrieval.build()
+        assert built["success"] and built["counts"]["capability_count"] == len(expected_leaves)
+        branch, = runtime.retrieval.read()["data"]["tree"]
+        assert {(leaf["capability_type"], leaf["capability_id"]) for leaf in branch["children"]} == expected_leaves
+        artifact = runtime.retrieval.artifact_root.parent
+        for kind, count in (("skill", len(expected_leaves) - 2), ("expert", 2)):
+            fingerprints = FingerprintArtifactStore(artifact / "cache" / "fingerprints" / kind).read()
+            assert len(fingerprints.fingerprints) == count
+            assert {item.capability_type for item in fingerprints.fingerprints} == {kind}
+
+        directory = runtime.retrieval.bind_search(pin_index_revision=True)
+        assert directory.pinned_index_snapshot.fingerprint == directory.pinned_expert_index_snapshot.fingerprint
+        search, = runtime.retrieval.get_tools()
+        skill = await search.invoke({"type": ["skill"], "query": "ledger"})
+        assert skill.detailed_output["observed_skill_ids"] == ["ledger"]
+        root = await search.invoke({"type": "expert", "operation": "list"})
+        category, = root["categories"]
+        assert category["count"] == 2
+        scoped = await search.invoke({"type": "expert", "category": category["category"], "query": "ledger"})
+        assert [hit["id"] for hit in scoped["matches"]] == ["ledger"]
+        batch = await search.invoke({
+            "type": "expert", "category": category["category"], "query": queries, "top_k": 1,
+        })
+        hit, = batch["matches"]
+        assert (hit["id"], hit["category"]) == ("ledger", category["category"])
+        with pytest.raises(ValueError, match="cursor query differs"):
+            await search.invoke({"type": "expert", "query": ["invoice"], "cursor": batch["next_cursor"]})
+        continued = await search.invoke({"type": "expert", "cursor": batch["next_cursor"]})
+        hit, = continued["matches"]
+        assert (hit["id"], hit["category"]) == ("invoice", category["category"])
+        assert continued["next_cursor"] is None
+        first = await search.invoke({"type": "expert", "operation": "list", "category": category["category"], "top_k": 1})
+        with pytest.raises(ValueError, match="belongs to type=expert"):
+            await search.invoke({"type": ["skill"], "operation": "list", "cursor": first["next_cursor"]})
+        second = await search.invoke({"cursor": first["next_cursor"]})
+        assert {hit["id"] for hit in first["matches"] + second["matches"]} == {"ledger", "invoice"}
+        assert second["next_cursor"] is None
+        assert marker.read_bytes() == old_marker
+    finally:
+        await runtime.aclose()
+
+    reordered = SymphonyRuntime(None, _config(tmp_path, list(reversed(sources))))
+    original = SymphonyRuntime(None, _config(tmp_path, [("skill", skills)]))
+    try:
+        assert reordered.retrieval.artifact_root == runtime.retrieval.artifact_root
+        assert reordered.retrieval.status()["fresh"]
+        assert original.retrieval.read()["version"] == old_tree["version"]
+    finally:
+        await reordered.aclose()
+        await original.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["skill", "expert", "mcp"])
+async def test_catalogs_share_order_page_limits_and_cursor_scope(tmp_path, kind):
+    names = ["orchid", "quartz", "cobalt"]
+    for name in names:
+        _skill(tmp_path / "skills", name, description=name)
+
+    async def catalog(requested_kind):
+        return [CapabilityCandidate(CapabilityDescriptor(capability_type=requested_kind, capability_id=n, name=n))
+                for n in names]
+
+    runtime = SymphonyRuntime(None, SymphonyConfig(
+        capability={"sources": [{"type": "skill", "root": tmp_path / "skills"}]},
+        storage={"artifact_root": tmp_path / "runtime"},
+        retrieval={"output": {"max_results": 2, "max_list_entries": 1}},
+    ))
+    runtime.retrieval.bind_search(catalog_candidates=catalog)
+    try:
+        tool, = runtime.retrieval.get_tools()
+        for operation in ("search", "list"):
+            args = {"type": kind, "operation": operation}
+            if operation == "search":
+                args["query"] = [*names, "orchid"]
+            pages = []
+            while True:
+                result = await tool.invoke(args)
+                if kind == "skill":
+                    rows = result.detailed_output["observed_skill_ids"]
+                    cursor = result.detailed_output["next_cursor"]
+                else:
+                    rows = [hit["id"] for hit in result["matches"]]
+                    cursor = result["next_cursor"]
+                pages.append(rows)
+                if not cursor:
+                    break
+                other = "expert" if kind == "skill" else "skill"
+                with pytest.raises(ValueError, match="belongs to type"):
+                    await runtime.retrieval.search(type=other, operation=operation, cursor=cursor)
+                args = {"type": kind, "operation": operation, "cursor": cursor}
+            expected = [names[:2], names[2:]] if operation == "search" else [[name] for name in sorted(names)]
+            assert pages == expected
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["search", "list"])
+async def test_multi_type_search_shares_page_boundaries_and_resumes_selected_catalogs(tmp_path, operation):
+    skills = tmp_path / "skills"
+    _skill(skills, "ledger")
+    visible = {kind: [CapabilityCandidate(CapabilityDescriptor(
+        capability_type=kind, capability_id="ledger", name="Ledger",
+    ))] for kind in ("expert", "mcp")}
+    calls = []
+
+    async def catalog(kind):
+        calls.append(kind)
+        return visible[kind]
+
+    runtime = SymphonyRuntime(None, _config(tmp_path, [("skill", skills)]))
+    try:
+        runtime.retrieval.bind_search(catalog_candidates=catalog)
+        tool, = runtime.retrieval.get_tools()
+        args = {"operation": operation, "top_k": 2}
+        if operation == "search":
+            args["query"] = ["ledger", "ledger"]
+        first = await tool.invoke(args)
+        assert [(row["type"], row["id"]) for row in first["matches"]] == [("skill", "ledger"), ("expert", "ledger")]
+        assert calls == ["expert", "mcp"]
+        cursor = first["next_cursor"]
+        with pytest.raises(ValueError, match="belongs to type"):
+            await tool.invoke({"type": ["skill"], "cursor": cursor})
+        last = await runtime.retrieval.search(cursor=cursor)
+        assert [(row["type"], row["id"]) for row in last["matches"]] == [("mcp", "ledger")]
+        assert last["next_cursor"] is None
+        with pytest.raises(ValueError, match="expired"):
+            await tool.invoke({"cursor": cursor})
+
+        calls.clear()
+        subset = await runtime.retrieval.search(args.get("query"), operation=operation, type=("mcp", "skill"), top_k=1)
+        assert [row["type"] for row in subset["matches"]] == ["mcp"] and calls == ["mcp"]
+        with pytest.raises(ValueError, match="belongs to type"):
+            await tool.invoke({"type": ["skill", "mcp"], "cursor": subset["next_cursor"]})
+        visible["mcp"].clear()
+        with pytest.raises(ValueError, match="MCP catalog changed"):
+            await tool.invoke({"cursor": subset["next_cursor"]})
+        assert [row["type"] for row in (await tool.invoke({**args, "type": ["mcp", "skill"]}))["matches"]] == ["skill"]
+        calls.clear()
+        for selector in ([], ["connector"], ["mcp", "mcp"], ["expert", 2]):
+            with pytest.raises(ValueError, match="type"):
+                await tool.invoke({**args, "type": selector})
+        assert calls == []
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["mcp", "expert"])
+async def test_host_catalog_batches_queries_and_pages_over_distinct_matches(tmp_path, kind):
+    skills = tmp_path / "skills"
+    _skill(skills, "ledger")
+    calls = []
+    office = CapabilityCandidate(
+        CapabilityDescriptor(capability_type=kind, capability_id="office", name="Office"),
+        actions=(CapabilityAction("tool", "orchid"), CapabilityAction("skill", "quartz")),
+    )
+    wiki = CapabilityCandidate(CapabilityDescriptor(capability_type=kind, capability_id="wiki", name="Cobalt"))
+    visible = [office, wiki]
+
+    async def catalog(requested_kind):
+        calls.append(requested_kind)
+        return tuple(visible)
+
+    runtime = SymphonyRuntime(None, _config(tmp_path, [("skill", skills)]))
+    try:
+        runtime.retrieval.bind_search(catalog_candidates=catalog)
+        tool, = runtime.retrieval.get_tools()
+        terms = ["orchid", "cobalt", "quartz", "orchid"]
+        result = await tool.invoke({"type": kind, "query": terms, "top_k": 1})
+        assert calls == [kind]
+        first, = result["matches"]
+        assert first["id"] == "office"
+        assert [(a["type"], a["id"]) for a in first["actions"]] == [("tool", "orchid"), ("skill", "quartz")]
+        second = await runtime.retrieval.search(type=kind, cursor=result["next_cursor"])
+        assert [item["id"] for item in second["matches"]] == ["wiki"] and second["next_cursor"] is None
+        assert calls == [kind, kind]
+
+        listed = await tool.invoke({"type": kind, "operation": "list", "top_k": 1})
+        assert listed["next_cursor"] and listed["categories"] == []
+        visible.remove(wiki)
+        with pytest.raises(ValueError, match="catalog changed"):
+            await tool.invoke({"type": kind, "operation": "list", "cursor": listed["next_cursor"]})
+        visible.clear()
+        assert (await tool.invoke({"type": kind, "operation": "list"}))["matches"] == []
+        with pytest.raises(ValueError, match="1-8"):
+            await runtime.retrieval.search([str(i) for i in range(9)], type=kind)
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_expert_only_collection_keeps_published_tree_on_invalid_inventory_change_and_cancel(tmp_path):
+    experts, other = tmp_path / "experts", tmp_path / "other"
+    entry = _expert(experts / "first", "first")
+    _expert(other / "second", "second")
+    runtime = SymphonyRuntime(GraphModel(), _config(tmp_path, [("expert", experts), ("expert", other)]))
+    try:
+        with pytest.raises(ValueError, match="exactly one skill"):
+            runtime.orchestration.status()
+        built = await runtime.retrieval.build()
+        assert built["success"]
+        published = runtime.retrieval.artifact_root / "index" / "commit.json"
+        original = published.read_bytes()
+        bad = experts / "bad" / "manifest.json"
+        bad.parent.mkdir()
+        bad.write_text("not JSON")
+        duplicate = _expert(experts / "duplicate", "second")
+        hits = await runtime.retrieval.search(type="expert", query="invoices")
+        assert [hit["id"] for hit in hits["matches"]] == ["first"]
+        status = runtime.retrieval.status()
+        assert not status["fresh"]
+        assert {item["code"] for item in status["diagnostics"]} == {
+            "invalid_expert_manifest", "duplicate_capability_id",
+        }
+        with pytest.raises(ValueError, match="Capability inventory is incomplete"):
+            await runtime.retrieval.build(force=True)
+        assert published.read_bytes() == original
+        bad.unlink()
+        duplicate.unlink()
+
+        def change(_candidate):
+            _expert(entry.parent, "first", "Prepare payroll")
+
+        changed = await runtime.retrieval.build(force=True, prepare_artifact=change)
+        assert not changed["success"] and "inventory changed" in changed["result"]
+        assert published.read_bytes() == original
+
+        entered = asyncio.Event()
+
+        async def prepare(_candidate):
+            entered.set()
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(runtime.retrieval.build(force=True, prepare_artifact=prepare))
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=10)
+        assert published.read_bytes() == original
+    finally:
+        await runtime.aclose()
