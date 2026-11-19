@@ -33,7 +33,7 @@ from openjiuwen.core.sys_operation.shell_process_registry import (
     terminate_shell_process,
     unregister_shell_process,
 )
-from openjiuwen.core.sys_operation._process_owner import create_process_owner
+from openjiuwen.core.sys_operation._process_owner import create_process_owner, wrap_posix_command
 
 
 _POWERSHELL_TOKENS = (
@@ -407,9 +407,15 @@ class ShellOperation(BaseShellOperation):
             owner = create_process_owner()
             subprocess_kw = owner.spawn_options() if owner is not None else {}
             if use_shell:
-                cmd = self._wrap_command_with_buffering(args) if (stream and not background) else args
+                args = self._wrap_command_with_buffering(args) if (stream and not background) else args
+            if owner is not None and os.name != "nt":
+                # Joining a guardian in another session would fail with EPERM.
+                # Detach only the command's tty, then exec in the anchored group.
+                args = wrap_posix_command(["/bin/sh", "-c", args] if use_shell else args)
+                use_shell = False
+            if use_shell:
                 creation = asyncio.create_task(asyncio.create_subprocess_shell(
-                    cmd, cwd=str(cwd), env=env, stdin=stdin, stdout=stdout, stderr=stderr, **subprocess_kw,
+                    args, cwd=str(cwd), env=env, stdin=stdin, stdout=stdout, stderr=stderr, **subprocess_kw,
                 ))
             else:
                 creation = asyncio.create_task(asyncio.create_subprocess_exec(

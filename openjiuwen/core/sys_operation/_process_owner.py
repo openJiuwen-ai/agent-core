@@ -18,15 +18,20 @@ from typing import Any, Protocol
 class ProcessOwner(Protocol):
     """Own processes until explicitly stopped or the execution group is empty."""
 
-    def spawn_options(self) -> dict[str, Any]: ...
+    def spawn_options(self) -> dict[str, Any]:
+        ...
 
-    def attach(self, pid: int) -> None: ...
+    def attach(self, pid: int) -> None:
+        ...
 
-    def start(self) -> None: ...
+    def start(self) -> None:
+        ...
 
-    def is_empty(self) -> bool: ...
+    def is_empty(self) -> bool:
+        ...
 
-    def close(self) -> None: ...
+    def close(self) -> None:
+        ...
 
 
 def _posix_members(group: int) -> set[int]:
@@ -38,20 +43,44 @@ def _posix_members(group: int) -> set[int]:
                 if not entry.name.isdigit():
                     continue
                 try:
-                    fields = (Path(entry.path) / "stat").read_text().rpartition(")")[2].split()
+                    # comm may contain non-UTF-8 bytes and embedded parentheses.
+                    fields = (Path(entry.path) / "stat").read_bytes().rpartition(b")")[2].split()
+                    if len(fields) < 3:
+                        raise ValueError("missing process state or group")
+                    pid, pgid = int(entry.name), int(fields[2])
                 except (FileNotFoundError, ProcessLookupError):
                     continue  # A process exited between listing and reading its status.
-                if len(fields) >= 3 and int(fields[2]) == group and fields[0] not in {"Z", "X"}:
-                    members.add(int(entry.name))
+                except ValueError as exc:
+                    # Unknown membership must not turn a partial scan into "empty".
+                    raise OSError(f"Cannot inspect process {entry.name}: invalid procfs stat") from exc
+                if pgid == group and fields[0] not in {b"Z", b"X"}:
+                    members.add(pid)
         return members
 
     # macOS has no procfs. Request only fixed, numeric columns, never command text.
-    output = subprocess.check_output(["ps", "-axo", "pid=,pgid=,stat="], text=True, timeout=2)
-    for line in output.splitlines():
-        pid, pgid, status = line.split()
-        if int(pgid) == group and not status.startswith("Z"):
-            members.add(int(pid))
+    try:
+        output = subprocess.check_output(
+            ["/bin/ps", "-axo", "pid=,pgid=,stat="], text=True, encoding="ascii", timeout=2,
+        )
+        if not output.strip():
+            raise ValueError("ps returned no process rows")
+        for line in output.splitlines():
+            if not line.strip():
+                continue
+            pid, pgid, status = line.split()
+            pid, pgid = int(pid), int(pgid)
+            if pgid == group and not status.startswith(("Z", "X")):
+                members.add(pid)
+    except ValueError as exc:
+        raise OSError("Cannot inspect process groups: invalid ps output") from exc
     return members
+
+
+def wrap_posix_command(arguments: list[str]) -> list[str]:
+    """Detach the command's controlling terminal without leaving its owned group."""
+    # A fresh interpreter avoids running Python preexec_fn in a threaded host.
+    launcher = str(Path(__file__).with_name("_posix_command.py").resolve())
+    return [sys.executable, "-I", "-S", launcher, *arguments]
 
 
 class PosixProcessOwner:
@@ -76,24 +105,32 @@ class PosixProcessOwner:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             close_fds=True,
+            # Commands spawned by the SDK can only join a group in its session.
             process_group=0,
         )
 
     def spawn_options(self) -> dict[str, Any]:
         return {"process_group": self._guardian.pid}
 
-    def attach(self, pid: int) -> None:
+    @staticmethod
+    def attach(pid: int) -> None:
         # Membership was set atomically by Popen before exec, even for fast commands.
         return None
 
-    def start(self) -> None:
+    @staticmethod
+    def start() -> None:
         return None
 
     def is_empty(self) -> bool:
         with self._lock:
             if self._closed:
                 return True
-            if _posix_members(self._guardian.pid) - {self._guardian.pid}:
+            try:
+                members = _posix_members(self._guardian.pid)
+            except (OSError, subprocess.SubprocessError, ValueError):
+                self._empty_since = None
+                raise
+            if members - {self._guardian.pid}:
                 self._empty_since = None
                 return False
             # procfs/ps enumeration is not an atomic snapshot. Require a quiet

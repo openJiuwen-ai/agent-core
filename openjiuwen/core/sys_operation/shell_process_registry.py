@@ -118,7 +118,7 @@ class ShellProcessRegistry:
                 if not owner.is_empty():
                     continue
                 owner.close()
-            except (OSError, subprocess.SubprocessError) as exc:
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
                 sys_operation_logger.warning("Could not inspect shell execution %s: %s", proc.pid, exc)
                 continue
             with self._lock:
@@ -142,7 +142,7 @@ class ShellProcessRegistry:
         else:
             try:
                 killed = not owner.is_empty()
-            except (OSError, subprocess.SubprocessError) as exc:
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
                 # Inspection is advisory. An explicit stop must still release
                 # the OS ownership handle even if process enumeration failed.
                 sys_operation_logger.warning("Could not inspect shell execution %s before stop: %s", proc.pid, exc)

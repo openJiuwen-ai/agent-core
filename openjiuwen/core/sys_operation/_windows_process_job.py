@@ -27,10 +27,14 @@ class _BasicLimits(ctypes.Structure):
 
 
 class _IoCounters(ctypes.Structure):
-    _fields_ = [(name, ctypes.c_uint64) for name in (
-        "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
-        "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
-    )]
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_uint64),
+        ("WriteOperationCount", ctypes.c_uint64),
+        ("OtherOperationCount", ctypes.c_uint64),
+        ("ReadTransferCount", ctypes.c_uint64),
+        ("WriteTransferCount", ctypes.c_uint64),
+        ("OtherTransferCount", ctypes.c_uint64),
+    ]
 
 
 class _ExtendedLimits(ctypes.Structure):
@@ -58,14 +62,15 @@ class _Accounting(ctypes.Structure):
 
 
 class _ThreadEntry(ctypes.Structure):
+    # THREADENTRY32 layout; Python field names do not affect its Win32 ABI.
     _fields_ = [
-        ("dwSize", wintypes.DWORD),
-        ("cntUsage", wintypes.DWORD),
-        ("th32ThreadID", wintypes.DWORD),
-        ("th32OwnerProcessID", wintypes.DWORD),
-        ("tpBasePri", wintypes.LONG),
-        ("tpDeltaPri", wintypes.LONG),
-        ("dwFlags", wintypes.DWORD),
+        ("size", wintypes.DWORD),
+        ("usage", wintypes.DWORD),
+        ("thread_id", wintypes.DWORD),
+        ("owner_process_id", wintypes.DWORD),
+        ("base_priority", wintypes.LONG),
+        ("delta_priority", wintypes.LONG),
+        ("flags", wintypes.DWORD),
     ]
 
 
@@ -113,7 +118,8 @@ class WindowsProcessJob:
             self.close()
             raise error
 
-    def spawn_options(self) -> dict[str, Any]:
+    @staticmethod
+    def spawn_options() -> dict[str, Any]:
         return {"creationflags": subprocess.CREATE_NO_WINDOW | 0x4}  # CREATE_SUSPENDED
 
     def attach(self, pid: int) -> None:
@@ -139,11 +145,11 @@ class WindowsProcessJob:
                 raise ctypes.WinError(ctypes.get_last_error())
             try:
                 entry = _ThreadEntry()
-                entry.dwSize = ctypes.sizeof(entry)
+                entry.size = ctypes.sizeof(entry)
                 more = self._kernel.Thread32First(snapshot, ctypes.byref(entry))
                 while more:
-                    if entry.th32OwnerProcessID == self._pid:
-                        self._resume(entry.th32ThreadID)
+                    if entry.owner_process_id == self._pid:
+                        self._resume(entry.thread_id)
                         return
                     more = self._kernel.Thread32Next(snapshot, ctypes.byref(entry))
                 raise OSError("Suspended shell command has no primary thread")
