@@ -23,6 +23,7 @@ generated: true
 | [core/session](#module-core-session) |
 | [core/session/tracer](#module-core-session-tracer) |
 | [core/sys_operation](#module-core-sys_operation) |
+| [core/workflow](#module-core-workflow) |
 | [extensions/a2a](#module-extensions-a2a) |
 | [extensions/observability](#module-extensions-observability) |
 | [extensions/tracer_otel](#module-extensions-tracer_otel) |
@@ -120,6 +121,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261104_2054_recovered-context-seed-and-execution-environment](agent_teams/B_20261104_2054_recovered-context-seed-and-execution-environment.md) | B | 冷恢复后成员策略 seed 与执行环境传递修复 | alan_cheng | 无独立 D：无独立 D；修复 F_20261104_1720_tool-execution-environment / F_20261104_1721_session-execution-settings 在冷恢复与远程调用路径上的遗漏。 |
+
+<a id="module-core-workflow"></a>
+
+## core/workflow
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261116_2246_subworkflow-stream-batch-mode](core_runtime/B_20261116_2246_subworkflow-stream-batch-mode.md) | B | 子工作流默认批式配置被流式边调用时 _sub_stream 必崩的缩进缺陷 | CharlesWang2030 | 无独立 D：常规缺陷修复，未归档独立设计；修复方案在 CORE-02 问题分析归档中确认（缩进修正 + 批式回退），沿用 _sub_invoke 既有批式返回契约，无新增公开 API。 |
 
 <a id="module-extensions-a2a"></a>
 
