@@ -118,7 +118,7 @@ class TreeEngine:
         committed = toolkit.read_committed_index_state()
         if self._storage.scoped:
             status["indexed_skill_count"] = sum(
-                identifier.startswith("skill:") for identifier in committed.get("record_hashes", {})
+                identifier.startswith("skill:") for identifier in (committed.get("record_hashes") or {})
             )
         return {
             **status, "enabled": True, "version": str(committed.get("build_id") or ""),

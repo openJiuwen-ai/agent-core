@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Sequence, get_args
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard, ToolExposure
 from openjiuwen.symphony.config import CapabilityType
 from openjiuwen.symphony.retrieval.search.runtime.lexical import LexicalDocument, LexicalIndex
+from openjiuwen.symphony.shared.storage import run_artifact_io
 
 from .capability_search import (
     CapabilityCandidate, capability_row, fingerprint_text, interleave_rankings, rank_capabilities, rank_queries,
@@ -54,6 +55,7 @@ class _PageRequest:
     page_size: int
     offset: int = 0
     fingerprints: tuple[str, ...] = ()
+    cursor: str = ""
 
 
 def _tool_card(tool_id: str) -> ToolCard:
@@ -235,9 +237,13 @@ class _CapabilityDirectory:
                 for kind in page.kinds:
                     if kind != "skill":
                         catalogs[kind] = await self._catalog_candidates(kind)
-            if cursor is not None:
-                self._cursors.pop(cursor.strip())
-            return await asyncio.to_thread(self._read_page, page, catalogs)
+            result, continuation = await run_artifact_io(self._read_page, page, catalogs)
+            self._cursors.pop(page.cursor, None)
+            if continuation is not None:
+                self._cursors[continuation.cursor] = continuation
+                if len(self._cursors) > _MAX_CURSORS:
+                    self._cursors.pop(next(iter(self._cursors)))
+            return result
 
     def get_tools(self) -> list[Tool]:
         if self._closed:
@@ -292,7 +298,7 @@ class _CapabilityDirectory:
 
     def _read_page(
         self, page: _PageRequest, catalogs: dict[str, Sequence[CapabilityCandidate]],
-    ) -> SkillDCICommandResult | dict[str, Any]:
+    ) -> tuple[SkillDCICommandResult | dict[str, Any], _PageRequest | None]:
         groups = []
         fingerprints = []
         total = 0
@@ -304,6 +310,7 @@ class _CapabilityDirectory:
                 snapshot = self._expert_snapshot() if kind == "expert" and self._expert_snapshot is not None else None
                 view, by_id, fingerprint = _catalog_view(kind, catalogs.get(kind, ()), snapshot)
             if page.fingerprints and fingerprint != page.fingerprints[index]:
+                self._cursors.pop(page.cursor, None)
                 label = {"skill": "Skill index", "expert": "Expert catalog", "mcp": "MCP catalog"}[kind]
                 raise ValueError(f"{label} changed; start a new list or search request")
             fingerprints.append(fingerprint)
@@ -336,27 +343,29 @@ class _CapabilityDirectory:
             rows = _catalog_search_rows(view, records, by_id, page.queries)
         return rows, len(rows)
 
-    def _render_catalog(self, page: _PageRequest, rows: list[dict[str, Any]], total: int) -> dict[str, Any]:
-        if len(page.kinds) > 1:
-            rows = _fit_catalog_rows(rows, self._default_max_output_chars)
+    def _render_catalog(
+        self, page: _PageRequest, rows: list[dict[str, Any]], total: int,
+    ) -> tuple[dict[str, Any], _PageRequest | None]:
+        rows = _fit_catalog_rows(rows, self._default_max_output_chars)
+        continuation = self._next_page(page, len(rows), total)
         categories = [row for row in rows if row["type"] == "category"]
         result: dict[str, Any] = {
             "matches": [row for row in rows if row["type"] != "category"],
-            "next_cursor": self._next_cursor(page, len(rows), total),
+            "next_cursor": continuation.cursor if continuation is not None else None,
         }
         if page.operation == "list" or categories:
             result["categories"] = categories
         if "skill" in page.kinds:
-            self._observed_skill_ids.update(row["id"] for row in result["matches"] if row["type"] == "skill")
-            remaining = self._default_max_output_chars - len(json.dumps(result, ensure_ascii=False)) - 20
+            remaining = max(0, self._default_max_output_chars - len(json.dumps(result, ensure_ascii=False)) - 20)
             notice = self._notice.append("", self._environment.selection_cards(refresh=False), output_budget=remaining)
             if notice:
                 result["skill_notice"] = notice
-        return result
+            self._observed_skill_ids.update(row["id"] for row in result["matches"] if row["type"] == "skill")
+        return result, continuation
 
     def _render_skills(
         self, page: _PageRequest, rows: Sequence[_Row], total: int, artifact: SkillFSArtifact,
-    ) -> SkillDCICommandResult:
+    ) -> tuple[SkillDCICommandResult, _PageRequest | None]:
         previously_shown = page.operation == "search" and all(
             not row.worker_id or row.worker_id in self._observed_skill_ids for row in rows
         )
@@ -367,7 +376,8 @@ class _CapabilityDirectory:
         )
         if not rows:
             content = _append_note(content, _empty_message(page.operation, page.category), budget)
-        next_cursor = self._next_cursor(page, shown_count, total)
+        continuation = self._next_page(page, shown_count, total)
+        next_cursor = continuation.cursor if continuation is not None else None
         if next_cursor is not None:
             args = {"type": ["skill"], "operation": page.operation, "cursor": next_cursor}
             footer = "[next] " + json.dumps(args, separators=(",", ":"))
@@ -396,19 +406,16 @@ class _CapabilityDirectory:
             "index_state": artifact.index_state,
             "runtime": "Symphony.CapabilitySearch",
         }
-        return SkillDCICommandResult(content, detailed_output=diagnostics, model_content=content)
+        return SkillDCICommandResult(content, detailed_output=diagnostics, model_content=content), continuation
 
-    def _next_cursor(self, page: _PageRequest, shown: int, total: int) -> str | None:
+    def _next_page(self, page: _PageRequest, shown: int, total: int) -> _PageRequest | None:
         next_offset = page.offset + shown
         if next_offset >= total:
             return None
         token = secrets.token_urlsafe(12)
         while token in self._cursors:
             token = secrets.token_urlsafe(12)
-        self._cursors[token] = replace(page, offset=next_offset)
-        while len(self._cursors) > _MAX_CURSORS:
-            self._cursors.pop(next(iter(self._cursors)))
-        return token
+        return replace(page, offset=next_offset, cursor=token)
 
     def _search_skills(
         self, view: SkillDirectoryView, path: str, records: Sequence[SkillRecord], queries: tuple[str, ...],
@@ -545,7 +552,7 @@ def _skill_display(row: dict[str, Any], operation: str) -> _Row:
 
 
 def _fit_catalog_rows(rows: list[dict[str, Any]], budget: int) -> list[dict[str, Any]]:
-    """Fit a mixed page to the output budget, preserving at least the first row's identity."""
+    """Fit catalog entries to the output budget, preserving at least the first row's identity."""
     used = _CURSOR_FOOTER_CHARS
     for index, row in enumerate(rows):
         used += len(json.dumps(row, ensure_ascii=False)) + 2

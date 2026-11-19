@@ -6,7 +6,7 @@ import json
 import pytest
 
 from openjiuwen.symphony import CapabilityDescriptor, SymphonyConfig, SymphonyRuntime
-from openjiuwen.symphony.discovery import CapabilityAction, CapabilityCandidate
+from openjiuwen.symphony.discovery import CapabilityAction, CapabilityCandidate, SkillIndexSnapshot
 from openjiuwen.symphony.shared.fingerprint import FingerprintArtifactStore
 from tests.unit_tests.symphony.test_runtime_config_integration import GraphModel
 
@@ -168,8 +168,103 @@ async def test_catalogs_share_order_page_limits_and_cursor_scope(tmp_path, kind)
 
 
 @pytest.mark.asyncio
+async def test_scoped_status_reads_a_commit_with_null_record_hashes(tmp_path):
+    skills, experts = tmp_path / "skills", tmp_path / "experts"
+    _skill(skills, "ledger")
+    _expert(experts / "reviewer", "reviewer")
+    runtime = SymphonyRuntime(None, _config(tmp_path, [("skill", skills), ("expert", experts)]))
+    try:
+        assert (await runtime.retrieval.build())["success"]
+        commit_path = runtime.retrieval.artifact_root / "index" / "commit.json"
+        commit = json.loads(commit_path.read_text(encoding="utf-8"))
+        commit["record_hashes"] = None
+        commit_path.write_text(json.dumps(commit), encoding="utf-8")
+
+        status = runtime.retrieval.status()
+        assert status["index_exists"]
+        assert status["indexed_skill_count"] == 0
+        assert status["counts"]["added_count"] == 2
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_branch_guidance_survives_only_for_fully_visible_subtrees(tmp_path, monkeypatch):
+    skills, experts = tmp_path / "skills", tmp_path / "experts"
+    for name in ("ledger", "payroll"):
+        _skill(skills, name)
+    _expert(experts / "reviewer", "reviewer")
+    shared_guidance = {"description": "All reports", "select_when": "reviewer", "dont_select_when": "other"}
+    skill_guidance = {"description": "Accounting reports", "select_when": "quarterly", "dont_select_when": "daily"}
+    snapshot = SkillIndexSnapshot.from_dict({
+        "nodes": [
+            {"type": "branch", "cid": "Reports", **shared_guidance},
+            {"type": "branch", "cid": "Reports.Accounting", **skill_guidance},
+            {"type": "leaf", "cid": "Reports.Accounting.Ledger", "worker_id": "skill:ledger"},
+            {"type": "leaf", "cid": "Reports.Accounting.Payroll", "worker_id": "skill:payroll"},
+            {"type": "leaf", "cid": "Reports.Reviewer", "worker_id": "expert:reviewer"},
+        ],
+        "record_hashes": {"skill:ledger": "1", "skill:payroll": "2", "expert:reviewer": "3"},
+        "fingerprint": "generation",
+    })
+    monkeypatch.setattr("openjiuwen.symphony.tree_engine.capture_index_snapshot", lambda root: snapshot)
+    runtime = SymphonyRuntime(None, _config(tmp_path, [("skill", skills), ("expert", experts)]))
+    visible = {"ledger", "payroll"}
+    try:
+        env = runtime.retrieval.bind_search(pin_index_revision=True, visible_capability_ids=lambda: visible)
+        branches = {node["cid"]: node for node in env.pinned_index_snapshot.nodes if node["type"] == "branch"}
+        assert all(not branches["Reports"][key] for key in shared_guidance)
+        assert all(branches["Reports.Accounting"][key] == value for key, value in skill_guidance.items())
+        branch = "/Reports/Accounting"
+        assert "quarterly" in env.directory.node_by_path[branch].description
+        visible.remove("payroll")
+        assert env.directory.node_by_path[branch].description == ""
+        assert "reviewer" not in (await runtime.retrieval.search(type="skill", operation="list"))
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["expert", "mcp"])
 @pytest.mark.parametrize("operation", ["search", "list"])
-async def test_multi_type_search_shares_page_boundaries_and_resumes_selected_catalogs(tmp_path, operation):
+async def test_single_catalog_pages_obey_the_character_budget(tmp_path, kind, operation):
+    skills = tmp_path / "skills"
+    _skill(skills, "ledger")
+    names = ("alpha", "bravo", "charlie")
+    candidates = [CapabilityCandidate(CapabilityDescriptor(
+        capability_type=kind, capability_id=name, name=name, description="accounting " * 60,
+    )) for name in names]
+
+    async def catalog(_kind):
+        return candidates
+
+    runtime = SymphonyRuntime(None, SymphonyConfig(
+        capability={"sources": [{"type": "skill", "root": skills}]},
+        storage={"artifact_root": tmp_path / "runtime"}, retrieval={"output": {"max_chars": 512}},
+    ))
+    try:
+        runtime.retrieval.bind_search(catalog_candidates=catalog)
+        args = {"type": kind, "operation": operation, "top_k": 3}
+        if operation == "search":
+            args["query"] = ["accounting"]
+        page = await runtime.retrieval.search(**args)
+        seen = []
+        for index in range(len(names)):
+            assert len(json.dumps(page, ensure_ascii=False)) <= 512
+            row, = page["matches"]
+            assert row["details_truncated"]
+            seen.append(row["id"])
+            if index + 1 < len(names):
+                assert page["next_cursor"]
+                page = await runtime.retrieval.search(cursor=page["next_cursor"])
+        assert page["next_cursor"] is None and sorted(seen) == list(names)
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["search", "list"])
+async def test_multi_type_search_shares_page_boundaries_and_resumes_selected_catalogs(tmp_path, operation, monkeypatch):
     skills = tmp_path / "skills"
     _skill(skills, "ledger")
     visible = {kind: [CapabilityCandidate(CapabilityDescriptor(
@@ -183,7 +278,7 @@ async def test_multi_type_search_shares_page_boundaries_and_resumes_selected_cat
 
     runtime = SymphonyRuntime(None, _config(tmp_path, [("skill", skills)]))
     try:
-        runtime.retrieval.bind_search(catalog_candidates=catalog)
+        env = runtime.retrieval.bind_search(catalog_candidates=catalog)
         tool, = runtime.retrieval.get_tools()
         args = {"operation": operation, "top_k": 2}
         if operation == "search":
@@ -194,6 +289,14 @@ async def test_multi_type_search_shares_page_boundaries_and_resumes_selected_cat
         cursor = first["next_cursor"]
         with pytest.raises(ValueError, match="belongs to type"):
             await tool.invoke({"type": ["skill"], "cursor": cursor})
+
+        def unavailable(*, refresh):
+            raise OSError("temporary directory read failure")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(env, "selection_cards", unavailable)
+            with pytest.raises(OSError, match="temporary directory read failure"):
+                await runtime.retrieval.search(cursor=cursor)
         last = await runtime.retrieval.search(cursor=cursor)
         assert [(row["type"], row["id"]) for row in last["matches"]] == [("mcp", "ledger")]
         assert last["next_cursor"] is None
@@ -205,9 +308,13 @@ async def test_multi_type_search_shares_page_boundaries_and_resumes_selected_cat
         assert [row["type"] for row in subset["matches"]] == ["mcp"] and calls == ["mcp"]
         with pytest.raises(ValueError, match="belongs to type"):
             await tool.invoke({"type": ["skill", "mcp"], "cursor": subset["next_cursor"]})
-        visible["mcp"].clear()
+        removed = visible["mcp"].pop()
         with pytest.raises(ValueError, match="MCP catalog changed"):
             await tool.invoke({"cursor": subset["next_cursor"]})
+        visible["mcp"].append(removed)
+        with pytest.raises(ValueError, match="expired"):
+            await tool.invoke({"cursor": subset["next_cursor"]})
+        visible["mcp"].clear()
         assert [row["type"] for row in (await tool.invoke({**args, "type": ["mcp", "skill"]}))["matches"]] == ["skill"]
         calls.clear()
         for selector in ([], ["connector"], ["mcp", "mcp"], ["expert", 2]):

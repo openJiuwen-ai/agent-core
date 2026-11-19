@@ -703,6 +703,32 @@ def capture_index_snapshot(root: Path | str) -> SkillIndexSnapshot | None:
         return _load_index_snapshot(index_dir) if recovered else None
 
 
+def _visible_taxonomy_nodes(
+    nodes: tuple[dict[str, Any], ...], visible_leaves: set[str],
+) -> list[dict[str, Any]]:
+    """Keep guidance only on branches whose entire indexed subtree is visible."""
+    visible_branches: set[str] = set()
+    hidden_branches: set[str] = set()
+    for node in nodes:
+        if str(node.get("type") or "").strip().lower() != "leaf":
+            continue
+        cid = str(node["cid"]).strip()
+        branches = visible_branches if cid in visible_leaves else hidden_branches
+        parent = cid.rpartition(".")[0]
+        while parent and parent not in branches:
+            branches.add(parent)
+            parent = parent.rpartition(".")[0]
+
+    projected = []
+    for node in nodes:
+        cid = str(node["cid"]).strip()
+        if cid in visible_leaves or cid in visible_branches:
+            if cid in hidden_branches:
+                node = {**node, "description": "", "select_when": "", "dont_select_when": ""}
+            projected.append(node)
+    return projected
+
+
 def project_index_snapshot(snapshot: SkillIndexSnapshot | None, kind: str) -> SkillIndexSnapshot | None:
     """Project one committed taxonomy to the bare IDs used by a typed session view."""
     if snapshot is None:
@@ -712,21 +738,12 @@ def project_index_snapshot(snapshot: SkillIndexSnapshot | None, kind: str) -> Sk
     if not hashes:
         return None
     leaves = {
-        node["cid"]: {**node, "worker_id": node["worker_id"].removeprefix(prefix)}
-        for node in snapshot.nodes
-        if node.get("type") == "leaf" and node.get("worker_id", "").startswith(prefix)
+        str(node["cid"]).strip() for node in snapshot.nodes
+        if str(node.get("type") or "").strip().lower() == "leaf" and str(node.get("worker_id") or "").startswith(prefix)
     }
-    parents = set()
-    for cid in leaves:
-        parent, _, _ = cid.rpartition(".")
-        while parent and parent not in parents:
-            parents.add(parent)
-            parent, _, _ = parent.rpartition(".")
     nodes = tuple(
-        leaves[node["cid"]] if node["cid"] in leaves else {
-            **node, "description": "", "select_when": "", "dont_select_when": "",
-        }
-        for node in snapshot.nodes if node["cid"] in leaves or node["cid"] in parents
+        {**node, "worker_id": node["worker_id"].removeprefix(prefix)} if str(node["cid"]).strip() in leaves else node
+        for node in _visible_taxonomy_nodes(snapshot.nodes, leaves)
     )
     return SkillIndexSnapshot(nodes, hashes, snapshot.fingerprint)
 
@@ -861,21 +878,7 @@ def _build_live_tree(
                 name=item.name,
                 description=item.description,
             )
-    visible_leaf_cids = {record.payload for record in indexed_records}
-    visible_branch_cids: set[str] = set()
-    for cid in visible_leaf_cids:
-        parent = cid.rsplit(".", 1)[0] if "." in cid else ""
-        while parent:
-            visible_branch_cids.add(parent)
-            parent = parent.rsplit(".", 1)[0] if "." in parent else ""
-    visible_nodes: list[Mapping[str, Any]] = []
-    for node in snapshot.nodes:
-        kind = str(node.get("type") or "").strip().lower()
-        cid = str(node.get("cid") or "").strip()
-        if kind == "leaf" and cid in visible_leaf_cids:
-            visible_nodes.append(node)
-        elif kind == "branch" and cid in visible_branch_cids:
-            visible_nodes.append(node)
+    visible_nodes = _visible_taxonomy_nodes(snapshot.nodes, {record.payload for record in indexed_records})
     safe_nodes = tuple(
         {
             **node,
