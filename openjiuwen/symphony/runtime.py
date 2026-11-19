@@ -180,7 +180,9 @@ class SymphonyRuntime:
         else:
             graph_storage = self._storage
             graph_inventory = inventory
-            graph_fingerprints = fingerprints["skill"]
+            graph_fingerprints = fingerprints.get("skill")
+            if graph_fingerprints is None:
+                raise RuntimeError("Skill fingerprint service was not initialized")
         policy_hash = hashlib.sha256(policy.model_dump_json().encode()).hexdigest()
         service = OrchestrationService(
             graph_artifact_root=artifact_root / "graph", capability_provider=graph_inventory or inventory,
