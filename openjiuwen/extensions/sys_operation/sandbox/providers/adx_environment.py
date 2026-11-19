@@ -6,6 +6,10 @@ are independent of that identity and may be shared by multiple Agents.
 Commands are submitted once with recoverable IDs; an unknown outcome is never
 handled by recreating an environment or replaying user work.
 
+Serializable ``rootfs={"type": "local", "path": "/node/rootfs"}`` settings use
+the public LocalRootfs SDK type. Image conversion and environment extraction
+are owned by the caller; the existing provider cache remains shared by operations.
+
 A launcher may configure ``endpoint_file`` as a read-only node context JSON
 with ``ingress_url`` and optional ``node_id``. It is read before every environment
 lookup; malformed or missing configured context is an error. Node changes select
@@ -35,7 +39,7 @@ from openjiuwen.extensions.sys_operation.sandbox.providers.adx_operations import
     NativeShellOperations,
 )
 
-ADX_ENVIRONMENT_CAPABILITIES = frozenset({"local-rootfs-templates"})
+ADX_ENVIRONMENT_CAPABILITIES = frozenset({"local-rootfs"})
 
 _PROCESS_IDENTITY = uuid.uuid4().hex
 _DEFAULT_RESTART_POLICY = {"maxAttempts": 3, "initialBackoffSeconds": 1, "maxBackoffSeconds": 30}
@@ -117,9 +121,19 @@ class _AdxEnvironmentBackend:
             identity = json.dumps([self._extra["user"], self._extra["group"]], separators=(",", ":"))
             self._scope_suffix = "|identity=" + hashlib.sha256(identity.encode()).hexdigest()
             self._scope += self._scope_suffix
-        if self._extra.get("rootfs_template"):
-            artifact = str(self._extra["rootfs_template"]).encode()
-            self._scope_suffix += "|rootfs=" + hashlib.sha256(artifact).hexdigest()
+        if "rootfs" in self._extra:
+            rootfs = self._extra["rootfs"]
+            if not isinstance(rootfs, dict) or rootfs.get("type") != "local":
+                raise ValueError("ADX tool rootfs requires type=local and a node path")
+            path = rootfs.get("path")
+            if not isinstance(path, str) or not path.startswith("/"):
+                raise ValueError("ADX tool rootfs requires an absolute node path")
+            if any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in path) or any(
+                part in (".", "..") for part in path.split("/")
+            ):
+                raise ValueError("ADX tool rootfs cannot contain traversal or control characters")
+            artifact = json.dumps({"type": "local", "path": path}, sort_keys=True)
+            self._scope_suffix += "|rootfs=" + hashlib.sha256(artifact.encode()).hexdigest()
             self._scope = build_adx_shared_scope_key(endpoint.base_url, endpoint.isolation_key) + self._scope_suffix
 
     def _resolve_endpoint(self) -> tuple[SplitResult, str]:
@@ -176,6 +190,9 @@ class _AdxEnvironmentBackend:
             Mount,
         )
 
+        if "rootfs" in self._extra and "local-rootfs" not in getattr(adx_environment, "SDK_CAPABILITIES", ()):
+            raise ValueError("Local rootfs requires adx-environment 0.1.0rc11 or newer")
+
         with self._lock:
             url, self._scope = self._resolve_endpoint()
             kwargs = {"restart_policy": _restart_policy(self._extra.get("restart_policy", _DEFAULT_RESTART_POLICY))}
@@ -191,9 +208,6 @@ class _AdxEnvironmentBackend:
                 cached[0].close()
                 del self._instances[self._scope]
                 self._incarnations[self._scope] = uuid.uuid4().hex
-            if self._extra.get("rootfs_template"):
-                if "local-rootfs-templates" not in getattr(adx_environment, "SDK_CAPABILITIES", ()):
-                    raise ValueError("Local rootfs templates require adx-environment 0.1.0rc5 or newer")
             connection_args = dict(self._extra.get("connection") or {})
             if self._extra.get("endpoint_file"):
                 for key in ("gateway_address", "gateway_use_tls"):
@@ -208,7 +222,7 @@ class _AdxEnvironmentBackend:
             connection = ConnectionConfig(**connection_args)
             for key in (
                 "image",
-                "rootfs_template",
+                "rootfs",
                 "runtime",
                 "user",
                 "group",
@@ -223,7 +237,8 @@ class _AdxEnvironmentBackend:
             ):
                 if key in self._extra:
                     kwargs[key] = self._extra[key]
-            if kwargs.get("rootfs_template"):
+            if kwargs.get("rootfs"):
+                kwargs["rootfs"] = adx_environment.LocalRootfs(path=self._extra["rootfs"]["path"])
                 kwargs.pop("image", None)
             if not kwargs.get("image"):
                 kwargs.pop("image", None)

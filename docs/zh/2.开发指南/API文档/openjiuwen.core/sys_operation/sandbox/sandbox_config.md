@@ -225,12 +225,13 @@ class LocalWorkConfig(BaseModel)
 * **dangerous_patterns**(List[str], 可选)：危险命令的正则模式列表。如果为 `None`，使用内置默认模式。默认值：`None`。
 
 
-### ADX 已登记的本地 rootfs
+### ADX 本地 rootfs
 
-`adx-environment` provider 支持在 launcher 的 `extra_params` 中设置 `rootfs_template`，
-需要 SDK 0.1.0rc5 或更新版本。该名称选择部署侧登记的 Local 制品；配置后，provider
-向 SDK 下发模板名称，省略 `image`。缓存作用域包含模板名称，因此切换制品不会复用
-旧 rootfs 的工具环境。镜像导入、镜像引用映射和跨节点分发由部署侧负责。
+`adx-environment` provider 支持在 launcher 的 `extra_params.rootfs` 中设置
+`{"type": "local", "path": "/var/lib/agentos/images/tools/rootfs"}`，需要 SDK 0.1.0rc11
+或更新版本。provider 将路径传给 SDK `LocalRootfs`，省略 `image`，并传递 `env`。
+ADX 强制以只读方式访问。缓存作用域包含 rootfs 类型和路径，切换路径会创建独立环境。
+镜像转换和跨节点分发由接入层负责；选定节点必须能访问该路径。
 
 ### ADX 工具沙箱重启策略
 

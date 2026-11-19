@@ -122,3 +122,22 @@ async def test_local_file_streams_preserve_bytes_and_report_size(monkeypatch, tm
     assert target.read_bytes() == payload
     assert len(downloads) == 1 and downloads[0].data.is_last_chunk
     assert downloads[0].data.chunk_size == len(payload)
+
+
+@pytest.mark.parametrize(
+    "rootfs",
+    [
+        {},
+        {"type": "local"},
+        {"type": "local", "path": 1},
+        {"type": "local", "path": "relative"},
+        {"type": "local", "path": "/node/../rootfs"},
+    ],
+)
+def test_local_rootfs_config_errors_are_reported_before_operations(rootfs):
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentFSProvider
+
+    config = provider_config()
+    config.launcher_config.extra_params["rootfs"] = rootfs
+    with pytest.raises(ValueError, match="rootfs"):
+        AdxEnvironmentFSProvider(SandboxEndpoint(base_url="http://localhost:18080"), config)
