@@ -211,6 +211,45 @@ class TestMessageOffloaderAddTrigger:
         )
 
         assert processor._rule_pipeline.compress.call_args.kwargs["max_chars"] == 30
+        assert processor._rule_pipeline.compress.call_args.kwargs["force"] is True
+
+    @pytest.mark.asyncio
+    async def test_cjk_over_abs_threshold_attempts_rule_compression(self):
+        """CJK ~1 char/token must not skip rule compression via the *3 char gate."""
+        counter = _metadata_token_counter()
+        context = await create_context(
+            MessageSummaryOffloaderConfig(
+                add_message_threshold_ratio=0.1,
+                add_message_abs_token_threshold=8_000,
+            ),
+            context_window_tokens=1_000_000,
+            token_counter=counter,
+        )
+        processor = context._processors[0]
+        # Repeated Chinese lines: under the old ASCII max_chars=24000, so a missing
+        # force=True would early-return even though the token gate (8001) fired.
+        line = "相同的中文检索结果行，用于验证规则压缩不会被字符门否决"
+        content = "\n".join([line] * 350)
+        assert 8_000 < len(content) <= 24_000
+        # Density ~1 char/token (not ASCII *3); must be far below the old 24_000 gate.
+        assert processor._add_message_max_chars(context, content) < 12_000
+
+        await context.add_messages(
+            ToolMessage(
+                content=content,
+                tool_call_id="tc-cjk-abs",
+                metadata={"test_token_count": 8_001},
+            )
+        )
+
+        message = context.get_messages()[0]
+        assert isinstance(message, OffloadMixin)
+        metadata = getattr(message, "metadata", None) or {}
+        preview_body = message.content.split("[[OFFLOAD:", 1)[0]
+        assert (
+            metadata.get("rule_compression_type") is not None
+            or len(preview_body) > 4_000
+        ), "CJK payload above the token gate should rule-compress or keep more than head/tail 2k+2k"
 
     @pytest.mark.asyncio
     async def test_does_not_trigger_below_default_token_capacity(self):
