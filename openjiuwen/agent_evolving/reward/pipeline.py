@@ -490,7 +490,15 @@ async def score_workspace(task, root, config, options=None):
     options = (options or RewardOptions()).for_run()
     models.set_language(task)
     root = Path(root)
-    deliverable, inputs = workspace_files(root)
+    deliverable, inputs = workspace_files(root, options.since_ns, options.until_ns)
+    if not deliverable and (options.since_ns is not None or options.until_ns is not None):
+        fallback, fallback_inputs = workspace_files(root)
+        if fallback:
+            warning = "交付物修改时间不在轨迹时间范围内，已回退为读取全部交付物并取消取证时间限制。"
+            options.warnings.append(warning)
+            options.log(WARNING + warning)
+            deliverable, inputs = fallback, fallback_inputs
+            options.since_ns = options.until_ns = None
     tools = checks.available_tools(root, config)
     has_pictures = "browser" in tools or any(p.suffix.lower() in checks.IMAGE_SUFFIXES for p in root.rglob("*")
                                            if checks.INPUTS_DIR not in p.parts)
@@ -536,6 +544,7 @@ async def score_with(task, root, config, options, *, deliverable, inputs, tools,
     # A stronger eye, if configured.
     art = models.Model(config["art_judge"]) if config.get("art_judge") else judge
     ctx = {"root": root, "tools": tools, "evidence": evidence, "art_judge": art, "config": config,
+           "since_ns": options.since_ns, "until_ns": options.until_ns,
            "plan_input": {"task": task, "available_tools": tools, "final_reply": response,
                           **({"domain_knowledge": knowledge} if knowledge else {}),
                           "workspace": {"files": {name: f"{text.count(chr(10)) + 1} lines"
@@ -572,7 +581,8 @@ async def score_with(task, root, config, options, *, deliverable, inputs, tools,
         log("evidence model gets no screenshots (text only); the judges get all of them")
     log(f"{len(criteria)} criteria: {', '.join(c['id'] for c in criteria)}; tools: {tools}")
     progress.current().stage("evidence", total=len(criteria))
-    limits = evidence_agent.Limits(rounds=int(config.get("evidence_rounds", evidence_agent.ROUNDS)))
+    rounds = config.get("evidence_rounds", evidence_agent.ROUNDS)
+    limits = evidence_agent.Limits(rounds=int(evidence_agent.ROUNDS if rounds is None else rounds))
     walked = await walk if walk is not None else None
     if walk is not None and walked is None:
         warn("默认浏览没能运行" + (f"（{walk_errors[0]}）" if walk_errors else "")
@@ -580,6 +590,15 @@ async def score_with(task, root, config, options, *, deliverable, inputs, tools,
     # one DeepAgent gathers evidence for every criterion, starting from the default walk
     gathered = await evidence_agent.gather(criteria, ctx, evidence_route, log, limits,
                                            prefetched=[walked] if walked else [])
+    if options.materials is not None:
+        shots = {label: data for _, images in gathered.values() for label, data in images}
+        receipts = []
+        for _, evidence in gathered.values():
+            for item in evidence:
+                if isinstance(item, dict):
+                    receipts.append(item)
+        options.materials.update(screenshots=list(shots.items()), deliverable=deliverable,
+                                 knowledge=knowledge, checks=receipts)
     browser_checks = {}   # a check serving several criteria counts once
     for evidence, _ in gathered.values():
         for f in evidence:
