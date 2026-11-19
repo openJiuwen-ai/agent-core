@@ -62,6 +62,13 @@ async def inprocess_spawn(
     teammate = _TeamAgent(card)
     teammate.configure(spec, ctx)
     kv_cache_hooks.share_registry_with_teammate(team_agent, teammate)
+    # Wire the round budget ledger: the teammate's rails
+    # resolve the leader's CURRENT ledger per tick through this getter —
+    # a new round swaps the ledger object on the leader kernel, so a
+    # captured reference would silently write into a discarded ledger.
+    teammate.set_budget_ledger_getter(lambda: team_agent.round_budget_ledger)
+    # 成员耗尽直报 leader kernel（摘牌名册 + 兜底计时）
+    teammate.set_exhaustion_notify(team_agent.notify_member_exhausted)
 
     # Empty query means "no first round": the teammate comes up, subscribes,
     # and idles until a real mailbox message arrives. Only a genuine
