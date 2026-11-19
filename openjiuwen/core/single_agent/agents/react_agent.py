@@ -235,7 +235,11 @@ SOFT_STOP_FALLBACK_STEERING = (
 )
 EMPTY_RESPONSE_MSG = "模型未返回有效内容（空响应），请重试或检查上下文。"
 # Ordinary reasoning-only / blank no-tool turns (not RAS soft-stop): bounded
-# same-round retry after injecting [EMPTY_RESPONSE], then hard error.
+# same-round retry after injecting [EMPTY_RESPONSE], then hard error. The
+# budget covers consecutive empty turns only: a productive tool-call turn
+# resets it, so an isolated empty turn later in a long task still gets its
+# own retry (2026-11-18 E-1118-0853-3c4f: the 3rd call's empty turn used the
+# budget and recovered, the 5th call's empty turn then hard-failed).
 EMPTY_RESPONSE_MAX_RETRIES = 1
 # Truncated streams (finish_reason == "length"): first a retry with a larger
 # budget, then persist-continuations across iterations. Real server-side
@@ -3375,6 +3379,10 @@ class ReActAgent(BaseAgent):
                                     }
                                 invoke_inputs.result = result
                                 break
+
+                            # A tool-call turn means the model recovered; a later
+                            # isolated empty turn gets a fresh retry budget.
+                            _empty_response_retry_count = 0
 
                             results = await self._execute_tool_call(ctx, ai_message.tool_calls, session, context)
 
