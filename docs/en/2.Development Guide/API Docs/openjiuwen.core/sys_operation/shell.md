@@ -72,6 +72,13 @@ Asynchronously execute Shell command in streaming mode.
 
 These rules apply to local `ShellOperation`, not to sandbox-provider lifecycle management.
 
+POSIX commands detach the inherited controlling terminal before execution without
+leaving the owned group. Commands cannot use the SDK host's `/dev/tty` for
+interactive prompts. This is not a new OS session; an explicit PTY wrapper can
+still create its own terminal. Process-enumeration errors retain ownership and
+restart the empty-group observation interval. They do not count as evidence that
+previews have exited, and do not prevent an explicit stop from attempting cleanup.
+
 - Successful command completion does not imply that its background services have exited. Preview services remain until an explicit session stop or SDK process exit. Another tool call or a completed conversation turn does not stop them. No automatic lifetime or memory limit is imposed.
 - Linux uses a dedicated process group with a guardian retaining its identity. Windows uses a Job Object assigned before the command starts executing. Timeout, cancellation, early closure of an active stream, and background startup failure clean up the owned execution. Explicit Windows stops use a nonzero exit code.
 - The PID returned by `execute_cmd_background` remains the command PID, not the internal guardian PID. Ordinary shell background syntax is also supported, but redirect the child's standard input, output, and error to prevent inherited pipes from keeping the foreground call open.
