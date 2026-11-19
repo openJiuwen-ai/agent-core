@@ -143,6 +143,18 @@ def _query_text(query: "str | list[str] | InteractiveInput") -> str | None:
     return None
 
 
+def _in_flight_round_already_carries_answer(query: Any, incoming: Any) -> bool:
+    """Return whether the running round already admitted this interrupt answer."""
+    if not isinstance(query, InteractiveInput) or not isinstance(incoming, InteractiveInput):
+        return False
+    for field in ("interrupt_answers", "user_inputs"):
+        running = getattr(query, field, None) or {}
+        asked = getattr(incoming, field, None) or {}
+        if isinstance(running, dict) and isinstance(asked, dict) and set(asked) & set(running):
+            return True
+    return False
+
+
 class NativeHarness(DeepAgent):
     """Concurrent-safe multi-round interaction wrapper that is itself a DeepAgent.
 
@@ -916,7 +928,13 @@ class NativeHarness(DeepAgent):
                 return
             reason = None
             if self._st.phase in (HarnessState.RUNNING, HarnessState.PAUSING):
-                reason = "interrupt_resume_busy"
+                active = self._st.active
+                query = active.original_query if active is not None else None
+                if _in_flight_round_already_carries_answer(query, cmd.msg.content):
+                    # This click is the card the running round already admitted.
+                    reason = "interrupt_already_resolved"
+                else:
+                    reason = "interrupt_resume_busy"
             elif self._session is None:
                 reason = "interrupt_resume_unavailable"
             elif not isinstance(cmd.msg.content, InteractiveInput):

@@ -91,7 +91,8 @@ async def test_busy_answer_never_enters_fifo_or_query(tmp_path, monkeypatch, hoo
             assert first.ok
             await asyncio.wait_for(entered.wait(), 2)
             second = await run.agent.resume_interrupt(approval_answer("call-a" if duplicate else "call-b", False))
-            assert not second.ok and second.reason == "interrupt_resume_busy"
+            expected = "interrupt_already_resolved" if duplicate else "interrupt_resume_busy"
+            assert not second.ok and second.reason == expected
             assert not run.native._st.pending_queue
         finally:
             release.set()
