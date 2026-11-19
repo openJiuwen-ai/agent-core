@@ -79,6 +79,30 @@ class LlmThinkingLoopConfig(BaseModel):
         description="Incremental chars since last L3 eval before next detection",
     )
     semantic_content_enabled: bool = True
+    # overthinking 推进豁免（BUG20261116410047）：有推进证据的 overthinking 判定
+    # 降级为仅观察（不软停），由下方上限约束最坏情况。
+    overthinking_progress_exempt: bool = Field(
+        default=True,
+        description="Exempt overthinking verdicts that show progress evidence",
+    )
+    overthinking_progress_exempt_max: int = Field(
+        default=3, ge=0,
+        description="Max observe-only exemptions per channel per model call; 0 disables",
+    )
+    overthinking_progress_min_novelty: float = Field(
+        default=0.3, ge=0.0, le=1.0,
+        description=(
+            "Min fraction of clause keys in the eval window that are new vs "
+            "all previously evaluated windows for the exemption to apply"
+        ),
+    )
+    overthinking_progress_exempt_max_chars: int = Field(
+        default=200000, ge=0,
+        description=(
+            "Cumulative channel chars beyond which the exemption no longer "
+            "applies; 0 = unlimited"
+        ),
+    )
 
 
 class DetectorsConfig(BaseModel):

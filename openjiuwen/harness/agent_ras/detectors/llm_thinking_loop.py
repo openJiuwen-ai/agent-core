@@ -335,6 +335,16 @@ class _TextRepetitionChannel:
     detection_latched: bool = False
 
 
+def _excerpt_clause_keys(text: str) -> set[str]:
+    """评估窗口的非空子句键集合（用于推进新颖度的程序化证据）。"""
+    keys: set[str] = set()
+    for clause in _split_clauses(text):
+        key = _extract_lexical_key(clause)
+        if key:
+            keys.add(key)
+    return keys
+
+
 @dataclass
 class _PlanExecutionChannel:
     buffer: str = ""
@@ -344,6 +354,9 @@ class _PlanExecutionChannel:
     model_call_start: float = field(default_factory=time.monotonic)
     eval_in_flight: bool = False
     detection_latched: bool = False
+    # overthinking 推进豁免状态（随 channel 生命周期，即每模型调用重置）
+    seen_clause_keys: frozenset[str] = frozenset()
+    progress_exempt_count: int = 0
 
 
 @dataclass
@@ -405,7 +418,8 @@ class LlmThinkingLoopDetector:
             for ct, ch in self._plan_exec.items():
                 pe_parts.append(
                     f"{ct}(total={ch.total_length} last_eval={ch.last_evaluated_pos}"
-                    f" latched={ch.detection_latched} in_flight={ch.eval_in_flight})"
+                    f" latched={ch.detection_latched} in_flight={ch.eval_in_flight}"
+                    f" exempt={ch.progress_exempt_count})"
                 )
             logger.info(
                 "[LlmThinkingLoopDetector] model_call end generation=%d "
@@ -839,11 +853,45 @@ class LlmThinkingLoopDetector:
         if generation != self._generation:
             return
 
+        # 推进证据（程序化）：本窗口子句键相对此前所有评估窗口的新颖度
+        window_keys = _excerpt_clause_keys(excerpt)
+        novelty = (
+            len(window_keys - ch.seen_clause_keys) / len(window_keys)
+            if window_keys
+            else 0.0
+        )
+        if window_keys:
+            ch.seen_clause_keys = ch.seen_clause_keys | window_keys
+
         if not abnormal:
             return
 
-        ch.detection_latched = True
         primary_fault = str(skill_result.get("primary_fault") or "semantic_deadlock")
+
+        # overthinking 推进豁免：有推进证据且未超上限 → 仅观察，不软停
+        if primary_fault == "overthinking" and self._exempt_overthinking_progress(
+            ch, skill_result, novelty,
+        ):
+            ch.progress_exempt_count += 1
+            ch.eval_in_flight = False
+            ch.last_evaluated_pos = trigger_buffer_len
+            ch.last_evaluated_at = time.monotonic()
+            logger.warning(
+                "[LlmThinkingLoopDetector] L3 overthinking EXEMPTED (progress) "
+                "member=%s chunk_type=%s exempt=%d/%d "
+                "total_chars=%d novelty=%.2f has_progress=%s confidence=%s",
+                member,
+                chunk_type,
+                ch.progress_exempt_count,
+                self._config.overthinking_progress_exempt_max,
+                ch.total_length,
+                novelty,
+                skill_result.get("has_progress"),
+                skill_result.get("confidence"),
+            )
+            return
+
+        ch.detection_latched = True
         logger.warning(
             "[LlmThinkingLoopDetector] L3 semantic ANOMALY DETECTED "
             "member=%s skill=%s "
@@ -876,6 +924,9 @@ class LlmThinkingLoopDetector:
                 "fault_domain": FAULT_DOMAIN_LLM_THINKING_LOOP,
                 "stream_chunk_keep_len": 0,
                 "primary_fault": primary_fault,
+                "skill_has_progress": skill_result.get("has_progress"),
+                "progress_novelty": round(novelty, 4),
+                "progress_exempt_count": ch.progress_exempt_count,
                 "skill_rationale": str(skill_result.get("rationale") or ""),
                 "skill_confidence": skill_result.get("confidence"),
             },
@@ -893,6 +944,38 @@ class LlmThinkingLoopDetector:
                 exc_info=True,
             )
             ch.eval_in_flight = False
+
+    def _exempt_overthinking_progress(
+        self,
+        ch: _PlanExecutionChannel,
+        skill_result: dict[str, Any],
+        novelty: float,
+    ) -> bool:
+        """判断 overthinking 判定是否可按「有推进」豁免软停。
+
+        双重门控：评审技能显式 ``has_progress`` + 窗口子句新颖度程序化证据；
+        并受连续豁免次数与累计字符上限约束（防伪推进/无界发散）。
+        """
+        cfg = self._config
+        if not cfg.overthinking_progress_exempt:
+            return False
+        if cfg.overthinking_progress_exempt_max <= 0:
+            return False
+        if ch.progress_exempt_count >= cfg.overthinking_progress_exempt_max:
+            return False
+        if (
+            cfg.overthinking_progress_exempt_max_chars > 0
+            and ch.total_length >= cfg.overthinking_progress_exempt_max_chars
+        ):
+            return False
+        has_progress_raw = skill_result.get("has_progress")
+        has_progress = has_progress_raw is True or (
+            isinstance(has_progress_raw, str)
+            and has_progress_raw.strip().lower() == "true"
+        )
+        if not has_progress:
+            return False
+        return novelty >= cfg.overthinking_progress_min_novelty
 
     @staticmethod
     def _build_anomaly(
