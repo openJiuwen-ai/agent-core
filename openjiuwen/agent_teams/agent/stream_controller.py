@@ -131,6 +131,9 @@ class StreamController:
         # task_failed (reset when the next round starts).
         self._retry_attempt: int = 0
         self._swallow_failed_round: bool = False
+        # 成员耗尽收口回调：重试穷尽（181001 耗尽透传分支）时触发。
+        # kernel 接线；None = 不通报。与迭代预算耗尽共用 kernel 同一收口。
+        self.on_round_exhausted: Optional[Callable[[], Awaitable[None]]] = None
 
     def _member_name(self) -> Optional[str]:
         bp = self._get_blueprint()
@@ -304,6 +307,15 @@ class StreamController:
         # 不复位的话下方 _forward_outputs 的吞帧检查会把这条终结性 task_failed
         # 一并吞掉——外部（jiuwenswarm team 流）收不到 chat.error，回合静默挂死。
         self._swallow_failed_round = False
+        if self.on_round_exhausted is not None:
+            try:
+                await self.on_round_exhausted()
+            except Exception:  # noqa: BLE001 - 收口回调失败不阻断透传
+                team_logger.warning(
+                    "[%s] round-exhausted callback failed",
+                    self._member_name() or "?",
+                    exc_info=True,
+                )
         return False
 
     # ------------------------------------------------------------------

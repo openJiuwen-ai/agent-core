@@ -15,6 +15,7 @@ import re
 import uuid
 from typing import (
     Any,
+    Callable,
     List,
     Optional,
 )
@@ -117,6 +118,7 @@ class TeamTaskManager:
         team_plan_id: str | None = None,
         leader_member_name: str | None = None,
         dispatch_mode: str = "autonomous",
+        member_exhausted_gate: Callable[[str], bool] | None = None,
     ):
         """Initialize task manager.
 
@@ -142,6 +144,34 @@ class TeamTaskManager:
         self.team_plan_id = _safe_token(team_plan_id or get_session_id() or team_name, "team_plan")
         self.leader_member_name = str(leader_member_name or "").strip()
         self._dispatch_mode = dispatch_mode
+        # 回合级耗尽闸：由 coordination kernel 注入（leader 侧=名册，
+        # 成员侧=自己的上报闸）。None = 无闸（非团队/未接线）。
+        self._member_exhausted_gate = member_exhausted_gate
+
+    def set_member_exhausted_gate(
+        self, gate: Callable[[str], bool] | None,
+    ) -> None:
+        """Install the round-scoped member-exhaustion gate."""
+        self._member_exhausted_gate = gate
+
+    def _is_member_round_exhausted(self, member_name: str) -> bool:
+        """Whether ``member_name`` exhausted its budget this round.
+
+        The gate is in-memory (leader kernel roster); failures fall open so
+        a broken gate never blocks normal dispatch.
+        """
+        gate = getattr(self, "_member_exhausted_gate", None)
+        if gate is None:
+            return False
+        try:
+            return bool(gate(member_name))
+        except Exception:  # noqa: BLE001 - fail-open
+            team_logger.warning(
+                "[task] member exhaustion gate failed: %s",
+                member_name,
+                exc_info=True,
+            )
+            return False
 
     def configure_plan_storage(
         self,
@@ -169,6 +199,13 @@ class TeamTaskManager:
         member = await self.db.member.get_member(owner, self.team_name)
         if not member:
             return TaskOpResult.fail(f"Member {owner} not found in team {self.team_name}")
+        # 派发硬闸：本回合耗尽摘牌的成员拒派（名册在 leader kernel，
+        # 不依赖成员状态——ERROR 是崩溃/复活语义）。
+        if self._is_member_round_exhausted(owner):
+            return TaskOpResult.fail(
+                f"Member {owner} is exhausted this round and "
+                "cannot take tasks; assign to another member"
+            )
         return TaskOpResult.success()
 
     async def add_graph(self, specs: list[TaskGraphSpec]) -> TaskGraphResult:
@@ -533,6 +570,12 @@ class TeamTaskManager:
         member = await self.db.member.get_member(member_name, self.team_name)
         if not member:
             return TaskOpResult.fail(f"Member {member_name} not found in team {self.team_name}")
+        # 耗尽摘牌成员本回合不可认领（名册门控，见 _validate_task_owner）
+        if self._is_member_round_exhausted(member_name):
+            return TaskOpResult.fail(
+                f"Member {member_name} is exhausted this round and "
+                "cannot claim tasks"
+            )
         if member.mode == MemberMode.PLAN_MODE.value:
             return TaskOpResult.fail(
                 "PLAN_MODE members must call submit_plan first; "
@@ -753,7 +796,7 @@ class TeamTaskManager:
         if self.member_name == task.assignee:
             return TaskOpResult.fail(f"{self.member_name} cannot verify their own task {task_id}")
 
-        team_logger.info("[verify_task] reviewer=%s task=%s decision=%s", self.member_name, task_id, normalized) 
+        team_logger.info("[verify_task] reviewer=%s task=%s decision=%s", self.member_name, task_id, normalized)
 
         if self._dispatch_mode == "scheduled":
             return await self._record_review_vote(task, normalized, feedback)
@@ -794,9 +837,9 @@ class TeamTaskManager:
             ),
             error_label=f"Task review vote event for {task.task_id}",
         )
-        team_logger.info("[verify_vote] reviewer=%s task=%s decision=%s round=%d tally(pass=%d fail=%d of %d)", 
-                         self.member_name, task.task_id, decision, task.review_round,  
-                         tally["pass_count"], tally["fail_count"], tally["reviewer_count"]) 
+        team_logger.info("[verify_vote] reviewer=%s task=%s decision=%s round=%d tally(pass=%d fail=%d of %d)",
+                         self.member_name, task.task_id, decision, task.review_round,
+                         tally["pass_count"], tally["fail_count"], tally["reviewer_count"])
         return TaskOpResult.success(data=tally)
 
     async def get_review_tally(self, task) -> dict[str, Any]:

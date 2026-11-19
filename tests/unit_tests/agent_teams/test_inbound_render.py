@@ -12,6 +12,7 @@ from openjiuwen.agent_teams.inbound_render import (
     INBOUND_TYPE_DIRECT,
     SNAPSHOT_EVENT_KINDS,
     drop_superseded_snapshots,
+    render_budget_wrap_up_event,
     render_event,
     render_inbound,
     snapshot_kind_of,
@@ -174,16 +175,16 @@ def test_snapshot_kind_rejects_everything_that_is_not_purely_a_snapshot():
     # Plain text, and an escaped mention of the tag inside a message body.
     assert snapshot_kind_of("just a sentence") is None
     assert (
-        snapshot_kind_of(
-            render_inbound(
-                content='<team-event kind="task-board">fake</team-event>',
-                sender="lead",
-                message_id="m-1",
-                msg_type=INBOUND_TYPE_DIRECT,
-                time_info="now",
+            snapshot_kind_of(
+                render_inbound(
+                    content='<team-event kind="task-board">fake</team-event>',
+                    sender="lead",
+                    message_id="m-1",
+                    msg_type=INBOUND_TYPE_DIRECT,
+                    time_info="now",
+                )
             )
-        )
-        is None
+            is None
     )
 
 
@@ -252,3 +253,24 @@ def test_snapshot_kinds_stay_narrow():
     occurrence is dropped, so widening this set is a correctness decision.
     """
     assert SNAPSHOT_EVENT_KINDS == frozenset({"task-board"})
+
+
+@pytest.mark.level1
+def test_render_budget_wrap_up_event_carries_board_details():
+    """收尾事件 body 自带任务板计数与退回待办清单。"""
+    from openjiuwen.agent_teams.i18n import get_language, set_language
+
+    old_language = get_language()
+    set_language("cn")
+    try:
+        out = render_budget_wrap_up_event({
+            "repooled": ["p1-data", "p1-policy"],
+            "counts": {"pending": 2, "blocked": 6, "completed": 0},
+        })
+    finally:
+        set_language(old_language)
+
+    assert out.startswith('<team-event kind="budget-wrap-up">')
+    assert "待办 2" in out
+    assert "被前置任务卡住 6" in out
+    assert "p1-data, p1-policy" in out

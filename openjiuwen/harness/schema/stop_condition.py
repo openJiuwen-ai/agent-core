@@ -57,7 +57,7 @@ class StopConditionEvaluator(ABC):
 
     @abstractmethod
     def should_stop(
-        self, ctx: StopEvaluationContext,
+            self, ctx: StopEvaluationContext,
     ) -> bool:
         """Return True if the loop should stop.
 
@@ -106,6 +106,51 @@ class MaxRoundsEvaluator(StopConditionEvaluator):
         return ctx.iteration >= self._max_rounds
 
 
+class RoundBudgetExhaustedEvaluator(StopConditionEvaluator):
+    """Stop when the shared round-budget ledger is exhausted.
+
+    Team-scope total budget: the rail ticks the ledger
+    once per task iteration and flags exhaustion; this evaluator only
+    reads the flag, so the ledger is never double-counted from the
+    evaluation path.
+
+    Attributes:
+        _exhausted: Zero-arg callable returning the exhaustion flag.
+    """
+
+    def __init__(self, exhausted: Callable[[], bool]) -> None:
+        self._exhausted = exhausted
+
+    def should_stop(self, ctx: StopEvaluationContext) -> bool:
+        """Return True when the round budget ledger is exhausted."""
+        try:
+            return bool(self._exhausted())
+        except Exception:  # ledger failure must not kill the loop
+            return False
+
+
+class IterationBudgetExhaustedEvaluator(StopConditionEvaluator):
+    """Stop when the per-invoke inner-iteration budget is exhausted.
+
+    Individual budget: the rail counts inner
+    ReAct iterations (every model call) and sets the flag at the cap;
+    this evaluator only reads the flag at the outer-loop boundary.
+
+    Attributes:
+        _exhausted: Zero-arg callable returning the exhaustion flag.
+    """
+
+    def __init__(self, exhausted: Callable[[], bool]) -> None:
+        self._exhausted = exhausted
+
+    def should_stop(self, ctx: StopEvaluationContext) -> bool:
+        """Return True when the inner-iteration budget is exhausted."""
+        try:
+            return bool(self._exhausted())
+        except Exception:  # budget flag failure must not kill the loop
+            return False
+
+
 class TokenBudgetEvaluator(StopConditionEvaluator):
     """Stop when cumulative token usage exceeds a budget.
 
@@ -148,9 +193,9 @@ class CompletionPromiseEvaluator(StopConditionEvaluator):
     """
 
     def __init__(
-        self,
-        promise: str,
-        required_confirmations: int = 1,
+            self,
+            promise: str,
+            required_confirmations: int = 1,
     ) -> None:
         self._promise = promise
         self._fulfilled: bool = False
@@ -168,8 +213,8 @@ class CompletionPromiseEvaluator(StopConditionEvaluator):
         """
         self._confirmation_count += 1
         self._fulfilled = (
-            self._confirmation_count
-            >= self._required_confirmations
+                self._confirmation_count
+                >= self._required_confirmations
         )
         self._matched_text = matched_text
 
@@ -218,9 +263,9 @@ class CompletionPromiseEvaluator(StopConditionEvaluator):
             int(data.get("confirmation_count", 0)),
         )
         self._fulfilled = (
-            self._confirmation_count
-            >= self._required_confirmations
-        ) or self._fulfilled
+                                  self._confirmation_count
+                                  >= self._required_confirmations
+                          ) or self._fulfilled
 
 
 class CustomPredicateEvaluator(StopConditionEvaluator):
@@ -235,8 +280,8 @@ class CustomPredicateEvaluator(StopConditionEvaluator):
     """
 
     def __init__(
-        self,
-        predicate: Callable[[StopEvaluationContext], bool],
+            self,
+            predicate: Callable[[StopEvaluationContext], bool],
     ) -> None:
         self._predicate = predicate
 

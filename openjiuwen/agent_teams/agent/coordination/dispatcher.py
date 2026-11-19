@@ -98,6 +98,14 @@ class AgentRoundController(Protocol):
         """Return whether an unresolved tool interrupt is pending."""
         ...
 
+    def is_round_budget_exhausted(self) -> bool:
+        """Return whether the shared team round budget is exhausted.
+
+        Handlers use this to stop self-healing nudges once the round's
+        iteration budget is spent; a missing ledger reports False.
+        """
+        ...
+
     async def cancel_agent(self) -> None:
         """Cancel the running agent task."""
         ...

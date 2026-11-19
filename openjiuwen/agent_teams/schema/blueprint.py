@@ -207,6 +207,10 @@ class TeamAgentSpec(BaseModel):
     agents: dict[str, DeepAgentSpec]
     team_name: str = "agent_team"
     lifecycle: str = TeamLifecycle.TEMPORARY
+    max_total_rounds: Optional[int] = None
+    """Team-round total iteration budget: sum of all
+    members' + leader's task-loop rounds within one round lifecycle.
+    None = uncapped (legacy behavior)."""
     enable_team_plan: bool = False
     """Whether the leader starts in single-agent plan mode for this run.
 

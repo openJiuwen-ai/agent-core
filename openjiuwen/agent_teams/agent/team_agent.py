@@ -96,6 +96,14 @@ class TeamAgent(BaseAgent):
             request_completion_poll_callback=self._request_completion_poll,
         )
         self._coordination = CoordinationKernel(self)
+        # Round-budget ledger getter: None on the leader (it
+        # owns the ledger via its coordination kernel); on in-process
+        # teammates it is wired at spawn time to resolve the leader's
+        # CURRENT ledger per tick (getter, not reference — a ledger swap on
+        # a new round must never be written through a stale reference).
+        self._budget_ledger_getter: Optional[Callable[[], Any]] = None
+        # 成员耗尽时直报 leader kernel（inprocess spawn 时接线）
+        self._exhaustion_notify: Optional[Callable[[str], None]] = None
 
     # ------------------------------------------------------------------
     # Properties — delegate to configurator
@@ -287,6 +295,39 @@ class TeamAgent(BaseAgent):
     def stream_controller(self) -> StreamController:
         """Return the stream controller."""
         return self._stream_controller
+
+    @property
+    def round_budget_ledger(self) -> Any:
+        """Return the leader's current round budget ledger (leader only)."""
+        return self._coordination.round_budget_ledger
+
+    def set_budget_ledger_getter(self, getter: Callable[[], Any]) -> None:
+        """Wire the leader-ledger getter on an in-process teammate."""
+        self._budget_ledger_getter = getter
+
+    def is_round_budget_exhausted(self) -> bool:
+        """Whether the shared team round budget is exhausted.
+
+        Leader resolves its own ledger; in-process members resolve the
+        leader's via the getter wired at spawn. A missing ledger
+        (subprocess member / budget disabled) reports False so behavior
+        stays unchanged.
+        """
+        getter = getattr(self, "_budget_ledger_getter", None)
+        # Contract: the setter stores a sync zero-arg callable (the only
+        # production writer is ``inprocess_spawn``'s lambda). Guard the
+        # callability anyway so a bad wiring degrades to this agent's own
+        # ledger instead of raising inside a poll handler.
+        ledger = getter() if callable(getter) else self.round_budget_ledger
+        return bool(ledger is not None and ledger.exhausted)
+
+    def set_exhaustion_notify(self, notify: Callable[[str], None]) -> None:
+        """Wire the leader-kernel exhaustion notify on a teammate."""
+        self._exhaustion_notify = notify
+
+    def notify_member_exhausted(self, member_name: str) -> None:
+        """Leader-side entry: register an exhausted member."""
+        self._coordination.mark_member_exhausted(member_name)
 
     @property
     def event_listeners(self) -> list:
@@ -703,6 +744,9 @@ class TeamAgent(BaseAgent):
         raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
         self._state.pending_user_query = raw_query
         routed_payloads = self._initial_leader_route_payloads(raw_query)
+        _open_budget = getattr(self._coordination, "open_round_budget", None)
+        if _open_budget is not None:
+            _open_budget(new_round=bool(raw_query), session=session)
         await self._coordination.start(session)
         try:
             if routed_payloads is not None:
@@ -752,13 +796,21 @@ class TeamAgent(BaseAgent):
         ).send(content, to=to, sender=sender)
 
     async def stream(self, inputs, session=None, stream_modes=None):
-        team_logger.info("[{}] stream start, role={}", self._member_name() or "?", self.role.value)
+        team_logger.info("[TeamAgent] [{}] stream start, role={}", self._member_name() or "?", self.role.value)
         self._stream_controller.stream_queue = asyncio.Queue()
         # ``.get`` default does not cover a present-but-None value, so
         # normalize an empty/None query to "".
         raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
         self._state.pending_user_query = raw_query
         routed_payloads = self._initial_leader_route_payloads(raw_query)
+        # Round budget ledger boundary: a user query opens a
+        # new round (follow-ups and post-pause follow-ups alike); an empty
+        # query is a spawn/recover/resume cycle and keeps the ledger.
+        # 能力探测守卫：测试替身/外部子类化的 coordination 可能未实现
+        # open_round_budget——预算治理不得阻断主链路
+        _open_budget = getattr(self._coordination, "open_round_budget", None)
+        if _open_budget is not None:
+            _open_budget(new_round=bool(raw_query), session=session)
 
         await self._coordination.start(session)
         try:

@@ -234,6 +234,12 @@ class DeepAgentConfig:
     enable_async_subagent: bool = False
     add_general_purpose_agent: bool = False
     max_iterations: int = 15
+    # Inner-iteration budget for task-loop invokes (
+    # every model call counts once; the inner ReAct loop itself stays
+    # uncapped at sys.maxsize, so this budget is enforced by the rail via
+    # force-finish at the iteration boundary). None = uncapped (legacy).
+    # Auto-injected into TaskCompletionRail by DeepAgent._queue_pending_rails.
+    task_loop_iteration_budget: Optional[int] = None
     subagents: Optional[List[SubAgentConfig | "DeepAgent"]] = None
     tools: Optional[List[ToolCard]] = None
     mcps: Optional[List[McpServerConfig]] = None

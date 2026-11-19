@@ -488,6 +488,7 @@ class AgentConfigurator:
                 "tools": list(agent_spec.tools or []),
                 "enable_skill_discovery": True,
                 "enable_task_loop": True,
+                "task_loop_iteration_budget": agent_spec.task_loop_iteration_budget,
                 "enable_read_image_multimodal": enable_read_image_multimodal,
             }
         )
