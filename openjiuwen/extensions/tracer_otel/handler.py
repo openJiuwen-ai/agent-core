@@ -1169,6 +1169,37 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         self._layer_root_spans.clear()
         self._component_spans.clear()
 
+    def drop_workflow_spans(self) -> None:
+        """Best-effort close of tracked workflow spans whose end never arrived.
+
+        Mirrors ``OtelAgentHandler.drop_agent_span``: a leaked span (emitter
+        died before on_call_done / on_call_error) keeps ``is_recording()``
+        true forever, which permanently short-circuits the rebind guard in
+        set_trace_id / set_session_id — every later session in the process
+        would keep serving the leaked run's binding. Ops / embedder code that
+        knows the run is dead calls this to force-close the tracked spans and
+        unblock rebinding. Never raises.
+        """
+        try:
+            for state in list(self._layer_root_spans.values()) + list(
+                self._component_spans.values()
+            ):
+                try:
+                    state.span.add_event(
+                        "oj.span.dropped",
+                        attributes={"reason": "end event undelivered by emitter"},
+                    )
+                except Exception as exc:
+                    session_logger.warning(
+                        "otel workflow handler: mark dropped event failed: %s", exc
+                    )
+            self._cleanup_stale_spans()
+            self._cached_root_ctx = None
+            self._cached_trace_id = None
+            self._cached_session_id = None
+        except Exception as exc:
+            session_logger.warning("otel workflow handler: drop_workflow_spans failed: %s", exc)
+
     @staticmethod
     def _detach_state(state: OtelSpanState) -> None:
         """Detach the ambient context attached with a workflow span, if any.
