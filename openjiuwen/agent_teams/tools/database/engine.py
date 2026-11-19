@@ -357,8 +357,10 @@ def _is_benign_mysql_index_error(exc: BaseException, *, missing: bool) -> bool:
 
     ``missing=True`` is errno 1091: DROP of an index a peer already removed.
     ``missing=False`` is errno 1061: CREATE of a name a peer already created.
-    Any other code (1062 duplicate row, 1050 table exists, 1146 unknown table)
-    stays fatal. Statement text is used only when no errno is present: a DROP
+    Errno 1553 (index still required by a foreign key) is *not* benign here —
+    the index remains; see ``_is_mysql_fk_retained_index_error``. Any other
+    code (1062 duplicate row, 1050 table exists, 1146 unknown table) stays
+    fatal. Statement text is used only when no errno is present: a DROP
     matches ``check that`` plus ``exists`` (MySQL ``column/key exists`` and
     MariaDB ``check that it exists``); a CREATE matches ``Duplicate key name``.
     """
@@ -372,18 +374,40 @@ def _is_benign_mysql_index_error(exc: BaseException, *, missing: bool) -> bool:
     return "duplicate key name" in folded
 
 
-def _exec_mysql_index_ddl(sync_conn, sql: str, *, missing: bool) -> None:
-    """Run MySQL-family index DDL, treating the known race errno as success.
+def _is_mysql_fk_retained_index_error(exc: BaseException) -> bool:
+    """True when InnoDB refuses DROP because a foreign key still needs the index.
+
+    Errno 1553: ``Cannot drop index ... needed in a foreign key constraint``.
+    Without an errno, require both ``foreign key`` and ``needed`` in the
+    server text. The index must stay; A1 cannot remove it while the FK remains.
+    """
+    errno = _mysql_errno(exc)
+    if errno is not None:
+        return errno == 1553
+    orig = getattr(exc, "orig", None)
+    folded = str(orig if orig is not None else exc).casefold()
+    return "foreign key" in folded and "needed" in folded
+
+
+def _exec_mysql_index_ddl(sync_conn, sql: str, *, missing: bool) -> bool:
+    """Run MySQL-family index DDL; return whether the goal state was reached.
 
     MySQL 8.0 rejects ``IF [NOT] EXISTS`` on these statements. A concurrent
     binder that already finished the same step raises ``OperationalError``
     (aiomysql) or, on some drivers, ``ProgrammingError``.
+
+    Returns ``True`` when the index is absent after DROP (or present after
+    CREATE), including the 1091 / 1061 races. Returns ``False`` only for DROP
+    when errno 1553 keeps the index for a foreign key.
     """
     try:
         sync_conn.exec_driver_sql(sql)
+        return True
     except (OperationalError, ProgrammingError) as exc:
+        if missing and _is_mysql_fk_retained_index_error(exc):
+            return False
         if _is_benign_mysql_index_error(exc, missing=missing):
-            return
+            return True
         raise
 
 
@@ -397,17 +421,29 @@ def _drop_index_if_present(
 
     The snapshot skips a useless DROP. MySQL/MariaDB have no
     ``DROP INDEX IF EXISTS`` and use ``DROP INDEX ... ON table``; a peer that
-    already dropped it (errno 1091) counts as success. SQLite / PostgreSQL
-    keep ``DROP INDEX IF EXISTS``. Returns whether a DROP was issued.
+    already dropped it (errno 1091) counts as success. InnoDB errno 1553
+    (index still required by a foreign key) leaves the index in place and
+    returns ``False`` so callers do not log a successful drop — A1 cannot
+    remove that covering index while the FK remains. SQLite / PostgreSQL
+    keep ``DROP INDEX IF EXISTS``. Returns whether the index is gone afterward
+    (dropped here or already absent via race).
     """
     if index_name not in index_names:
         return False
     q_idx = _quote_ident(sync_conn, index_name)
     if _is_mysql_family(sync_conn):
         q_table = _quote_ident(sync_conn, table_name)
-        _exec_mysql_index_ddl(sync_conn, f"DROP INDEX {q_idx} ON {q_table}", missing=True)
-    else:
-        sync_conn.exec_driver_sql(f"DROP INDEX IF EXISTS {q_idx}")
+        dropped = _exec_mysql_index_ddl(
+            sync_conn, f"DROP INDEX {q_idx} ON {q_table}", missing=True
+        )
+        if not dropped:
+            team_logger.info(
+                "Retained index %s on %s: still required by a foreign key",
+                index_name,
+                table_name,
+            )
+        return dropped
+    sync_conn.exec_driver_sql(f"DROP INDEX IF EXISTS {q_idx}")
     return True
 
 
@@ -423,22 +459,22 @@ def _create_index_if_absent(
     The snapshot skips a useless CREATE. MySQL/MariaDB have no
     ``CREATE INDEX IF NOT EXISTS``; a peer that already created the name
     (errno 1061) counts as success. SQLite / PostgreSQL keep statement-level
-    ``IF NOT EXISTS``. Returns whether a CREATE was issued.
+    ``IF NOT EXISTS``. Returns whether a CREATE was issued (or the name
+    already exists after a race).
     """
     if index_name in index_names:
         return False
     q_idx = _quote_ident(sync_conn, index_name)
     q_table = _quote_ident(sync_conn, table_name)
     if _is_mysql_family(sync_conn):
-        _exec_mysql_index_ddl(
+        return _exec_mysql_index_ddl(
             sync_conn,
             f"CREATE INDEX {q_idx} ON {q_table} ({columns_sql})",
             missing=False,
         )
-    else:
-        sync_conn.exec_driver_sql(
-            f"CREATE INDEX IF NOT EXISTS {q_idx} ON {q_table} ({columns_sql})"
-        )
+    sync_conn.exec_driver_sql(
+        f"CREATE INDEX IF NOT EXISTS {q_idx} ON {q_table} ({columns_sql})"
+    )
     return True
 
 
@@ -738,9 +774,11 @@ def _ensure_dynamic_table_indexes(
 
     Index DROP/CREATE probes ``inspector.get_indexes`` so an up-to-date table
     skips DDL. MySQL/MariaDB have no ``IF [NOT] EXISTS`` on these statements;
-    a concurrent peer's 1091/1061 is treated as success. SQLite / PostgreSQL
-    keep ``IF [NOT] EXISTS``. Identifiers are dialect-quoted so MySQL gets
-    backticks instead of hard-coded double quotes.
+    a concurrent peer's 1091/1061 is treated as success. InnoDB errno 1553
+    (``team_name`` index still required by the FK) retains the index and does
+    not fail the bind — A1 cannot drop that covering index while the FK stays.
+    SQLite / PostgreSQL keep ``IF [NOT] EXISTS``. Identifiers are dialect-quoted
+    so MySQL gets backticks instead of hard-coded double quotes.
 
     Scope: ``candidates`` are the current session's tables (computed from
     ``get_session_id``). ``existing_before_create`` is the snapshot of which of

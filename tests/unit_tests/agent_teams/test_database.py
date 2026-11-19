@@ -695,6 +695,45 @@ class TestTeamDatabaseInit:
         assert "IF EXISTS" not in sql
 
     @pytest.mark.level0
+    def test_drop_index_if_present_retains_mysql_1553_for_fk(self):
+        """InnoDB errno 1553 keeps the index; bind succeeds and reports not dropped."""
+        table = "team_task_mysql01"
+        index_name = f"ix_{table}_team_name"
+        sync_conn = MagicMock()
+        sync_conn.dialect = mysql_dialects.dialect()
+        sync_conn.exec_driver_sql.side_effect = OperationalError(
+            "DROP INDEX",
+            {},
+            Exception(
+                1553,
+                "Cannot drop index 'ix_team_task_mysql01_team_name': "
+                "needed in a foreign key constraint",
+            ),
+        )
+
+        assert _drop_index_if_present(sync_conn, table, index_name, {index_name}) is False
+
+        sql = sync_conn.exec_driver_sql.call_args.args[0]
+        assert sql == f"DROP INDEX `{index_name}` ON `{table}`"
+
+    @pytest.mark.level0
+    def test_drop_index_if_present_retains_mysql_fk_text_without_errno(self):
+        """Without errno, FK-needed DROP text retains the index (returns False)."""
+        table = "team_task_mysql01"
+        index_name = f"ix_{table}_team_name"
+        sync_conn = MagicMock()
+        sync_conn.dialect = mysql_dialects.dialect()
+        sync_conn.exec_driver_sql.side_effect = OperationalError(
+            "DROP INDEX",
+            {},
+            Exception(
+                "Cannot drop index 'ix': needed in a foreign key constraint"
+            ),
+        )
+
+        assert _drop_index_if_present(sync_conn, table, index_name, {index_name}) is False
+
+    @pytest.mark.level0
     def test_create_index_if_absent_treats_mysql_1061_as_success(self):
         """A peer that already created the index (errno 1061) does not fail the bind."""
         table = "team_task_mysql01"
