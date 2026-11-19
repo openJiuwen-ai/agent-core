@@ -4,7 +4,6 @@
 import asyncio
 import codecs
 import os
-import signal
 import tempfile
 from datetime import (
     datetime,
@@ -25,6 +24,7 @@ from pydantic import (
 )
 
 from openjiuwen.core.common.logging import sys_operation_logger, LogEventType
+from openjiuwen.core.sys_operation.shell_process_registry import terminate_shell_process
 
 
 class StreamEventType(str, Enum):
@@ -92,25 +92,8 @@ class AsyncProcessHandler:
         self._background_tasks: set[asyncio.Task[str]] = set()
 
     def _kill_process_tree(self) -> None:
-        """Kill the subprocess and all its children using process group.
-
-        Requires ``start_new_session=True`` when creating the subprocess
-        for full process-tree coverage.  Falls back to ``process.kill()``
-        when the process group is not available (e.g. Windows).
-        """
-        pid = self._process.pid
-        if pid is None:
-            return
-        try:
-            if os.name != "nt":
-                os.killpg(pid, signal.SIGKILL)
-            else:
-                self._process.kill()
-        except OSError:
-            try:
-                self._process.kill()
-            except ProcessLookupError:
-                pass
+        """Stop the owned execution, even if its original command already exited."""
+        terminate_shell_process(self._process)
 
     async def invoke(self) -> InvokeData:
         """One-time execution to get structured subprocess result by wrapping stream().
@@ -173,6 +156,7 @@ class AsyncProcessHandler:
             )
             self._kill_process_tree()
             await _finish_readers(5)
+            await asyncio.wait_for(self._process.wait(), timeout=5)
             raise
         except asyncio.TimeoutError as ori_ex:
             sys_operation_logger.error("Get process result time out",
@@ -251,6 +235,13 @@ class AsyncProcessHandler:
                                                event_type=LogEventType.SYS_OP_STREAM,
                                                metadata={"timeout": 0.1})
                     continue
+        except GeneratorExit:
+            self._kill_process_tree()
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.wait_for(self._process.wait(), timeout=5)
+            raise
         except asyncio.CancelledError:
             sys_operation_logger.warning(
                 "Stream cancelled by user, killing subprocess tree",
@@ -261,6 +252,8 @@ class AsyncProcessHandler:
             for task in tasks:
                 if not task.done():
                     task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.wait_for(self._process.wait(), timeout=5)
             yield StreamEvent(
                 type=StreamEventType.ERROR,
                 data="Execution cancelled by user"
@@ -268,12 +261,20 @@ class AsyncProcessHandler:
             return
         except asyncio.TimeoutError:
             self._kill_process_tree()
-            await self._process.wait()
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.wait_for(self._process.wait(), timeout=5)
             yield StreamEvent(
                 type=StreamEventType.ERROR,
                 data=f"execution timeout after {self._overall_timeout} seconds"
             )
         except Exception as e:
+            self._kill_process_tree()
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.wait_for(self._process.wait(), timeout=5)
             sys_operation_logger.error("Stream execution error",
                                        event_type=LogEventType.SYS_OP_ERROR,
                                        exception=e)
@@ -305,12 +306,20 @@ class AsyncProcessHandler:
 
         try:
             await self._queue.join()
-            await self._process.wait()
-            yield StreamEvent(
-                type=StreamEventType.EXIT,
-                data=self._process.returncode if self._process.returncode is not None else -1
-            )
+            # A command can close both output pipes before it exits. The same
+            # execution deadline must also cover this final wait.
+            remaining = None
+            if self._overall_timeout > 0:
+                remaining = max(0, self._overall_timeout - (asyncio.get_event_loop().time() - start_time))
+            if self._process.returncode is None:
+                await asyncio.wait_for(self._process.wait(), timeout=remaining)
+        except asyncio.CancelledError:
+            self._kill_process_tree()
+            await asyncio.wait_for(self._process.wait(), timeout=5)
+            raise
         except Exception as e:
+            self._kill_process_tree()
+            await asyncio.wait_for(self._process.wait(), timeout=5)
             sys_operation_logger.error("Release process error",
                                        event_type=LogEventType.SYS_OP_ERROR,
                                        exception=e)
@@ -318,6 +327,11 @@ class AsyncProcessHandler:
                 type=StreamEventType.ERROR,
                 data=f"process wait error: {str(e)}"
             )
+            return
+        yield StreamEvent(
+            type=StreamEventType.EXIT,
+            data=self._process.returncode if self._process.returncode is not None else -1
+        )
 
     async def _drain_background_stderr(self, limit: int = 8192) -> str:
         """Drain stderr without allowing retained diagnostics to grow without bound."""
