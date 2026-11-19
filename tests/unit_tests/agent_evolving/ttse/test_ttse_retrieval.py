@@ -10,13 +10,13 @@ from typing import Dict, List
 import pytest
 
 from openjiuwen.agent_evolving.ttse.config import TTSEConfig
-from openjiuwen.agent_evolving.ttse.consult import (
+from openjiuwen.agent_evolving.ttse.recall.consult import (
     clamp_top_k,
     parse_consult_query,
     render_consult_result_async,
 )
-from openjiuwen.agent_evolving.ttse.index import _BM25Index, TOKENIZER_VERSION, _rrf
-from openjiuwen.agent_evolving.ttse.stores import (
+from openjiuwen.agent_evolving.ttse.bank.index import _BM25Index, TOKENIZER_VERSION, _rrf
+from openjiuwen.agent_evolving.ttse.bank.stores import (
     TTSERecordStore,
     _EMBED_PROBE_RETRY_S,
     _EMBED_PROBE_TEXT,

@@ -6,8 +6,8 @@ The harness I/O layer is :class:`~openjiuwen.harness.rails.evolution.ttse_rail.T
 """
 
 from .config import TTSEConfig
-from .stores import TTSERecordStore
-from .success import (
+from .bank.stores import TTSERecordStore
+from .evolve.success import (
     SignalBasedSuccessDetector,
     SuccessDetector,
     SuccessOutcome,

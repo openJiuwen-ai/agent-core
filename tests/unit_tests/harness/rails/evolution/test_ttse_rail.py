@@ -42,17 +42,17 @@ from openjiuwen.harness.rails.evolution import (
     configure_ttse_evolution_runtime,
     unconfigure_ttse_evolution,
 )
-from openjiuwen.agent_evolving.ttse.stores import (
+from openjiuwen.agent_evolving.ttse.bank.stores import (
     reset_shared_stores,
     shared_store,
     _new_record,
     format_ts,
     parse_ts,
 )
-from openjiuwen.agent_evolving.ttse.catalog import project_catalog
+from openjiuwen.agent_evolving.ttse.bank.catalog import project_catalog
 from openjiuwen.agent_evolving.ttse.dream import load_dream_state
-from openjiuwen.agent_evolving.ttse.classify import parse_assignments
-from openjiuwen.agent_evolving.ttse.consult import (
+from openjiuwen.agent_evolving.ttse.taxonomy.classify import parse_assignments
+from openjiuwen.agent_evolving.ttse.recall.consult import (
     CONSULT_ALL_CATEGORY,
     consult_arg_errors,
     parse_consult_categories,
@@ -62,12 +62,12 @@ from openjiuwen.agent_evolving.ttse.consult import (
 )
 from openjiuwen.agent_evolving.ttse.prompts import FACT_TIP_DEFINITION, detect_judge_prompt
 from openjiuwen.agent_evolving.ttse.render import DISK_CATALOG_GUIDANCE_CN
-from openjiuwen.agent_evolving.ttse.trajectory_adapter import (
+from openjiuwen.agent_evolving.ttse.evidence.trajectory_adapter import (
     count_tool_calls,
     extract_final_reply,
     extract_output_paths,
 )
-from openjiuwen.agent_evolving.ttse.induction import (
+from openjiuwen.agent_evolving.ttse.evolve.induction import (
     blame,
     induce,
     induce_batch,
@@ -1887,7 +1887,7 @@ async def test_disk_catalog_attachment_uses_context_session_id(tmp_path):
 
 
 def test_trajectory_adapter_reads_openai_tool_args_and_keeps_tail():
-    from openjiuwen.agent_evolving.ttse.trajectory_adapter import (
+    from openjiuwen.agent_evolving.ttse.evidence.trajectory_adapter import (
         messages_to_trajectory_text,
     )
 

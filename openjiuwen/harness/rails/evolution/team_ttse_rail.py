@@ -27,7 +27,7 @@ from openjiuwen.harness.rails.evolution.evolution_rail import (
     _append_increment,
     _trim_window,
 )
-from openjiuwen.agent_evolving.ttse.capabilities import render_capabilities
+from openjiuwen.agent_evolving.ttse.evidence.capabilities import render_capabilities
 from openjiuwen.agent_evolving.ttse.config import TTSEConfig
 from openjiuwen.agent_evolving.ttse.subject_log import bind_induce_subject, logger, reset_induce_subject
 from openjiuwen.core.common.background_tasks import BackgroundTask

@@ -9,7 +9,7 @@ from typing import Optional, Union
 
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.agent_evolving.ttse.config import TTSEConfig
-from openjiuwen.agent_evolving.ttse.success import SuccessDetector
+from openjiuwen.agent_evolving.ttse.evolve.success import SuccessDetector
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.harness.rails.evolution.evolution_interrupt_rail import EvolutionInterruptRail

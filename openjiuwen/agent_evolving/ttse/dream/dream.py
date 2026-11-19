@@ -33,8 +33,8 @@ from openjiuwen.agent_evolving.optimizer.llm_resilience import (
 from openjiuwen.agent_evolving.ttse.subject_log import logger
 from openjiuwen.core.foundation.llm.model import Model
 
-from .config import TTSEConfig
-from .prompts import (
+from ..config import TTSEConfig
+from ..prompts.builders import (
     DREAM_CATEGORY_MERGE_SYSTEM,
     DREAM_CLUSTER_SYSTEM,
     DREAM_MERGE_SYSTEM,
@@ -44,7 +44,7 @@ from .prompts import (
     dream_merge_prompt,
     dream_purge_prompt,
 )
-from .stores import TTSERecordStore, format_ts, parse_ts
+from ..bank.stores import TTSERecordStore, format_ts, parse_ts
 from .tip_parse import parse_tip
 
 
