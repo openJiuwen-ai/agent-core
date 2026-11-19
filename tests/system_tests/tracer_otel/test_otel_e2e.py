@@ -494,6 +494,12 @@ class TestE2EComponentNamePropagation:
         assert names_by_id.get("add_one") == "加一节点"
         assert names_by_id.get("end") == "结束节点"
 
+        # span 名使用节点 name（而非 node_id），提升观测端首屏可读性
+        span_names = {s.name for s in comp_spans}
+        assert "component.开始节点" in span_names
+        assert "component.加一节点" in span_names
+        assert "component.结束节点" in span_names
+
     async def test_unset_name_falls_back_to_comp_id(self):
         _register_otel_handlers()
 
