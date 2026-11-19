@@ -186,7 +186,8 @@ class DirectoryInventory:
     def scan(self, *, allow_partial: bool = False) -> ScanResult:
         sources = self.sources(self.kind)
         # Preserve the legacy inventory payload and fingerprint signature.
-        if not self.storage.scoped and len(sources) == 1 and sources[0].type == "skill" and not allow_partial:
+        single_skill = len(sources) == 1 and sources[0].type == "skill"
+        if single_skill and not self.storage.scoped and not allow_partial:
             result = self._scan_source(sources[0])
             error = next((item for item in result.diagnostics if item.severity == "error"), None)
             if error is not None:

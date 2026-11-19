@@ -140,8 +140,13 @@ async def test_missing_index_keeps_live_inventory_search_and_prompt(tmp_path):
     assert environment.prompt_snapshot().entries[0].worker_id == "invoice"
     toolkit = _CapabilityDirectory(environment, session_scope="missing-index")
     try:
-        result = await toolkit.search(query="Invoice")
-        assert result.detailed_output["observed_skill_ids"] == ["invoice"]
-        assert "Process invoices" in result.data["content"]
+        catalog = await toolkit.search(query="Invoice")
+        assert [(row["type"], row["id"]) for row in catalog["matches"]] == [("skill", "invoice")]
+        assert catalog["matches"][0]["description"] == "Process invoices"
+
+        skills = await toolkit.search(query="Invoice", type=["skill"])
+        assert skills.detailed_output["index_state"] == "missing"
+        assert skills.detailed_output["observed_skill_ids"] == ["invoice"]
+        assert "Process invoices" in skills.data["content"]
     finally:
         await toolkit.aclose()

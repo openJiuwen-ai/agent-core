@@ -61,7 +61,7 @@ def scan_expert_manifests(
             if value["package_type"] != "agent_template":
                 continue
             name, description = value.get("name"), value.get("description")
-            if not isinstance(name, str) or not name.strip() or not isinstance(description, str) or not description.strip():
+            if not all(isinstance(field, str) and field.strip() for field in (name, description)):
                 raise ValueError("expert name and description must be non-empty strings")
             name, description = name.strip(), redact_sensitive_text(description.strip())
             if not name.isprintable():
@@ -72,7 +72,7 @@ def scan_expert_manifests(
                 source="expert-manifest", content_hash=hashlib.sha256(identity).hexdigest(),
                 metadata={"entrypoint": relative},
             ))
-        except (OSError, ValueError, RecursionError, RuntimeError):
+        except (OSError, ValueError, RuntimeError):
             diagnostics.append(ScanDiagnostic("invalid_expert_manifest", "Expert manifest is invalid or unreadable",
                                               path=relative))
     return ScanResult(tuple(descriptors), tuple(diagnostics), "expert-manifest")

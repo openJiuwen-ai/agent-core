@@ -9,14 +9,14 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Unpack
 from uuid import uuid4
 from weakref import WeakSet
 
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.symphony.config import RetrievalConfig
 from openjiuwen.symphony.discovery import CapabilityCandidate, SkillDCICommandResult, SkillFS, read_fingerprints
-from openjiuwen.symphony.discovery.directory_toolkit import _CapabilityDirectory
+from openjiuwen.symphony.discovery.directory_toolkit import CapabilitySearchOptions, _CapabilityDirectory
 from openjiuwen.symphony.discovery.skillfs import (
     _UNSET_SNAPSHOT, SkillIndexSnapshot, VisibleSkillNames, capture_index_snapshot, project_index_snapshot,
 )
@@ -358,17 +358,20 @@ class TreeEngine:
             raise RuntimeError("Symphony runtime is closed")
         if self._directory is None:
             self.bind_search()
-        assert self._directory is not None
-        return self._directory
+        directory = self._directory
+        if directory is None:
+            raise RuntimeError("Symphony search directory was not initialized")
+        return directory
+
+    def owns_search_directory(self, directory: _CapabilityDirectory) -> bool:
+        """Identify the current directory without creating a binding during read-only approval."""
+        return self._directory is directory
 
     async def search(
-        self, query: str | list[str] | None = None, *, type: str | list[str] | tuple[str, ...] | None = None,
-        operation: str | None = None, category: str | None = None, cursor: str | None = None, top_k: int | None = None,
+        self, query: str | list[str] | None = None, **options: Unpack[CapabilitySearchOptions],
     ) -> SkillDCICommandResult | dict[str, Any]:
         """Search or browse any combination of capability types. New requests default to all three."""
-        return await self._search_directory().search(
-            query=query, type=type, operation=operation, category=category, cursor=cursor, top_k=top_k,
-        )
+        return await self._search_directory().search(query, **options)
 
     def get_tools(self) -> list[Tool]:
         """Return the model-facing capability search tool bound to the same directory as search()."""

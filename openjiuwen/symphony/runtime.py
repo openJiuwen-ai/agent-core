@@ -148,34 +148,39 @@ class SymphonyRuntime:
         identity_hash = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest() if identity else ""
         protocol = FingerprintProtocolConfig(configuration_signature=identity_hash)
         observer = getattr(model, "symphony_response_observer", None)
+
         def fingerprint_service(provider, root):
             return FingerprintService(
                 provider, root, llm=model, config=policy, protocol=protocol, model_response_observer=observer,
                 allow_metadata_fallback=self.config.retrieval.index_build.task.allow_fallback_tree,
             )
 
-        fingerprints = {
-            kind: fingerprint_service(
-                DirectoryInventory(self.config.capability, self._storage, kind=kind) if self._storage.scoped else inventory,
-                self._storage.root / "cache" / "fingerprints" / kind if self._storage.scoped
-                else self._storage.root / "cache" / "fingerprints",
-            )
-            for kind in ("skill", "expert") if inventory.sources(kind)
-        }
+        fingerprint_root = self._storage.root / "cache" / "fingerprints"
+        fingerprints = {}
+        for kind in ("skill", "expert"):
+            if not inventory.sources(kind):
+                continue
+            if self._storage.scoped:
+                provider = DirectoryInventory(self.config.capability, self._storage, kind=kind)
+                root = fingerprint_root / kind
+            else:
+                provider, root = inventory, fingerprint_root
+            fingerprints[kind] = fingerprint_service(provider, root)
         skill_sources = inventory.sources("skill")
         graph_storage = None
         graph_inventory = None
         graph_fingerprints = None
         graph_unavailable = None
-        if len(skill_sources) == 1:
-            graph_storage = RuntimeStorage(self.config, skill_source=skill_sources[0]) if self._storage.scoped else self._storage
-            graph_inventory = DirectoryInventory(self.config.capability, graph_storage, kind="skill") if self._storage.scoped else inventory
-            graph_fingerprints = (
-                fingerprint_service(graph_inventory, artifact_root / "cache" / "fingerprints")
-                if self._storage.scoped else fingerprints["skill"]
-            )
-        else:
+        if len(skill_sources) != 1:
             graph_unavailable = "Symphony orchestration requires exactly one skill capability source"
+        elif self._storage.scoped:
+            graph_storage = RuntimeStorage(self.config, skill_source=skill_sources[0])
+            graph_inventory = DirectoryInventory(self.config.capability, graph_storage, kind="skill")
+            graph_fingerprints = fingerprint_service(graph_inventory, artifact_root / "cache" / "fingerprints")
+        else:
+            graph_storage = self._storage
+            graph_inventory = inventory
+            graph_fingerprints = fingerprints["skill"]
         policy_hash = hashlib.sha256(policy.model_dump_json().encode()).hexdigest()
         service = OrchestrationService(
             graph_artifact_root=artifact_root / "graph", capability_provider=graph_inventory or inventory,

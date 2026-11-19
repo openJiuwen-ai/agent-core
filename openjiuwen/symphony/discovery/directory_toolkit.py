@@ -12,7 +12,7 @@ from dataclasses import astuple, dataclass, replace
 from itertools import islice
 from pathlib import PurePosixPath
 from types import MethodType
-from typing import TYPE_CHECKING, Any, Iterable, Sequence, get_args
+from typing import TYPE_CHECKING, Any, Iterable, Sequence, TypedDict, TypeGuard, TypeVar, Unpack, get_args
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard, ToolExposure
 from openjiuwen.symphony.config import CapabilityType
@@ -38,6 +38,17 @@ _CAPABILITY_TYPES = get_args(CapabilityType)
 _OPERATIONS = ("list", "search")
 _MAX_TOP_K = 50
 _TOOL_ID_DOMAIN = b"openjiuwen.skill-index-tool.v1\0"
+_ExecutorT = TypeVar("_ExecutorT")
+
+
+class CapabilitySearchOptions(TypedDict, total=False):
+    """Keyword arguments shared by Runtime search and the model-facing directory."""
+
+    type: str | list[str] | tuple[str, ...] | None
+    operation: str | None
+    category: str | None
+    cursor: str | None
+    top_k: int | None
 
 
 @dataclass(frozen=True)
@@ -130,23 +141,25 @@ def _tool_card(tool_id: str) -> ToolCard:
     )
 
 
+def _is_concrete_executor(value: object, implementation: type[_ExecutorT]) -> TypeGuard[_ExecutorT]:
+    # Read-only approval identifies the exact implementation. Subclasses can override execution.
+    return type(value) is implementation  # pylint: disable=unidiomatic-typecheck,huawei-unidiomatic-typecheck
+
+
 class CapabilitySearchTool(LocalFunction):
     """Normalize search strings and enforce the model-facing argument schema."""
 
     def is_bound_to(self, retrieval: TreeEngine, environment: SkillFS, session_scope: str) -> bool:
         """Verify the built-in read-only executor against its live host binding."""
         method = self._func
-        if type(self) is not CapabilitySearchTool or type(method) is not MethodType:
+        if not _is_concrete_executor(self, CapabilitySearchTool) or not _is_concrete_executor(method, MethodType):
             return False
         owner = method.__self__
         return (
             method.__func__ is _CapabilityDirectory.search
-            and type(owner) is _CapabilityDirectory
-            and owner is retrieval._directory
-            and owner.environment is environment
-            and owner.session_scope == session_scope
-            and not owner._closed
-            and vars(_CapabilityDirectory).keys().isdisjoint(vars(owner))
+            and _is_concrete_executor(owner, _CapabilityDirectory)
+            and retrieval.owns_search_directory(owner)
+            and _CapabilityDirectory.is_open_for(owner, environment, session_scope)
         )
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> Any:
@@ -209,29 +222,35 @@ class _CapabilityDirectory:
     def environment(self) -> SkillFS:
         return self._environment
 
+    def is_open_for(self, environment: SkillFS, session_scope: str) -> bool:
+        return (
+            not self._closed
+            and self._environment is environment
+            and self.session_scope == session_scope
+            and vars(_CapabilityDirectory).keys().isdisjoint(vars(self))
+        )
+
     async def search(
         self,
         query: str | list[str] | None = None,
-        type: str | list[str] | tuple[str, ...] | None = None,
-        operation: str | None = None,
-        category: str | None = None,
-        cursor: str | None = None,
-        top_k: int | None = None,
+        **options: Unpack[CapabilitySearchOptions],
     ) -> SkillDCICommandResult | dict[str, Any]:
         """Search the selected live catalogs, defaulting to all three on a new request."""
+        unexpected = options.keys() - CapabilitySearchOptions.__annotations__.keys()
+        if unexpected:
+            raise TypeError(f"Unknown capability search arguments: {', '.join(sorted(unexpected))}")
         if self._closed:
             raise RuntimeError("capability search binding is closed")
-        kinds = _selected_types(type) if type is not None else None
+        capability_types = options.get("type")
+        kinds = _selected_types(capability_types) if capability_types is not None else None
+        operation = options.get("operation")
         if operation is not None:
             operation = _enum(operation, _OPERATIONS, "operation")
-        if top_k is not None and (
-            isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= _MAX_TOP_K
-        ):
-            raise ValueError(f"top_k must be an integer from 1 to {_MAX_TOP_K}")
+        top_k = _page_limit(options.get("top_k"))
         async with self._lock:
             if self._closed:
                 raise RuntimeError("capability search binding is closed")
-            page = self._page_request(kinds, operation, category, query, cursor, top_k)
+            page = self._page_request(kinds, operation, options.get("category"), query, options.get("cursor"), top_k)
             catalogs = {}
             if self._catalog_candidates is not None:
                 for kind in page.kinds:
@@ -681,6 +700,14 @@ def _queries(query: str | list[str] | None) -> tuple[str, ...]:
             raise ValueError("query must contain 1-8 strings")
         return tuple(dict.fromkeys(_bounded_query(item, "query item") for item in query))
     return (_bounded_query(query, "query"),)
+
+
+def _page_limit(value: int | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_TOP_K:
+        raise ValueError(f"top_k must be an integer from 1 to {_MAX_TOP_K}")
+    return value
 
 
 def _selected_types(value: str | list[str] | tuple[str, ...]) -> tuple[str, ...]:
