@@ -286,8 +286,8 @@ class Model:
 
     The client is the same one the attribution agent uses: it normalizes OpenAI-compatible
     endpoints, follows the configured provider (OpenAI, Anthropic, ...), and keeps the
-    no-time-limit policy of Reward. One failed call (an error, a cut connection, or a reply
-    that is not JSON) is tried once more.
+    no-time-limit policy of Reward. A streamed call that fails or does not yield JSON is
+    retried once without streaming, for providers that cannot stream JSON replies.
     """
 
     def __init__(self, config):
@@ -314,16 +314,26 @@ class Model:
         )
         messages = [{"role": "system", "content": system + language + "\nReply with one JSON object only."},
                     {"role": "user", "content": content if images else user}]
-        error = None
-        for _ in range(2):  # one retry
-            try:
-                response = await self._model.invoke(
-                    messages,
-                    extra_body=self.extra or None,
-                    response_format={"type": "json_object"},
-                )
-                text = _answer_text(response)
-                return json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip()))
-            except Exception as failure:  # noqa: BLE001 - retry once
-                error = failure
-        raise error
+        stream_error = None
+        try:
+            # Streamed: a long non-streamed reply leaves the connection silent and gets cut.
+            parts = []
+            async for chunk in self._model.stream(
+                messages,
+                extra_body=self.extra or None,
+                response_format={"type": "json_object"},
+            ):
+                parts.append(_answer_text(chunk))
+            text = "".join(parts)
+            return json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip()))
+        except Exception as failure:  # noqa: BLE001 - providers may reject streamed JSON
+            stream_error = failure
+        try:
+            response = await self._model.invoke(
+                messages,
+                extra_body=self.extra or None,
+                response_format={"type": "json_object"},
+            )
+            return json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", _answer_text(response).strip()))
+        except Exception as failure:  # noqa: BLE001 - keep both causes
+            raise failure from stream_error

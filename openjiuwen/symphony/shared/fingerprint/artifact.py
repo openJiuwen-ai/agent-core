@@ -10,9 +10,9 @@ from pydantic import ValidationError as PydanticValidationError
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error, raise_error
+from openjiuwen.symphony.config import FINGERPRINT_SCHEMA_VERSION
 from openjiuwen.symphony.models import FingerprintArtifact
 from openjiuwen.symphony.shared.fingerprint._io import atomic_write_json, read_json
-from openjiuwen.symphony.shared.fingerprint.settings import FINGERPRINT_SCHEMA_VERSION
 
 FINGERPRINT_ARTIFACT_FILENAME = "fingerprint.json"
 

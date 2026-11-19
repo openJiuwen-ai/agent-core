@@ -1,3 +1,5 @@
+
+from openjiuwen.symphony.config import OrchestrationConfig
 import asyncio
 import json
 import multiprocessing
@@ -415,7 +417,7 @@ async def test_service_reuses_internal_relation_cache_and_force_bypasses_it(tmp_
         capability_provider=_service_inventory,
         model=first_llm,
         source_snapshot={"revision": 1},
-        graph_config={"require_consensus": False},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False}}),
     )
     await first.build()
     assert len(first_llm.calls) == 1
@@ -425,7 +427,7 @@ async def test_service_reuses_internal_relation_cache_and_force_bypasses_it(tmp_
         capability_provider=_service_inventory,
         model=None,
         source_snapshot={"revision": 1},
-        graph_config={"require_consensus": False},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False}}),
     )
     assert reader.status().fresh is True
     assert reader.read()["nodes"]
@@ -436,7 +438,7 @@ async def test_service_reuses_internal_relation_cache_and_force_bypasses_it(tmp_
         capability_provider=_service_inventory,
         model=reused_llm,
         source_snapshot={"revision": 2},
-        graph_config={"require_consensus": False},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False}}),
     )
     await reused.build()
     assert reused_llm.calls == []
@@ -461,7 +463,7 @@ async def test_service_build_identity_invalidates_artifact_and_cache(
         graph_artifact_root=tmp_path,
         capability_provider=_service_inventory,
         model=_CountingLLM(model="model-a"),
-        graph_config={"batch_size": 1, "require_consensus": False},
+        config=OrchestrationConfig(build={'matching': {'batch_size': 1, 'require_consensus': False}}),
     )
     built = await first.build()
     changed_llm = _CountingLLM(model="model-b" if identity_change == "model" else "model-a")
@@ -469,10 +471,7 @@ async def test_service_build_identity_invalidates_artifact_and_cache(
         graph_artifact_root=tmp_path,
         capability_provider=_service_inventory,
         model=changed_llm,
-        graph_config={
-            "batch_size": 2 if identity_change == "graph_config" else 1,
-            "require_consensus": False,
-        },
+        config=OrchestrationConfig(build={'matching': {'batch_size': 2 if identity_change == 'graph_config' else 1, 'require_consensus': False}}),
     )
 
     assert changed.status().fresh is False
@@ -490,7 +489,7 @@ async def test_real_openjiuwen_adapter_model_switch_invalidates_and_rebuilds(tmp
         graph_artifact_root=tmp_path,
         capability_provider=_service_inventory,
         model=_real_model("model-a", first_calls),
-        graph_config={"require_consensus": False},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False}}),
     )
     first_build = await first.build()
     assert len(first_calls) == 1
@@ -504,7 +503,7 @@ async def test_real_openjiuwen_adapter_model_switch_invalidates_and_rebuilds(tmp
         graph_artifact_root=tmp_path,
         capability_provider=_service_inventory,
         model=_real_model("model-b", second_calls),
-        graph_config={"require_consensus": False},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False}}),
     )
 
     assert second.status().fresh is False
@@ -552,7 +551,7 @@ async def test_real_model_token_request_config_invalidates_without_leaking_crede
                 "vendorToken": "request-vendor-secret",
             },
         ),
-        graph_config={"require_consensus": False},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False}}),
     )
     first_build = await first.build()
     first_request_signature = first.read()["config"]["llm"]["request_config_sha256"]
@@ -575,7 +574,7 @@ async def test_real_model_token_request_config_invalidates_without_leaking_crede
                 "vendorToken": "request-vendor-secret",
             },
         ),
-        graph_config={"require_consensus": False},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False}}),
     )
 
     assert second.status().fresh is False
@@ -607,7 +606,7 @@ async def test_candidate_graph_config_and_both_cache_schemas_invalidate_relation
         graph_artifact_root=tmp_path,
         capability_provider=_service_inventory,
         model=first_llm,
-        graph_config={"require_consensus": False, "max_port_mappings_per_candidate": 12},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False, 'max_port_mappings_per_candidate': 12}}),
     )
     await first.build()
     second_llm = _CountingLLM()
@@ -615,7 +614,7 @@ async def test_candidate_graph_config_and_both_cache_schemas_invalidate_relation
         graph_artifact_root=tmp_path,
         capability_provider=_service_inventory,
         model=second_llm,
-        graph_config={"require_consensus": False, "max_port_mappings_per_candidate": 7},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False, 'max_port_mappings_per_candidate': 7}}),
     )
 
     await second.build()
@@ -682,7 +681,7 @@ async def test_cached_rebuild_restores_batch_diagnostics_without_duplicates(tmp_
         capability_provider=inventory,
         model=first_llm,
         source_snapshot={"revision": 1},
-        graph_config={"require_consensus": False},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False}}),
     )
     await first.build()
     first_diagnostics = first.read()["diagnostics"]
@@ -692,7 +691,7 @@ async def test_cached_rebuild_restores_batch_diagnostics_without_duplicates(tmp_
         capability_provider=inventory,
         model=second_llm,
         source_snapshot={"revision": 2},
-        graph_config={"require_consensus": False},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False}}),
     )
 
     await second.build()
@@ -711,7 +710,7 @@ async def test_prompt_version_change_invalidates_artifact_and_cache(
         graph_artifact_root=tmp_path,
         capability_provider=_service_inventory,
         model=_CountingLLM(),
-        graph_config={"require_consensus": False},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False}}),
     )
     built = await first.build()
     monkeypatch.setattr(
@@ -723,7 +722,7 @@ async def test_prompt_version_change_invalidates_artifact_and_cache(
         graph_artifact_root=tmp_path,
         capability_provider=_service_inventory,
         model=changed_llm,
-        graph_config={"require_consensus": False},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False}}),
     )
 
     assert changed.status().fresh is False
@@ -757,7 +756,7 @@ async def test_source_snapshot_is_wrapped_without_leaking_secrets(tmp_path: Path
                 }
             ],
         },
-        graph_config={"require_consensus": False, "apiKey": "graph-config-secret"},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False}}),
     )
     await service.build()
 
@@ -798,7 +797,7 @@ async def test_unknown_source_key_value_changes_build_identity_without_leaking(t
         capability_provider=_service_inventory,
         model=_CountingLLM(),
         source_snapshot={"revision": "same", "vendorKey": "vendor-one"},
-        graph_config={"require_consensus": False},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False}}),
     )
     first_build = await first.build()
     first_hash = first.read()["source_snapshot"]["vendorKey_sha256"]
@@ -807,7 +806,7 @@ async def test_unknown_source_key_value_changes_build_identity_without_leaking(t
         capability_provider=_service_inventory,
         model=_CountingLLM(),
         source_snapshot={"revision": "same", "vendorKey": "vendor-two"},
-        graph_config={"require_consensus": False},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False}}),
     )
 
     assert second.status().fresh is False

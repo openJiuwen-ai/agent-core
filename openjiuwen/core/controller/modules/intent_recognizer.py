@@ -154,7 +154,11 @@ class IntentRecognizer:
             )
 
         from openjiuwen.core.runner import Runner
-        model = await Runner.resource_mgr.get_model(model_id=self._config.intent_llm_id, session=session)
+        model = await Runner.resource_mgr.get_model(
+            model_id=self._config.intent_llm_id,
+            session=session,
+            identity={"agent_id": "core.intent_recognizer", "agent_name": "core.intent_recognizer"},
+        )
         user_message = await self._prepare_user_message(query=texts[0].text)
         await context.add_messages(user_message)
         toolkits = IntentToolkits(event, self._config.intent_confidence_threshold)

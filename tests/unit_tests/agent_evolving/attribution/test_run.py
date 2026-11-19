@@ -1135,3 +1135,15 @@ async def test_a_real_attribution_agent_streams_both_rounds_through_one_session(
     assert len(rounds) >= 2 and outcome.wake_attempted  # the wake round streamed too
     assert "还在看轨迹。" in rounds[-1]  # ... and went on from the first round's conversation
     assert outcome.failure_kind == "incomplete" and not outcome.error_detail  # no "StreamQueue is already closed"
+
+
+async def test_develop_host_can_read_release_attribution_buckets() -> None:
+    runtime = NodeBackedRuntime(_nodes())
+    runtime.record_reward_failure("diag-1", [{"text_md": "购物清单不在文末", "start_node_id": "main:1"}])
+    runtime.record_skill_evolution("schedule", "把清单移到文末", 0.8)
+
+    assert runtime.attributions["diag-1"][0]["text_md"] == "购物清单不在文末"
+    assert runtime.skill_improvements == {"schedule": "把清单移到文末"}
+    assert runtime.record_attribution("diag-2", [{"text_md": "外婆出发太早"}]) == "recorded"
+    assert "diag-2" in runtime.reward_attributions
+    assert runtime.record_skill_improvement("wechat", "改到 17:00 以后") == "recorded"
