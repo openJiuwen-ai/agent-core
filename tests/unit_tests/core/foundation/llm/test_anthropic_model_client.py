@@ -468,6 +468,38 @@ class TestUsageFromAnthropic:
         assert chunk.usage_metadata is not None
         assert chunk.usage_metadata.model_name == "claude-served-4"
 
+    def test_message_delta_reuses_message_start_served_model(self):
+        start_usage = MagicMock()
+        start_usage.model_dump.return_value = {"input_tokens": 10, "output_tokens": 5}
+        start = MagicMock()
+        start.type = "message_start"
+        msg = MagicMock()
+        msg.id = "msg-1"
+        msg.model = "claude-served-4"
+        msg.usage = start_usage
+        start.message = msg
+
+        delta_usage = MagicMock()
+        delta_usage.model_dump.return_value = {
+            "input_tokens": 12,
+            "output_tokens": 7,
+        }
+        delta = MagicMock()
+        delta.type = "message_delta"
+        inner_delta = MagicMock()
+        inner_delta.stop_reason = "end_turn"
+        delta.delta = inner_delta
+        delta.usage = delta_usage
+
+        client = _make_client()
+        served_acc: list[str] = []
+        client._event_to_chunk(start, {}, served_acc)
+        chunk = client._event_to_chunk(delta, {}, served_acc)
+
+        assert chunk is not None
+        assert chunk.usage_metadata is not None
+        assert chunk.usage_metadata.model_name == "claude-served-4"
+
 
 # ---------------------------------------------------------------------------
 # E. Client registration / identity
