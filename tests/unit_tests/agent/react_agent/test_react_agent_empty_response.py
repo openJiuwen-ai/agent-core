@@ -402,6 +402,55 @@ class TestEmptyNoToolTurn(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertFalse(fallback, "must not duplicate fallback when queue has steering")
 
+    async def _invoke_with_tools(self, agent, responses):
+        async def _fake_execute(ctx, tool_calls, session, context):
+            return [{"tool_name": "bash", "tool_result": "ok"}] * len(tool_calls)
+
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses(responses)
+        session = _mock_session()
+        with patch.object(agent, "_get_llm", return_value=mock_llm), \
+                patch.object(agent, "_execute_tool_call", side_effect=_fake_execute), \
+                patch.object(agent, "_after_execute_tool_call_for_hitl",
+                             return_value=(None, None)), \
+                patch.object(agent, "_after_execute_tool_call", return_value=None):
+            result = await agent.invoke({"query": "work"}, session=session)
+        return result, mock_llm
+
+    async def test_tool_turn_resets_empty_retry_budget(self):
+        agent, _, _ = self._make_agent_with_mocks(max_iterations=8)
+
+        result, mock_llm = await self._invoke_with_tools(
+            agent,
+            [
+                _reasoning_only_empty(),
+                _tool_call_answer("bash"),
+                _reasoning_only_empty(),
+                _text_answer("recovered again"),
+            ],
+        )
+
+        self.assertEqual(result["result_type"], "answer")
+        self.assertEqual(result["output"], "recovered again")
+        self.assertEqual(mock_llm.call_count, 4)
+
+    async def test_consecutive_empties_after_tool_turn_still_bounded(self):
+        agent, _, _ = self._make_agent_with_mocks(max_iterations=8)
+
+        result, mock_llm = await self._invoke_with_tools(
+            agent,
+            [
+                _tool_call_answer("bash"),
+                _reasoning_only_empty(),
+                _reasoning_only_empty(),
+            ],
+        )
+
+        self.assertEqual(result["result_type"], "error")
+        self.assertEqual(result["output"], EMPTY_RESPONSE_MSG)
+        self.assertTrue(result["reasoning_present"])
+        self.assertEqual(mock_llm.call_count, 1 + EMPTY_RESPONSE_MAX_RETRIES + 1)
+
     async def test_empty_retry_budget_independent_of_soft_stop(self):
         """普通空响应重试预算与 soft-stop 续跑互相独立。"""
         agent, _, _ = self._make_agent_with_mocks(max_iterations=8)
