@@ -678,6 +678,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             result = self._executable.get_stream_output()
             if result is not None:
                 self._session.state().set_outputs(result)
+                await self.__trace_component_outputs__(result)
 
     async def _process_chunk(
         self, message, is_end_node: bool, end_stream_index: int, is_sub_graph: bool, ability: ComponentAbility

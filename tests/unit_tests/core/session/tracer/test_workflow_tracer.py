@@ -85,6 +85,18 @@ class InteractiveNode(WorkflowComponent):
         yield result
 
 
+class StreamNodeWithFinalOutput(WorkflowComponent):
+    """Streams frames and also exposes get_stream_output, mirroring the
+    LLMComponent / SubWorkflowComponent surface (bug #2319 coverage)."""
+
+    async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
+        for v in inputs.get("array"):
+            yield {"output": v}
+
+    def get_stream_output(self) -> dict:
+        return {"output": "final-answer"}
+
+
 class FinalizeRecorderHandler(TraceExtWorkflowHandler):
     """Extension handler recording every workflow tracer event per invoke_id.
 
@@ -197,6 +209,35 @@ class TestTraceWorkflow:
 
             chunks.append(payload)
         assert chunks == expect_chunks
+
+    async def test_stream_component_traces_final_output(self):
+        """Streaming nodes exposing get_stream_output must emit on_post_invoke with the final result (bug #2319)."""
+        handler = FinalizeRecorderHandler()
+        TracerHandlerRegistry.register_handler("finalize_recorder", handler)
+        try:
+            workflow = Workflow(card=WorkflowCard(id="test"))
+            workflow.set_start_comp("start", Start())
+            workflow.add_workflow_comp("producer", StreamNodeWithFinalOutput(), inputs_schema={"array": "${inputs}"})
+            workflow.set_end_comp(
+                "end", End(), stream_inputs_schema={"output": "${producer.output}"}, response_mode="streaming"
+            )
+            workflow.add_connection("start", "producer")
+            workflow.add_stream_connection("producer", "end")
+
+            async for _ in workflow.stream(
+                inputs={"inputs": [1, 2, 3]}, session=create_workflow_session(), stream_modes=[BaseStreamMode.TRACE]
+            ):
+                pass
+        finally:
+            TracerHandlerRegistry.unregister_handler("finalize_recorder")
+
+        post_invokes = [
+            kwargs
+            for name, kwargs in handler.events
+            if name == "on_post_invoke" and kwargs.get("invoke_id") == "producer"
+        ]
+        assert len(post_invokes) == 1
+        assert post_invokes[0].get("outputs") == {"output": "final-answer"}
 
     async def test_seq_exec_stream_workflow_with_tracer(self):
         """
