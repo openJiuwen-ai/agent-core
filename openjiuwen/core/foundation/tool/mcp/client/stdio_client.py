@@ -25,6 +25,15 @@ class StdioClient(McpClient):
         self._exit_stack = AsyncExitStack()
         self._is_disconnected: bool = False
 
+    def _resolve_timeout(self, timeout: float) -> float:
+        """Resolve an operation bound: explicit > config timeout_s > 60s."""
+        if isinstance(timeout, (int, float)) and timeout > 0:
+            return float(timeout)
+        configured = self._params.get("timeout_s")
+        if isinstance(configured, (int, float)) and configured > 0:
+            return float(configured)
+        return 60.0
+
     async def connect(self, *, timeout: float = NO_TIMEOUT) -> bool:
         """Establish Stdio connection to the tool server"""
         from mcp import ClientSession, StdioServerParameters
@@ -47,14 +56,28 @@ class StdioClient(McpClient):
             self._read, self._write = await self._exit_stack.enter_async_context(self._client)
             self._session = await self._exit_stack.enter_async_context(
                 ClientSession(self._read, self._write, sampling_callback=None))
-            await self._session.initialize()
+            # An stdio wrapper may wait on an interactive flow (e.g. OAuth) and
+            # never answer initialize(); bound it so the caller cannot hang.
+            actual_timeout = self._resolve_timeout(timeout)
+            async with asyncio.timeout(actual_timeout):
+                await self._session.initialize()
             self._is_disconnected = False
             logger.info("Stdio client connected successfully")
             return True
-        except Exception as e:
-            logger.error(f"Stdio connection failed: {e}")
-            self._last_connect_error = e
-            await self.disconnect()
+        except BaseException as e:
+            error = e
+            if isinstance(e, TimeoutError):
+                error = TimeoutError(
+                    f"stdio handshake did not complete within {self._resolve_timeout(timeout):g}s"
+                )
+            logger.error(f"Stdio connection failed: {error}")
+            self._last_connect_error = error
+            try:
+                await self.disconnect()
+            except BaseException as cleanup_exc:  # noqa: BLE001 - teardown must not mask the cause
+                logger.debug(f"Stdio connect cleanup failed: {cleanup_exc!r}")
+            if not isinstance(e, Exception):
+                raise
             return False
 
     async def disconnect(self, *, timeout: float = NO_TIMEOUT) -> bool:
@@ -88,7 +111,9 @@ class StdioClient(McpClient):
             raise RuntimeError("Not connected to Stdio server")
 
         try:
-            tools_response = await self._session.list_tools()
+            actual_timeout = self._resolve_timeout(timeout)
+            async with asyncio.timeout(actual_timeout):
+                tools_response = await self._session.list_tools()
             tools_list = [
                 McpToolCard(
                     name=tool.name,
@@ -100,6 +125,10 @@ class StdioClient(McpClient):
             ]
             logger.info(f"Retrieved {len(tools_list)} tools from Stdio server")
             return tools_list
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"stdio list_tools did not complete within {actual_timeout:g}s"
+            ) from exc
         except Exception as e:
             logger.error(f"Failed to list tools via Stdio: {e}")
             raise
