@@ -26,6 +26,7 @@ generated: true
 | [core/foundation/llm](#module-core-foundation-llm) |
 | [core/runner/drunner/dmessage_queue](#module-core-runner-drunner-dmessage_queue) |
 | [core/session](#module-core-session) |
+| [core/session/tracer](#module-core-session-tracer) |
 | [core/sys_operation](#module-core-sys_operation) |
 | [extensions.tracer_otel](#module-extensions-tracer_otel) |
 | [extensions/a2a](#module-extensions-a2a) |
@@ -257,6 +258,7 @@ generated: true
 | [B_20261104_2030_cancellation-cause-lifecycle](bugfix/core_runtime/B_20261104_2030_cancellation-cause-lifecycle.md) | B | 压缩取消一律误报 failed 及标记生命周期残留窗口缺陷 | CharlesWang2030 | 无独立 D：c4e52b7c 引入 cancellation cause 注册表属于常规缺陷修复，未归档独立设计；本次为对该提交检视发现的标记生命周期缺陷的后续修复，沿用注册表现有契约（TTL、非消费式 resolve、前缀继承）。 |
 | [B_20261104_2054_recovered-context-seed-and-execution-environment](bugfix/agent_teams/B_20261104_2054_recovered-context-seed-and-execution-environment.md) | B | 冷恢复后成员策略 seed 与执行环境传递修复 | alan_cheng | 无独立 D：无独立 D；修复 F_20261104_1720_tool-execution-environment / F_20261104_1721_session-execution-settings 在冷恢复与远程调用路径上的遗漏。 |
 | [B_20261105_0911_swarmflow-thirdparty-trajectory](bugfix/agent_teams/B_20261105_0911_swarmflow-thirdparty-trajectory.md) | B | Swarmflow 三方 Agent 轨迹未绑定成员身份 | wangcan103 | 无独立 D：小范围补齐既有 HarnessTrajectoryRecorder 的 Swarmflow 接线，不新增协议或公开 API。 |
+| [B_20261117_1626_directed-assignment-notice-dropped](bugfix/agent_teams/B_20261117_1626_directed-assignment-notice-dropped.md) | B | 定向指派/改派的通知被接收端 pending 判据丢弃，新 owner 永不唤醒 | xiajing | 无独立 D：缺陷修复只改消费端投递判据，不新增契约与机制；依据见 S_03（TASK_CLAIMED 定向投递）与 jiuwenswarm 问题 |
 | [S_01_public-api-and-spec-flow](specs/agent_teams/S_01_public-api-and-spec-flow.md) | S | S_01 公开 API 表面与 Spec 流 | alan_cheng | — |
 | [S_02_team-agent-architecture](specs/agent_teams/S_02_team-agent-architecture.md) | S | TeamAgent 架构规约 | alan_cheng | — |
 | [S_03_coordination-protocol](specs/agent_teams/S_03_coordination-protocol.md) | S | Coordination Protocol | alan_cheng | — |
@@ -288,7 +290,6 @@ generated: true
 | [S_27_external-harness-member-runtime](specs/agent_teams/S_27_external-harness-member-runtime.md) | S | S_27 External Harness Member Runtime | alan_cheng | — |
 | [S_28_group-conversation-and-delegation](specs/agent_teams/S_28_group-conversation-and-delegation.md) | S | S_28 群聊输入与文件归档 | openJiuwen-bot | — |
 | [S_29_team-organization](specs/agent_teams/S_29_team-organization.md) | S | Team Organization | ZezeChang | — |
-| [B_20261117_1626_directed-assignment-notice-dropped](bugfix/agent_teams/B_20261117_1626_directed-assignment-notice-dropped.md) | B | 定向指派/改派的通知被接收端 pending 判据丢弃，新 owner 永不唤醒 | xiajing | openjiuwen/agent_teams | openjiuwen/agent_teams/agent/coordination/handlers/task_board.py, tests/unit_tests/agent_teams/agent/test_directed_assignment_notice.py | 无独立 D：只改消费端投递判据，沿用 S_03 的 TASK_CLAIMED 定向投递契约 |
 
 <a id="module-agent_teams-workflow"></a>
 
@@ -378,6 +379,14 @@ generated: true
 | [B_20261103_1050_grandocean-review-feedback](bugfix/core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
 | [S_01_runtime-data-compatibility](specs/core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | — |
 
+<a id="module-core-session-tracer"></a>
+
+## core/session/tracer
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261108_2028_llm-span-model-display-name](bugfix/core_runtime/B_20261108_2028_llm-span-model-display-name.md) | B | llm span 的 gen_ai.request.model 与 span 名显示网关服务 ID 而非模型名缺陷 | yidaaichixia | 无独立 D：常规缺陷修复（遥测展示层纯增量可选字段），无方案取舍与公开契约变更，未归档独立设计。 |
+
 <a id="module-core-sys_operation"></a>
 
 ## core/sys_operation
@@ -426,6 +435,7 @@ generated: true
 |---|---|---|---|---|
 | [F_20261104_1638_drop-llm-span-cost-attrs](features/F_20261104_1638_drop-llm-span-cost-attrs.md) | F | LLM span 去掉 usage cost 属性（openjiuwen.gen_ai.usage.*_cost） | weixin_39960157 | 无独立 D：纯删减类变更（去掉一处已定属性的发射），无方案级取舍需要独立设计；键的引入背景与命名迁移见 |
 | [F_20261104_2034_converge-tpot-attr-key](features/F_20261104_2034_converge-tpot-attr-key.md) | F | TPOT 属性键收敛（inter_token_latency_ms → tpot_ms） | weixin_39960157 | 无独立 D：键名纠错类变更；"one fact, one key / no reader fallback chain" 的规范依据为 observability/semconv.py 成文评注（b0134c30d 引入、544ea2838 重申），无独立方案取舍需要设计文档。 |
+| [B_20261108_2028_llm-span-model-display-name](bugfix/core_runtime/B_20261108_2028_llm-span-model-display-name.md) | B | llm span 的 gen_ai.request.model 与 span 名显示网关服务 ID 而非模型名缺陷 | yidaaichixia | 无独立 D：常规缺陷修复（遥测展示层纯增量可选字段），无方案取舍与公开契约变更，未归档独立设计。 |
 
 <a id="module-harness"></a>
 
