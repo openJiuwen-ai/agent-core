@@ -57,6 +57,7 @@ from openjiuwen.core.workflow import (
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.runtime import TeamRuntimeManager
+    from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
 
 
 class _RunnerImpl(_TeamRunnerMixin):
@@ -99,6 +100,7 @@ class _RunnerImpl(_TeamRunnerMixin):
         self._root_task_group_ready = None
         self._root_task_group_stop = None
         self._team_runtime_manager: Optional["TeamRuntimeManager"] = None
+        self._extension_bus: Optional["ExtensionEventBusProtocol"] = None
 
     @property
     def resource_mgr(self) -> ResourceMgr:
@@ -263,6 +265,14 @@ class _RunnerImpl(_TeamRunnerMixin):
             RunnerConfig: The current configuration object
         """
         return get_runner_config()
+
+    def set_extension_bus(self, bus: Optional["ExtensionEventBusProtocol"]) -> None:
+        """Set the host-built extension bus used by AgentLoop events, or None to unwire it."""
+        self._extension_bus = bus
+
+    def get_extension_bus(self) -> Optional["ExtensionEventBusProtocol"]:
+        """Return the AgentLoop extension bus, or None when no host bus is published."""
+        return self._extension_bus
 
     async def start(self) -> bool:
         """Start the runner and its associated components, such as message queue."""
@@ -746,6 +756,20 @@ class Runner(_TeamRunnerClassMixin):
             RunnerConfig: The current configuration object
         """
         return GLOBAL_RUNNER.get_config()
+
+    @classmethod
+    def set_extension_bus(cls, bus: Optional["ExtensionEventBusProtocol"]) -> None:
+        """Publish the host-built extension bus to AgentLoop, or pass None to unwire it.
+
+        The host registers events and runs ``ops.build`` before publishing; Runner
+        only holds the reference and is independent from ``set_team_extension_bus``.
+        """
+        GLOBAL_RUNNER.set_extension_bus(bus)
+
+    @classmethod
+    def get_extension_bus(cls) -> Optional["ExtensionEventBusProtocol"]:
+        """Return the published AgentLoop extension bus, or None."""
+        return GLOBAL_RUNNER.get_extension_bus()
     
     @classmethod
     async def start(cls) -> bool:

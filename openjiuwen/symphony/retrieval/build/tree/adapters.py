@@ -134,7 +134,7 @@ class TreeBuilderAdaptersMixin(TreeBuilderMixin):
         """Call LLM and return response."""
         return self.llm_runtime.call_llm(prompt, is_retry=is_retry, retry_left=retry_left)
 
-    def _call_llm_json(self, prompt: str, max_retries: int = 3, is_retry: bool = False) -> dict:
+    def _call_llm_json(self, prompt: str, max_retries: int | None = None, is_retry: bool = False) -> dict:
         """Call LLM expecting a JSON dict response, with retry on format errors."""
         return self.llm_runtime.call_llm_json(prompt, max_retries=max_retries, is_retry=is_retry)
 

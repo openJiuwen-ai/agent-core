@@ -25,6 +25,9 @@ dependencies = [
     # Date & time
     "python-dateutil>=2.9.0.post0",
     # File & locking
+    # filelock 4.x binds a lock hold to the asyncio task that took it, while
+    # `HybridAsyncReadWriteLock` shares one hold between reader tasks. Lifting
+    # this bound needs that class redesigned first.
     "filelock>=3.25.0,<4",
     "portalocker>=3.2.0",
     "aiofiles>=25.1.0",
@@ -229,6 +232,8 @@ include = ["openjiuwen*"]
 openjiuwen = [
     "**/prompts/**/*.md",
     "**/locales/**/*.md",
+    "agent_evolving/reward/metrics/*.md",
+    "agent_evolving/reward/metrics/personal_assistant.md",
     "**/harness/resources/*.yaml",
     "dev_tools/agent_builder/resource/*.json",
     "extensions/observability/schemas/*.json",

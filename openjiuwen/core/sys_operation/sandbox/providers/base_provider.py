@@ -177,7 +177,7 @@ class BaseShellProvider(BaseShellProtocal, ABC):
             *,
             cwd: Optional[str] = None,
             timeout: Optional[int] = 300,
-            environment: Optional[Dict[str, str]] = None,
+            environment: dict[str, str | None] | None = None,
             options: Optional[Dict[str, Any]] = None
     ) -> ExecuteCmdResult:
         raise NotImplementedError(f"{self.__class__.__name__}.execute_cmd is not implemented")
@@ -188,7 +188,7 @@ class BaseShellProvider(BaseShellProtocal, ABC):
             *,
             cwd: Optional[str] = None,
             timeout: Optional[int] = 300,
-            environment: Optional[Dict[str, str]] = None,
+            environment: dict[str, str | None] | None = None,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[ExecuteCmdStreamResult]:
         raise NotImplementedError(f"{self.__class__.__name__}.execute_cmd_stream is not implemented")
@@ -207,7 +207,7 @@ class BaseCodeProvider(BaseCodeProtocal, ABC):
             *,
             language: Literal['python', 'javascript'] = "python",
             timeout: int = 300,
-            environment: Optional[Dict[str, str]] = None,
+            environment: dict[str, str | None] | None = None,
             cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> ExecuteCodeResult:
@@ -219,7 +219,7 @@ class BaseCodeProvider(BaseCodeProtocal, ABC):
             *,
             language: Literal['python', 'javascript'] = "python",
             timeout: int = 300,
-            environment: Optional[Dict[str, str]] = None,
+            environment: dict[str, str | None] | None = None,
             cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[ExecuteCodeStreamResult]:

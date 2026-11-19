@@ -618,7 +618,7 @@ class TestOnTeammateCreatedFork:
         """Build a TeamAgent with its runtime parts mocked.
 
         Args:
-            fork_info: What ``consume_fork_on_spawn`` returns (None = no fork).
+            fork_info: What ``pending_fork_on_spawn`` returns (None = no fork).
             checkpoints: The leader's ``_named_checkpoints`` mapping.
             source: When given, register an in-process spawned member under
                 this name so ``_resolve_fork_native`` resolves it.
@@ -634,13 +634,16 @@ class TestOnTeammateCreatedFork:
             return_value=cls._make_native()
         )
         agent._configurator.team_backend = MagicMock()
-        agent._configurator.team_backend.consume_fork_on_spawn = MagicMock(
+        agent._configurator.team_backend.pending_fork_on_spawn = MagicMock(
             return_value=fork_info
         )
         agent._configurator.message_manager = AsyncMock()
         agent._named_checkpoints = dict(checkpoints or {})
         agent._spawn_manager = MagicMock()
         agent._spawn_manager.spawned_handles = {}
+        agent._spawn_manager.lookup_inprocess_agent = lambda name: getattr(
+            agent._spawn_manager.spawned_handles.get(name), "agent_ref", None
+        )
         if source is not None:
             handle = MagicMock()
             handle.agent_ref = MagicMock()
