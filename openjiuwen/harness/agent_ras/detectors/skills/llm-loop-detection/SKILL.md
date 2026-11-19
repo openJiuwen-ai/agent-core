@@ -30,6 +30,8 @@ description: Plan-execution semantic judge for LLM thinking-loop faults (PR#3102
 - 大量铺垫与重复论证，迟迟不收敛到下一步或结论
 - 审慎复核本身不算异常；只有「纠结占主导、推进极慢」才判 overthinking
 
+- 判 overthinking 时必须额外输出 `has_progress` 字段（见输出格式）
+
 ### none（正常）
 
 - 推理在引入新信息、缩小选项、或明确向答案推进
@@ -65,6 +67,7 @@ description: Plan-execution semantic judge for LLM thinking-loop faults (PR#3102
 |------|------|------|------|
 | `abnormal` | boolean | 是 | 是否异常 |
 | `primary_fault` | string | 是 | `none` / `semantic_deadlock` / `text_degradation` / `overthinking` |
+| `has_progress` | boolean | 仅 `primary_fault == "overthinking"` 时必填 | 是否存在可观察的推进证据：引入新信息、覆盖范围扩大、结论逐步收敛、出现阶段性产出。「结论在缓慢前进」→ `true`；「原地重复、无新内容、不前进」→ `false`。其余 `primary_fault` 不输出该字段 |
 | `confidence` | number | 否 | 0.0–1.0 |
 | `rationale` | string | 否 | 简短判定理由 |
 
@@ -76,6 +79,30 @@ description: Plan-execution semantic judge for LLM thinking-loop faults (PR#3102
   "primary_fault": "text_degradation",
   "confidence": 0.85,
   "rationale": "URL/词语被撕碎交叉拼接，推理链不可读"
+}
+```
+
+示例（过度思考且结论在缓慢前进）：
+
+```json
+{
+  "abnormal": true,
+  "primary_fault": "overthinking",
+  "has_progress": true,
+  "confidence": 0.75,
+  "rationale": "反复权衡但条目覆盖在扩大，结论在缓慢前进，非语义死锁"
+}
+```
+
+示例（过度思考且原地重复）：
+
+```json
+{
+  "abnormal": true,
+  "primary_fault": "overthinking",
+  "has_progress": false,
+  "confidence": 0.8,
+  "rationale": "同一批条目换说法反复权衡，结论与覆盖范围均无推进"
 }
 ```
 

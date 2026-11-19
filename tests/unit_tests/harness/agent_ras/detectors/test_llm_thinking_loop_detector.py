@@ -784,3 +784,242 @@ class TestWindowTruncation:
         for _ in range(10):
             await det.observe(_stream_chunk("x" * 100))
         assert len(det._buffers["llm_output"][0]) <= config.window_max_chars
+
+
+class _SeqAgents:
+    """Skill agent returning a scripted sequence of verdicts (last repeats)."""
+
+    def __init__(self, responses: list[dict]):
+        self.responses = list(responses)
+        self.calls: list[str] = []
+
+    async def invoke_skill(self, *, role: str, skill_name: str, payload: str, timeout: float):
+        self.calls.append(payload)
+        if len(self.responses) > 1:
+            return self.responses.pop(0)
+        return self.responses[0]
+
+
+class TestOverthinkingProgressExemption:
+    """BUG20261116410047: overthinking verdicts with progress evidence must
+    be exempted from soft-stop (observe-only), bounded by caps; deadlock and
+    no-progress verdicts keep raising anomalies as before."""
+
+    def _config(self, **overrides):
+        params = dict(
+            semantic_eval_chars=200,
+            semantic_content_enabled=True,
+            detection_start_chars=1,
+            window_max_chars=100,
+        )
+        params.update(overrides)
+        return LlmThinkingLoopConfig(**params)
+
+    async def _wait_until(self, predicate, attempts: int = 200):
+        for _ in range(attempts):
+            if predicate():
+                return True
+            await asyncio.sleep(0.01)
+        return predicate()
+
+    @pytest.mark.asyncio
+    async def test_exempt_with_progress_and_novelty(self):
+        agents = _CaptureAgents(response={
+            "abnormal": True,
+            "primary_fault": "overthinking",
+            "has_progress": True,
+            "confidence": 0.75,
+        })
+        captured: list = []
+
+        async def handler(anomaly, chunk_type):
+            captured.append(anomaly)
+
+        det = LlmThinkingLoopDetector(self._config(), agents=agents)
+        det.set_async_recovery_handler(handler)
+        await det.observe(_stream_chunk("x" * 200))
+        assert await self._wait_until(
+            lambda: agents.calls and not det.has_eval_in_flight()
+        )
+        await asyncio.sleep(0.05)
+        ch = det._plan_exec_channel("llm_output")
+        assert captured == []
+        assert ch.progress_exempt_count == 1
+        assert not ch.detection_latched
+        assert ch.last_evaluated_pos == 200
+        assert not det.has_eval_in_flight()
+
+    @pytest.mark.asyncio
+    async def test_exempt_tolerates_string_true(self):
+        agents = _CaptureAgents(response={
+            "abnormal": True,
+            "primary_fault": "overthinking",
+            "has_progress": "true",
+        })
+        captured: list = []
+
+        async def handler(anomaly, chunk_type):
+            captured.append(anomaly)
+
+        det = LlmThinkingLoopDetector(self._config(), agents=agents)
+        det.set_async_recovery_handler(handler)
+        await det.observe(_stream_chunk("x" * 200))
+        assert await self._wait_until(
+            lambda: agents.calls and not det.has_eval_in_flight()
+        )
+        await asyncio.sleep(0.05)
+        assert captured == []
+        assert det._plan_exec_channel("llm_output").progress_exempt_count == 1
+
+    @pytest.mark.asyncio
+    async def test_no_exempt_without_has_progress(self):
+        agents = _CaptureAgents(response={
+            "abnormal": True,
+            "primary_fault": "overthinking",
+        })
+        captured: list = []
+
+        async def handler(anomaly, chunk_type):
+            captured.append(anomaly)
+
+        det = LlmThinkingLoopDetector(self._config(), agents=agents)
+        det.set_async_recovery_handler(handler)
+        await det.observe(_stream_chunk("x" * 200))
+        assert await self._wait_until(lambda: captured)
+        anomaly = captured[0]
+        assert anomaly.evidence.get("primary_fault") == "overthinking"
+        assert anomaly.evidence.get("skill_has_progress") is None
+        assert det._plan_exec_channel("llm_output").detection_latched
+
+    @pytest.mark.asyncio
+    async def test_no_exempt_for_deadlock_even_with_progress_flag(self):
+        agents = _CaptureAgents(response={
+            "abnormal": True,
+            "primary_fault": "semantic_deadlock",
+            "has_progress": True,
+        })
+        captured: list = []
+
+        async def handler(anomaly, chunk_type):
+            captured.append(anomaly)
+
+        det = LlmThinkingLoopDetector(self._config(), agents=agents)
+        det.set_async_recovery_handler(handler)
+        await det.observe(_stream_chunk("x" * 200))
+        assert await self._wait_until(lambda: captured)
+        assert captured[0].evidence.get("primary_fault") == "semantic_deadlock"
+
+    @pytest.mark.asyncio
+    async def test_exempt_cap_exhausted_then_anomaly(self):
+        agents = _SeqAgents([
+            {"abnormal": True, "primary_fault": "overthinking", "has_progress": True},
+            {"abnormal": True, "primary_fault": "overthinking", "has_progress": True},
+        ])
+        captured: list = []
+
+        async def handler(anomaly, chunk_type):
+            captured.append(anomaly)
+
+        det = LlmThinkingLoopDetector(
+            self._config(overthinking_progress_exempt_max=1), agents=agents,
+        )
+        det.set_async_recovery_handler(handler)
+        await det.observe(_stream_chunk("x" * 200))
+        assert await self._wait_until(
+            lambda: agents.calls and not det.has_eval_in_flight()
+        )
+        assert det._plan_exec_channel("llm_output").progress_exempt_count == 1
+        await det.observe(_stream_chunk("a" * 200))
+        assert await self._wait_until(lambda: len(agents.calls) >= 2 and captured)
+        anomaly = captured[0]
+        assert anomaly.evidence.get("progress_exempt_count") == 1
+        assert det._plan_exec_channel("llm_output").detection_latched
+
+    @pytest.mark.asyncio
+    async def test_no_exempt_on_low_novelty(self):
+        # Second window rehashes the same content → novelty 0 → no exemption.
+        agents = _SeqAgents([
+            {"abnormal": True, "primary_fault": "overthinking", "has_progress": True},
+            {"abnormal": True, "primary_fault": "overthinking", "has_progress": True},
+        ])
+        captured: list = []
+
+        async def handler(anomaly, chunk_type):
+            captured.append(anomaly)
+
+        det = LlmThinkingLoopDetector(self._config(), agents=agents)
+        det.set_async_recovery_handler(handler)
+        await det.observe(_stream_chunk("x" * 200))
+        assert await self._wait_until(
+            lambda: agents.calls and not det.has_eval_in_flight()
+        )
+        assert det._plan_exec_channel("llm_output").progress_exempt_count == 1
+        await det.observe(_stream_chunk("x" * 200))
+        assert await self._wait_until(lambda: len(agents.calls) >= 2 and captured)
+        assert captured[0].evidence.get("progress_novelty") == 0.0
+        assert det._plan_exec_channel("llm_output").detection_latched
+
+    @pytest.mark.asyncio
+    async def test_no_exempt_beyond_char_cap(self):
+        agents = _CaptureAgents(response={
+            "abnormal": True,
+            "primary_fault": "overthinking",
+            "has_progress": True,
+        })
+        captured: list = []
+
+        async def handler(anomaly, chunk_type):
+            captured.append(anomaly)
+
+        det = LlmThinkingLoopDetector(
+            self._config(overthinking_progress_exempt_max_chars=1), agents=agents,
+        )
+        det.set_async_recovery_handler(handler)
+        await det.observe(_stream_chunk("x" * 200))
+        assert await self._wait_until(lambda: captured)
+        assert det._plan_exec_channel("llm_output").detection_latched
+
+    @pytest.mark.asyncio
+    async def test_exempt_disabled_by_config(self):
+        agents = _CaptureAgents(response={
+            "abnormal": True,
+            "primary_fault": "overthinking",
+            "has_progress": True,
+        })
+        captured: list = []
+
+        async def handler(anomaly, chunk_type):
+            captured.append(anomaly)
+
+        det = LlmThinkingLoopDetector(
+            self._config(overthinking_progress_exempt=False), agents=agents,
+        )
+        det.set_async_recovery_handler(handler)
+        await det.observe(_stream_chunk("x" * 200))
+        assert await self._wait_until(lambda: captured)
+        assert det._plan_exec_channel("llm_output").detection_latched
+
+    @pytest.mark.asyncio
+    async def test_exempt_state_resets_per_model_call(self):
+        agents = _CaptureAgents(response={
+            "abnormal": True,
+            "primary_fault": "overthinking",
+            "has_progress": True,
+        })
+        captured: list = []
+
+        async def handler(anomaly, chunk_type):
+            captured.append(anomaly)
+
+        det = LlmThinkingLoopDetector(
+            self._config(overthinking_progress_exempt_max=1), agents=agents,
+        )
+        det.set_async_recovery_handler(handler)
+        await det.observe(_stream_chunk("x" * 200))
+        assert await self._wait_until(
+            lambda: agents.calls and not det.has_eval_in_flight()
+        )
+        assert det._plan_exec_channel("llm_output").progress_exempt_count == 1
+        det.reset()
+        assert det._plan_exec_channel("llm_output").progress_exempt_count == 0
+        assert captured == []
