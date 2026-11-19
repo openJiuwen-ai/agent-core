@@ -282,7 +282,14 @@ class NativeHarness(DeepAgent):
         if raw_template is not None:
             from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec
 
-            template = AgentTemplateSpec.model_validate(raw_template)
+            try:
+                template = AgentTemplateSpec.model_validate(raw_template)
+            except Exception as exc:
+                raise build_error(
+                    StatusCode.DEEPAGENT_LOAD_AGENT_TEMPLATE_ERROR,
+                    error_msg=str(exc),
+                    cause=exc,
+                ) from exc
             await self.load_agent_template_spec(template, context=self._build_context)
         self._prepared = True
 

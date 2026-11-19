@@ -12,6 +12,8 @@ import pytest
 
 from openjiuwen.agent_teams.harness.native_harness import NativeHarness
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness import deep_agent as deep_agent_module
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.build_context import BuildContext
@@ -147,3 +149,23 @@ async def test_prepare_without_template_preserves_existing_behavior(
     await harness._prepare()
 
     assert calls == ["initialize"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_invalid_template_uses_template_load_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = make_spec()
+    spec.agent_template_spec = {"agent_card": "invalid-card"}
+    harness = NativeHarness(spec)
+
+    async def _ensure_initialized() -> None:
+        pass
+
+    monkeypatch.setattr(harness, "ensure_initialized", _ensure_initialized)
+
+    with pytest.raises(BaseError) as raised:
+        await harness._prepare()
+
+    assert raised.value.status == StatusCode.DEEPAGENT_LOAD_AGENT_TEMPLATE_ERROR
+    assert not harness._prepared
