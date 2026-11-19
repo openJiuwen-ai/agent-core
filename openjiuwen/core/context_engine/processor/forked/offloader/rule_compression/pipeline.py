@@ -12,7 +12,7 @@ from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.query_terms import extract_query_terms
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.router import RuleContentRouter
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.types import RuleContext
-from openjiuwen.core.context_engine.token.encode_guard import CHARS_PER_TOKEN
+from openjiuwen.core.context_engine.token.encode_guard import CHARS_PER_TOKEN, estimate_tokens
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, UserMessage
 
 
@@ -79,11 +79,17 @@ class RuleCompressionPipeline:
             tool_name,
             tool_arguments,
         )
+        # Derive the token budget from max_chars using this payload's density so
+        # CJK (~1 char/token) and ASCII (~3 chars/token) share the same semantics
+        # as encode_guard.estimate_tokens / the on-add token gate.
+        density = estimate_tokens(original) / max(len(original), 1)
+        max_tokens = max(int(max_chars * density), 1)
+        half_tokens = max(max_tokens // 2, 1)
         rule_ctx = RuleContext(
-            max_tokens=max(max_chars // CHARS_PER_TOKEN, 1),
-            head_tokens=max(max_chars // (CHARS_PER_TOKEN * 2), 1),
-            tail_tokens=max(max_chars // (CHARS_PER_TOKEN * 2), 1),
-            count_tokens=lambda text: max(len(text) // CHARS_PER_TOKEN, 1),
+            max_tokens=max_tokens,
+            head_tokens=half_tokens,
+            tail_tokens=half_tokens,
+            count_tokens=lambda text: max(estimate_tokens(text), 1),
             query_terms=query_terms,
             tool_name=tool_name,
         )

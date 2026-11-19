@@ -209,6 +209,39 @@ def test_create_general_tools_returns_list(temp_dir):
 
     assert isinstance(tools, list)
     assert len(tools) > 0
+    for tool in tools:
+        desc = getattr(getattr(tool, "card", None), "description", None)
+        assert isinstance(desc, str) and desc.strip()
+
+
+def test_create_general_tools_description_follows_language(temp_dir):
+    """ToolCard descriptions must follow toolkit language (TeamSpec locale)."""
+    from openjiuwen.harness.prompts.tools.memory import MEMORY_SEARCH_DESCRIPTION
+
+    workspace = MockWorkspace(temp_dir)
+
+    cn_toolkit = MemberMemoryToolkit(
+        member_name="cn",
+        team_name="team1",
+        workspace=workspace,
+        scenario="general",
+        language="cn",
+    )
+    en_toolkit = MemberMemoryToolkit(
+        member_name="en",
+        team_name="team1",
+        workspace=workspace,
+        scenario="general",
+        language="en",
+    )
+    cn_toolkit._ctx = MagicMock(spec=MemoryToolContext)
+    en_toolkit._ctx = MagicMock(spec=MemoryToolContext)
+
+    cn_search = next(t for t in _create_general_tools(cn_toolkit, read_only=True) if t.card.name == "memory_search")
+    en_search = next(t for t in _create_general_tools(en_toolkit, read_only=True) if t.card.name == "memory_search")
+
+    assert cn_search.card.description == MEMORY_SEARCH_DESCRIPTION["cn"]
+    assert en_search.card.description == MEMORY_SEARCH_DESCRIPTION["en"]
 
 
 def test_create_general_tools_read_only(temp_dir):

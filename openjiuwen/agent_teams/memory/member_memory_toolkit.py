@@ -26,6 +26,24 @@ from openjiuwen.core.memory.lite.memory_tool_ops import (
     read_memory_with_context,
     write_memory_with_context,
 )
+from openjiuwen.harness.prompts import resolve_language
+from openjiuwen.harness.prompts.tools.coding_memory import (
+    CODING_MEMORY_EDIT_DESCRIPTION,
+    CODING_MEMORY_READ_DESCRIPTION,
+    CODING_MEMORY_WRITE_DESCRIPTION,
+)
+from openjiuwen.harness.prompts.tools.memory import (
+    EDIT_MEMORY_DESCRIPTION,
+    MEMORY_GET_DESCRIPTION,
+    MEMORY_SEARCH_DESCRIPTION,
+    READ_MEMORY_DESCRIPTION,
+    WRITE_MEMORY_DESCRIPTION,
+)
+
+
+def _tool_desc(table: dict[str, str], language: str) -> str:
+    lang = resolve_language(language)
+    return table.get(lang) or table["cn"]
 
 if TYPE_CHECKING:
     from openjiuwen.core.sys_operation.sys_operation import SysOperation
@@ -43,6 +61,7 @@ class MemberMemoryToolkit:
         embedding_config: Optional[EmbeddingConfig] = None,
         sys_operation: Optional["SysOperation"] = None,
         read_only: bool = False,
+        language: str = "cn",
     ) -> None:
         self._member_name = member_name
         self._team_name = team_name
@@ -51,6 +70,7 @@ class MemberMemoryToolkit:
         self._embedding_config = embedding_config
         self._sys_operation = sys_operation
         self._read_only = read_only
+        self._language = resolve_language(language)
         self._manager: Optional[MemoryIndexManager] = None
         self._ctx: Optional[Union[MemoryToolContext, CodingMemoryToolContext]] = None
         self._tools: List[LocalFunction] = []
@@ -148,16 +168,25 @@ class MemberMemoryToolkit:
     def member_name(self):
         return self._member_name
 
+    @property
+    def language(self) -> str:
+        return self._language
+
 
 def _create_general_tools(toolkit: MemberMemoryToolkit, read_only: bool) -> List[LocalFunction]:
     ctx = toolkit.ctx
     if not isinstance(ctx, MemoryToolContext):
         raise TypeError(f"Expected MemoryToolContext, got {type(ctx).__name__}")
     pfx = f"memory.{toolkit.team_name}.{toolkit.member_name}"
+    lang = toolkit.language
 
     @tool(
         name="memory_search",
-        card=ToolCard(id=f"{pfx}.memory_search", name="memory_search"),
+        card=ToolCard(
+            id=f"{pfx}.memory_search",
+            name="memory_search",
+            description=_tool_desc(MEMORY_SEARCH_DESCRIPTION, lang),
+        ),
         input_params={
             "type": "object",
             "properties": {
@@ -185,7 +214,11 @@ def _create_general_tools(toolkit: MemberMemoryToolkit, read_only: bool) -> List
 
     @tool(
         name="memory_get",
-        card=ToolCard(id=f"{pfx}.memory_get", name="memory_get"),
+        card=ToolCard(
+            id=f"{pfx}.memory_get",
+            name="memory_get",
+            description=_tool_desc(MEMORY_GET_DESCRIPTION, lang),
+        ),
         input_params={
             "type": "object",
             "properties": {
@@ -205,7 +238,11 @@ def _create_general_tools(toolkit: MemberMemoryToolkit, read_only: bool) -> List
 
     @tool(
         name="read_memory",
-        card=ToolCard(id=f"{pfx}.read_memory", name="read_memory"),
+        card=ToolCard(
+            id=f"{pfx}.read_memory",
+            name="read_memory",
+            description=_tool_desc(READ_MEMORY_DESCRIPTION, lang),
+        ),
         input_params={
             "type": "object",
             "properties": {
@@ -230,7 +267,11 @@ def _create_general_tools(toolkit: MemberMemoryToolkit, read_only: bool) -> List
 
     @tool(
         name="write_memory",
-        card=ToolCard(id=f"{pfx}.write_memory", name="write_memory"),
+        card=ToolCard(
+            id=f"{pfx}.write_memory",
+            name="write_memory",
+            description=_tool_desc(WRITE_MEMORY_DESCRIPTION, lang),
+        ),
         input_params={
             "type": "object",
             "properties": {
@@ -250,7 +291,11 @@ def _create_general_tools(toolkit: MemberMemoryToolkit, read_only: bool) -> List
 
     @tool(
         name="edit_memory",
-        card=ToolCard(id=f"{pfx}.edit_memory", name="edit_memory"),
+        card=ToolCard(
+            id=f"{pfx}.edit_memory",
+            name="edit_memory",
+            description=_tool_desc(EDIT_MEMORY_DESCRIPTION, lang),
+        ),
         input_params={
             "type": "object",
             "properties": {
@@ -273,10 +318,15 @@ def _create_coding_tools(toolkit: MemberMemoryToolkit, read_only: bool) -> List[
     if not isinstance(ctx, CodingMemoryToolContext):
         raise TypeError(f"Expected CodingMemoryToolContext, got {type(ctx).__name__}")
     pfx = f"coding_memory.{toolkit.team_name}.{toolkit.member_name}"
+    lang = toolkit.language
 
     @tool(
         name="coding_memory_read",
-        card=ToolCard(id=f"{pfx}.coding_memory_read", name="coding_memory_read"),
+        card=ToolCard(
+            id=f"{pfx}.coding_memory_read",
+            name="coding_memory_read",
+            description=_tool_desc(CODING_MEMORY_READ_DESCRIPTION, lang),
+        ),
         input_params={
             "type": "object",
             "properties": {
@@ -301,7 +351,11 @@ def _create_coding_tools(toolkit: MemberMemoryToolkit, read_only: bool) -> List[
 
     @tool(
         name="coding_memory_write",
-        card=ToolCard(id=f"{pfx}.coding_memory_write", name="coding_memory_write"),
+        card=ToolCard(
+            id=f"{pfx}.coding_memory_write",
+            name="coding_memory_write",
+            description=_tool_desc(CODING_MEMORY_WRITE_DESCRIPTION, lang),
+        ),
         input_params={
             "type": "object",
             "properties": {
@@ -316,7 +370,11 @@ def _create_coding_tools(toolkit: MemberMemoryToolkit, read_only: bool) -> List[
 
     @tool(
         name="coding_memory_edit",
-        card=ToolCard(id=f"{pfx}.coding_memory_edit", name="coding_memory_edit"),
+        card=ToolCard(
+            id=f"{pfx}.coding_memory_edit",
+            name="coding_memory_edit",
+            description=_tool_desc(CODING_MEMORY_EDIT_DESCRIPTION, lang),
+        ),
         input_params={
             "type": "object",
             "properties": {

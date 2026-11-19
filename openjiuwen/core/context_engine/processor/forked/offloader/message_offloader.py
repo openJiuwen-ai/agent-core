@@ -20,6 +20,7 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.util imp
 )
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression import RuleCompressionPipeline
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
+from openjiuwen.core.context_engine.token.encode_guard import CHARS_PER_TOKEN, estimate_tokens
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
 
 OMIT_STRING = "..."
@@ -38,6 +39,11 @@ class MessageSummaryOffloaderConfig(BaseModel):
 
     add_message_threshold_ratio: float = Field(default=0.1, gt=0)
     """Context-token-capacity ratio above which a newly added tool message is processed."""
+
+    add_message_abs_token_threshold: int = Field(default=8_000, gt=0)
+    """Absolute token cap for on-add offload. Effective threshold is
+    ``min(context_window × add_message_threshold_ratio, this value)`` so a 1M
+    window with ratio 0.1 still offloads around 8K tokens instead of 100K."""
 
     ttl_seconds: int = Field(default=300, ge=0)
     """Idle time between LLM context-window requests before TTL processing is eligible."""
@@ -110,12 +116,13 @@ class MessageSummaryOffloader(ContextProcessor):
     ) -> tuple[Optional[ContextEvent], list[BaseMessage]]:
         all_messages = context.get_messages() + messages_to_add
         threshold_tokens = self._add_message_token_threshold(context)
-        max_chars = self._add_message_max_chars(context)
         processed = list(messages_to_add)
         event = ContextEvent(event_type=self.processor_type())
         context_size = len(context)
 
         for index, message in enumerate(messages_to_add):
+            content = message.content if isinstance(message.content, str) else None
+            max_chars = self._add_message_max_chars(context, content)
             replacement = await self._process_added_message(
                 message,
                 context,
@@ -159,12 +166,15 @@ class MessageSummaryOffloader(ContextProcessor):
             )
             # Rule compression (esp. json_repair) is CPU-bound; keep it off the
             # event loop so WebSocket ping/pong can still run during large tool results.
+            # Token gate already fired: do not let the ASCII-biased char heuristic
+            # skip rule compression (CJK ~1 char/token can still be <= max_chars).
             compressed = await asyncio.to_thread(
                 self._rule_pipeline.compress,
                 message,
                 context,
                 pass_name="add",
                 max_chars=max_chars,
+                force=True,
                 context_messages=context_messages,
             )
             if self._is_rule_compressed_message(compressed):
@@ -473,19 +483,49 @@ class MessageSummaryOffloader(ContextProcessor):
         return resolve_ratio_token_threshold(self._context_max(context), self._ttl_context_occupancy_ratio())
 
     def _add_message_token_threshold(self, context: ModelContext) -> int:
-        return resolve_ratio_token_threshold(self._context_max(context), self._add_message_threshold_ratio())
+        ratio_threshold = resolve_ratio_token_threshold(
+            self._context_max(context),
+            self._add_message_threshold_ratio(),
+        )
+        return min(ratio_threshold, self._add_message_abs_token_threshold())
 
     def _ttl_message_token_threshold(self, context: ModelContext) -> int:
         return resolve_ratio_token_threshold(self._context_max(context), self._ttl_message_threshold_ratio())
 
-    def _add_message_max_chars(self, context: ModelContext) -> int:
-        return self._character_budget(context, self._add_message_threshold_ratio())
+    def _add_message_max_chars(
+        self,
+        context: ModelContext,
+        content: str | None = None,
+    ) -> int:
+        """Character budget for the effective on-add token threshold.
+
+        Uses ``estimate_tokens`` density of ``content`` when available so CJK
+        (~1 char/token) is not measured with the ASCII ``* 3`` heuristic.
+        """
+        return self._max_chars_for_token_threshold(
+            self._add_message_token_threshold(context),
+            content,
+        )
+
+    @staticmethod
+    def _max_chars_for_token_threshold(
+        token_threshold: int,
+        content: str | None = None,
+    ) -> int:
+        if not content:
+            return max(int(token_threshold) * CHARS_PER_TOKEN, 1)
+        sample_tokens = estimate_tokens(content)
+        if sample_tokens <= 0:
+            return max(int(token_threshold) * CHARS_PER_TOKEN, 1)
+        chars_per_token = len(content) / sample_tokens
+        return max(int(token_threshold * chars_per_token), 1)
 
     def _ttl_message_max_chars(self, context: ModelContext) -> int:
+        # TTL keeps the context-relative ASCII budget; on-add uses content density.
         return self._character_budget(context, self._ttl_message_threshold_ratio())
 
     def _character_budget(self, context: ModelContext, ratio: float) -> int:
-        return max(int(self._context_max(context) * 3 * ratio), 1)
+        return max(int(self._context_max(context) * CHARS_PER_TOKEN * ratio), 1)
 
     def _context_max(self, context: ModelContext) -> int:
         return resolve_context_max(context)
@@ -525,6 +565,9 @@ class MessageSummaryOffloader(ContextProcessor):
 
     def _add_message_threshold_ratio(self) -> float:
         return float(getattr(self.config, "add_message_threshold_ratio", 0.2))
+
+    def _add_message_abs_token_threshold(self) -> int:
+        return int(getattr(self.config, "add_message_abs_token_threshold", 8_000))
 
     def _ttl_context_occupancy_ratio(self) -> float:
         return float(getattr(self.config, "ttl_context_occupancy_ratio", 0.5))
