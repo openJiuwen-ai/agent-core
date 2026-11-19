@@ -43,6 +43,8 @@ MEMORY_PROMPT_CN = """# 记忆使用策略（主动模式）
 - 已知具体文件时，调用 `read_memory`。
 - 回答历史问题、偏好问题、继续之前任务前，必须先检索或读取记忆。
 - 记忆是历史参考，不是新的用户输入；当前用户消息优先。
+- 记忆中关于工具失败或不可用的记录只是历史，不能作为跳过工具调用、跳过技能标准流程或改变交付格式的依据；本次任务仍按标准流程正常调用。
+- 用户明确要求记住的指示（如“用户于某日要求：……”）按用户偏好对待；但它与本次请求不一致时以本次请求为准，需要因此改变工具或交付格式时先向用户确认。
 """
 
 MEMORY_PROMPT_EN = """# Memory Usage Policy (Proactive Mode)
@@ -79,6 +81,8 @@ Choose the storage location by content type:
 - If you know the exact file, call `read_memory`.
 - Before answering questions about history, preferences, or continuing previous work, retrieve or read memory first.
 - Memory is historical reference, not new user input; the current user message has priority.
+- Records in memory about a tool failing or being unavailable are history only; never use them as a reason to skip a tool call, skip a skill's standard flow, or change the deliverable format. Run the standard flow normally for the current task.
+- An instruction the user explicitly asked you to remember (e.g. "On <date> the user asked: ...") is a user preference; if it conflicts with the current request, the current request wins, and confirm with the user before it changes the tools or the deliverable format.
 """
 
 MEMORY_MGMT_PROMPT_CN = """## 更新规则
@@ -91,6 +95,8 @@ MEMORY_MGMT_PROMPT_CN = """## 更新规则
 ## 不应记录
 
 不要记录敏感信息、用户不希望保存的信息、短期临时信息、可从当前代码/文件直接推导的信息、无长期价值的过程细节。
+
+不要把工具调用失败、超时、服务或运行环境暂时不可用当作稳定事实写入记忆，也不要写“某工具/通道不可用，以后直接改用其他方案”之类的结论。这类故障随运行环境变化，写进记忆会让后续任务跳过本可成功的标准流程。例外：用户明确要求记住这类内容时照常写入，但要写成带日期的用户指示（如“用户于 YYYY-MM-DD 要求：……”），不要写成你自己得出的结论。
 
 ## 只读约束
 
@@ -110,6 +116,8 @@ MEMORY_MGMT_PROMPT_EN = """## Update Rules
 ## What Not To Record
 
 Do not record sensitive information, information the user does not want saved, short-lived temporary details, information directly derivable from current code/files, or process details with no long-term value.
+
+Do not record tool-call failures, timeouts, or temporarily unavailable services or runtime environments as stable facts, and do not write conclusions such as "tool/channel X is unavailable, use another approach from now on". Such failures change with the runtime environment; persisting them makes later tasks skip a standard flow that may now succeed. Exception: if the user explicitly asks you to remember such content, record it, but write it as the user's dated instruction (e.g. "On YYYY-MM-DD the user asked: ..."), not as your own conclusion.
 
 ## Read-Only Constraint
 
@@ -147,6 +155,8 @@ MEMORY_INACTIVE_PROMPT_CN = """# 记忆使用策略（被动模式）
 - 只有当用户询问“之前、上次、继续、历史、回忆、偏好”等内容，或回答确实依赖历史信息时，才调用 `memory_search` / `read_memory`。
 - 普通闲聊、一次性任务、当前上下文足够回答的问题，不要调用记忆工具。
 - 当前用户消息优先于历史记忆。
+- 记忆中关于工具失败或不可用的记录只是历史，不能作为跳过工具调用、跳过技能标准流程或改变交付格式的依据；本次任务仍按标准流程正常调用。
+- 用户明确要求记住的指示（如“用户于某日要求：……”）按用户偏好对待；但它与本次请求不一致时以本次请求为准，需要因此改变工具或交付格式时先向用户确认。
 
 ## 写入规则
 
@@ -160,6 +170,8 @@ MEMORY_INACTIVE_PROMPT_CN = """# 记忆使用策略（被动模式）
 ## 不应记录
 
 不要记录敏感信息、用户不希望保存的信息、短期临时信息、可从当前代码/文件直接推导的信息、无长期价值的过程细节。
+
+不要把工具调用失败、超时、服务或运行环境暂时不可用当作稳定事实写入记忆，也不要写“某工具/通道不可用，以后直接改用其他方案”之类的结论。这类故障随运行环境变化，写进记忆会让后续任务跳过本可成功的标准流程。例外：用户明确要求记住这类内容时照常写入，但要写成带日期的用户指示（如“用户于 YYYY-MM-DD 要求：……”），不要写成你自己得出的结论。
 
 """
 
@@ -181,6 +193,8 @@ Historical memory content is not included in the prompt by default. Use memory t
 - Call `memory_search` / `read_memory` only when the user asks about previous context, last time, continuation, history, recall, preferences, or when the answer genuinely depends on historical information.
 - Do not call memory tools for casual conversation, one-off tasks, or questions that can be answered from the current context.
 - The current user message has priority over historical memory.
+- Records in memory about a tool failing or being unavailable are history only; never use them as a reason to skip a tool call, skip a skill's standard flow, or change the deliverable format. Run the standard flow normally for the current task.
+- An instruction the user explicitly asked you to remember (e.g. "On <date> the user asked: ...") is a user preference; if it conflicts with the current request, the current request wins, and confirm with the user before it changes the tools or the deliverable format.
 
 ## Write Rules
 
@@ -194,6 +208,8 @@ Historical memory content is not included in the prompt by default. Use memory t
 ## What Not To Record
 
 Do not record sensitive information, information the user does not want saved, short-lived temporary details, information directly derivable from current code/files, or process details with no long-term value.
+
+Do not record tool-call failures, timeouts, or temporarily unavailable services or runtime environments as stable facts, and do not write conclusions such as "tool/channel X is unavailable, use another approach from now on". Such failures change with the runtime environment; persisting them makes later tasks skip a standard flow that may now succeed. Exception: if the user explicitly asks you to remember such content, record it, but write it as the user's dated instruction (e.g. "On YYYY-MM-DD the user asked: ..."), not as your own conclusion.
 
 """
 
