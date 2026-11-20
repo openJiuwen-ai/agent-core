@@ -91,7 +91,9 @@ async def plan_invoice(model):
 - 两种接口均支持通过 `orchestration.plan.mode` 选择 `fast` 或 `beam`，并通过 `result["planned_graph"]["graph"]` 返回图。节点和依赖分别位于 `nodes` 和 `edges`。专家任务图的交接边引用本轮任务的 `source_output` 和 `target_input`。
 - 可选的 `inputs` 接收一组 `PlanningInput` 或等价字典。每项的 `name` 唯一，`kind` 为 `text` 或 `file`，`value` 为已知文本或宿主已校验的文件引用，`description` 可注明用途。直接使用 SDK 时，由宿主负责解析文件引用。
 
-Skill 和子智能体编排均以 `graph.metadata.status=ready` 返回有效任务图，无法形成计划时返回 `no_plan`。宿主可结合已掌握的资料、图中的交接关系和 `graph.metadata.missing_inputs` 判断哪些节点可以执行。Skill 节点的 `metadata.inputs` 和 `outputs` 描述已声明的端口，`metadata.missing_inputs` 标记规划时发现的节点缺项。子智能体节点用 `metadata.external_inputs` 引用相关资料名。
+Skill 和子智能体编排均以 `graph.metadata.status=ready` 返回有效任务图，无法形成计划时返回 `no_plan`。宿主可结合已掌握的资料、图中的交接关系和 `graph.metadata.missing_inputs` 判断哪些节点可以执行。Skill 节点的 `metadata.inputs` 和 `outputs` 描述已声明的端口，`metadata.missing_inputs` 标记规划时发现的节点缺项。子智能体节点用 `metadata.external_inputs` 引用所需资料名。Core 会将已引用但未提供的资料汇总到图级 `missing_inputs`，模型也可以补充缺项的类型和用途。节点自身入边已经提供的产物由交接传递，只有单独声明的同名外部资料才计入外部输入。
+
+子智能体草稿只需给出 `tasks` 和必要的 `handoffs`。非空任务图通过校验后，Core 补上 `ready`。节点可以省略 `title`，此时使用任务正文的首句或首行作为显示标题。
 
 子智能体草稿结构或交接校验失败时，Core 将原请求、错误和限长的上一份草稿交给模型补试一次。只报告缺项的空草稿也使用这一次补试额度。再次无法形成计划时，`graph.metadata.reason` 给出原因。模型明确返回的 `no_plan`（无资料缺项）直接保留，模型调用异常和取消沿调用链传播。
 
