@@ -1233,7 +1233,7 @@ async def test_write_file_allows_after_paginated_read_covers_whole_file(sys_op, 
 
     _FILE_READ_REGISTRY.pop(file_path, None)
     page_size = 1000
-    for offset in range(0, total_lines, page_size):
+    for offset in range(1, total_lines + 1, page_size):  # 1 基行号分页起点
         await read_tool.invoke({"file_path": file_path, "offset": offset, "limit": page_size})
 
     state = _FILE_READ_REGISTRY[file_path]
@@ -1368,3 +1368,20 @@ async def test_read_file_offset_past_eof_reports_line_and_total(sys_op, temp_dir
     assert res.success is True
     assert "line 4 is past its end" in res.data["content"]
     assert "at most 3 lines" in res.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_blank_line_page_does_not_claim_eof(sys_op, temp_dir):
+    """空白页 ≠ 越界：读空行不得断言 past-EOF 或低报总行数（AI 检视 P2）。"""
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "blank_mid.txt")
+    await write_tool.invoke({"file_path": file_path, "content": "line1\n\nline3"})
+
+    blank = await read_tool.invoke({"file_path": file_path, "offset": 2, "limit": 1})
+    assert blank.success is True
+    assert "past its end" not in blank.data["content"]
+    assert "line 2 is blank" in blank.data["content"]
+
+    after = await read_tool.invoke({"file_path": file_path, "offset": 3, "limit": 1})
+    assert "line3" in after.data["content"]
