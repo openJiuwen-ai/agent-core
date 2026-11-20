@@ -1218,16 +1218,23 @@ class TeamAgent(BaseAgent):
             return
         await self._spawn_manager.worktree_lifecycle.finalize_all_member_worktrees_for_team_clean()
 
-    async def conclude_completed_round(self, member_count: int, task_count: int) -> None:
-        """Emit a team-completed marker chunk, then close the leader stream.
+    async def conclude_completed_round(self, member_count: int, task_count: int) -> bool:
+        """Close the completed leader stream unless a local interrupt is pending.
 
         Drives the auto-pause path for a completed persistent team: closing
         the stream makes the Runner's stream loop break on the None sentinel
         and call ``manager.finalize``, which pauses the team. The marker
         chunk lets the SDK consumer distinguish a completion-driven end from
         an error/cancel end. Best-effort and idempotent -- the completion
-        handler's rising-edge guard ensures one call per completion.
+        handler's rising-edge guard ensures one call per completion. The
+        pending check and stream close do not yield to another member.
         """
+        if self.has_pending_interrupt():
+            return False
+        for handle in self._spawn_manager.spawned_handles.values():
+            member = getattr(handle, "agent_ref", None)
+            if member is not None and member.has_pending_interrupt():
+                return False
         team_logger.info(
             "[{}] concluding completed round: {} member(s), {} task(s)",
             self._member_name() or "?",
@@ -1235,6 +1242,7 @@ class TeamAgent(BaseAgent):
             task_count,
         )
         self._stream_controller.emit_completion_and_close(member_count, task_count)
+        return True
 
     async def _start_agent(self, initial_message: Any) -> None:
         harness = self.harness

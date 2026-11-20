@@ -125,17 +125,20 @@ class TeamCompletionHandler(BaseCoordinationHandler):
             return
 
         await self._finalize_non_contributing_worktrees("team completion")
-        await self._publish_team_completed(team_backend.team_name, snapshot)
-        self._team_completed_emitted = True
-
         # Persistent teams auto-pause on completion: close the leader stream
         # so the Runner finally drives finalize -> pause. Temporary teams are
         # torn down by their leader via clean_team, not here.
         if self._blueprint.lifecycle == "persistent":
-            await self._lifecycle.conclude_completed_round(
+            concluded = await self._lifecycle.conclude_completed_round(
                 snapshot.member_count,
                 snapshot.task_count,
             )
+            if not concluded:
+                return
+            # Commit before publishing: pause can cancel this best-effort notice.
+            self._team_completed_emitted = True
+        await self._publish_team_completed(team_backend.team_name, snapshot)
+        self._team_completed_emitted = True
 
     async def _publish_team_completed(self, team_name: str, snapshot: TeamCompletionSnapshot) -> None:
         """Publish TEAM_COMPLETED on the team topic; log on failure."""

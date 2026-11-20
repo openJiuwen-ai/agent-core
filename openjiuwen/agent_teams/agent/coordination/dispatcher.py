@@ -157,8 +157,8 @@ class TeamLifecycleController(Protocol):
         """Record a member's status into the leader's activity view."""
         ...
 
-    async def conclude_completed_round(self, member_count: int, task_count: int) -> None:
-        """Emit a team-completed marker chunk, then close the leader stream."""
+    async def conclude_completed_round(self, member_count: int, task_count: int) -> bool:
+        """Close the leader stream, or return False for a pending local interrupt."""
         ...
 
     async def finalize_non_contributing_worktrees(self) -> None:
