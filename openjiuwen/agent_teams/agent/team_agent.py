@@ -550,6 +550,10 @@ class TeamAgent(BaseAgent):
     def has_in_flight_round(self) -> bool:
         return self._has_in_flight_round()
 
+    def active_input_snapshot(self) -> tuple[object, str] | None:
+        snapshot = getattr(self.harness, "active_input_snapshot", None)
+        return snapshot() if snapshot is not None else None
+
     async def announce_task_revisions(self) -> None:
         """Have the member runtime deliver its pending task edit notice now (F_129).
 
@@ -609,6 +613,19 @@ class TeamAgent(BaseAgent):
         """Drop the delivery signal so a later review wait starts clean."""
         self._user_input_delivered = None
 
+    def leader_stop(self) -> dict | None:
+        if getattr(self.team_backend, "enable_message_delivery_modes", False) is not True:
+            return None
+        getter = getattr(self.harness, "leader_stop", None)
+        return getter() if getter is not None else getattr(self, "_leader_stop_marker", None)
+
+    def set_leader_stop(self, marker: dict | None) -> None:
+        setter = getattr(self.harness, "set_leader_stop", None)
+        if setter is not None:
+            setter(marker)
+        else:
+            self._leader_stop_marker = marker
+
     async def deliver_input(
         self,
         content: Any,
@@ -619,6 +636,8 @@ class TeamAgent(BaseAgent):
         # The runtime's single supervisor serialises inputs: send() starts a
         # round when idle, steers (use_steer) or queues a follow-up when running.
         # No transition-window race, so no manual branch / pending queue here.
+        if self.leader_stop() is not None:
+            return
         harness = self.harness
         if harness is None:
             return

@@ -449,8 +449,7 @@ STRINGS: dict[str, str] = {
     "send_message.to": (
         '单个收件人：填 member_name（如 "backend-dev-1"）发送点对点 DM/私聊，仅你与该成员可见；'
         '填 "user"（仅 teammate 用于回复用户，leader 调用会被拒绝）；'
-        '填 "*" 广播到团队频道 channel，所有成员可见——一次广播会唤醒每一个成员各跑一轮 '
-        "LLM 交互，开销与团队规模成正比，仅用于全员必须知晓的公告，务必慎用。"
+        '填 "*" 登记团队广播；各成员可立即接收、延后接收或丢弃，广播成功不代表收到。'
         "多播不要填写本字段，改用 targets"
     ),
     "send_message.targets": (
@@ -460,6 +459,10 @@ STRINGS: dict[str, str] = {
     ),
     "send_message.content": "消息内容，应包含明确的行动指引或信息",
     "send_message.summary": "5-10 词摘要，用于消息预览和日志",
+    "send_message.broadcast_receipt_pending": (
+        "广播已登记，由各成员决定何时接收或丢弃。此结果不确认任何成员已收到。"
+        "没有明确回执时，只能说“尚未确认收到”；任务完成也不代表已收到。"
+    ),
     "send_message.error_group_to_user": (
         "群聊回复必须使用 group_send_message；send_message(to='user') 不是公开群消息入口。"
     ),
@@ -488,7 +491,7 @@ STRINGS: dict[str, str] = {
         '单个收件人："leader"（角色名，系统自动投递给真正的 Leader）、'
         '其他成员的 member_name（点对点私聊，用于协作沟通）、'
         '"user"（仅当收到的消息来源是 user 时用于回复），'
-        '或 "*" 广播给全体成员——一次广播会唤醒每一个成员各跑一轮 LLM 交互，务必慎用。'
+        '或 "*" 登记团队广播；各成员可延后接收或丢弃，广播成功不代表收到。'
         "多播不要填写本字段，改用 targets"
     ),
     "send_message_scheduled_peers.targets": (

@@ -123,6 +123,7 @@ async def post_message(conversation, message_manager, sender: str, content: str,
                 targets.append(name)
         meta = dict(type="group_chat", client_message_id=client_message_id,
                     sender_name=author.display_name if author else "user", mentions=mentions, attachments=attachments)
+        meta["delivery_feedback"] = {name: {"state": "pending", "mode": None} for name in targets}
         identity = str(uuid.uuid5(uuid.NAMESPACE_URL, json.dumps(
             [conversation.team_name, conversation.session_id, client_message_id], ensure_ascii=False)))
         stored = await db.message.get_message(identity)

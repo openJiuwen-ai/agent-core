@@ -621,9 +621,8 @@ STRINGS: dict[str, str] = {
         'Single recipient: member_name for a point-to-point DM (e.g. "backend-dev-1"), '
         "visible only to you and that member; "
         '"user" (teammates only, to reply to the user; leader calls are rejected); '
-        '"*" to broadcast on the team channel, visible to all members — one broadcast '
-        "wakes every member for a full LLM turn, so cost scales linearly with team size; "
-        "reserve it for announcements everyone must see and use it sparingly. "
+        '"*" to record a team broadcast; recipients may receive it, defer it, or discard it. '
+        "Broadcast success does not confirm receipt. "
         "For multicast, leave this field unset and use targets"
     ),
     "send_message.targets": (
@@ -634,6 +633,11 @@ STRINGS: dict[str, str] = {
     ),
     "send_message.content": "Message content with clear action guidance or information",
     "send_message.summary": "5-10 word summary for message preview and logging",
+    "send_message.broadcast_receipt_pending": (
+        "Broadcast recorded. Each recipient decides when to receive it or whether to discard it. "
+        "This result confirms no recipient's receipt. Without explicit acknowledgment, report receipt as "
+        "unconfirmed. Task completion does not confirm receipt."
+    ),
     "send_message.error_group_to_user": (
         "Use group_send_message to reply in a group chat; send_message(to='user') is not a public group reply."
     ),
@@ -667,8 +671,8 @@ STRINGS: dict[str, str] = {
         'Single recipient: "leader" (a role name — the system delivers it to the real '
         "Leader), another member's member_name (a point-to-point DM for coordination), "
         '"user" (only to reply when an incoming message came from the user), or "*" to '
-        "broadcast to every member — one broadcast wakes every member for a full LLM "
-        "turn, so use it sparingly. For multicast, leave this field unset and use targets"
+        "record a team broadcast; recipients may defer or discard it. Broadcast success does not confirm receipt. "
+        "For multicast, leave this field unset and use targets"
     ),
     "send_message_scheduled_peers.targets": (
         'Multicast recipient array (e.g. ["leader","m2"]): the same content is sent as '

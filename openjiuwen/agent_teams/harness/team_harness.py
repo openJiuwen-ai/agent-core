@@ -369,6 +369,15 @@ class TeamHarness:
             )
         return self._native.outputs()
 
+    def active_input_snapshot(self) -> tuple[object, str] | None:
+        """Return the active native round identity and a bounded text excerpt."""
+        active = self._native.active_round if self._native is not None else None
+        if active is None:
+            return None
+        query = active.original_query
+        text = query if isinstance(query, str) else ""
+        return active, text[-1500:]
+
     async def send(
         self,
         content: Any,
@@ -389,6 +398,13 @@ class TeamHarness:
             immediate=immediate,
             run_context=run_context,
         )
+
+    def leader_stop(self) -> dict | None:
+        return self._native.leader_stop() if self._native is not None else None
+
+    def set_leader_stop(self, marker: dict | None) -> None:
+        if self._native is not None:
+            self._native.set_leader_stop(marker)
 
     async def abort(self, *, immediate: bool = False) -> None:
         """Abort the active round: graceful (False) or hard+rollback (True).

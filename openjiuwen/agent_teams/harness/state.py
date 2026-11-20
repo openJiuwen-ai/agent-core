@@ -9,6 +9,7 @@ is the sole writer. External API methods only push ControlEvent objects.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
@@ -23,6 +24,14 @@ if TYPE_CHECKING:
     from openjiuwen.core.foundation.llm import BaseMessage
     from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
     from openjiuwen.harness.deep_agent import DeepAgent
+
+
+def follow_up_context(earlier: list, current: str) -> str:
+    """Include prior requests as context without creating another task queue."""
+    return json.dumps({"follow_up_context": earlier, "current_steer": current,
+        "follow_up_policy": "Earlier requests for context, not completed work. Keep after-task timing; "
+                            "judge relevance using the task board and newer instructions. No second todo queue."},
+        ensure_ascii=False)
 
 
 class RoundPhase(str, Enum):

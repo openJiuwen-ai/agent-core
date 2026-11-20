@@ -190,3 +190,41 @@ async def test_harness_without_goal_support_is_unchanged() -> None:
         assert _queries(fake) == ["hello"]
     finally:
         await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_leader_abort_blocks_goal_nudges_until_explicit_resume() -> None:
+    """A goal cannot restart a member stopped by its leader."""
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        harness.enable_goal(_stop_config())
+        fake = await start_harness(harness, sleep_seconds=5.0)
+        consumer = asyncio.create_task(drain_outputs(harness, []))
+        try:
+            await harness.goal_manager.set(_OBJECTIVE, max_attempts=2)
+            await wait_invoke_running(fake)
+            harness.merge_follow_ups = True
+            harness.set_leader_stop({"message_id": "abort-goal", "timestamp": 10})
+            await harness.abort(immediate=True)
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            attempts = harness.goal_manager.peek().attempt_count
+            harness.nudge_goal()
+            await asyncio.sleep(0.1)
+            assert harness.state is HarnessState.IDLE
+            assert len(fake.invocations) == 1
+            assert harness.goal_manager.peek().attempt_count == attempts
+
+            harness.set_leader_stop(None)
+            fake.sleep_seconds = 0.0
+            await harness.send("new leader instruction", immediate=True)
+            assert await _wait_goal_status(harness, GoalStatus.BLOCKED)
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            assert _queries(fake)[1] == "new leader instruction"
+            assert _OBJECTIVE in _queries(fake)[2]
+        finally:
+            await harness.stop()
+            await consumer
+    finally:
+        await Runner.stop()

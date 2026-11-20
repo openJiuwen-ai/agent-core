@@ -7,11 +7,13 @@ This module provides messaging functionality for team members and team leader.
 """
 
 import uuid
+import json
 from typing import (
     List,
     Optional,
 )
 
+from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.events import (
     BroadcastEvent,
@@ -22,6 +24,34 @@ from openjiuwen.agent_teams.schema.events import (
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database import TeamDatabase, TeamMessageBase
 from openjiuwen.core.common.logging import team_logger
+
+
+MODE_KEY = "private_delivery_mode"
+MODES = ("steer", "follow_up", "abort")
+ACTIVE_TASKS = frozenset(
+    status.value for status in (TaskStatus.PLANNING, TaskStatus.IN_PROGRESS, TaskStatus.IN_REVIEW)
+)
+
+
+def message_metadata(message):
+    raw = getattr(message, "meta", None)
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def read_delivery(message):
+    raw = message_metadata(message)
+    if getattr(message, "broadcast", False) or raw.get(MODE_KEY) not in MODES:
+        return None, {}
+    tasks = raw.get("target_tasks")
+    return raw[MODE_KEY], tasks if isinstance(tasks, dict) else {}
+
+
+def is_receiver_routed(message):
+    return getattr(message, "broadcast", False) and message_metadata(message).get("receiver_routed") is True
 
 
 class TeamMessageManager:
@@ -74,10 +104,9 @@ class TeamMessageManager:
             from_member_name: Override sender ID. Defaults to self.member_name.
             protocol: Message format — ``"plain"`` for normal text,
                 ``"json"`` for structured payloads.
-            meta: Framework-only delivery payload (template key + refs +
-                params). Not reachable from the send_message tool — only the
-                framework (scheduler handoffs) sets it. See
-                ``message_template.py``.
+            meta: Framework-owned metadata, e.g. a scheduler template or
+                validated private delivery mode. Callers of the send_message
+                tool cannot provide arbitrary metadata.
         """
         sender = from_member_name or self.member_name
         message_id = str(uuid.uuid4())
@@ -123,6 +152,8 @@ class TeamMessageManager:
         self,
         content: str,
         from_member_name: str | None = None,
+        *,
+        receiver_routed: bool = False,
     ) -> Optional[str]:
         """Send a broadcast message.
 
@@ -141,15 +172,18 @@ class TeamMessageManager:
             content=content,
             to_member_name=None,
             broadcast=True,
+            meta={"receiver_routed": True, "delivery_feedback": {}} if receiver_routed else None,
         )
         if not success:
             team_logger.error(f"Failed to create broadcast message {message_id}")
             return None
 
-        await self.publish_broadcast(message_id, sender)
+        await self.publish_broadcast(message_id, sender, receiver_routed=receiver_routed)
         return message_id
 
-    async def publish_broadcast(self, message_id: str, from_member_name: str) -> None:
+    async def publish_broadcast(
+        self, message_id: str, from_member_name: str, *, receiver_routed: bool = False,
+    ) -> None:
         """Publish an already persisted broadcast (also used after group history sync)."""
         try:
             await self.messager.publish(
@@ -159,6 +193,7 @@ class TeamMessageManager:
                         message_id=message_id,
                         team_name=self.team_name,
                         from_member_name=from_member_name,
+                        receiver_routed=receiver_routed,
                     )
                 ),
             )
@@ -380,8 +415,12 @@ class TeamMessageManager:
             return 0
 
         direct_ids = [m.message_id for m in messages if not m.broadcast]
-        broadcasts = [m for m in messages if m.broadcast]
-        ids = list(direct_ids)
+        tracked = []
+        for message in messages:
+            if message.broadcast and "delivery_feedback" in message_metadata(message):
+                tracked.append(message)
+        broadcasts = [m for m in messages if m.broadcast and m not in tracked]
+        ids = list(direct_ids) + [m.message_id for m in tracked]
         if broadcasts:
             newest_broadcast = max(broadcasts, key=lambda m: m.timestamp)
             ids.append(newest_broadcast.message_id)

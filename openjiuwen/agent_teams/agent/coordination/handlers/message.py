@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import Any, ClassVar
 
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
@@ -41,7 +42,11 @@ from openjiuwen.agent_teams.message_template import (
     revision_getters,
     task_links,
 )
-from openjiuwen.agent_teams.prompts.loader import TemplateLoader, bind_template_loader
+from openjiuwen.agent_teams.tools.message_manager import (
+    ACTIVE_TASKS, is_receiver_routed, message_metadata, read_delivery,
+)
+from openjiuwen.agent_teams.prompts.loader import TemplateLoader, bind_template_loader, load_template
+from openjiuwen.agent_teams.harness.state import follow_up_context
 from openjiuwen.agent_teams.schema.events import EventMessage, MessageEvent, TeamEvent
 from openjiuwen.agent_teams.schema.external_runtime_reliability import ExternalRuntimeFailure
 from openjiuwen.agent_teams.schema.status import MemberStatus, retire_target
@@ -49,6 +54,33 @@ from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.timefmt import format_absolute_time
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session import InteractiveInput
+
+
+async def choose_delivery(state, *, group=False):
+    from openjiuwen.agent_evolving.attribution.jev import JevClient
+
+    fallback = "steer" if group else "legacy"
+    if not any(os.environ.get(key) for key in ("JEV_BASE_URL", "JEV_MODEL", "JEV_API_KEY")):
+        return fallback
+    try:
+        client = JevClient(timeout=3)
+        try:
+            async with asyncio.timeout(5):
+                modes = ("steer", "follow_up") if group else ("steer", "follow_up", "drop")
+                instructions = load_template("broadcast_delivery", state.get("language", "en")).content
+                instructions = instructions.split("<!-- group-delivery -->")[int(group)].strip()
+                question = {"type": "choice", "criteria": {mode: mode for mode in modes},
+                            "instructions": instructions}
+                answers = await client.system_one(state, {"delivery": question})
+                choice = (answers.get("delivery") or {}).get("choice")
+                if choice in modes:
+                    team_logger.info("Jev delivery for {}: {}", state.get("recipient"), choice)
+                    return choice
+        finally:
+            await client.close()
+    except Exception as exc:
+        team_logger.warning("Jev unavailable for {}: {}", state.get("recipient"), type(exc).__name__)
+    return fallback
 
 
 class MessageHandler(BaseCoordinationHandler):
@@ -233,9 +265,12 @@ class MessageHandler(BaseCoordinationHandler):
         is_human_agent = backend is not None and await backend.is_human_agent(member_name)
         is_bridge = self._blueprint.role == TeamRole.BRIDGE_AGENT and backend is not None
 
-
         while True:
             all_unread = await self._read_all_unread(member_name)
+            # Abort is a control operation, not an input for another model turn.
+            # Inspect it before draining older deferred work or calling Jev.
+            if self._delivery_modes_enabled() and await self._stop_for_abort(member_name, all_unread):
+                return
             new_messages = [m for m in all_unread if m.message_id not in seen_ids]
 
             if not new_messages:
@@ -256,6 +291,24 @@ class MessageHandler(BaseCoordinationHandler):
             try:
                 for msg in new_messages:
                     seen_ids.add(msg.message_id)
+                    stopped = (
+                        getattr(self._round, "leader_stop", lambda: None)() if self._delivery_modes_enabled() else None
+                    )
+                    resumed_by_leader = False
+                    if stopped:
+                        meta = message_metadata(msg)
+                        leader = await backend.resolve_leader_member_name() if backend is not None else None
+                        explicit_leader_input = (
+                            msg.from_member_name == leader and not getattr(msg, "broadcast", False)
+                            and not (
+                                isinstance(meta, dict) and (meta.get("template") or meta.get("type") == "group_chat")
+                            )
+                            and getattr(msg, "timestamp", 0) > stopped.get("timestamp", 0)
+                            and read_delivery(msg)[0] != "abort"
+                        )
+                        if not explicit_leader_input:
+                            continue
+                        resumed_by_leader = True
                     approval_data = self._try_parse_approval_payload(msg)
                     if approval_data is not None:
                         approval_data = self._validate_approval_payload(approval_data)
@@ -333,6 +386,25 @@ class MessageHandler(BaseCoordinationHandler):
                         )
                         interrupted = True
                         continue
+                    mode, target_tasks = read_delivery(msg) if self._delivery_modes_enabled() else (None, {})
+                    if mode == "abort":
+                        # Authorized aborts are handled by the prepass, never as text.
+                        team_logger.warning("Discarding unauthorized or stale private abort {}", msg.message_id)
+                        delivered.append(msg)
+                        continue
+                    if self._delivery_modes_enabled() and is_receiver_routed(msg):
+                        if self._round.has_pending_interrupt():
+                            continue
+                        mode, target_tasks = await self._broadcast_mode(member_name, msg)
+                        if mode == "drop":
+                            delivered.append(msg)
+                            continue
+                    if not mode and not self._round.has_pending_interrupt():
+                        mode = await self._mailbox_delivery_mode(member_name, msg)
+                    if mode == "follow_up" and target_tasks and not resumed_by_leader:
+                        active = await self._active_task_versions(member_name)
+                        if active.keys() & target_tasks.keys():
+                            continue
                     # An external_runtime_failed JSON message is rendered as a
                     # <team-event> and never falls through to plain
                     # member-message rendering, so the leader sees a
@@ -358,14 +430,117 @@ class MessageHandler(BaseCoordinationHandler):
                         )
                     team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
-                    await self._round.deliver_input(text, use_steer=use_steer)
-                    delivered.append(msg)
+                    message_steers = mode == "steer" if mode else use_steer
+                    merged = []
+                    snapshot = getattr(self._round, "active_input_snapshot", lambda: None)()
+                    merge_follow_ups = self._delivery_modes_enabled() and message_steers and not is_bridge
+                    if merge_follow_ups and snapshot is not None:
+                        for old in all_unread:
+                            if old in delivered or old.timestamp >= msg.timestamp:
+                                continue
+                            meta = message_metadata(old)
+                            entry = meta.get("delivery_feedback", {}).get(member_name, {})
+                            old_mode = entry.get("mode") or read_delivery(old)[0]
+                            if old_mode == "follow_up" and not meta.get("template"):
+                                merged.append(old)
+                        if merged:
+                            earlier = [{"message_id": old.message_id, "sender": old.from_member_name,
+                                "timestamp": old.timestamp, "original_mode": "follow_up",
+                                "target_tasks": message_metadata(old).get("delivery_feedback", {}).get(
+                                    member_name, {}).get("target_tasks", read_delivery(old)[1]),
+                                "content": self._format_message(old, expanded=await self._expand(old),
+                                           is_human_agent=is_human_agent)} for old in merged]
+                            text = follow_up_context(earlier, text)
+                    if resumed_by_leader:
+                        self._round.set_leader_stop(None)
+                    try:
+                        await self._round.deliver_input(text, use_steer=message_steers)
+                    except BaseException:
+                        if resumed_by_leader:
+                            self._round.set_leader_stop(stopped)
+                        raise
+                    delivered.extend([*merged, msg])
                     await self._observe_shown_revision(expanded)
             finally:
                 if delivered:
                     await self._infra.message_manager.mark_messages_read(delivered, member_name)
             if interrupted:
                 return
+
+    async def _stop_for_abort(self, member_name: str, messages: list[Any]) -> bool:
+        backend = self._infra.team_backend
+        aborts = [(index, msg) for index, msg in enumerate(messages) if read_delivery(msg)[0] == "abort"]
+        if not aborts or backend is None:
+            return False
+        leader = await backend.resolve_leader_member_name()
+        for index, msg in reversed(aborts):
+            if msg.from_member_name != leader:
+                continue
+            _, targets = read_delivery(msg)
+            if targets and targets != await self._active_task_versions(member_name):
+                team_logger.info("[{}] ignoring stale abort {}", member_name, msg.message_id)
+                continue
+            marker = {"message_id": msg.message_id, "timestamp": getattr(msg, "timestamp", 0)}
+            self._round.set_leader_stop(marker)
+            # Install the barrier before cancellation so task-board events and
+            # asynchronous completions cannot restart the stopped member.
+            await self._round.cancel_agent()
+            discarded = messages[:index + 1]
+            await self._infra.message_manager.mark_messages_read(discarded, member_name)
+            team_logger.info("[{}] aborted; discarded {} pending mailbox inputs; waiting for leader",
+                             member_name, len(discarded))
+            return True
+        return False
+
+    def _delivery_modes_enabled(self) -> bool:
+        return getattr(self._infra.team_backend, "enable_message_delivery_modes", False) is True
+
+    async def _mailbox_delivery_mode(self, member_name: str, msg: Any) -> str | None:
+        """Allow a conversation handler to select the runtime's input mode."""
+        return None
+
+    async def _broadcast_mode(self, member_name: str, msg: Any) -> tuple[str | None, dict]:
+        meta = message_metadata(msg)
+        feedback = meta.get("delivery_feedback", {}).get(member_name, {})
+        if feedback.get("mode") == "follow_up":
+            return "follow_up", feedback.get("target_tasks", {})
+        manager = self._infra.task_manager
+        tasks = await manager.get_tasks_by_assignee(member_name) if manager is not None else []
+        active = [task for task in tasks if task.status in ACTIVE_TASKS]
+        versions = {task.task_id: task.updated_at for task in active}
+        body = getattr(msg, "content", "") or ""
+        if not body.strip() or msg.from_member_name == member_name:
+            return "drop", {}
+        snapshot_getter = getattr(self._round, "active_input_snapshot", None)
+        snapshot = snapshot_getter() if callable(snapshot_getter) else None
+        mode = await choose_delivery({
+            "recipient": member_name,
+            "role": self._blueprint.role.value,
+            "role_description": (getattr(getattr(self._blueprint, "card", None), "description", "") or "")[:500],
+            "sender": msg.from_member_name,
+            "broadcast": body[:2000],
+            "current_input": str(snapshot[1])[:2000] if isinstance(snapshot, tuple) and len(snapshot) == 2 else "",
+            "active_tasks": [
+                {"task_id": task.task_id, "revision": task.updated_at,
+                 "title": task.title[:200], "summary": task.content[:1500]} for task in active[:4]
+            ],
+        })
+        if mode == "legacy":
+            return None, {}
+        if mode == "steer" and versions != await self._active_task_versions(member_name):
+            team_logger.info("Broadcast {} for {} changed from steer to follow_up: task changed",
+                             msg.message_id, member_name)
+            mode = "follow_up"
+        if mode == "follow_up":
+            await self._infra.message_manager.db.message.save_delivery_mode(
+                msg.message_id, member_name, mode, versions,
+            )
+        return mode, versions
+
+    async def _active_task_versions(self, member_name: str) -> dict:
+        manager = self._infra.task_manager
+        tasks = await manager.get_tasks_by_assignee(member_name) if manager is not None else []
+        return {task.task_id: task.updated_at for task in tasks if task.status in ACTIVE_TASKS}
 
     async def _observe_shown_revision(self, expanded: ExpandedMessage) -> None:
         """Record the task revision a delivered handoff showed as seen (F_129).
@@ -681,6 +856,8 @@ class MessageHandler(BaseCoordinationHandler):
             return
         try:
             if event.event_type == TeamEvent.BROADCAST:
+                if self._delivery_modes_enabled() and getattr(payload, "receiver_routed", False):
+                    return
                 started = await backend.autostart_unstarted(include_idle_task_scoped=True)
                 if started:
                     team_logger.info("Started members for a broadcast from {}: {}", sender, started)

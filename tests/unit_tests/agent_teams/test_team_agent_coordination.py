@@ -3712,3 +3712,20 @@ async def test_rearm_allows_completion_to_conclude_again():
 
     # Two rising edges → two markers + two sentinels.
     assert agent._stream_controller.stream_queue.qsize() == 4
+
+
+@pytest.mark.asyncio
+async def test_stop_barrier_keeps_runtime_without_native_stop_hooks_compatible():
+    agent = _make_leader()
+    agent.team_backend.enable_message_delivery_modes = True
+    runtime = SimpleNamespace(send=AsyncMock())
+    agent._configurator.harness = runtime
+    await agent.deliver_input("before stop")
+    runtime.send.assert_awaited_once_with("before stop", immediate=True)
+    runtime.send.reset_mock()
+    agent.set_leader_stop({"message_id": "stop", "timestamp": 10})
+    await agent.deliver_input("automatic nudge")
+    runtime.send.assert_not_awaited()
+    agent.set_leader_stop(None)
+    await agent.deliver_input("new leader input", use_steer=False)
+    runtime.send.assert_awaited_once_with("new leader input", immediate=False)
