@@ -31,6 +31,14 @@ class Model:
         envelope = json.loads(messages[-1]["content"])
         self.calls.append((envelope, messages, tools, kwargs))
         payload = envelope["input"]
+        if "segments" in payload:
+            return reply({"results": [{
+                "segment_id": item["segment_id"],
+                "narrative": item["agent_id"] + " performed the observed work",
+                "problems": [{"kind": "tool_error", "summary": "Validation failed and requires attention",
+                              "node_ids": [n["node_id"]], "state": "unresolved"}
+                             for n in item["primary"] if n["error"] and self.issues],
+            } for item in payload["segments"]]})
         if "primary" in payload:
             problems = [{"kind": "tool_error", "summary": "Validation failed and requires attention",
                          "node_ids": [n["node_id"]], "state": "unresolved"}
@@ -98,11 +106,12 @@ def test_prompt_files_are_cached_across_stages_and_requests(language, monkeypatc
     monkeypatch.setattr(Path, "read_text", track)
     try:
         for _ in range(2):
-            for stage in ("segment", "turn", "agent", "root"):
+            for stage in ("segment", "segment_batch", "turn", "agent", "root"):
                 result = summary_prompts(language, stage)
                 assert ("display_summary" in result["report"]) == (stage == "root")
                 assert ("display_summary" in result["retry"]) == (stage == "root")
-        assert sorted(reads) == [(language, name + ".md") for name in ("common", "merge", "root", "segment")]
+        assert sorted(reads) == [(language, name + ".md")
+                                 for name in ("common", "merge", "root", "segment", "segment_batch")]
     finally:
         _load_prompt.cache_clear()
 
@@ -275,7 +284,6 @@ async def test_leaf_reference_format_is_normalized_without_retry_or_lost_provena
     ({"node_ids": []}, "node_ids must be a nonempty array"),
     ({"kind": "unsupported"}, "invalid problem kind"),
     ({"summary": " "}, "missing or empty problem summary"),
-    ({"state": "resolved", "resolution_node_ids": ["B:0"]}, "resolution_node_ids invalid or outside Segment"),
 ])
 async def test_invalid_leaf_reports_keep_summary_and_identify_candidate_without_retry(patch, reason):
     class InvalidLeaf(Model):
@@ -298,6 +306,28 @@ def test_numeric_reference_does_not_choose_between_ambiguous_local_ids():
     from openjiuwen.agent_evolving.attribution.trajectory_summary.summarize import _Runner
     with pytest.raises(ValueError, match="invalid or outside Segment"):
         _Runner._leaf_ids([0], {"A:0", "A:branch:0"}, {"0": ["A:0", "A:branch:0"]}, "node_ids")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovery", [[], None, "A:0", ["B:0"]])
+@pytest.mark.parametrize("state, expected_state", [("resolved", "unknown"), ("unresolved", "unresolved"),
+                                                   ("unknown", "unknown")])
+async def test_invalid_recovery_keeps_problem_without_retry(recovery, state, expected_state):
+    class RecoveryModel(Model):
+        async def invoke(self, messages, tools, **kwargs):
+            response = await super().invoke(messages, tools, **kwargs)
+            report = json.loads(response["tool_calls"][0]["function"]["arguments"])
+            if "primary" in self.calls[-1][0]["input"]:
+                report["problems"] = [{"kind": "tool_error", "summary": "Material issue",
+                    "node_ids": ["A:0"], "state": state, "resolution_node_ids": recovery}]
+            return reply(report)
+    model = RecoveryModel()
+    tree = await summarize_trajectory(model=model, nodes_by_agent={"A": [node(0)]})
+    assert tree.status == "completed" and len(model.calls) == 2
+    assert tree.problems[0].state == expected_state and tree.problems[0].resolution_node_ids == []
+    assert tree.problems[0].locations[0].node_ids == ["A:0"]
+    expected_warnings = ["problem_recovery_unconfirmed"] if recovery != [] or state == "resolved" else []
+    assert [warning["code"] for warning in tree.warnings] == expected_warnings
 
 
 @pytest.mark.asyncio
@@ -563,8 +593,20 @@ async def test_readable_summary_failure_does_not_discard_technical_result():
             report.pop("display_summary")
             return reply(report)
     tree = await summarize_trajectory(model=NoDisplay(), nodes_by_agent={"A": [node(0)]})
-    assert tree.trajectory_summary and not tree.display_summary
+    assert tree.status == "degraded" and tree.trajectory_summary and not tree.display_summary
     assert any(w["code"] == "display_summary_missing" for w in tree.warnings)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nodes, warning_code", [
+    ([node(0, turn="")], "turn_identity_fallback"),
+    ([node(0), replace(node(1), turn_number=2)], "turn_number_conflict"),
+])
+async def test_turn_structure_warning_degrades_tree_without_discarding_summary(nodes, warning_code):
+    tree = await summarize_trajectory(model=Model(), nodes_by_agent={"A": nodes})
+    assert tree.status == "degraded"
+    assert tree.trajectory_summary and tree.display_summary
+    assert [warning["code"] for warning in tree.warnings] == [warning_code]
 
 
 @pytest.mark.asyncio
@@ -659,13 +701,147 @@ async def test_local_merge_starts_before_unrelated_segment_finishes(merge_level)
 async def test_single_segment_turns_keep_37_call_path_and_all_output_scopes():
     model = Model()
     groups = {a: [node(i, a, f"turn{i}") for i in range(count)] for a, count in [("A", 29), ("B", 2), ("C", 2)]}
-    tree = await summarize_trajectory(model=model, nodes_by_agent=groups)
+    tree = await summarize_trajectory(model=model, nodes_by_agent=groups,
+                                      limits=SummaryLimits(segment_batch_size=1))
     purposes = [call[0]["purpose"].split(":", 1)[0] for call in model.calls]
     assert purposes.count("segment") == 33 and purposes.count("agent") == 3
     assert purposes.count("turn") == 0 and purposes.count("root") == 1
     assert len(model.calls) == 37 and tree.status == "completed"
     assert sum(len(ts) for ts in tree.turns.values()) == 33
     assert all(t.narrative == t.segments[0].narrative for ts in tree.turns.values() for t in ts)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("language", ["zh", "en"])
+async def test_short_turn_batches_preserve_tree_and_reduce_requests(language):
+    from openjiuwen.agent_evolving.attribution.trajectory_summary.prompts import _PROMPT_DIR
+    class ReverseBatch(Model):
+        async def invoke(self, messages, tools, **kwargs):
+            result = await super().invoke(messages, tools, **kwargs)
+            report = json.loads(result["tool_calls"][0]["function"]["arguments"])
+            if "results" in report:
+                system = messages[0]["content"]
+                for name in ("common", "segment", "segment_batch"):
+                    assert (_PROMPT_DIR / language / f"{name}.md").read_text(encoding="utf-8").strip() in system
+                assert tools[0]["function"]["parameters"]["required"] == ["results"]
+                report["results"].reverse()
+            return reply(report)
+    groups = {"A": [replace(node(i, turn=f"t{i}"), error=(i == 3)) for i in range(35)]}
+    original, batched = Model(issues=True), ReverseBatch(issues=True)
+    before = await summarize_trajectory(model=original, nodes_by_agent=groups, language=language,
+                                        limits=SummaryLimits(segment_batch_size=1))
+    after = await summarize_trajectory(model=batched, nodes_by_agent=groups, language=language)
+    assert before.to_dict() == after.to_dict()
+    assert len(original.calls) == 36 and len(batched.calls) == 6
+    assert [len(call[0]["input"]["segments"]) for call in batched.calls
+            if "segments" in call[0]["input"]] == [8, 8, 8, 8, 3]
+    assert len(after.turns["A"]) == 35 and after.status == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["missing", "duplicate", "empty", "missing_problems", "context_limit"])
+async def test_batch_fallback_retries_only_bad_items(invalid):
+    class PartialBatch(Model):
+        async def invoke(self, messages, tools, **kwargs):
+            result = await super().invoke(messages, tools, **kwargs)
+            report = json.loads(result["tool_calls"][0]["function"]["arguments"])
+            if "results" in report:
+                if invalid == "context_limit":
+                    raise RuntimeError("context_length_exceeded")
+                if invalid == "missing":
+                    report["results"].pop(0)
+                elif invalid == "duplicate":
+                    report["results"].append(dict(report["results"][0]))
+                elif invalid == "empty":
+                    report["results"][0]["narrative"] = ""
+                else:
+                    del report["results"][0]["problems"]
+            return reply(report)
+    model = PartialBatch()
+    tree = await summarize_trajectory(model=model, nodes_by_agent={
+        "A": [node(i, turn=f"t{i}") for i in range(4)]})
+    singles = [call[0]["input"] for call in model.calls if "primary" in call[0]["input"]]
+    batches = [call for call in model.calls if "segments" in call[0]["input"]]
+    assert len(batches) == 1
+    assert len(singles) == (4 if invalid == "context_limit" else 1)
+    if invalid != "context_limit":
+        assert singles[0]["primary"][0]["node_id"] == "A:0"
+    assert tree.status == "completed" and tree.warnings == []
+    assert all(t.segments[0].status == "completed" for t in tree.turns["A"])
+
+
+@pytest.mark.asyncio
+async def test_batch_grouping_keeps_agents_turn_boundaries_and_full_large_content():
+    model = Model()
+    groups = {"A": [replace(node(0, turn="t0"), content="y" * 13_000),
+                    replace(node(1, turn="t1"), content="x" * 13_000),
+                    node(2, turn="t2"), node(3, turn="t3"), node(4, turn="t3"), node(5, turn="t3"),
+                    node(6, turn="t4"), node(7, turn="t5")],
+              "B": [node(0, "B", "t0"), node(1, "B", "t1")]}
+    tree = await summarize_trajectory(model=model, nodes_by_agent=groups,
+                                      limits=SummaryLimits(target_nodes=2, boundary_window=0))
+    leaves = [call[0]["input"] for call in model.calls if call[0]["purpose"].startswith("segment")]
+    batches = [p["segments"] for p in leaves if "segments" in p]
+    assert len(batches) == 3
+    for batch in batches:
+        assert len({p["agent_id"] for p in batch}) == 1
+        assert len({p["turn_id"] for p in batch}) == len(batch)
+        assert sum(len(p["primary"]) for p in batch) <= 2
+    large_batch = next(batch for batch in batches if batch[0]["primary"][0]["node_id"] == "A:0")
+    assert [p["primary"][0]["content"] for p in large_batch] == ["y" * 13_000, "x" * 13_000]
+    assert tree.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_batch_requests_share_concurrency_limit_and_cancel_cleanly():
+    entered = asyncio.Event()
+    active, peak = 0, 0
+    class Blocking(Model):
+        async def invoke(self, messages, tools, **kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            if active == 2:
+                entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                active -= 1
+    task = asyncio.create_task(summarize_trajectory(model=Blocking(), nodes_by_agent={
+        "A": [node(i, turn=f"t{i}") for i in range(12)]}, limits=SummaryLimits(concurrency=2)))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        assert peak == 2
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert active == 0
+
+
+def test_segment_batch_size_must_be_positive():
+    with pytest.raises(ValueError, match="batch size"):
+        SummaryLimits(segment_batch_size=0)
+
+
+@pytest.mark.asyncio
+async def test_batch_problem_evidence_cannot_cross_segment_boundaries():
+    class ForeignEvidence(Model):
+        async def invoke(self, messages, tools, **kwargs):
+            result = await super().invoke(messages, tools, **kwargs)
+            report = json.loads(result["tool_calls"][0]["function"]["arguments"])
+            if "results" in report:
+                report["results"][0]["problems"] = [{
+                    "kind": "tool_error", "summary": "Incorrect evidence from another turn",
+                    "node_ids": ["A:1"], "state": "unresolved"}]
+                report["results"].append({"segment_id": "unknown", "narrative": "Ignore this", "problems": []})
+            return reply(report)
+    tree = await summarize_trajectory(model=ForeignEvidence(), nodes_by_agent={
+        "A": [node(0, turn="t0"), node(1, turn="t1")]})
+    assert all(not t.segments[0].problems for t in tree.turns["A"])
+    assert all(t.segments[0].status == "completed" for t in tree.turns["A"])
+    assert tree.status == "degraded"
+    assert len(tree.warnings) == 1 and tree.warnings[0]["code"] == "problem_rejected"
 
 
 @pytest.mark.asyncio
