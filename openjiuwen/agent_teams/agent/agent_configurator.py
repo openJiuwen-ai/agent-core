@@ -100,7 +100,7 @@ def _resolve_team_mode(spec: TeamAgentSpec) -> str:
     # "hybrid": the leader keeps its spawn_* tools so the roster can
     # still grow at runtime. Lock it down by setting an explicit
     # "predefined" team_mode.
-    avatar_roles = {TeamRole.HUMAN_AGENT, TeamRole.PASSIVE_HUMAN, TeamRole.BRIDGE_AGENT}
+    avatar_roles = {TeamRole.HUMAN_AGENT, TeamRole.PASSIVE_HUMAN, TeamRole.BRIDGE_AGENT, TeamRole.HOST_MANAGED}
     non_avatar_predefined = [m for m in spec.predefined_members if m.role_type not in avatar_roles]
     return "hybrid" if non_avatar_predefined else "default"
 

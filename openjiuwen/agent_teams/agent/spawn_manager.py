@@ -105,7 +105,7 @@ class SpawnManager:
         # The recovery loop also skips it explicitly (see
         # ``RecoveryManager.recover_team``) — one guard per layer, each
         # pointing at the other, so future drift is grep-able (F_14 lesson).
-        if getattr(ctx, "role", None) == TeamRole.PASSIVE_HUMAN:
+        if getattr(ctx, "role", None) in (TeamRole.PASSIVE_HUMAN, TeamRole.HOST_MANAGED):
             team_logger.warning(
                 "[{}] refusing to spawn passive human {}; it has no runtime by design",
                 self._configurator.member_name or "?",

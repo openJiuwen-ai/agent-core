@@ -58,6 +58,7 @@ from openjiuwen.agent_teams.schema.task import (
     TaskSummary,
 )
 from openjiuwen.agent_teams.context import get_session_id
+from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.tools.database import (
     TASK_TERMINAL_STATUSES,
     TeamDatabase,
@@ -178,7 +179,7 @@ class TeamTaskManager:
             self.team_plan_id = _safe_token(team_plan_id, "team_plan")
 
     async def _validate_task_owner(self, member_name: str) -> TaskOpResult:
-        """Validate that a task owner exists and is not the team leader."""
+        """Validate that the named member can own a team task."""
         owner = str(member_name or "").strip()
         if not owner:
             return TaskOpResult.success()
@@ -191,6 +192,8 @@ class TeamTaskManager:
         member = await self.db.member.get_member(owner, self.team_name)
         if not member:
             return TaskOpResult.fail(f"Member {owner} not found in team {self.team_name}")
+        if member.role == TeamRole.HOST_MANAGED.value:
+            return TaskOpResult.fail(f"Host-managed member {owner} cannot be assigned team tasks")
         return TaskOpResult.success()
 
     async def add_graph(self, specs: list[TaskGraphSpec], *, suspend_parent: str | None = None) -> TaskGraphResult:
@@ -595,6 +598,8 @@ class TeamTaskManager:
         member = await self.db.member.get_member(member_name, self.team_name)
         if not member:
             return TaskOpResult.fail(f"Member {member_name} not found in team {self.team_name}")
+        if member.role == TeamRole.HOST_MANAGED.value:
+            return TaskOpResult.fail(f"Host-managed member {member_name} cannot claim team tasks")
         if member.mode == MemberMode.PLAN_MODE.value:
             return TaskOpResult.fail(
                 "PLAN_MODE members must call submit_plan first; "
