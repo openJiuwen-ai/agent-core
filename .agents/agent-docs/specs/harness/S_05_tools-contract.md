@@ -115,9 +115,13 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
    todo 工具族共同构成任务计划面；task 卡的 schema 见本 spec 数据结构的 `TaskPlan` / `TodoItem`。
 7. **工具描述与 i18n**：工具描述默认经 `prompts/tools/` 模板渲染；`LspToolMetadataProvider`
    （`tools/lsp_tool`）是 LSP 工具描述的唯一提供者 —— `S_14` / `S_06`。
-8. **工具装载顺序**：`create_deep_agent` / `DeepAgentConfig.tools` 进 `ability_manager`；
-   rail init 再动态加工具（`SysOperationRail` 100 先铺文件系统/shell 工具，见 `S_04`
-   梯队 100）。工具分批装载的时序语义由 rail priority 保证。
+8. **工具装载顺序**：默认 `create_deep_agent` / `DeepAgentConfig.tools` 直接进入
+   `ability_manager`；显式 `tool_registration_mode="event"` 时，被选中的具体启动 `Tool`
+   通过 `tool.register` 事件完成同一绑定，未选中的 concrete `Tool` 和纯 `ToolCard` 仍按
+   legacy / 卡片路径装载。rail init 再动态加工具
+   （`SysOperationRail` 100 先铺文件系统/shell 工具，见 `S_04` 梯队 100），并在每个 rail
+   初始化后 flush 事件队列。工具分批装载的时序语义由 rail priority 保证；事件失败不得静默
+   回退到直接登记，未完成项保留以便重试。
 9. **Browser 默认工具面保持紧凑**：`browser_capabilities=None` / `[]` 只选择 `core`，
    加上两类 Probe、Batch、可选意图/验证入口 browser_phase 和受限 offload recall。其他 MCP 工具通过显式 capability 启用；
    `unsafe_dev` 与 `advanced_code` 同选时以前者替换后者。不支持图像输入时过滤截图工具。

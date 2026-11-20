@@ -17,6 +17,8 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 if TYPE_CHECKING:
     from openjiuwen.core.events.bus import ExtensionEventBus
+    from openjiuwen.harness.deep_agent import DeepAgent
+    from openjiuwen.harness.schema.config import SubAgentConfig
 
 AGENT_REGISTER = "agent.register"
 
@@ -25,8 +27,10 @@ AGENT_REGISTER = "agent.register"
 class AgentRegisterInput:
     """Declaration for one sub-agent type to bind to the current DeepAgent."""
 
-    agent_card: AgentCard
-    prompt: str
+    # Keep the legacy projection first so existing positional construction
+    # remains valid.  New callers should prefer ``subagent_config``.
+    agent_card: AgentCard | None = None
+    prompt: str | None = None
     tools: tuple[str, ...] | None = None
     disallowed_tools: tuple[str, ...] | None = None
     model: str | None = None
@@ -42,6 +46,29 @@ class AgentRegisterInput:
     background: Literal[True] | None = None
     omit_claude_md: Literal[True] | None = None
     isolation: Literal["worktree", "remote"] | None = None
+    subagent_config: "SubAgentConfig | None" = None
+
+    @classmethod
+    def from_subagent_config(cls, config: "SubAgentConfig") -> "AgentRegisterInput":
+        """Build an event input from the canonical subagent declaration."""
+        _validate_subagent_config(config)
+        return cls(
+            agent_card=config.agent_card,
+            prompt=config.system_prompt,
+            subagent_config=config,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRegisterTriggerContext:
+    """Internal CORE context used during DeepAgent initialization.
+
+    Startup registration has a live ``DeepAgent`` but may not have a user
+    session yet.  The context is accepted only by the CORE handler; public
+    ``ops.agent.register`` continues to require a ``SessionContext``.
+    """
+
+    agent: "DeepAgent"
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,17 +105,82 @@ class AgentRegisterOutput:
         self.__post_init__()
 
 
-def prepare_agent_register_input(data: AgentRegisterInput) -> AgentRegisterInput:
-    """Validate and snapshot an agent registration request."""
-    if not isinstance(data, AgentRegisterInput) or not isinstance(data.agent_card, AgentCard):
+def _validate_agent_card(card: object) -> AgentCard:
+    if not isinstance(card, AgentCard):
         raise TypeError("agent.register requires AgentRegisterInput with AgentCard")
-    card = data.agent_card
     if not isinstance(card.id, str) or not card.id:
         raise ValueError("agent card id must be a nonempty string")
     if not isinstance(card.name, str) or not card.name:
         raise ValueError("agent card name must be a nonempty string")
-    if not isinstance(data.prompt, str) or not data.prompt:
-        raise ValueError("prompt must be a nonempty string")
+    return card
+
+
+def _validate_subagent_config(config: object) -> "SubAgentConfig":
+    from openjiuwen.harness.schema.config import SubAgentConfig
+
+    if not isinstance(config, SubAgentConfig):
+        raise TypeError("subagent_config must be SubAgentConfig")
+    _validate_agent_card(config.agent_card)
+    if not isinstance(config.system_prompt, str):
+        raise TypeError("subagent_config.system_prompt must be a string")
+    return config
+
+
+def _copy_mutable(value: object) -> object:
+    """Copy declaration containers while preserving runtime object handles."""
+    if isinstance(value, Mapping):
+        return {key: _copy_mutable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_mutable(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_copy_mutable(item) for item in value)
+    if isinstance(value, set):
+        return {_copy_mutable(item) for item in value}
+    return value
+
+
+def _snapshot_subagent_config(config: "SubAgentConfig") -> "SubAgentConfig":
+    """Snapshot mutable declaration state without cloning runtime handles."""
+    from dataclasses import replace as replace_dataclass
+
+    config = _validate_subagent_config(config)
+    return replace_dataclass(
+        config,
+        agent_card=config.agent_card.model_copy(deep=True),
+        tools=list(config.tools),
+        mcps=list(config.mcps),
+        rails=None if config.rails is None else list(config.rails),
+        skills=None if config.skills is None else list(config.skills),
+        factory_kwargs=_copy_mutable(config.factory_kwargs),
+    )
+
+
+def prepare_agent_register_input(data: AgentRegisterInput) -> AgentRegisterInput:
+    """Validate and snapshot an agent registration request."""
+    if not isinstance(data, AgentRegisterInput):
+        raise TypeError("agent.register requires AgentRegisterInput")
+
+    config = data.subagent_config
+    if config is not None:
+        config = _snapshot_subagent_config(config)
+        if data.agent_card is not None:
+            card = _validate_agent_card(data.agent_card)
+            if card != config.agent_card:
+                raise ValueError("agent_card must match subagent_config.agent_card")
+        if data.prompt is not None and data.prompt != config.system_prompt:
+            raise ValueError("prompt must match subagent_config.system_prompt")
+        card = config.agent_card
+        prompt = config.system_prompt
+    else:
+        card = _validate_agent_card(data.agent_card)
+        if not isinstance(data.prompt, str) or not data.prompt:
+            raise ValueError("prompt must be a nonempty string")
+        from openjiuwen.harness.schema.config import SubAgentConfig
+
+        config = SubAgentConfig(agent_card=card, system_prompt=data.prompt)
+        config = _snapshot_subagent_config(config)
+        card = config.agent_card
+        prompt = config.system_prompt
 
     for name in ("tools", "disallowed_tools", "skills"):
         value = getattr(data, name)
@@ -125,7 +217,9 @@ def prepare_agent_register_input(data: AgentRegisterInput) -> AgentRegisterInput
 
     return replace(
         data,
-        agent_card=data.agent_card.model_copy(deep=True),
+        agent_card=card,
+        prompt=prompt,
+        subagent_config=config,
         hooks=None if data.hooks is None else copy.deepcopy(dict(data.hooks)),
         mcp_servers=None if data.mcp_servers is None else copy.deepcopy(data.mcp_servers),
     )
@@ -165,6 +259,28 @@ def _require_session_context(ops: EventHandlerOps | None):
     return ops.session_context
 
 
+def _resolve_agent(ops: EventHandlerOps | None) -> "DeepAgent":
+    """Resolve the live agent from internal startup or public session context."""
+    trigger_context = getattr(ops, "trigger_context", None)
+
+    from openjiuwen.harness.deep_agent import DeepAgent
+
+    if isinstance(trigger_context, AgentRegisterTriggerContext):
+        if not isinstance(trigger_context.agent, DeepAgent):
+            raise RuntimeError("agent.register trigger context requires a bound DeepAgent")
+        return trigger_context.agent
+
+    session = _require_session_context(ops)
+    from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
+
+    agent = get_agent_runtime().get(session.session_id)
+    if agent is None:
+        raise RuntimeError("session agent is not bound or has been released")
+    if not isinstance(agent, DeepAgent):
+        raise RuntimeError("agent.register requires a bound DeepAgent")
+    return agent
+
+
 def match_pattern_func(value: object, pattern: MatchPattern) -> bool:
     """Match valid agent registration requests with an empty pattern."""
     return isinstance(value, AgentRegisterInput) and not pattern
@@ -177,18 +293,8 @@ async def core_handler(
 ) -> AgentRegisterOutput:
     """Bind a real ``SubAgentConfig`` through the live ``DeepAgent`` binder."""
     del event_next
-    session = _require_session_context(ops)
+    agent = _resolve_agent(ops)
     data = prepare_agent_register_input(event.event_input)
-
-    from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
-    from openjiuwen.harness.deep_agent import DeepAgent
-    from openjiuwen.harness.schema.config import SubAgentConfig
-
-    agent = get_agent_runtime().get(session.session_id)
-    if agent is None:
-        raise RuntimeError("session agent is not bound or has been released")
-    if not isinstance(agent, DeepAgent):
-        raise RuntimeError("agent.register requires a bound DeepAgent")
 
     unsupported = _unsupported_fields(data)
     if unsupported:
@@ -196,11 +302,9 @@ async def core_handler(
             deny=("agent.register fields are not supported by the current DeepAgent runtime: " + ", ".join(unsupported))
         )
 
-    config = SubAgentConfig(
-        agent_card=data.agent_card,
-        system_prompt=data.prompt,
-    )
-    await agent.load_subagent_config(config)
+    if data.subagent_config is None:
+        raise RuntimeError("agent.register input did not produce a SubAgentConfig")
+    await agent.load_subagent_config(data.subagent_config)
     return AgentRegisterOutput(
         value=AgentRegisterValue(agent=data.agent_card.name, agent_card=data.agent_card),
     )

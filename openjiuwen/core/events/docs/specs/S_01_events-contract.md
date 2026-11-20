@@ -7,8 +7,8 @@
 | 类型 | spec |
 | 编号 / slug | `S_01 / events-contract` |
 | 关联模块 | `openjiuwen/core/events/`；消费方包括 Core 业务模块、扩展运行时和 JiuwenSwarm 宿主 |
-| 最近一次修订日期 | 2026-11-07 |
-| 关联 feature | [F_01 公共契约](../features/F_01_ev01-public-contract.md)、[F_06 包信息能力](../features/F_06_ops-package.md)、[F_14 store 持久化](../features/F_14_ops-store.md)、[F_16 prompt.attachment Agent Loop 事件](../features/F_16_prompt-attachment-event.md)、[F_17 prompt.section](../features/F_17_prompt-section-event.md)、[F_18 prompt.compose](../features/F_18_prompt-compose-event.md)；已撤回的限定派发提案见 [F_09](../features/F_09_handler-selection.md)，进度见[开发计划](../designs/events-development-plan.md) |
+| 最近一次修订日期 | 2026-11-11 |
+| 关联 feature | [F_01 公共契约](../features/F_01_ev01-public-contract.md)、[F_06 包信息能力](../features/F_06_ops-package.md)、[F_11 tool.register](../features/F_11_ev11-tool-register-ops.md)、[F_14 store 持久化](../features/F_14_ops-store.md)、[F_16 prompt.attachment Agent Loop 事件](../features/F_16_prompt-attachment-event.md)、[F_17 prompt.section](../features/F_17_prompt-section-event.md)、[F_18 prompt.compose](../features/F_18_prompt-compose-event.md)；已撤回的限定派发提案见 [F_09](../features/F_09_handler-selection.md)，进度见[开发计划](../designs/events-development-plan.md) |
 | 设计依据 | [设计概览](../designs/events-overview.md)、[详细架构](../designs/events-architecture.md) |
 
 本规约是 Events 公共模型、接口协议、错误码和调用语义的唯一维护位置。公共模型、EventBus、Builder/Ops 已有实现与测试；具体方案和验证范围见关联 feature 与开发计划。`trigger` 由事件类型的 matcher 选择 Handler，不接受调用级 Handler ID 白名单。
@@ -29,7 +29,7 @@
 - **注册快照：** 一次普通 `trigger()` 在首次 `await` 前固定的事件定义和 Handler 注册记录。
 - **能力目录：** Builder 保存的 `namespace.method` 定义集合。
 - **可用 Builder：** 第一次成功执行 `ops.build` 后由 Bus 保存、供后续普通调用构建 Ops 的 Builder。普通调用只以 Bus 是否已保存 Builder 判断可用。
-- **受支持 Session：** 首版接受 `SessionContext`、`None` 和 `openjiuwen.core.single_agent.Session`。
+- **受支持 Session：** 首版接受 `SessionContext`、`None` 和 `openjiuwen.core.single_agent.Session`。此外，`trigger_context` 是只传给 CORE 的调用级内部数据，不属于 Session，也不改变 Handler 的 session 语义。
 
 本规约适用于同一进程、同一 asyncio 事件循环内的 EventBus。跨线程、跨事件循环、跨进程投递和进程重启后的调用恢复不在本期范围内。
 
@@ -183,6 +183,8 @@ class ExtensionEventBusProtocol(Protocol):
         self,
         event: Event,
         session: "Session | SessionContext | None" = None,
+        *,
+        trigger_context: object | None = None,
     ) -> EventOutput | None: ...
 ```
 
@@ -235,7 +237,7 @@ Bus 按以下顺序处理普通调用：
 4. 若事件定义配置了 `input_validator`，校验初始 `event_input`；返回 `False` 时以 `EVENTS_PAYLOAD_INVALID` 拒绝，matcher 和 Handler 均不执行。
 5. 用 MatchPatternFunc 筛选 USER / BUILTIN；CORE 不参与筛选。
 6. 按 USER → BUILTIN → CORE 执行，链内不重新匹配。USER / BUILTIN Adapter 在 Handler 调用 `EventNext` 传入新 Event 前校验 `event_input`；Handler 正常返回后校验 Handler 输出；CORE 正常返回后校验 CORE 输出。未配置对应 Validator 时跳过该项业务校验。
-7. 每次进入 Handler 前构建独立 Ops。扩展 Handler 调用 `Builder.build(package_metadata, session_context)`，package_metadata 取自该 Handler 注册记录。CORE 调用 `Builder.build_core(session_context, trigger_context)`，不绑定包信息。
+7. 每次进入 Handler 前构建独立 Ops。扩展 Handler 调用 `Builder.build(package_metadata, session_context)`，package_metadata 取自该 Handler 注册记录。CORE 调用 `Builder.build_core(session_context, trigger_context)`，不绑定包信息；`trigger_context` 不注入 USER / BUILTIN Handler 的 Ops。
 8. 将最外层合法结果交给调用方；CORE 或入口校验失败时 `trigger()` 失败。
 
 Validator 返回 `False` 表示业务值非法；Validator 抛异常或返回非 `bool` 时视为事件定义错误，原样传播，不适用扩展 Handler 的 skip。预置事件通过同一注册参数声明 Validator，不增加专用容错分支。

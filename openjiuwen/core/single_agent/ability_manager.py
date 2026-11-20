@@ -269,6 +269,7 @@ class AbilityManager:
         self._tools: Dict[str, ToolCard] = {}
         self._workflows: Dict[str, WorkflowCard] = {}
         self._agents: Dict[str, AgentCard] = {}
+        self._hidden_agent_names: set[str] = set()
         self._mcp_servers: Dict[str, McpServerConfig] = {}
         self._mcp_tool_allowlists: Dict[str, frozenset[str]] = {}
         self._context_engine = None
@@ -740,12 +741,16 @@ class AbilityManager:
 
     def add(
             self,
-            ability: Union[Ability, List[Ability]]
+            ability: Union[Ability, List[Ability]],
+            *,
+            expose_agent_cards: bool = True,
     ) -> Union[AddAbilityResult, List[AddAbilityResult]]:
         """Add an ability
 
         Args:
             ability: Ability Card to add
+            expose_agent_cards: Whether newly added AgentCards should be
+                included in the model-facing tool list.
 
         Returns:
             AddAbilityResult for single ability input,
@@ -838,6 +843,10 @@ class AbilityManager:
                         reason="duplicate_agent",
                     )
                 self._agents[_ability.name] = _ability
+                if expose_agent_cards:
+                    self._hidden_agent_names.discard(_ability.name)
+                else:
+                    self._hidden_agent_names.add(_ability.name)
                 self._mark_registry_changed()
                 return AddAbilityResult(
                     name=_ability.name,
@@ -989,6 +998,7 @@ class AbilityManager:
                 removed = self._workflows.pop(name, None)
             if name in self._agents:
                 removed = self._agents.pop(name, None)
+                self._hidden_agent_names.discard(name)
             if name in self._mcp_servers:
                 # Remove MCP server and its tools
                 mcp_server = self._mcp_servers.pop(name, None)
@@ -1016,6 +1026,7 @@ class AbilityManager:
                     removed = self._workflows.pop(item, None)
                 if item in self._agents:
                     removed = self._agents.pop(item, None)
+                    self._hidden_agent_names.discard(item)
                 if item in self._mcp_servers:
                     # Remove MCP server and its tools
                     mcp_server = self._mcp_servers.pop(item, None)
@@ -1167,6 +1178,8 @@ class AbilityManager:
 
         # Convert AgentCards to ToolInfo
         for name, agent_card in self._agents.items():
+            if name in self._hidden_agent_names:
+                continue
             if names is None or name in names:
                 # Build parameters from input_params
                 # input_params can be: None, dict (JSON Schema), or Type[BaseModel]
