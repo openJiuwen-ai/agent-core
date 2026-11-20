@@ -5,7 +5,7 @@
 
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current_time
@@ -83,19 +83,26 @@ class TeamDao:
     async def delete_team(self, team_name: str) -> bool:
         """Delete a team (cascade delete will remove related records).
 
+        Uses a single conditional ``DELETE ... WHERE team_name = ?`` and
+        checks ``rowcount`` rather than a SELECT-then-``session.delete``
+        read-modify-write: the conditional DELETE is atomic at the row level
+        on every backend, so a concurrent caller that already deleted the
+        row yields ``rowcount == 0`` and we return ``False`` instead of
+        clobbering a re-created team.
+
         Returns:
             ``True`` if a row was deleted, ``False`` when the team did
             not exist. Callers that treat "missing" as success can map
             ``False`` themselves.
         """
         async with self._sessions.write() as session:
-            result = await session.execute(select(Team).where(Team.team_name == team_name))
-            team = result.scalar_one_or_none()
-            if not team:
+            result = await session.execute(
+                delete(Team).where(Team.team_name == team_name)
+            )
+            deleted = (result.rowcount or 0) == 1
+            if not deleted:
                 team_logger.debug("Team %s not found for deletion", team_name)
                 return False
-
-            await session.delete(team)
             await session.commit()
             team_logger.info("Team %s deleted", team_name)
             return True

@@ -35,10 +35,10 @@ def _fake_session_factory() -> _FakeSession:
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_read_block_exceeding_watchdog_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_read_block_exceeding_watchdog_raises() -> None:
     """A read block hanging past the watchdog raises TimeoutError instead of stalling."""
-    monkeypatch.setattr(engine_module, "_DB_SESSION_WATCHDOG_SECONDS", 0)
     sessions = DbSessions(_fake_session_factory)
+    sessions._watchdog_seconds = 0
 
     with pytest.raises(TimeoutError):
         async with sessions.read():
@@ -50,12 +50,10 @@ async def test_read_block_exceeding_watchdog_raises(monkeypatch: pytest.MonkeyPa
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_write_block_exceeding_watchdog_raises_and_releases_lock(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_write_block_exceeding_watchdog_raises_and_releases_lock() -> None:
     """A hung write block raises TimeoutError and leaves the write lock free."""
-    monkeypatch.setattr(engine_module, "_DB_SESSION_WATCHDOG_SECONDS", 0)
     sessions = DbSessions(_fake_session_factory)
+    sessions._watchdog_seconds = 0
 
     with pytest.raises(TimeoutError):
         async with sessions.write():
@@ -66,15 +64,15 @@ async def test_write_block_exceeding_watchdog_raises_and_releases_lock(
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_write_lock_wait_is_not_counted_by_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_write_lock_wait_is_not_counted_by_watchdog() -> None:
     """Queueing behind the write lock is not counted by the watchdog; only the block is.
 
     With a zero watchdog, *any* wait longer than zero exceeds the budget —
     so a writer that merely queues for the lock would already time out if
     the lock were inside the ``asyncio.timeout`` context. It must survive.
     """
-    monkeypatch.setattr(engine_module, "_DB_SESSION_WATCHDOG_SECONDS", 0)
     sessions = DbSessions(_fake_session_factory)
+    sessions._watchdog_seconds = 0
 
     entered = asyncio.Event()
 

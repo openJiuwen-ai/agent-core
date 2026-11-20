@@ -141,6 +141,22 @@ class DbSessions:
         self._write_session_local = write_session_local
         self._read_session_local = read_session_local or write_session_local
         self._write_lock = asyncio.Lock()
+        # DDL serialisation lock — taken by ``create_cur_session_tables`` /
+        # ``drop_cur_session_tables`` / ``cleanup_all_runtime_state`` /
+        # ``drop_session_tables_by_id`` on **all** backends. DDL (CREATE /
+        # DROP TABLE) is rare (bind-time + teardown) but must not interleave
+        # with itself: two concurrent teardowns of the same session's tables
+        # or a bind racing a drop can leave half-created / half-dropped
+        # tables. On SQLite the per-write lock already serialises DDL with
+        # every DAO write; this lock adds DDL-vs-DDL protection on
+        # PostgreSQL / MySQL, where the per-write lock is skipped (the DB
+        # itself is the write arbiter). DDL-vs-write is still guarded by the
+        # DB's own table-level DDL lock (AccessExclusiveLock on PostgreSQL,
+        # equivalent metadata lock on MySQL) — a DROP blocks until in-flight
+        # writes commit, and a write that starts after the DROP completes
+        # sees "table does not exist", which is the expected teardown
+        # semantics, not data corruption.
+        self._ddl_lock = asyncio.Lock()
         # Skip the process-level write lock for client/server backends:
         # PostgreSQL / MySQL provide native write concurrency (row locks +
         # MVCC), so serialising writes in-process only throttles throughput.
@@ -156,8 +172,25 @@ class DbSessions:
 
     @property
     def write_locked(self) -> bool:
-        """Whether a ``write()`` block currently holds the write lock (diagnostics)."""
-        return self._write_lock.locked()
+        """Whether a ``write()`` block currently holds the process write lock.
+
+        Returns ``False`` on client/server backends (PostgreSQL / MySQL)
+        where ``write()`` skips the process-level lock — the DB itself is the
+        arbiter. On SQLite returns whether the lock is currently held.
+        """
+        return self._use_write_lock and self._write_lock.locked()
+
+    @asynccontextmanager
+    async def ddl_lock(self) -> AsyncIterator[None]:
+        """Acquire the DDL serialisation lock (all backends).
+
+        Taken by the DDL / cleanup helpers (``create_cur_session_tables``,
+        ``drop_cur_session_tables``, ``cleanup_all_runtime_state``,
+        ``drop_session_tables_by_id``) so DDL operations serialise with each
+        other. See ``DbSessions.__init__`` for the full rationale.
+        """
+        async with self._ddl_lock:
+            yield
 
     @asynccontextmanager
     async def read(self) -> AsyncIterator[AsyncSession]:
@@ -1017,14 +1050,15 @@ async def _ensure_session_tables(session: AsyncSession) -> None:
 # Preserve the shared DDL retry/drop layout while develop updates its write protocol.
 # fmt: off
 async def create_cur_session_tables(sessions: DbSessions) -> bool:
-    """Create dynamic tables for current session under the process-wide write lock.
+    """Create dynamic tables for current session under the DDL + write lock.
 
     Runs inside ``DbSessions.write()`` so bind-time DDL serialises with every
-    DAO write of this instance. The engine-level variant (``engine.begin()``)
-    bypassed the lock: two teammates binding concurrently could hold BOTH
-    write-pool connections while their DDL parked on the SQLite file lock,
-    exhausting the 2-connection pool (``QueuePool limit of size 2`` teammate
-    crashes).
+    DAO write of this instance, **and** holds ``sessions.ddl_lock()`` so two
+    concurrent binds of the same instance's tables cannot interleave. The
+    engine-level variant (``engine.begin()``) bypassed both: two teammates
+    binding concurrently could hold BOTH write-pool connections while their
+    DDL parked on the SQLite file lock, exhausting the 2-connection pool
+    (``QueuePool limit of size 2`` teammate crashes).
 
     The session_id is obtained from context via get_session_id().
 
@@ -1045,9 +1079,10 @@ async def create_cur_session_tables(sessions: DbSessions) -> bool:
         return False
 
     async def _ddl_once() -> None:
-        async with sessions.write() as session:
-            await _ensure_session_tables(session)
-            await session.commit()
+        async with sessions.ddl_lock():
+            async with sessions.write() as session:
+                await _ensure_session_tables(session)
+                await session.commit()
 
     try:
         await retry_on_transient(_ddl_once, label=f"create_cur_session_tables(session={session_id})")
@@ -1062,11 +1097,12 @@ async def create_cur_session_tables(sessions: DbSessions) -> bool:
 
 
 async def drop_cur_session_tables(sessions: DbSessions) -> None:
-    """Drop dynamic tables for current session under the process-wide write lock.
+    """Drop dynamic tables for current session under the DDL + write lock.
 
-    Runs inside ``DbSessions.write()`` so the drop serialises with
-    ``create_cur_session_tables`` and every DAO write of this instance; a bare
-    ``engine.begin()`` let a drop interleave with an in-flight bind or write.
+    Runs inside ``DbSessions.write()`` and ``sessions.ddl_lock()`` so the
+    drop serialises with ``create_cur_session_tables``, every other DDL
+    helper, and every DAO write of this instance; a bare ``engine.begin()``
+    let a drop interleave with an in-flight bind or write.
 
     The session_id is obtained from context via get_session_id().
     """
@@ -1084,11 +1120,12 @@ async def drop_cur_session_tables(sessions: DbSessions) -> None:
     read_status_model = _get_message_read_status_model()
     review_vote_model = _get_review_vote_model()
 
-    async with sessions.write() as session:
-        conn = await session.connection()
-        for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
-            await conn.run_sync(model.__table__.drop, checkfirst=True)
-        await session.commit()
+    async with sessions.ddl_lock():
+        async with sessions.write() as session:
+            conn = await session.connection()
+            for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
+                await conn.run_sync(model.__table__.drop, checkfirst=True)
+            await session.commit()
 
     team_logger.info("Dropped dynamic tables for session %s", session_id)
 
@@ -1101,29 +1138,31 @@ async def cleanup_all_runtime_state(
 
     This cleanup is storage-level and does not depend on an active
     agent instance or the current session context. Runs under the
-    ``DbSessions`` write lock, same as ``drop_cur_session_tables``.
+    ``DbSessions`` write lock **and** ``sessions.ddl_lock()``, same as
+    ``drop_cur_session_tables``.
     """
     if sessions is None:
         return [], []
 
     deleted_tables: list[str] = []
     cleared_tables: list[str] = []
-    async with sessions.write() as session:
-        conn = await session.connection()
-        table_names = await conn.run_sync(_get_table_names)
+    async with sessions.ddl_lock():
+        async with sessions.write() as session:
+            conn = await session.connection()
+            table_names = await conn.run_sync(_get_table_names)
 
-        for table_name in table_names:
-            if not table_name.startswith(TEAM_DYNAMIC_TABLE_PREFIXES):
-                continue
-            await conn.run_sync(_drop_table, table_name)
-            deleted_tables.append(table_name)
+            for table_name in table_names:
+                if not table_name.startswith(TEAM_DYNAMIC_TABLE_PREFIXES):
+                    continue
+                await conn.run_sync(_drop_table, table_name)
+                deleted_tables.append(table_name)
 
-        for table_name in TEAM_STATIC_TABLES_TO_CLEAR:
-            if table_name not in table_names:
-                continue
-            await conn.run_sync(_clear_table, table_name)
-            cleared_tables.append(table_name)
-        await session.commit()
+            for table_name in TEAM_STATIC_TABLES_TO_CLEAR:
+                if table_name not in table_names:
+                    continue
+                await conn.run_sync(_clear_table, table_name)
+                cleared_tables.append(table_name)
+            await session.commit()
 
     team_logger.info(
         "Cleaned team runtime state: deleted dynamic tables={}, cleared static tables={}",
@@ -1138,8 +1177,8 @@ async def drop_session_tables_by_id(sessions: DbSessions, session_id: str) -> li
 
     This is used by Runner.release(session_id) to clean up per-session
     tables when the session context is not active (e.g. after the agent
-    has finished executing). Runs under the ``DbSessions`` write lock,
-    same as ``drop_cur_session_tables``.
+    has finished executing). Runs under the ``DbSessions`` write lock
+    **and** ``sessions.ddl_lock()``, same as ``drop_cur_session_tables``.
 
     Args:
         sessions: Read/write session provider of the database.
@@ -1153,15 +1192,16 @@ async def drop_session_tables_by_id(sessions: DbSessions, session_id: str) -> li
 
     suffix = _sanitize_session_id_for_table(session_id)
     dropped: list[str] = []
-    async with sessions.write() as session:
-        conn = await session.connection()
-        table_names = await conn.run_sync(_get_table_names)
-        for prefix in TEAM_DYNAMIC_TABLE_PREFIXES:
-            expected_table = f"{prefix}{suffix}"
-            if expected_table in table_names:
-                await conn.run_sync(_drop_table, expected_table)
-                dropped.append(expected_table)
-        await session.commit()
+    async with sessions.ddl_lock():
+        async with sessions.write() as session:
+            conn = await session.connection()
+            table_names = await conn.run_sync(_get_table_names)
+            for prefix in TEAM_DYNAMIC_TABLE_PREFIXES:
+                expected_table = f"{prefix}{suffix}"
+                if expected_table in table_names:
+                    await conn.run_sync(_drop_table, expected_table)
+                    dropped.append(expected_table)
+            await session.commit()
 
     if dropped:
         team_logger.info("Dropped session tables for session %s: %s", session_id, dropped)
