@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import fnmatch
+import ipaddress
 import json
 import logging
 import os
@@ -234,6 +235,20 @@ def _raise_for_status(response: httpx.Response) -> None:
     raise httpx.HTTPStatusError(message, request=response.request, response=response)
 
 
+def _authentication_failure(error: BaseException) -> bool:
+    if not isinstance(error, httpx.HTTPStatusError):
+        return False
+    if error.response.status_code in (401, 403):
+        return True
+    if error.response.status_code == 503:
+        try:
+            payload = error.response.json()
+        except ValueError:
+            return False
+        return isinstance(payload, dict) and payload.get("code") == "API_TOKEN_REQUIRED"
+    return False
+
+
 def _is_permanent_acl_cleanup_error(error: BaseException) -> bool:
     """Only an explicit Box receipt disables transport-level cleanup retries."""
     if not isinstance(error, httpx.HTTPStatusError) or error.response is None or error.response.status_code != 409:
@@ -306,6 +321,39 @@ def _is_sandbox_exec_delivered(
 
 _ENV_API_TOKEN = "JIUWENBOX_API_TOKEN"
 _CREATE_SANDBOX_MIN_TIMEOUT_SECONDS = 180.0
+_service_token_resolver: Callable[[str, str | None], str | None] | None = None
+
+
+def set_jiuwenbox_service_token_resolver(resolver: Callable[[str, str | None], str | None]) -> None:
+    """Install the embedding host's in-memory, endpoint-scoped credential source."""
+    global _service_token_resolver
+    _service_token_resolver = resolver
+
+
+class JiuwenBoxAuthenticationError(PermissionError):
+    """Credential unavailable for a retired or unauthorised service."""
+
+
+class _EndpointAuth(httpx.Auth):
+    def __init__(self, base_url: str, explicit: str | None):
+        self.endpoint = httpx.URL(base_url)
+        self.explicit = explicit
+
+    def auth_flow(self, request: httpx.Request):
+        same_origin = (request.url.scheme, request.url.host, request.url.port) == (
+            self.endpoint.scheme, self.endpoint.host, self.endpoint.port,
+        )
+        if same_origin:
+            resolver = _service_token_resolver
+            token = (
+                resolver(str(self.endpoint).rstrip("/"), self.explicit)
+                if resolver else _resolve_api_token(self.explicit)
+            )
+            if token:
+                request.headers["Authorization"] = f"Bearer {token}"
+        else:
+            request.headers.pop("Authorization", None)
+        yield request
 
 
 def _resolve_api_token(api_token: str | None) -> str | None:
@@ -323,17 +371,29 @@ def build_jiuwenbox_http_client(
     api_token: str | None = None,
 ) -> httpx.Client:
     """Build an httpx client for the jiuwenbox HTTP API with optional Bearer auth."""
-    token = _resolve_api_token(api_token)
-    headers = {"Authorization": f"Bearer {token}"} if token else None
     return httpx.Client(
         base_url=base_url.rstrip("/"),
         timeout=timeout_seconds,
-        headers=headers,
+        auth=_EndpointAuth(base_url, api_token),
+        trust_env=_allow_proxy(base_url),
     )
 
 
 class JiuwenBoxUnavailableError(RuntimeError):
     """Instance startup failed before tool dispatch, with verified remote cleanup."""
+
+
+def _allow_proxy(base_url: str | httpx.URL) -> bool:
+    host = httpx.URL(base_url).host
+    if host.lower() == "localhost":
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return not address.is_loopback
 
 
 class _JiuwenBoxClient:
@@ -502,6 +562,7 @@ class _JiuwenBoxClient:
         }
         async with httpx.AsyncClient(
             base_url=self._client.base_url, headers=self._client.headers,
+            auth=self._client.auth, trust_env=_allow_proxy(self._client.base_url),
             timeout=max(timeout_seconds or 30, 30),
         ) as client:
             response = await client.post(
@@ -1599,9 +1660,11 @@ class _JiuwenBoxProviderMixin:
                     sandbox_id = await self._recreate_sandbox_after_loss(
                         stale_sandbox_id=stale_sandbox_id,
                     )
-                except _SandboxLifecyclePendingError:
+                except (_SandboxLifecyclePendingError, JiuwenBoxAuthenticationError):
                     raise
                 except Exception as exc:
+                    if _authentication_failure(exc):
+                        raise
                     last_error = str(exc)
                     logger.warning(
                         "[jiuwenbox] sandbox recreate failed (attempt %d/%d): %s",
@@ -1627,6 +1690,8 @@ class _JiuwenBoxProviderMixin:
                 )
                 break
             except httpx.HTTPStatusError as exc:
+                if _authentication_failure(exc):
+                    raise
                 if _is_sandbox_not_found_error(exc):
                     last_error = str(exc)
                     stale_sandbox_id = sandbox_id
@@ -1639,6 +1704,8 @@ class _JiuwenBoxProviderMixin:
                     continue
                 last_error = str(exc)
                 break
+            except JiuwenBoxAuthenticationError:
+                raise
             except Exception as exc:
                 last_error = str(exc)
                 break
