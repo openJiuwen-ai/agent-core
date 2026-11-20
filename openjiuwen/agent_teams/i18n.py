@@ -86,6 +86,15 @@ STRINGS: dict[str, dict[str, str]] = {
             "但我已连续空闲 {minutes} 分钟未推进（多次自我催促无效）。"
             "请评估是否需要问询、改派或更换成员。"
         ),
+        # budget wrap-up trigger (PM-85): delivered as a team event
+        "dispatcher.budget_wrap_up": (
+            "[预算收尾] 本轮迭代预算已经用完，所有成员都已停下。"
+            "任务板现状：待办 {pending} 个，被前置任务卡住 {blocked} 个，"
+            "已完成 {completed} 个。还没做完、已经退回待办清单的任务："
+            "{tasks}。请直接输出最终交付总结：已经做完了什么、哪些没做完、"
+            "下一轮怎么接着做。不要重新开工，也不要再派活。"
+        ),
+        "dispatcher.budget_wrap_up_none": "无",
         # agent/dispatcher.py — task assignment notification
         "dispatcher.task_assigned_to_self": (
             "[任务指派] 任务 [{task_id}] 已指派给你，请通过 view_task 工具查看任务详情并执行。"
@@ -382,6 +391,16 @@ STRINGS: dict[str, dict[str, str]] = {
             "idle for {minutes} minute(s) without progressing it (repeated self-nudges did not "
             "help). Please consider checking in, reassigning, or replacing the assignee."
         ),
+        # budget wrap-up trigger (PM-85): delivered as a team event
+        "dispatcher.budget_wrap_up": (
+            "[Budget wrap-up] The iteration budget is used up and all members "
+            "have stopped. Task board: {pending} to do, {blocked} blocked by "
+            "prerequisites, {completed} done. Unfinished tasks returned to the "
+            "to-do list: {tasks}. Produce the final delivery summary now: what "
+            "is done, what is not, and how the next round should continue. Do "
+            "not restart work or dispatch new tasks."
+        ),
+        "dispatcher.budget_wrap_up_none": "none",
         # agent/dispatcher.py — task assignment notification
         "dispatcher.task_assigned_to_self": (
             "[Task Assigned] Task [{task_id}] has been assigned to you. "

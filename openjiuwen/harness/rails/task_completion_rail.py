@@ -28,24 +28,25 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 from openjiuwen.core.foundation.tool import Tool
-from openjiuwen.core.single_agent.rail.base import (
-    AgentCallbackContext,
-    ToolCallInputs,
-)
+from openjiuwen.core.foundation.llm import ToolMessage
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
 )
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.task_completion import (
     build_completion_signal_section,
+    build_iteration_budget_section,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.stop_condition import (
     CompletionPromiseEvaluator,
+    IterationBudgetExhaustedEvaluator,
     MaxRoundsEvaluator,
+    RoundBudgetExhaustedEvaluator,
     StopConditionEvaluator,
     TimeoutEvaluator,
 )
@@ -70,6 +71,45 @@ PROMISE_TAG_PATTERN = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+# Soft-hint threshold (hardcoded, no config knob): hint when
+# remaining rounds <= this, mandatory wrap-up when the cap is reached.
+_BUDGET_HINT_THRESHOLD = 3
+
+# Expansion tools blocked during the budget wrap-up round:
+# the wrap-up round is for the final summary only — no new delegations, no
+# new tasks, no waking members, no swarmflow expansion. ``update_task`` is
+# blocked only when it carries an assignee (reassignment = expansion);
+# status-only updates stay allowed.
+_WRAP_UP_BLOCKED_TOOLS = frozenset({
+    "spawn_teammate",
+    "spawn_human_agent",
+    "spawn_bridge_agent",
+    "spawn_external_cli",
+    "create_task",
+    # wake/revive a member or start new work through the mailbox
+    "send_message",
+    # orchestration fan-out and team expansion
+    "swarmflow",
+    "build_team",
+    # approving a plan resumes member work
+    "approve_plan",
+})
+
+# ``update_task`` task-graph changes that count as expansion: (re)assigning,
+# adding/removing dependencies, adding/changing a reviewer. Status-only
+# updates (including cancelled) stay allowed.
+_TASK_GRAPH_EXPANSION_ARGS = (
+    "assignee",
+    "reviewer",
+    "add_blocked_by",
+    "remove_blocked_by",
+)
+
+# Inner-iteration grace for the wrap-up round (收尾轮硬上限，
+# 硬编码不加旋钮): the summary should take a handful of model calls; beyond
+# this the wrap-up round itself is force-finished.
+_WRAP_UP_GRACE_ITERATIONS = 30
+
 
 class TaskCompletionRail(DeepAgentRail):
     """Task-completion strategy Rail with optional goal lifecycle support.
@@ -89,6 +129,9 @@ class TaskCompletionRail(DeepAgentRail):
             ``<promise>…</promise>`` to signal task completion.
         max_rounds: Maximum number of outer-loop rounds before
             the loop is force-stopped.
+        iteration_budget: Maximum number of INNER ReAct iterations
+            (every model call) per invoke. Exceeding it force-finishes
+            the current round at the next iteration boundary.
         timeout_seconds: Wall-clock timeout in seconds for the
             entire task loop.
         evaluators: Additional custom evaluators appended after
@@ -101,18 +144,20 @@ class TaskCompletionRail(DeepAgentRail):
     priority = 10
 
     def __init__(
-        self,
-        task_instruction: Optional[str] = None,
-        completion_promise: Optional[str] = None,
-        required_confirmations: int = 1,
-        allow_promise_details: bool = False,
-        max_rounds: Optional[int] = None,
-        timeout_seconds: Optional[float] = None,
-        evaluators: Optional[
-            List[StopConditionEvaluator]
-        ] = None,
-        goal_manager: Optional[GoalManager] = None,
-        goal_language: str = "cn",
+            self,
+            task_instruction: Optional[str] = None,
+            completion_promise: Optional[str] = None,
+            required_confirmations: int = 1,
+            allow_promise_details: bool = False,
+            max_rounds: Optional[int] = None,
+            iteration_budget: Optional[int] = None,
+            timeout_seconds: Optional[float] = None,
+            evaluators: Optional[
+                List[StopConditionEvaluator]
+            ] = None,
+            goal_manager: Optional[GoalManager] = None,
+            goal_language: str = "cn",
+            enable_budget_wrap_up: bool = False,
     ) -> None:
         super().__init__()
         self.task_instruction = task_instruction
@@ -124,7 +169,7 @@ class TaskCompletionRail(DeepAgentRail):
         self.max_rounds = max_rounds
         self.timeout_seconds = timeout_seconds
         self._extra_evaluators: List[StopConditionEvaluator] = (
-            evaluators or []
+                evaluators or []
         )
 
         # Goal support
@@ -140,9 +185,57 @@ class TaskCompletionRail(DeepAgentRail):
         self._current_attempt_messages: List[Any] = []
         self.attachment_manager = None
 
+        # Iteration budget:
+        # per-invoke INNER ReAct iteration counter (every model call),
+        # soft hints and the optional shared team budget hook.
+        # ``budget_tick`` is wired by the team layer (TeamAgent); it is a
+        # zero-arg callable that ticks the round's shared ledger and
+        # returns the remaining total budget (None = no ledger). Wired as
+        # a getter-resolved callable so a mid-invoke ledger swap (new
+        # round) can never be written through a stale reference.
+        self.iteration_budget = iteration_budget
+        self._iteration_count = 0
+        self._iteration_cap_hit = False
+        self._budget_total_exhausted = False
+        # 成员池到顶（leader 仍持有预留）：leader rail 由 kernel 置位，
+        # 停轮后进入收尾；成员侧不使用该标志。
+        self._member_budget_exhausted = False
+        self.budget_tick: Optional[Callable[[], Optional[int]]] = None
+        # 非变更探针：只读剩余额度，不计数（结算点/看门狗用）。
+        self.budget_probe: Optional[Callable[[], Optional[int]]] = None
+        # 本外层轮是否已就 total 耗尽发起过止血（before_invoke 重新武装）
+        self._budget_finish_armed = False
+        # Wrap-up round (leader only): when a budget cap is
+        # hit, grant exactly one final OUTER round for the delivery summary
+        # (inner grace = _WRAP_UP_GRACE_ITERATIONS), with expansion tools
+        # hard-blocked. ``on_budget_wrap_up`` fires once at wrap-up entry so
+        # the team layer can stop members and repool tasks BEFORE the
+        # summary round runs.
+        self.enable_budget_wrap_up = enable_budget_wrap_up
+        # 返回 list[str]（旧）或 {"repooled": [...], "counts": {...}}（新）
+        self.on_budget_wrap_up: Optional[Callable[[], Awaitable[Any]]] = None
+        # 收尾提示用的任务板计数（待办/被卡住/已完成）
+        self._wrap_up_task_counts: Dict[str, int] = {}
+        # 成员侧收口回调：迭代预算触顶时触发（成员无 wrap-up，
+        # 触顶即收口）。team 层 kernel 接线；None = 不通报（非团队链路）。
+        self.on_iteration_cap: Optional[Callable[[], Awaitable[None]]] = None
+        # 成员侧 total 耗尽停轮回调：只回池自己在途任务（不摘牌/不通报）。
+        # leader 不接此回调——回池由收尾轮统一负责。
+        self.on_total_budget_exhausted: Optional[
+            Callable[[], Awaitable[None]]
+        ] = None
+        self._wrap_up_consumed = False
+        self._in_wrap_up_round = False
+        self._wrap_up_iterations = 0
+        # 收尾轮回池任务清单（kernel 回调返回，注入收尾提示）
+        self._wrap_up_repooled: List[str] = []
+        # Agent 名只用于日志；init() 时填充，未初始化时回落 "?"
+        self._agent_name: str = "?"
+        # 周期重置采样计数：每 10 个周期打一条 reset 日志
+        self._budget_cycle_seq: int = 0
 
     def set_goal_manager(
-        self, goal_manager: GoalManager,
+            self, goal_manager: GoalManager,
     ) -> None:
         """Inject or replace the GoalManager after DeepAgent starts.
 
@@ -163,7 +256,7 @@ class TaskCompletionRail(DeepAgentRail):
     # -- evaluator builder --
 
     def build_evaluators(
-        self,
+            self,
     ) -> List[StopConditionEvaluator]:
         """Build the evaluator chain from rail parameters.
 
@@ -174,6 +267,20 @@ class TaskCompletionRail(DeepAgentRail):
         result: List[StopConditionEvaluator] = []
         if self.max_rounds is not None:
             result.append(MaxRoundsEvaluator(self.max_rounds))
+        if self.iteration_budget is not None:
+            result.append(
+                IterationBudgetExhaustedEvaluator(
+                    lambda: self._iteration_cap_hit
+                            and (not self.enable_budget_wrap_up or self._wrap_up_consumed)
+                )
+            )
+        if self.budget_tick is not None:
+            result.append(
+                RoundBudgetExhaustedEvaluator(
+                    lambda: self._budget_stop_hit
+                            and (not self.enable_budget_wrap_up or self._wrap_up_consumed)
+                )
+            )
         if self.timeout_seconds is not None:
             result.append(
                 TimeoutEvaluator(self.timeout_seconds)
@@ -203,6 +310,9 @@ class TaskCompletionRail(DeepAgentRail):
         self.attachment_manager = getattr(
             agent, "prompt_attachment_manager", None
         )
+        self._agent_name = getattr(
+            getattr(agent, "card", None), "name", "?",
+        ) or "?"
         if self._goal_manager is None:
             return
 
@@ -261,13 +371,108 @@ class TaskCompletionRail(DeepAgentRail):
 
     # -- lifecycle hooks --
 
+    def reset_budget_cycle(self) -> None:
+        """Reset the iteration budget at a CYCLE boundary.
+
+        周期边界 = 一次完整的 agent 调用周期：
+        - 非团队 DeepAgent：一次 task-loop invoke（``_run_task_loop`` 起点）；
+        - 专家团（NativeHarness）：一次 coordination.start 周期（leader 一条
+          用户消息 / 成员一次派发），由 coordination kernel 在 start 时调用。
+
+        刻意不在 ``before_invoke`` 里重置：团队链路的 BEFORE_INVOKE 是
+        **每个外层轮**触发一次（native_harness._drive_round），在那里重置会让
+        main/total 预算退化为"每轮一份"，收尾轮入口的标志也会被清零。
+        """
+        self._budget_cycle_seq += 1
+        if self._budget_cycle_seq % 10 == 0:
+            logger.info(
+                "[TaskCompletionRail] iteration budget cycle reset: "
+                "agent=%s cycle=%d prev_iterations=%d",
+                self._agent_name,
+                self._budget_cycle_seq,
+                self._iteration_count,
+            )
+        self._iteration_count = 0
+        self._iteration_cap_hit = False
+        self._budget_total_exhausted = False
+        self._member_budget_exhausted = False
+        self._budget_finish_armed = False
+        self._wrap_up_consumed = False
+        self._in_wrap_up_round = False
+        self._wrap_up_iterations = 0
+        self._wrap_up_repooled = []
+        self._wrap_up_task_counts = {}
+
+    @property
+    def iteration_cap_hit(self) -> bool:
+        """Whether the per-invoke iteration budget was exhausted."""
+        return self._iteration_cap_hit
+
+    @property
+    def total_budget_exhausted(self) -> bool:
+        """Whether the shared round-budget ledger is exhausted."""
+        return self._budget_total_exhausted
+
+    @property
+    def _budget_stop_hit(self) -> bool:
+        """Absolute total hit, or the member pool hit (leader reserve)."""
+        return bool(
+            self._budget_total_exhausted or self._member_budget_exhausted
+        )
+
+    def mark_member_budget_exhausted(self) -> None:
+        """Leader rail hook: member pool reached its cap (reserve remains).
+
+        Set by the coordination kernel on the ledger's exhaustion edge so
+        the leader winds down into the wrap-up round even though it still
+        holds the reserved share for the current round.
+        """
+        self._member_budget_exhausted = True
+
+    @property
+    def budget_wrap_up_pending(self) -> bool:
+        """True when the wrap-up round is owed but not yet entered."""
+        return bool(
+            self.enable_budget_wrap_up
+            and not self._wrap_up_consumed
+            and (self._iteration_cap_hit or self._budget_stop_hit)
+        )
+
+    @property
+    def budget_wrap_up_consumed(self) -> bool:
+        """Whether the one budget wrap-up round has already been entered."""
+        return self._wrap_up_consumed
+
+    def should_suppress_budget_result(self, result: Any) -> bool:
+        """Whether this round result is a pre-wrap-up control payload.
+
+        The round in which a cap is hit ends with the rail's canned
+        ``budget_stop`` answer. When a wrap-up round will follow, that
+        control payload must not reach the user stream: the wrap-up
+        summary is the round's user-visible answer.
+        """
+        return bool(
+            isinstance(result, dict)
+            and result.get("budget_stop")
+            and self.enable_budget_wrap_up
+            and not self._wrap_up_consumed
+        )
+
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Stage goal-round dynamic context before the first user message."""
+        # 周期重置不在这里（见 reset_budget_cycle）：团队链路每外层轮触发
+        # 一次 BEFORE_INVOKE。这里只做提示段同步——新周期首个模型调用前
+        # 清掉上一周期残留的"最后一轮"收尾提示。
+        # 但 total 止血按外层轮重新武装：账本耗尽后每个新轮的首个成功
+        # 迭代都要能就地收场，否则事件驱动的新轮会一路跑完。
+        self._budget_finish_armed = False
+        if not self._in_wrap_up_round:
+            self._sync_iteration_budget_prompt(ctx)
         builder = getattr(ctx.agent, "system_prompt_builder", None)
         await self._sync_goal_protocol_prompt(ctx, builder)
 
     async def before_model_call(
-        self, ctx: AgentCallbackContext,
+            self, ctx: AgentCallbackContext,
     ) -> None:
         """Inject prompt sections.
 
@@ -290,9 +495,9 @@ class TaskCompletionRail(DeepAgentRail):
         await self._sync_goal_protocol_prompt(ctx, builder)
 
     async def _sync_goal_protocol_prompt(
-        self,
-        ctx: AgentCallbackContext,
-        builder: Any,
+            self,
+            ctx: AgentCallbackContext,
+            builder: Any,
     ) -> None:
         """Upsert or clear goal protocol based on run_kind."""
         from openjiuwen.harness.prompts.sections.goal import (
@@ -301,7 +506,7 @@ class TaskCompletionRail(DeepAgentRail):
 
         run_kind = self._get_run_kind(ctx)
         want_goal = (
-            run_kind == "goal" and self._goal_manager is not None
+                run_kind == "goal" and self._goal_manager is not None
         )
         language = getattr(
             builder, "language", self._goal_language
@@ -345,7 +550,7 @@ class TaskCompletionRail(DeepAgentRail):
             )
 
     async def before_task_iteration(
-        self, ctx: AgentCallbackContext,
+            self, ctx: AgentCallbackContext,
     ) -> None:
         """Apply task_instruction template or goal query replacement.
 
@@ -353,6 +558,13 @@ class TaskCompletionRail(DeepAgentRail):
         <goal_task> XML.
         For normal rounds: apply task_instruction on the first iteration.
         """
+        # Wrap-up entry lives at the OUTER round boundary;
+        # iteration counting/ticking lives in after_react_iteration (inner
+        # ReAct iteration = every model call). Sync first so a stale hint
+        # from the previous round cannot leak into the first model call.
+        if not self._in_wrap_up_round:
+            self._sync_iteration_budget_prompt(ctx)
+        await self._maybe_enter_wrap_up_round(ctx)
         run_kind = self._get_run_kind(ctx)
         if run_kind == "goal" and self._goal_manager is not None:
             self._do_goal_before_iteration(ctx)
@@ -372,8 +584,318 @@ class TaskCompletionRail(DeepAgentRail):
             query=query,
         )
 
+    async def after_react_iteration(self, ctx: AgentCallbackContext) -> None:
+        """Count one inner ReAct iteration (every model call).
+
+        循环轮次=内层迭代。外层
+        轮内 ReAct 在 task loop 模式下不封顶（sys.maxsize），轮内死循环
+        只能在这里拦——触顶即 request_force_finish，在下个迭代边界收场。
+        """
+        if self.iteration_budget is None and self.budget_tick is None:
+            # 仍要走一次 section 同步：预算被热清除时摘除残留提示
+            self._sync_iteration_budget_prompt(ctx)
+            return
+        self._iteration_count += 1
+        if self._in_wrap_up_round:
+            self._wrap_up_iterations += 1
+            if self._wrap_up_iterations > _WRAP_UP_GRACE_ITERATIONS:
+                self._request_budget_force_finish(ctx, "wrap_up_grace")
+            return
+        if (
+                self.iteration_budget is not None
+                and not self._iteration_cap_hit
+                and self._iteration_count > self.iteration_budget
+        ):
+            self._iteration_cap_hit = True
+            self._request_budget_force_finish(ctx, "iteration_budget")
+            if self.on_iteration_cap is not None:
+                try:
+                    await self.on_iteration_cap()
+                except Exception:  # noqa: BLE001 - 收口回调失败不阻断收场
+                    logger.warning(
+                        "[TaskCompletionRail] iteration-cap callback failed",
+                        exc_info=True,
+                    )
+        self._tick_round_budget(ctx)
+        self._sync_iteration_budget_prompt(ctx)
+
+    def _request_budget_force_finish(
+            self, ctx: AgentCallbackContext, reason: str,
+    ) -> None:
+        """Ask the ReAct loop to finish at the next iteration boundary."""
+        if ctx.has_force_finish_request:
+            return
+        language = getattr(
+            getattr(ctx.agent, "system_prompt_builder", None),
+            "language",
+            "cn",
+        )
+        if language == "cn":
+            text = "迭代预算已耗尽，本轮提前结束。"
+        else:
+            text = "Iteration budget exhausted; round ended early."
+        ctx.request_force_finish({
+            "output": text,
+            "result_type": "answer",
+            "budget_stop": reason,
+        })
+        logger.warning(
+            "[TaskCompletionRail] iteration budget force finish: "
+            "agent=%s reason=%s count=%d",
+            getattr(getattr(ctx.agent, "card", None), "name", "?"),
+            reason,
+            self._iteration_count,
+        )
+
+    def _tick_round_budget(
+            self, ctx: AgentCallbackContext,
+    ) -> None:
+        """Tick the shared team budget ledger once per inner iteration.
+
+        Fail-open: a ledger failure must never kill the loop; exhaustion
+        is surfaced via ``_budget_total_exhausted`` which the
+        RoundBudgetExhaustedEvaluator reads at the next loop boundary.
+        触顶同时在下个内层迭代边界 force-finish（就地止血）——只靠外层
+        评估器的话，当前外层轮仍可能再烧完整一圈。
+        """
+        if self.budget_tick is None:
+            return
+        try:
+            remaining = self.budget_tick()
+        except Exception:
+            logger.warning(
+                "[TaskCompletionRail] budget tick failed", exc_info=True,
+            )
+            return
+        if remaining is not None and remaining <= 0:
+            self._budget_total_exhausted = True
+            # 每个外层轮至多发起一次止血（before_invoke 重新武装）。
+            # 只按“首次 False→True”的话，耗尽后新起的轮不会收场。
+            if not self._budget_finish_armed:
+                self._budget_finish_armed = True
+                self._request_budget_force_finish(ctx, "budget_total")
+
+    def refresh_budget_state(self) -> None:
+        """Settle-time probe: refresh total exhaustion without ticking.
+
+        纯文本轮（模型直接出答案、零工具）不会触发
+        ``after_react_iteration``；只靠 tick 的话，team 总量早已耗尽也无法
+        在结算点感知，收尾轮会被无限推迟。结算点用非变更
+        探针补一次判定，只置位标志、不请求 force finish（轮已结束）。
+        """
+        if self.budget_probe is None:
+            return
+        try:
+            remaining = self.budget_probe()
+        except Exception:  # noqa: BLE001 - 探测失败不得打断结算
+            logger.warning(
+                "[TaskCompletionRail] budget probe failed", exc_info=True,
+            )
+            return
+        if remaining is not None and remaining <= 0:
+            self._budget_total_exhausted = True
+
+    def _sync_iteration_budget_prompt(
+            self, ctx: AgentCallbackContext,
+    ) -> None:
+        """Attach/detach the soft-hint section based on remaining rounds.
+
+        Section channel only (SystemPromptBuilder in-memory, rebuilt per
+        model call) — never touches query text, so checkpoint/rewind
+        history stays clean.
+        """
+        builder = getattr(ctx.agent, "system_prompt_builder", None)
+        if builder is None:
+            return
+        has_hint = builder.has_section(SectionName.ITERATION_BUDGET)
+        if self.iteration_budget is None:
+            if has_hint:
+                builder.remove_section(SectionName.ITERATION_BUDGET)
+            return
+        remaining = self.iteration_budget - self._iteration_count
+        if remaining > _BUDGET_HINT_THRESHOLD:
+            if has_hint:
+                builder.remove_section(SectionName.ITERATION_BUDGET)
+            return
+        language = getattr(builder, "language", "cn")
+        agent_name = getattr(
+            getattr(ctx.agent, "card", None), "name", "?",
+        )
+        if remaining <= 0:
+            section = build_iteration_budget_section(
+                language, remaining, self.iteration_budget, final_round=True,
+            )
+            logger.warning(
+                "[TaskCompletionRail] iteration budget final stretch: agent=%s, forcing wrap-up",
+                agent_name,
+            )
+        else:
+            section = build_iteration_budget_section(
+                language, remaining, self.iteration_budget,
+            )
+            logger.info(
+                "[TaskCompletionRail] iteration budget warning: agent=%s remaining=%d/%d",
+                agent_name,
+                remaining,
+                self.iteration_budget,
+            )
+        builder.add_section(section)
+
+    async def _maybe_enter_wrap_up_round(
+            self, ctx: AgentCallbackContext,
+    ) -> None:
+        """Enter the granted wrap-up round on budget exhaustion.
+
+        Fires once per invoke, on the OUTER round AFTER a budget cap is hit
+        (main/member cap: ``_iteration_cap_hit``; total: ledger exhausted).
+        Attaches the mandatory-wrap-up section (force, even when the
+        iteration budget alone would not), then invokes the team-layer
+        callback so members are stopped and tasks repooled BEFORE the
+        summary round runs.
+        """
+        if not self.enable_budget_wrap_up or self._wrap_up_consumed:
+            return
+        if not (self._iteration_cap_hit or self._budget_stop_hit):
+            return
+        agent_name = getattr(
+            getattr(ctx.agent, "card", None), "name", "?",
+        )
+        payload = await self.prepare_wrap_up_round()
+        if payload is None:
+            return
+        logger.warning(
+            "[TaskCompletionRail] iteration budget wrap-up round: agent=%s "
+            "(iteration_cap=%s, total_exhausted=%s)",
+            agent_name,
+            self._iteration_cap_hit,
+            self._budget_total_exhausted,
+        )
+        # Fallback path only: the primary trigger (supervisor / kernel)
+        # calls ``prepare_wrap_up_round`` before starting the round and
+        # carries the same details in the ``budget-wrap-up`` event body.
+        builder = getattr(ctx.agent, "system_prompt_builder", None)
+        if builder is not None:
+            language = getattr(builder, "language", "cn")
+            builder.add_section(
+                build_iteration_budget_section(
+                    language,
+                    0,
+                    self.iteration_budget or 0,
+                    wrap_up=True,
+                    repooled_tasks=self._wrap_up_repooled,
+                    task_counts=self._wrap_up_task_counts,
+                )
+            )
+
+    async def prepare_wrap_up_round(self) -> Optional[dict]:
+        """Consume the wrap-up slot and return the task-board payload.
+
+        Called by the supervisor (wrap-up grant) or the coordination kernel
+        (idle-leader wake) BEFORE the wrap-up round starts, so the
+        ``budget-wrap-up`` event can carry the unfinished-task list/counts.
+        The round is still marked as the wrap-up round here (tool gate and
+        inner grace apply). Returns None when the wrap-up is not owed.
+        """
+        if not self.enable_budget_wrap_up or self._wrap_up_consumed:
+            return None
+        if not (self._iteration_cap_hit or self._budget_stop_hit):
+            return None
+        self._wrap_up_consumed = True
+        self._in_wrap_up_round = True
+        self._wrap_up_iterations = 0
+        # Team layer first: stop members and put unfinished tasks back to
+        # the to-do list BEFORE the summary round runs.
+        self._wrap_up_repooled = []
+        self._wrap_up_task_counts = {}
+        payload: Any = None
+        if self.on_budget_wrap_up is not None:
+            try:
+                payload = await self.on_budget_wrap_up()
+            except Exception:
+                logger.warning(
+                    "TaskCompletionRail: budget wrap-up callback failed",
+                    exc_info=True,
+                )
+        self._consume_wrap_up_payload(payload)
+        return {
+            "repooled": list(self._wrap_up_repooled),
+            "counts": dict(self._wrap_up_task_counts),
+        }
+
+    def _consume_wrap_up_payload(self, payload: Any) -> None:
+        """Normalize the team callback result (legacy list or dict)."""
+        if isinstance(payload, dict):
+            self._wrap_up_repooled = [
+                str(t) for t in payload.get("repooled", [])
+            ]
+            counts = payload.get("counts")
+            if isinstance(counts, dict):
+                self._wrap_up_task_counts = {
+                    str(k): int(v) for k, v in counts.items()
+                }
+        elif isinstance(payload, (list, tuple)):
+            self._wrap_up_repooled = [str(t) for t in payload]
+
+    async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Block expansion once the team's work pool is closed.
+
+        Active in the wrap-up round AND in the endgame window after the
+        member pool hit its cap (``_member_budget_exhausted``): the leader
+        may finish its current round with the reserved budget, but it must
+        not create/reassign tasks or wake members — those only produce
+        claim-then-stop churn on exhausted members.
+        """
+        if not (self._in_wrap_up_round or self._member_budget_exhausted):
+            return
+        inputs = ctx.inputs
+        tool_name = getattr(inputs, "tool_name", "") or ""
+        if not tool_name and getattr(inputs, "tool_call", None) is not None:
+            tool_name = getattr(inputs.tool_call, "name", "") or ""
+        blocked = tool_name in _WRAP_UP_BLOCKED_TOOLS
+        if not blocked and tool_name == "update_task":
+            args = getattr(inputs, "tool_args", None)
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (ValueError, TypeError):
+                    args = None
+            # 任务图变更同样算扩张：派/换人、加/去依赖、加/换评审。
+            # 只改状态（含 cancelled）仍放行，便于显式放弃任务。
+            if isinstance(args, dict):
+                for key in _TASK_GRAPH_EXPANSION_ARGS:
+                    if args.get(key):
+                        blocked = True
+                        break
+        if not blocked:
+            return
+        language = getattr(
+            getattr(ctx.agent, "system_prompt_builder", None),
+            "language",
+            "cn",
+        )
+        if language == "cn":
+            reason = (
+                f"[预算用完] 迭代预算已耗尽，禁止调用 {tool_name} "
+                "等扩张类工具；请直接输出最终交付总结。"
+            )
+        else:
+            reason = (
+                f"[Budget used up] Iteration budget exhausted; expansion "
+                f"tool {tool_name} is blocked. Produce the final summary now."
+            )
+        tool_call = getattr(inputs, "tool_call", None)
+        tool_call_id = tool_call.id if tool_call else ""
+        ctx.extra["_skip_tool"] = True
+        inputs.tool_result = {"error": reason}
+        inputs.tool_msg = ToolMessage(
+            content=reason, tool_call_id=tool_call_id,
+        )
+        logger.warning(
+            "[TaskCompletionRail] endgame blocked expansion tool: %s", tool_name,
+        )
+
     async def after_model_call(
-        self, ctx: AgentCallbackContext,
+            self, ctx: AgentCallbackContext,
     ) -> None:
         """Accumulate token usage for goal rounds."""
         if not self._is_goal_round or self._goal_manager is None:
@@ -392,7 +914,7 @@ class TaskCompletionRail(DeepAgentRail):
             )
 
     async def after_task_iteration(
-        self, ctx: AgentCallbackContext,
+            self, ctx: AgentCallbackContext,
     ) -> None:
         """Detect completion promise and/or consume goal report.
 
@@ -417,8 +939,8 @@ class TaskCompletionRail(DeepAgentRail):
             if not self.allow_promise_details:
                 return
             if not promise_matches(
-                promise_block,
-                self.completion_promise,
+                    promise_block,
+                    self.completion_promise,
             ):
                 return
             matched = expected
@@ -433,7 +955,7 @@ class TaskCompletionRail(DeepAgentRail):
     # ================================================================
 
     def _do_goal_before_iteration(
-        self, ctx: AgentCallbackContext,
+            self, ctx: AgentCallbackContext,
     ) -> None:
         """Validate goal and replace query with <goal_task> XML."""
         run_context = self._get_run_context(ctx)
@@ -478,7 +1000,7 @@ class TaskCompletionRail(DeepAgentRail):
             inputs.query = build_goal_task_query(record, self._goal_language)
 
     async def _do_goal_after_iteration(
-        self, ctx: AgentCallbackContext,
+            self, ctx: AgentCallbackContext,
     ) -> None:
         """Consume the goal report and run assessment."""
         run_context = self._get_run_context(ctx)
@@ -491,10 +1013,10 @@ class TaskCompletionRail(DeepAgentRail):
         record = store.load()
 
         if not self._validate_goal_state(
-            record,
-            self._current_goal_id,
-            self._current_revision,
-            allow_paused=True,
+                record,
+                self._current_goal_id,
+                self._current_revision,
+                allow_paused=True,
         ):
             logger.info(
                 "[GoalLifecycle] Goal state invalid after iteration, "
@@ -587,10 +1109,10 @@ class TaskCompletionRail(DeepAgentRail):
         return text or type(exc).__name__
 
     async def _maybe_invoke_transcript_assessor(
-        self,
-        record: GoalRecord,
-        agent_report: Optional[GoalAssessment],
-        ctx: AgentCallbackContext,
+            self,
+            record: GoalRecord,
+            agent_report: Optional[GoalAssessment],
+            ctx: AgentCallbackContext,
     ) -> Optional[str]:
         """Invoke transcript assessment only when the configured strategy needs it."""
         from openjiuwen.harness.goal.schema import GoalAssessmentStatus, GoalStopStrategy
@@ -621,9 +1143,9 @@ class TaskCompletionRail(DeepAgentRail):
         return await self._invoke_transcript_assessor(record, ctx)
 
     async def _invoke_transcript_assessor(
-        self,
-        record: GoalRecord,
-        ctx: AgentCallbackContext,
+            self,
+            record: GoalRecord,
+            ctx: AgentCallbackContext,
     ) -> Optional[str]:
         """Run a no-tool LLM call that judges the goal attempt transcript."""
         from openjiuwen.core.foundation.llm import SystemMessage, UserMessage
@@ -710,11 +1232,11 @@ class TaskCompletionRail(DeepAgentRail):
 
     @staticmethod
     def _validate_goal_state(
-        record: Optional[GoalRecord],
-        expected_goal_id: Optional[str],
-        expected_revision: Optional[int],
-        *,
-        allow_paused: bool = False,
+            record: Optional[GoalRecord],
+            expected_goal_id: Optional[str],
+            expected_revision: Optional[int],
+            *,
+            allow_paused: bool = False,
     ) -> bool:
         from openjiuwen.harness.goal.schema import GoalStatus
 
@@ -800,7 +1322,7 @@ class TaskCompletionRail(DeepAgentRail):
         return None
 
     def _extract_attempt_context(
-        self, ctx: AgentCallbackContext,
+            self, ctx: AgentCallbackContext,
     ) -> str:
         """Serialize the current attempt's model context for assessment."""
         if self._current_attempt_messages:
@@ -817,7 +1339,7 @@ class TaskCompletionRail(DeepAgentRail):
         return self._format_context_messages(messages)
 
     def _capture_attempt_model_context(
-        self, ctx: AgentCallbackContext,
+            self, ctx: AgentCallbackContext,
     ) -> None:
         """Keep the latest actual LLM request/response for goal assessment."""
         inputs = ctx.inputs
@@ -850,8 +1372,8 @@ class TaskCompletionRail(DeepAgentRail):
         # Keep the tail (latest model window) for assessment relevance.
         omitted = len(text) - _ATTEMPT_CONTEXT_MAX_CHARS
         return (
-            f"...[truncated {omitted} earlier chars]...\n"
-            + text[-_ATTEMPT_CONTEXT_MAX_CHARS:]
+                f"...[truncated {omitted} earlier chars]...\n"
+                + text[-_ATTEMPT_CONTEXT_MAX_CHARS:]
         )
 
     @staticmethod
@@ -877,7 +1399,7 @@ class TaskCompletionRail(DeepAgentRail):
     # -- private helpers (promise detection) --
 
     def _notify_evaluator(
-        self, ctx: AgentCallbackContext, text: str,
+            self, ctx: AgentCallbackContext, text: str,
     ) -> None:
         coordinator = getattr(
             ctx.agent, "loop_coordinator", None,
@@ -890,7 +1412,7 @@ class TaskCompletionRail(DeepAgentRail):
 
     @staticmethod
     def _extract_output(
-        ctx: AgentCallbackContext,
+            ctx: AgentCallbackContext,
     ) -> Optional[str]:
         inputs = ctx.inputs
         result = getattr(inputs, "result", None)

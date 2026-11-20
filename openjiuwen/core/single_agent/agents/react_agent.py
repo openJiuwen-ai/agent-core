@@ -2490,10 +2490,20 @@ class ReActAgent(BaseAgent):
                                 and schema.payload.id == pending_id)):
                         await session.write_stream(schema)
         else:
+            payload = {
+                "output": result.get("output", ""),
+                "result_type": result_type,
+            }
+            # D6 budget marking: carry the stop_reason tag through
+            # to the answer frame so downstream terminal classifiers can
+            # distinguish budget exhaustion from a normal finish.
+            stop_reason = result.get("stop_reason")
+            if stop_reason:
+                payload["stop_reason"] = stop_reason
             await session.write_stream(OutputSchema(
                 type="answer",
                 index=0,
-                payload={"output": result.get("output", ""), "result_type": result_type},
+                payload=payload,
             ))
 
     async def stream(

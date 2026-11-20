@@ -445,6 +445,11 @@ class TeamHarness:
             return []
         return self._native.find_rails_by_type((rail_type,))
 
+    def refresh_loop_evaluators(self) -> None:
+        """Rebuild the native's stop-condition chain after rail wiring."""
+        if self._native is not None:
+            self._native.refresh_loop_evaluators()
+
     async def register_rail(self, rail: "AgentRail") -> None:
         """Register an additional rail on the running agent."""
         if self._native is not None:
