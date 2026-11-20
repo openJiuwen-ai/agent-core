@@ -7,10 +7,10 @@ import json
 from copy import deepcopy
 from typing import (
     TYPE_CHECKING,
-    Optional,
     Any,
     Dict,
     Mapping,
+    Optional,
 )
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -79,7 +79,7 @@ class BaseError(Exception):
         }
 
     def to_json(self) -> str:
-        return json.dumps(self.to_dict(), ensure_ascii=False)
+        return json.dumps(self.to_dict(), ensure_ascii=False, default=_json_default)
 
     def __str__(self) -> str:
         return f"[{self.code}] {self.message if self.message else self._template_message}"
@@ -128,6 +128,13 @@ def _format_template(template: str,
             return f"{template} (format error, params={dict(params) if params else {} })"
         except Exception:
             return template
+
+
+def _json_default(value: Any) -> Any:
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return model_dump()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 # =======================
@@ -235,7 +242,7 @@ class ToolError(ExecutionError):
             self._card = deepcopy(card)
             if details is None:
                 details = {}
-            details = details.update({"card": self._card})
+            details = {**details, "card": self._card.model_dump()}
         else:
             self._card = None
         super().__init__(status=status, msg=msg, details=details, cause=cause, card=card, **kwargs)
