@@ -25,7 +25,7 @@ add_agent(self,
 
 **返回：**
 
-**Result**[[AgentCard](../single_agent/single_agent.md), Exception]，包含添加的代理卡片或异常的Result对象。
+**Result**[[AgentCard](../../single_agent/single_agent.md), Exception]，包含添加的代理卡片或异常的Result对象。
 
 **样例：**
 
@@ -60,7 +60,7 @@ add_agents(self,
 
 **返回：**
 
-**Result**[[AgentCard](../single_agent/single_agent.md), Exception]|list[Result[[AgentCard](../single_agent/single_agent.md), Exception]]，包含添加的代理卡片或异常的Result对象或列表。
+**Result**[[AgentCard](../../single_agent/single_agent.md), Exception]|list[Result[[AgentCard](../../single_agent/single_agent.md), Exception]]，包含添加的代理卡片或异常的Result对象或列表。
 
 **样例：**
 
@@ -99,7 +99,7 @@ remove_agent(self,
 
 **返回：**
 
-**Result**[Optional[[AgentCard](../single_agent/single_agent.md)], Exception]|list[Result[Optional[[AgentCard](../single_agent/single_agent.md)], Exception]]，包含删除的代理卡片或异常的Result对象或列表。
+**Result**[Optional[[AgentCard](../../single_agent/single_agent.md)], Exception]|list[Result[Optional[[AgentCard](../../single_agent/single_agent.md)], Exception]]，包含删除的代理卡片或异常的Result对象或列表。
 
 **样例：**
 
@@ -131,7 +131,7 @@ async get_agent(self,
 
 **返回：**
 
-**[BaseAgent](../single_agent/single_agent.md)|list[[BaseAgent](../single_agent/single_agent.md)]**，如果找到则返回代理实例，否则为None。
+**[BaseAgent](../../single_agent/single_agent.md)|list[[BaseAgent](../../single_agent/single_agent.md)]**，如果找到则返回代理实例，否则为None。
 
 **样例：**
 
@@ -161,7 +161,7 @@ add_workflow(self,
 
 **返回：**
 
-**Result**[[WorkflowCard](../workflow/workflow.md), Exception]，包含添加的工作流卡片或异常的Result对象。
+**Result**[[WorkflowCard](../../workflow/workflow.md), Exception]，包含添加的工作流卡片或异常的Result对象。
 
 **样例：**
 
@@ -193,7 +193,7 @@ add_workflows(self,
 
 **返回：**
 
-**Result**[[WorkflowCard](../workflow/workflow.md), Exception]|list[Result[[WorkflowCard](../workflow/workflow.md), Exception]]，包含添加的工作流卡片或异常的Result对象或列表。
+**Result**[[WorkflowCard](../../workflow/workflow.md), Exception]|list[Result[[WorkflowCard](../../workflow/workflow.md), Exception]]，包含添加的工作流卡片或异常的Result对象或列表。
 
 **样例：**
 
@@ -228,7 +228,7 @@ remove_workflow(self,
 
 **返回：**
 
-**Result**[Optional[[WorkflowCard](../workflow/workflow.md)], Exception]|list[Result[Optional[[WorkflowCard](../workflow/workflow.md)], Exception]]，包含删除的工作流卡片或异常的Result对象或列表。
+**Result**[Optional[[WorkflowCard](../../workflow/workflow.md)], Exception]|list[Result[Optional[[WorkflowCard](../../workflow/workflow.md)], Exception]]，包含删除的工作流卡片或异常的Result对象或列表。
 
 **样例：**
 
@@ -288,7 +288,7 @@ add_tool(self,
 
 **返回：**
 
-**Result**[[ToolCard](../foundation/tool/tool.md), Exception]|list[Result[[ToolCard](../foundation/tool/tool.md), Exception]]，包含添加的工具卡片或异常的Result对象或列表。
+**Result**[[ToolCard](../../foundation/tool/tool.md), Exception]|list[Result[[ToolCard](../../foundation/tool/tool.md), Exception]]，包含添加的工具卡片或异常的Result对象或列表。
 
 **样例：**
 
@@ -355,7 +355,7 @@ remove_tool(self,
 
 **返回：**
 
-**Result[Optional[[ToolCard](../foundation/tool/tool.md)], Exception]|list[Result[Optional[[ToolCard](../foundation/tool/tool.md)], Exception]]**，包含删除的工具卡片或异常的Result对象或列表。
+**Result[Optional[[ToolCard](../../foundation/tool/tool.md)], Exception]|list[Result[Optional[[ToolCard](../../foundation/tool/tool.md)], Exception]]**，包含删除的工具卡片或异常的Result对象或列表。
 
 **样例：**
 
@@ -607,7 +607,7 @@ get_prompt(self,
 
 **返回：**
 
-**[PromptTemplate](../foundation/prompt/template.md)|list[[PromptTemplate](../foundation/prompt/template.md)]**，如果找到则返回提示模板实例，否则为None。
+**[PromptTemplate](../../foundation/prompt/template.md)|list[[PromptTemplate](../../foundation/prompt/template.md)]**，如果找到则返回提示模板实例，否则为None。
 
 **样例：**
 
@@ -635,7 +635,7 @@ add_sys_operation(self,
 
 **返回：**
 
-**Result[[SysOperationCard](../sys_operation/sys_operation.md), Exception] | List[Result[[SysOperationCard](../sys_operation/sys_operation.md), Exception]]**，单个结果对象或结果对象列表，包含成功添加的卡片或错误。
+**Result[[SysOperationCard](../../sys_operation/sys_operation.md), Exception] | List[Result[[SysOperationCard](../../sys_operation/sys_operation.md), Exception]]**，单个结果对象或结果对象列表，包含成功添加的卡片或错误。
 
 **样例：**
 
@@ -677,7 +677,7 @@ remove_sys_operation(self,
 
 **返回：**
 
-**Result**[Optional[[SysOperationCard](../sys_operation/sys_operation.md)], Exception] | List[Result[Optional[[SysOperationCard](../sys_operation/sys_operation.md)], Exception]]，单个结果对象或结果对象列表，包含删除的卡片或错误。
+**Result**[Optional[[SysOperationCard](../../sys_operation/sys_operation.md)], Exception] | List[Result[Optional[[SysOperationCard](../../sys_operation/sys_operation.md)], Exception]]，单个结果对象或结果对象列表，包含删除的卡片或错误。
 
 **样例：**
 
@@ -715,7 +715,7 @@ get_sys_operation(self,
 
 **返回：**
 
-**SysOperation | List[[SysOperation](../sys_operation/sys_operation.md)]**，单个系统操作实例或实例列表，如果未找到则返回None。
+**SysOperation | List[[SysOperation](../../sys_operation/sys_operation.md)]**，单个系统操作实例或实例列表，如果未找到则返回None。
 
 **样例：**
 
@@ -751,7 +751,7 @@ get_sys_op_tool_cards(self,
 
 **返回：**
 
-**[ToolCard](../foundation/tool/tool.md) | List[[ToolCard](../foundation/tool/tool.md)] | None**，符合条件的工具卡片。
+**[ToolCard](../../foundation/tool/tool.md) | List[[ToolCard](../../foundation/tool/tool.md)] | None**，符合条件的工具卡片。
 
 **异常：**
 
@@ -801,7 +801,7 @@ async get_tool_infos(self,
 
 **返回：**
 
-**[ToolInfo](../foundation/tool/tool.md)|list[[ToolInfo](../foundation/tool/tool.md)]**，如果找到则返回工具信息实例，否则为None。
+**[ToolInfo](../../foundation/tool/tool.md)|list[[ToolInfo](../../foundation/tool/tool.md)]**，如果找到则返回工具信息实例，否则为None。
 
 **样例：**
 
@@ -982,7 +982,7 @@ async get_mcp_tool_infos(self,
 
 **返回：**
 
-**[ToolInfo](../foundation/tool/tool.md)|list[[ToolInfo](../foundation/tool/tool.md)]**，如果找到则返回MCP工具信息实例，否则为None。
+**[ToolInfo](../../foundation/tool/tool.md)|list[[ToolInfo](../../foundation/tool/tool.md)]**，如果找到则返回MCP工具信息实例，否则为None。
 
 **样例：**
 
