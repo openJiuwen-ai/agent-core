@@ -172,3 +172,25 @@ of creating a replacement or replaying commands. A later call reuses the same
 Environment after recovery. After retry exhaustion, inspect/recover or delete
 the failed Environment explicitly. Idle-deleted Environments are recreated on
 the next call as before.
+
+### ADX idle pause and recovery settings
+
+The `adx-environment` provider forwards three optional launcher `extra_params`
+to the SDK create call:
+
+* `idle_action`: `delete` (default) or `pause`. `pause` requires a positive
+  `idle_timeout` and a checkpoint-capable runtime; Conch is rejected.
+* `pause_policy`: `{"retention": {"kind": "forever"}}` or
+  `{"retention": {"kind": "ttl", "ttlSeconds": 86400}}`, with optional
+  `timeoutSeconds` (1 through 3600) and `storage` (`configured`, `local` or
+  `shared`). Unknown fields are rejected.
+* `failover`: boolean; recover an unexpectedly exited execution from its latest
+  retained restore point on the owning node.
+
+A paused Environment stays cached and the first data-plane operation (command or
+file operation) wakes it; passive command observation, health and metric probes
+do not. Non-default lifecycle settings are part of the environment scope, so
+changing them selects a new Environment instead of silently reusing one created
+with the old settings. Cross-node restore additionally requires shared
+checkpoint storage and the deployment's adxlet `checkpoint_runtime_binaries`
+setting.

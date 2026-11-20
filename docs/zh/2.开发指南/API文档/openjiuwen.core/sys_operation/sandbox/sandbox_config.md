@@ -244,3 +244,19 @@ ADX 强制以只读方式访问。缓存作用域包含 rootfs 类型和路径�
 策略开启时，缓存实例处于 failed 状态会向工具调用方返回错误，由 ADX 负责恢复和
 次数限制，provider 不另建实例、不重放命令。恢复后的新调用继续复用原实例；
 次数耗尽后需明确检查、恢复或删除该失败实例。空闲删除后的下次调用仍会重新创建。
+
+### ADX 空闲暂停与恢复参数
+
+`adx-environment` provider 会把三个可选的 launcher `extra_params` 透传给 SDK 创建请求：
+
+* `idle_action`：`delete`（默认）或 `pause`。`pause` 要求 `idle_timeout` 为正数，
+  且运行时支持 checkpoint；Conch 会被直接拒绝。
+* `pause_policy`：`{"retention": {"kind": "forever"}}` 或
+  `{"retention": {"kind": "ttl", "ttlSeconds": 86400}}`，可选 `timeoutSeconds`
+  （1 到 3600）和 `storage`（`configured`、`local` 或 `shared`）。未知字段会被拒绝。
+* `failover`：布尔值；在所属节点上从最近保留的恢复点恢复异常退出的执行。
+
+处于 paused 的 Environment 会保留在缓存中，由首次数据面操作（命令或文件操作）唤醒；
+被动命令观察、健康检查和指标探测不会唤醒。非默认的生命周期参数参与环境作用域，
+修改后会选择新的 Environment，而不是静默复用按旧参数创建的实例。跨节点恢复还需要
+共享 checkpoint 存储，以及部署侧 adxlet 的 `checkpoint_runtime_binaries` 配置。
