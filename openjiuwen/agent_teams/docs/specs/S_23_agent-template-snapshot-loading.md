@@ -13,6 +13,8 @@
 
 本规约定义 Team 成员如何携带已解析的 `AgentTemplateSpec` 快照，以及 `NativeHarness` 如何在成员启动前重新挂载该快照。磁盘包发现、manifest 解析和 Team 固定成员名单由平台层负责，不属于 agent-core。
 
+消费者边界：平台在组装 TeamSpec 时解析 AgentTemplate，并将快照 `model_dump` 进成员的 `DeepAgentSpec`；本规约只处理该快照在成员构建时的加载。会话恢复时先冻结 `modes.team`、再由平台重新 assembly 是另一条恢复链，不由 `NativeHarness._prepare()` 完成。
+
 ## 不变量
 
 1. `DeepAgentSpec.agent_template_spec` 只保存 JSON 可序列化的普通映射，默认 `None`。

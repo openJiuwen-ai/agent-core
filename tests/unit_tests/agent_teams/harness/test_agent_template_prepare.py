@@ -169,3 +169,24 @@ async def test_prepare_invalid_template_uses_template_load_error(
 
     assert raised.value.status == StatusCode.DEEPAGENT_LOAD_AGENT_TEMPLATE_ERROR
     assert not harness._prepared
+
+
+@pytest.mark.asyncio
+async def test_prepare_resolves_and_applies_snapshot_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = make_spec()
+    spec.agent_template_spec = _template_snapshot()
+    harness = NativeHarness(spec)
+
+    async def _ensure_initialized() -> None:
+        pass
+
+    monkeypatch.setattr(harness, "ensure_initialized", _ensure_initialized)
+
+    await harness._prepare()
+
+    section = harness.system_prompt_builder.get_section("identity")
+    assert section is not None
+    assert section.render("cn") == "专家身份"
+    assert harness._prepared
