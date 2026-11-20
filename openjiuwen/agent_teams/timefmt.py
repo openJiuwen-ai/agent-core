@@ -79,7 +79,12 @@ def _format_absolute(timestamp_ms: int) -> str:
     return f"{base} {offset[:3]}:{offset[3:]}"
 
 
-def format_time_context(timestamp_ms: int | None, now_ms: int) -> str:
+def format_time_context(
+    timestamp_ms: int | None,
+    now_ms: int,
+    *,
+    language: str | None = None,
+) -> str:
     """Render a timestamp as ``<absolute local time> (<relative diff>)``.
 
     Args:
@@ -87,19 +92,29 @@ def format_time_context(timestamp_ms: int | None, now_ms: int) -> str:
             source field is unset (e.g. a task that never transitioned).
         now_ms: Current millisecond UTC epoch, used as the relative anchor.
             Always passed in so the function stays pure and testable.
+        language: Optional ``"cn"`` / ``"en"`` for the relative wording. When
+            omitted, uses the process-global agent_teams language.
 
     Returns:
         Localized text such as ``2026-05-27 14:30:05 +08:00 (3 分钟前)``,
         or ``time.unknown`` when ``timestamp_ms`` is ``None``.
     """
     if timestamp_ms is None:
-        return t("time.unknown")
+        return t("time.unknown", language=language)
     key, value = _relative_key_and_value(now_ms - timestamp_ms)
-    relative = t(key) if value is None else t(key, value=value)
+    relative = (
+        t(key, language=language)
+        if value is None
+        else t(key, language=language, value=value)
+    )
     return f"{_format_absolute(timestamp_ms)} ({relative})"
 
 
-def format_absolute_time(timestamp_ms: int | None) -> str:
+def format_absolute_time(
+    timestamp_ms: int | None,
+    *,
+    language: str | None = None,
+) -> str:
     """Render a timestamp as absolute local time only, with no relative diff.
 
     For text that is written into an agent's conversation history and stays
@@ -112,13 +127,14 @@ def format_absolute_time(timestamp_ms: int | None) -> str:
     Args:
         timestamp_ms: Millisecond UTC epoch to render, or ``None`` when the
             source field is unset.
+        language: Optional ``"cn"`` / ``"en"`` for the unknown-time wording.
 
     Returns:
         Text such as ``2026-05-27 14:30:05 +08:00``, or ``time.unknown`` when
         ``timestamp_ms`` is ``None``.
     """
     if timestamp_ms is None:
-        return t("time.unknown")
+        return t("time.unknown", language=language)
     return _format_absolute(timestamp_ms)
 
 

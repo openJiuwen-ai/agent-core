@@ -97,7 +97,8 @@ author_email: chengshuo5@huawei.com
     `ValueError`，列出当前合法集合。新增语言 = 新增 `STRINGS["<lang>"]` 字典 + 给现有键
     全译，禁止半搭。
 13. **进程级单例**：`_current_language` 是模块级变量，不走 contextvars。这是有意的——
-    运行时硬编码串切语言是 team 启动时的一次性配置，不需要按 session 切。
+    运行时硬编码串切语言是 team 启动时的一次性配置，不需要按 session 切。调用方可对单次
+    `t(..., language=...)` 覆盖词典选择，不修改 `_current_language`。
 
 ### constants.py
 
@@ -185,23 +186,41 @@ Language = Literal["cn", "en"]
 
 def set_language(lang: Language) -> None       # 非法 lang → ValueError
 def get_language() -> Language
-def t(key: str, **kwargs: object) -> str       # 缺 key → KeyError
+def t(
+    key: str,
+    *,
+    language: Language | str | None = None,
+    **kwargs: object,
+) -> str                                       # 缺 key → KeyError
 ```
 
 错误语义：
 
 - `set_language("xx")` → `ValueError: Unsupported language 'xx'. Supported: cn, en`
 - `t("missing.key")` → `KeyError: Missing i18n key 'missing.key' for language 'cn'`
+- `language` 是查表控制参数，不进入 `format_map`；插值只走 `**kwargs`。
+- `language` 省略或未在 `STRINGS` 注册 → 回退 `_current_language`（**不抛**；与
+  `set_language` 非法值抛 `ValueError` 区分）。合法值按该语言查表，不改进程全局。
 - `t(key, **kwargs)` 用 `str.format_map`，模板里多写的占位符 → 抛 `KeyError`（来自
   `format_map`），少传的 kwarg 不报错（因为 `format_map` 只拿用到的）。
 
 ### timefmt.py
 
 ```python
-def format_time_context(timestamp_ms: int | None, now_ms: int) -> str
-def format_absolute_time(timestamp_ms: int | None) -> str
+def format_time_context(
+    timestamp_ms: int | None,
+    now_ms: int,
+    *,
+    language: str | None = None,
+) -> str
+def format_absolute_time(
+    timestamp_ms: int | None,
+    *,
+    language: str | None = None,
+) -> str
 ```
 
+- `language` 透传给 `t(..., language=language)`；省略则用进程全局语言。
 - 输出形如 `2026-05-27 14:30:05 +08:00 (3 分钟前)`；`timestamp_ms is None` → `t("time.unknown")`。
 - 相对桶：`< 10s` / 未来 → `time.just_now`；`< 60s` → `time.seconds_ago`；`< 60min` →
   `time.minutes_ago`；`< 24h` → `time.hours_ago`；否则 `time.days_ago`。

@@ -12,6 +12,12 @@ author_email: chengshuo5@huawei.com
 
 # Prompts 与 Team Rails
 
+> 策略构建更新：实际 section 集合统一交给扩展处理器；旧静态构建接口保留为共享兼容基类。
+> 新增的构建快照、渐进式披露和四个能力/前缀配置见
+> [F_100_team-extension-wiring](../../../../.agents/agent-docs/features/agent_teams/F_100_team-extension-wiring.md)。
+> 下文的模板、状态投递与角色边界继续适用；策略构建细节以 F_100 为准。
+
+
 ## 元信息
 
 | 项 | 值 |

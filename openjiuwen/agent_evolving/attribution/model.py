@@ -216,13 +216,15 @@ class TaskParseResult:
     file_candidates: list[tuple[str, str, str]]
     run_meta: dict[str, Any] = field(default_factory=dict)
     user_request: str = ""
-    """The user's own messages, verbatim and in order: the task as the user stated it."""
+    """Verbatim user messages the effective task rests on, in order. A new request is only its own
+    message; a revision also includes the earlier demands it depends on. Other messages in the session
+    are not included."""
     user_feedback: list[str] | None = None
     """The user's follow-up messages judged to be feedback on the work (a correction, a complaint, asking for
     something left out); ``None`` when task parsing did not judge them."""
     requirements: list[dict[str, Any]] = field(default_factory=list)
-    """The current requirement list from all the user's messages: ``[{"text", "corrected"}]``, later changes
-    applied; empty when task parsing reported none."""
+    """The requirement list of the effective task: ``[{"text", "corrected"}]``, later changes of that
+    task applied; empty when task parsing reported none."""
     delivery_round: str | None = None
     """The user message starting the round in which the result was last delivered (``None``: unknown)."""
     delivery_round_selected: bool | None = None
@@ -306,7 +308,7 @@ class AttributionRunOutcome:
     counts: dict[str, Any] = field(default_factory=dict)
     token_usage: dict[str, Any] = field(default_factory=dict)
     trajectory_summary: str | None = None
-    """Trajectory narrative; always non-empty on a successful run (agent submission or fallback)."""
+    """Precomputed trajectory narrative; empty only when the run fails before attribution starts."""
 
 
 @dataclass(frozen=True)
