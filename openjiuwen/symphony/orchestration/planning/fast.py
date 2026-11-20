@@ -54,13 +54,14 @@ Task:
 - When runtime_weight and planner_weight are present, use them only as tie-breakers
   between otherwise relevant relationships. planner_weight already combines static and
   scoped runtime evidence.
-- If required information is missing, set status to "needs_input" and list it.
+- Return a ready plan whenever the steps can be determined. List outstanding inputs
+  in missing_inputs with the affected skill_id so the host can decide how to obtain them.
 - If no useful plan exists from the candidates, set status to "no_plan".
 
 Schema:
 {
   "title": "short plan title",
-  "status": "ready | needs_input | no_plan",
+  "status": "ready | no_plan",
   "reason": "why this plan is best",
   "steps": [
     {"skill_id": "skill-a", "reason": "why this step is used"}
@@ -501,11 +502,9 @@ class FastOneShotPlanner:
         candidate_edges: dict[tuple[str, str], dict[str, Any]],
     ) -> dict[str, Any]:
         status = str(selection.get("status") or "ready").strip().lower()
-        if status not in {"ready", "needs_input", "no_plan"}:
-            status = "ready"
         raw_steps = selection.get("steps") or selection.get("skill_order") or []
         step_ids = self._normalize_step_ids(raw_steps)
-        if status == "no_plan" or not step_ids:
+        if not step_ids or (status == "no_plan" and not selection.get("missing_inputs")):
             return {
                 "valid": True,
                 "detail": "",
@@ -626,23 +625,19 @@ class FastOneShotPlanner:
                     selected_edges_result["reasons"].get(edge, ""),
                 )
             )
-        if missing_inputs:
-            status = "needs_input"
-        elif reported_missing:
-            status = "ready"
         return {
             "valid": True,
             "detail": "",
             "plan": {
                 "title": str(selection.get("title") or "Symphony fast plan").strip(),
-                "status": status,
+                "status": "ready",
                 "steps": steps,
                 "stages": [{"stage": index, "skills": [step]} for index, step in enumerate(steps, start=1)],
                 "produced_artifacts": produced_artifacts,
                 "missing_inputs": missing_inputs,
                 "can_feed_edges": edge_items,
                 "reason": str(selection.get("reason") or "").strip(),
-                "plan_classification": ("executable" if status == "ready" else "structurally_valid_but_incomplete"),
+                "plan_classification": "structurally_valid_but_incomplete" if missing_inputs else "executable",
                 "connectivity_trace": (
                     ["can_feed", "fast_llm_inferred"] if has_inferred_edges else (["can_feed"] if edge_items else [])
                 ),

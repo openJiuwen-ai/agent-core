@@ -1,11 +1,8 @@
-
-from openjiuwen.symphony.config import OrchestrationConfig
 import asyncio
 import importlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
 
 import pytest
 
@@ -198,8 +195,17 @@ async def test_graph_engine_build_and_plan_fast_or_beam(tmp_path: Path, mode: st
     assert graph["metadata"]["status"] == "ready"
     assert set(graph["metadata"]).issubset({"status", "reason", "missing_inputs"})
     assert graph["nodes"] == {
-        "extract": {"label": "extract", "metadata": {"type": "skill"}},
-        "summarize": {"label": "summarize", "metadata": {"type": "skill"}},
+        "extract": {
+            "label": "extract", "metadata": {"type": "skill", "outputs": [{"name": "text", "type": "text"}]},
+        },
+        "summarize": {
+            "label": "summarize",
+            "metadata": {
+                "type": "skill",
+                "inputs": [{"name": "text", "type": "text", "required": True}],
+                "outputs": [{"name": "summary", "type": "text"}],
+            },
+        },
     }
     assert graph["edges"] == [
         {"source": "extract", "target": "summarize", "relation": "can_feed"},

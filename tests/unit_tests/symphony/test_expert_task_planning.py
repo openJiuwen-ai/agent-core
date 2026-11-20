@@ -95,7 +95,7 @@ async def test_expert_task_plan_preserves_relevant_isolated_expert(mode, tmp_pat
     }
     service, model = _service(tmp_path, draft, monkeypatch, expert_artifacts)
 
-    result = await service.plan_expert_tasks("Verify citations independently", mode=mode)
+    result = await service.plan_subagent_graph("Verify citations independently", mode=mode)
     graph = result["planned_graph"]["graph"]
 
     assert "isolated" in {expert["id"] for expert in model.request["experts"]}
@@ -112,7 +112,7 @@ async def test_missing_expert_graph_allows_inline_plan(mode, tmp_path, monkeypat
     service, model = _service(tmp_path, {"status": "ready", "tasks": [_task("verify")]}, monkeypatch)
 
     engine = SymphonyGraphEngine(service, unavailable_reason="Static graph sources are unavailable.")
-    result = await engine.plan_expert_tasks("Check the evidence", candidate_ids=["removed"], mode=mode)
+    result = await engine.plan_subagent_graph("Check the evidence", candidate_ids=["removed"], mode=mode)
     graph = result["planned_graph"]["graph"]
 
     assert model.request["experts"] == []
@@ -131,7 +131,7 @@ async def test_expert_task_plan_derives_type_from_assignment(tmp_path, monkeypat
         tasks[1]["type"] = "inline"
     service, model = _service(tmp_path, {"status": "ready", "tasks": tasks}, monkeypatch, expert_artifacts)
 
-    graph = (await service.plan_expert_tasks("Write a report and verify its evidence"))["planned_graph"]["graph"]
+    graph = (await service.plan_subagent_graph("Write a report and verify its evidence"))["planned_graph"]["graph"]
 
     assert graph["metadata"]["status"] == "ready"
     expert = graph["nodes"]["task-1"]["metadata"]
@@ -169,7 +169,7 @@ async def test_expert_task_plan_exposes_published_handoff_hints(tmp_path, monkey
     }
     service, model = _service(tmp_path, draft, monkeypatch, expert_artifacts)
 
-    graph = (await service.plan_expert_tasks("Research and report"))["planned_graph"]["graph"]
+    graph = (await service.plan_subagent_graph("Research and report"))["planned_graph"]["graph"]
 
     assert model.request["published_expert_handoffs"] == [{
         "source_id": "research",
@@ -207,7 +207,7 @@ async def test_expert_task_plan_derives_ports_for_expert_without_published_ports
     }
     service, model = _service(tmp_path, draft, monkeypatch, artifacts)
 
-    result = await service.plan_expert_tasks("Check platform rules, write the script, and review it", [expert_id])
+    result = await service.plan_subagent_graph("Check platform rules, write the script, and review it", [expert_id])
     graph = result["planned_graph"]["graph"]
 
     assert graph["metadata"]["status"] == "ready"
@@ -249,7 +249,7 @@ async def test_expert_task_plan_recovers_legacy_node_ids_in_input_ports(tmp_path
     ]
     service, model = _service(tmp_path, {"status": "ready", "tasks": tasks, "handoffs": handoffs}, monkeypatch)
 
-    graph = (await service.plan_expert_tasks("Draft three platform launches, review them, and package the result"))[
+    graph = (await service.plan_subagent_graph("Draft three platform launches, review them, and package the result"))[
         "planned_graph"
     ]["graph"]
 
@@ -282,7 +282,7 @@ async def test_expert_task_plan_groups_types_by_target_alias(tmp_path, monkeypat
     }
     service, _ = _service(tmp_path, draft, monkeypatch)
 
-    graph = (await service.plan_expert_tasks("Review and archive the evidence"))["planned_graph"]["graph"]
+    graph = (await service.plan_subagent_graph("Review and archive the evidence"))["planned_graph"]["graph"]
 
     assert graph["metadata"]["status"] == "ready"
     assert graph["nodes"]["task-3"]["metadata"]["inputs"] == [_port("research", "unknown")]
@@ -335,7 +335,7 @@ async def test_expert_task_plan_rejects_invalid_assignments(
         tmp_path, {"status": "ready", "tasks": tasks, "handoffs": handoffs}, monkeypatch, expert_artifacts,
     )
 
-    graph = (await service.plan_expert_tasks("Research and report"))["planned_graph"]["graph"]
+    graph = (await service.plan_subagent_graph("Research and report"))["planned_graph"]["graph"]
 
     assert graph["metadata"]["status"] == "no_plan"
     assert reason in graph["metadata"]["reason"]
@@ -353,7 +353,7 @@ async def test_invalid_expert_draft_reports_field_after_one_retry(tmp_path, monk
     }
     service, model = _service(tmp_path, draft, monkeypatch)
 
-    graph = (await service.plan_expert_tasks("Research the evidence"))["planned_graph"]["graph"]
+    graph = (await service.plan_subagent_graph("Research the evidence"))["planned_graph"]["graph"]
 
     assert graph["metadata"]["status"] == "no_plan"
     assert "tasks.0.outputs.0.type" in graph["metadata"]["reason"]
@@ -396,7 +396,7 @@ async def test_expert_task_plan_corrects_invalid_draft(failure, tmp_path, monkey
 
     service, model = _service(tmp_path, draft, monkeypatch, expert_artifacts)
     source = PlanningInput(name="facts", kind="file", value="attachment/facts.md")
-    graph = (await service.plan_expert_tasks("Research and report with the supplied facts", inputs=[source]))[
+    graph = (await service.plan_subagent_graph("Research and report with the supplied facts", inputs=[source]))[
         "planned_graph"
     ]["graph"]
 
@@ -414,7 +414,7 @@ async def test_expert_task_plan_corrects_invalid_draft(failure, tmp_path, monkey
 async def test_expert_task_plan_keeps_explicit_no_plan_without_retry(tmp_path, monkeypatch):
     service, model = _service(tmp_path, {"status": "no_plan", "reason": "Required expert is unavailable."}, monkeypatch)
 
-    graph = (await service.plan_expert_tasks("Use the required expert"))["planned_graph"]["graph"]
+    graph = (await service.plan_subagent_graph("Use the required expert"))["planned_graph"]["graph"]
 
     assert graph["metadata"]["status"] == "no_plan"
     assert graph["metadata"]["reason"] == "Required expert is unavailable."
@@ -432,7 +432,7 @@ async def test_expert_task_plan_does_not_retry_model_failure(tmp_path, monkeypat
     expected_error = asyncio.CancelledError if error is asyncio.CancelledError else RuntimeError
 
     with pytest.raises(expected_error, match="model interrupted"):
-        await service.plan_expert_tasks("Research the evidence")
+        await service.plan_subagent_graph("Research the evidence")
 
     assert len(model.planning_prompts) == 1
 
@@ -446,7 +446,7 @@ async def test_expert_task_plan_shares_retry_budget_with_missing_inputs(tmp_path
 
     service, model = _service(tmp_path, draft, monkeypatch)
 
-    graph = (await service.plan_expert_tasks("Plan the report even if some facts are missing"))["planned_graph"]["graph"]
+    graph = (await service.plan_subagent_graph("Plan the report even if some facts are missing"))["planned_graph"]["graph"]
 
     assert graph["metadata"]["status"] == "no_plan"
     assert "visible installed expert" in graph["metadata"]["reason"]
@@ -471,7 +471,7 @@ async def test_expert_task_plan_accepts_unpublished_expert_handoff(tmp_path, mon
     }
     service, _ = _service(tmp_path, draft, monkeypatch, expert_artifacts)
 
-    result = await service.plan_expert_tasks("Research and report", candidate_ids=["research", "report"])
+    result = await service.plan_subagent_graph("Research and report", candidate_ids=["research", "report"])
     graph = result["planned_graph"]["graph"]
 
     assert graph["metadata"]["status"] == "ready"
@@ -495,7 +495,7 @@ async def test_expert_task_plan_preserves_tasks_with_missing_inputs(tmp_path, mo
     )
 
     engine = SymphonyGraphEngine(service)
-    graph = (await engine.plan_expert_tasks("Verify the evidence", inputs=[source]))["planned_graph"]["graph"]
+    graph = (await engine.plan_subagent_graph("Verify the evidence", inputs=[source]))["planned_graph"]["graph"]
 
     assert graph["metadata"]["status"] == "ready"
     assert graph["metadata"]["missing_inputs"] == [
@@ -520,7 +520,7 @@ async def test_empty_expert_draft_with_missing_inputs_gets_one_conditional_attem
         return {"status": "needs_input", "missing_inputs": ["facts"]}
 
     service, model = _service(tmp_path, draft, monkeypatch)
-    graph = (await service.plan_expert_tasks("Plan a launch. You may consult platform rules."))["planned_graph"]["graph"]
+    graph = (await service.plan_subagent_graph("Plan a launch. You may consult platform rules."))["planned_graph"]["graph"]
 
     assert len(model.planning_prompts) == 2
     assert graph["metadata"]["status"] == ("ready" if recover else "no_plan")

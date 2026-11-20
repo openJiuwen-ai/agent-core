@@ -51,7 +51,6 @@ def state_to_plan(
 
     edges = [can_feed_edges[index] for index in state.edges]
     edge_confidence = sum(float(edge.get("confidence") or 0.0) for edge in edges) / len(edges) if edges else 1.0
-    status = "ready" if not all_missing else "needs_input"
     return OrchestrationPlan(
         steps=steps,
         produced_artifacts=[
@@ -62,7 +61,7 @@ def state_to_plan(
         goal_score=sum(10.0 for item in state.skill_ids if item in seed_skill_ids),
         edge_confidence=edge_confidence,
         consumed_user_artifacts=0,
-        status=status,
+        status="ready",
         reasons=list(state.score_reasons[:8]),
     )
 

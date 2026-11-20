@@ -847,11 +847,10 @@ class BidirectionalBeamPlanner:
             (skill_id(edge.get("source")), skill_id(edge.get("target"))): edge for edge in self.eligible_edges
         }
         edge_items = [edge_plan_item(edge_by_key[edge]) for edge in selected_edges]
-        status = "needs_input" if missing_inputs else "ready"
         reason = _short_text(str(selection.get("reason") or ""))
         return {
             "title": _query_plan_title(query, language=self.language),
-            "status": status,
+            "status": "ready",
             "steps": steps,
             "stages": _rerank_plan_stages(steps, edge_items),
             "produced_artifacts": _dedupe_dict_items(produced_artifacts),
@@ -859,7 +858,7 @@ class BidirectionalBeamPlanner:
             "can_feed_edges": edge_items,
             "reason": reason,
             "reasons": [reason] if reason else [],
-            "plan_classification": ("executable" if status == "ready" else "structurally_valid_but_incomplete"),
+            "plan_classification": "structurally_valid_but_incomplete" if missing_inputs else "executable",
             "connectivity_trace": ["can_feed"] if edge_items else [],
             "source": "bidirectional_beam_final_rerank",
         }
@@ -1350,7 +1349,7 @@ class BidirectionalBeamPlanner:
                 "title": title,
                 "reason": reason,
                 "plan_classification": (
-                    "executable" if plan.status == "ready" else "structurally_valid_but_incomplete"
+                    "structurally_valid_but_incomplete" if plan.missing_inputs else "executable"
                 ),
                 "connectivity_trace": (["can_feed"] if plan.can_feed_edges else []),
                 "source": "bidirectional_beam",

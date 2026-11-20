@@ -300,7 +300,7 @@ class SymphonyGraphEngine:
                 inputs=inputs,
             )
 
-    async def plan_expert_tasks(
+    async def plan_subagent_graph(
         self,
         query: str,
         candidate_ids: Sequence[str] | None = None,
@@ -314,7 +314,7 @@ class SymphonyGraphEngine:
         """Plan installed expert tasks and inline roles using any published expert evidence."""
         with self._track_operation():
             self._check(require_graph=False)
-            return await self._orchestration_service.plan_expert_tasks(
+            return await self._orchestration_service.plan_subagent_graph(
                 query,
                 candidate_ids,
                 expert_manifest_paths=expert_manifest_paths,
