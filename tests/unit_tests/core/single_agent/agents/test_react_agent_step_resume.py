@@ -166,3 +166,19 @@ async def test_step_write_failure_does_not_abort_invoke(monkeypatch):
 
 def test_mock_session_is_ignored():
     assert ReActAgent._begin_agent_steps(MagicMock()) is None
+
+
+@pytest.mark.asyncio
+async def test_run_that_never_starts_does_not_close_steps(monkeypatch):
+    """A rejected invoke must not turn a pending resume into a finished task.
+
+    The empty-query ValueError is raised before ``begin_agent_steps``; closing
+    steps there would append a ``final`` record and destroy the resume point.
+    """
+    llm = MockLLMModel()
+    agent, session, recorder = await _run(monkeypatch, card_id="step-noquery", llm=llm)
+
+    with pytest.raises(ValueError):
+        await agent.invoke({"query": ""}, session=session)
+
+    assert not any(isinstance(e, tuple) and e[0] == "end" for e in recorder.events)

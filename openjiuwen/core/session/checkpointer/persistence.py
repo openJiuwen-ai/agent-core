@@ -996,9 +996,14 @@ class PersistenceCheckpointer(Checkpointer):
                 session_id=session_id,
                 metadata={"operation": "release_all", "storage_type": "persistence"}
             )
-            # Delete all keys matching the session prefix
+            # Delete all keys matching the session prefix. Filtered in Python:
+            # ``delete_by_prefix`` compiles the prefix into a LIKE pattern, so a
+            # session id containing ``_`` or ``%`` would also wipe other sessions.
             prefix = f"{session_id}:"
-            await self._kv_store.delete_by_prefix(prefix)
+            keys = await self._kv_store.get_by_prefix(prefix)
+            exact = [key for key in sorted(keys) if key.startswith(prefix)]
+            if exact:
+                await self._kv_store.batch_delete(exact)
             self._step_storage.forget_session(session_id)
             session_logger.debug(
                 "All session resources released",

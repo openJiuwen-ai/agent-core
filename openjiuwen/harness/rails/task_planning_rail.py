@@ -475,7 +475,16 @@ class TaskPlanningRail(DeepAgentRail):
             )
             return
         if getattr(result, "code", -1) != 0 or result.data is None:
-            logger.warning(
+            # Some backends (sandbox providers) ignore ``options``, so a missing
+            # file surfaces as an error instead of ``exists=False``. Probe the
+            # directory to tell "no todo list yet" from a real read failure.
+            exists = await self._todo_file_exists(tool, path)
+            if exists is False:
+                ctx.session.update_state({
+                    STEP_TODO_SNAPSHOT_KEY: {"exists": False, "content": ""}
+                })
+                return
+            logger.debug(
                 "TaskPlanningRail: todo snapshot read returned code=%s session_id=%s",
                 getattr(result, "code", None), session_id,
             )
@@ -487,6 +496,19 @@ class TaskPlanningRail(DeepAgentRail):
         ctx.session.update_state({
             STEP_TODO_SNAPSHOT_KEY: {"exists": exists, "content": content or ""}
         })
+
+    @staticmethod
+    async def _todo_file_exists(tool, path: str) -> bool | None:
+        """Return whether ``path`` exists via a directory listing, or None."""
+        try:
+            listing = await tool.fs.list_files(os.path.dirname(path))
+        except Exception:
+            return None
+        if getattr(listing, "code", -1) != 0 or listing.data is None:
+            return None
+        name = os.path.basename(path)
+        items = getattr(listing.data, "list_items", None) or []
+        return any(getattr(item, "name", None) == name for item in items)
 
     async def _rollback_todo_for_step_resume(self, ctx: AgentCallbackContext) -> None:
         """Pull todo.json back to the last persisted step before a resume.

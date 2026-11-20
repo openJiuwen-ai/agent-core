@@ -284,3 +284,32 @@ async def test_commit_durability_issue(dialect, value, ok):
 async def test_commit_durability_issue_reports_read_failure():
     issue = await _commit_durability_issue(_FakeEngine("mysql", fail=True))
     assert issue.startswith("cannot read commit durability setting")
+
+
+@pytest.mark.asyncio
+async def test_release_session_only_clears_its_own_step_records(tmp_path):
+    """Session-level release must not ride the LIKE wildcard into other sessions.
+
+    ``delete_by_prefix`` compiles the prefix into ``LIKE 'a_b:%'``, where ``_``
+    matches any character, so ``axb``'s records would be deleted too.
+    """
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from openjiuwen.core.foundation.store import DbBasedKVStore
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'kv.db'}")
+    kv = DbBasedKVStore(engine)
+    try:
+        cp = PersistenceCheckpointer(kv)
+        for sid in ("a_b", "axb"):
+            session = make_session(sid, "agent-1")
+            set_msgs(session, ["q"])
+            cp.begin_agent_steps(session)
+            await cp.save_agent_step(session, 0, query="q")
+
+        await cp.release("a_b")
+
+        remaining = await kv.get_by_prefix("a")
+        assert sorted(remaining) == ["axb:agent-step:agent-1:" + "0" * 20]
+    finally:
+        await engine.dispose()

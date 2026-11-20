@@ -2911,6 +2911,7 @@ class ReActAgent(BaseAgent):
 
         abort_persisted = False
         agent_interrupted = False
+        steps_started = False
         try:
             async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
                 user_input = ctx.inputs.query
@@ -2934,6 +2935,7 @@ class ReActAgent(BaseAgent):
                 # the first iteration of this run is. A pending HITL interrupt
                 # never leaves a resume point behind, so the two cannot overlap.
                 step_resume = self._begin_agent_steps(session)
+                steps_started = True
 
                 state_loaded_at = time.monotonic()
 
@@ -3511,15 +3513,17 @@ class ReActAgent(BaseAgent):
         finally:
             # Close this run's step records before any commit, so
             # post_agent_execute sees an idle or interrupted agent rather than
-            # one still in progress. Every exit path lands here (cancel,
-            # exception, exhausted iterations), which is what stops a finished
-            # task from being resumed after a crash.
-            step_result = invoke_inputs.result
-            await self._end_agent_steps(
-                session,
-                interrupted=agent_interrupted
-                or (isinstance(step_result, dict) and step_result.get("result_type") == "interrupt"),
-            )
+            # one still in progress. Every exit path after the run started
+            # lands here (cancel, exception, exhausted iterations), which is
+            # what stops a finished task from being resumed after a crash. An
+            # invoke rejected before the loop began keeps its resume point.
+            if steps_started:
+                step_result = invoke_inputs.result
+                await self._end_agent_steps(
+                    session,
+                    interrupted=agent_interrupted
+                    or (isinstance(step_result, dict) and step_result.get("result_type") == "interrupt"),
+                )
             if need_cleanup:
                 if not abort_persisted:
                     await self.context_engine.save_contexts(session)

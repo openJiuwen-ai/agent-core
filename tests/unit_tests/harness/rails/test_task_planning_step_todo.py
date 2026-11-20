@@ -102,3 +102,56 @@ async def test_rollback_skips_when_snapshot_had_no_file(env):
     await rail.before_invoke(ctx)
 
     assert todo_path.read_text(encoding="utf-8") == "AHEAD"
+
+
+class _ErrorResult:
+    def __init__(self, code=199003, message="no such file", data=None):
+        self.code = code
+        self.message = message
+        self.data = data
+
+
+class _SandboxLikeFs:
+    """Mimics sandbox providers: read options are ignored, a missing file errors.
+
+    ``aio.py``/``yuanrong.py`` drop ``options`` entirely, so ``snapshot`` and
+    ``missing_ok`` never reach them and a missing todo.json comes back as an
+    error instead of ``exists=False``.
+    """
+
+    def __init__(self, real_fs):
+        self._real = real_fs
+
+    async def read_file(self, path, *, mode="text", **kwargs):
+        import os
+
+        if not os.path.exists(path):
+            return _ErrorResult()
+        return await self._real.read_file(path, mode=mode)
+
+    async def list_files(self, path, **kwargs):
+        return await self._real.list_files(path, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_after_react_iteration_records_missing_file_when_backend_ignores_options(env):
+    rail, session, ctx, todo_path = env
+    todo_path.parent.mkdir(parents=True)
+    tool = rail.tools[0]
+    tool.fs = _SandboxLikeFs(tool.fs)
+
+    await rail.after_react_iteration(ctx)
+
+    assert session.get_state(STEP_TODO_SNAPSHOT_KEY) == {"exists": False, "content": ""}
+
+
+@pytest.mark.asyncio
+async def test_after_react_iteration_reads_existing_file_when_backend_ignores_options(env):
+    rail, session, ctx, todo_path = env
+    _todo_file(todo_path).write_text('{"todos": [2]}', encoding="utf-8")
+    tool = rail.tools[0]
+    tool.fs = _SandboxLikeFs(tool.fs)
+
+    await rail.after_react_iteration(ctx)
+
+    assert session.get_state(STEP_TODO_SNAPSHOT_KEY) == {"exists": True, "content": '{"todos": [2]}'}
