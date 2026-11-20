@@ -213,8 +213,12 @@ def test_permanent_pause_retention_and_inherited_defaults(monkeypatch):
         {"retention": {"kind": "never"}},
         {"retention": {"kind": "ttl"}},
         {"retention": {"kind": "ttl", "ttlSeconds": True}},
+        {"retention": {"kind": "ttl", "ttlSeconds": 0}},
+        {"retention": {"kind": "ttl", "ttlSeconds": -1}},
         {"retention": {"kind": "forever", "ttlSeconds": 5}},
         {"timeoutSeconds": "300"},
+        {"timeoutSeconds": 0},
+        {"timeoutSeconds": -1},
         {"storage": "cluster"},
         {"timeout_seconds": 300},
     ],
@@ -363,6 +367,46 @@ def test_lifecycle_change_selects_a_new_environment(monkeypatch):
         config = provider_config()
         config.launcher_config.extra_params.update(
             idle_timeout=900, idle_action="pause", pause_policy={"storage": storage}
+        )
+        AdxEnvironmentShellProvider(endpoint, config)._get_environment()
+    assert factory.call_count == 2
+    assert factory.call_args_list[0].kwargs["name"] != factory.call_args_list[1].kwargs["name"]
+
+
+def test_same_lifecycle_configuration_reuses_one_environment(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    factory = MagicMock()
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    config = provider_config()
+    config.launcher_config.extra_params.update(
+        idle_timeout=900, idle_action="pause",
+        pause_policy={"retention": {"kind": "ttl", "ttlSeconds": 86400},
+                      "timeoutSeconds": 300, "storage": "shared"},
+    )
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="lifecycle-reuse"), config
+    )
+    provider._get_environment()
+    provider._get_environment()
+    assert factory.call_count == 1
+
+
+def test_idle_timeout_change_selects_a_new_environment(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    factory = MagicMock()
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    endpoint = SandboxEndpoint(base_url="http://localhost:18080", isolation_key="lifecycle-timeout")
+    for idle_timeout in (900, 3600):
+        config = provider_config()
+        config.launcher_config.extra_params.update(
+            idle_timeout=idle_timeout, idle_action="pause",
+            pause_policy={"retention": {"kind": "ttl", "ttlSeconds": 86400}},
         )
         AdxEnvironmentShellProvider(endpoint, config)._get_environment()
     assert factory.call_count == 2
