@@ -1,15 +1,22 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.sql.elements import TextClause
 
 from openjiuwen.core.foundation.llm.schema.message import UserMessage
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
-from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointer
+from openjiuwen.core.session.checkpointer.persistence import (
+    PersistenceCheckpointer,
+    PersistenceCheckpointerProvider,
+    _commit_durability_issue,
+)
 from openjiuwen.core.session.checkpointer.step_storage import SESSION_NAMESPACE_AGENT_STEP, StepResume
 from openjiuwen.core.session.config.base import Config
 from openjiuwen.core.session.internal.agent import AgentSession
@@ -210,3 +217,70 @@ async def test_session_wrapper_and_inmemory_defaults():
 
 def test_namespace_constant_is_stable():
     assert SESSION_NAMESPACE_AGENT_STEP == "agent-step"
+
+
+class _FakeResult:
+    def __init__(self, value):
+        self._value = value
+
+    def scalar(self):
+        return self._value
+
+
+class _FakeConnection:
+    def __init__(self, value, fail=False):
+        self._value = value
+        self._fail = fail
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def execute(self, statement):
+        assert isinstance(statement, TextClause)
+        return _FakeResult(self._value)
+
+
+class _FakeEngine:
+    def __init__(self, dialect, value=None, fail=False):
+        self.dialect = SimpleNamespace(name=dialect)
+        self._value = value
+        self._fail = fail
+
+    def connect(self):
+        if self._fail:
+            raise RuntimeError("boom")
+        return _FakeConnection(self._value)
+
+
+@pytest.mark.asyncio
+async def test_provider_sqlite_uses_full_synchronous(tmp_path):
+    cp = await PersistenceCheckpointerProvider().create(
+        {"db_type": "sqlite", "db_path": str(tmp_path / "checkpoint")}
+    )
+    try:
+        async with cp._kv_store.engine.connect() as conn:
+            assert (await conn.execute(text("PRAGMA synchronous"))).scalar() == 2
+    finally:
+        await cp._kv_store.engine.dispose()
+
+
+@pytest.mark.parametrize("dialect,value,ok", [
+    ("mysql", 1, True),
+    ("mysql", 2, False),
+    ("postgresql", "on", True),
+    ("postgresql", "local", True),
+    ("postgresql", "off", False),
+    ("sqlite", None, True),
+])
+@pytest.mark.asyncio
+async def test_commit_durability_issue(dialect, value, ok):
+    assert (await _commit_durability_issue(_FakeEngine(dialect, value)) is None) is ok
+
+
+@pytest.mark.asyncio
+async def test_commit_durability_issue_reports_read_failure():
+    issue = await _commit_durability_issue(_FakeEngine("mysql", fail=True))
+    assert issue.startswith("cannot read commit durability setting")

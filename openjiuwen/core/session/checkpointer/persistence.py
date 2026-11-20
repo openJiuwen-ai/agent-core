@@ -17,7 +17,7 @@ from typing import (
     Tuple,
 )
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     create_async_engine,
@@ -1049,6 +1049,58 @@ def _enable_sqlite_wal(engine: AsyncEngine) -> None:
         cursor.close()
 
 
+def _enable_sqlite_full_sync(engine: AsyncEngine) -> None:
+    """Make SQLite commits durable before ``set`` returns.
+
+    SQLite's default ``synchronous=FULL`` is not something the step checkpoint
+    can rely on across builds, and WAL mode does not change the requirement:
+    a step record must be on disk (fsynced), not merely in the OS cache, before
+    the round counts as complete. Set explicitly on every new connection.
+    """
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_sqlite_full_sync(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA synchronous=FULL")
+        cursor.close()
+
+
+async def _commit_durability_issue(engine: AsyncEngine) -> str | None:
+    """Describe why a server-side database may lose committed rows, if it can.
+
+    SQLite is configured by this provider, so it is not checked here. MySQL and
+    PostgreSQL are owned by the host: their durability depends on a global
+    setting a DBA controls, so this only reports a problem and never changes
+    server configuration.
+
+    Returns:
+        A human-readable issue, or None when commits are durable or the
+        dialect needs no check.
+    """
+    dialect = getattr(getattr(engine, "dialect", None), "name", "")
+    try:
+        if dialect == "mysql":
+            async with engine.connect() as conn:
+                value = (await conn.execute(text("SELECT @@innodb_flush_log_at_trx_commit"))).scalar()
+            if str(value).strip() != "1":
+                return (
+                    f"innodb_flush_log_at_trx_commit={value}, committed step records "
+                    "may be lost on power failure"
+                )
+            return None
+        if dialect == "postgresql":
+            async with engine.connect() as conn:
+                value = (await conn.execute(text("SHOW synchronous_commit"))).scalar()
+            if str(value).strip().lower() == "off":
+                return (
+                    "synchronous_commit=off, committed step records "
+                    "may be lost on power failure"
+                )
+            return None
+    except Exception as exc:
+        return f"cannot read commit durability setting: {exc}"
+    return None
+
+
 @CheckpointerFactory.register("persistence")
 class PersistenceCheckpointerProvider(CheckpointerProvider):
     """
@@ -1085,6 +1137,14 @@ class PersistenceCheckpointerProvider(CheckpointerProvider):
         if db_type == "sqlite":
             db_client = conf.get("db_client")
             if db_client is not None and isinstance(db_client, AsyncEngine):
+                issue = await _commit_durability_issue(db_client)
+                if issue:
+                    session_logger.warning(
+                        "Checkpoint database does not guarantee durable commits: %s",
+                        issue,
+                        event_type=LogEventType.CHECKPOINT_ERROR,
+                        metadata={"operation": "durability_check", "storage_type": "persistence"},
+                    )
                 kv_store = DbBasedKVStore(db_client)
             else:
                 if not db_path.endswith(".db"):
@@ -1101,6 +1161,8 @@ class PersistenceCheckpointerProvider(CheckpointerProvider):
                 # Enable WAL mode if configured (default: True)
                 if conf.get("db_enable_wal", True):
                     _enable_sqlite_wal(engine)
+                # Step records must be fsynced before the round counts as done.
+                _enable_sqlite_full_sync(engine)
                 kv_store = DbBasedKVStore(engine)
         elif db_type == "shelve":
             if db_path.endswith(".db"):
