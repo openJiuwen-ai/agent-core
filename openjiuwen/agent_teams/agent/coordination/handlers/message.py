@@ -313,16 +313,8 @@ class MessageHandler(BaseCoordinationHandler):
                             )
                             raise
                         if not result.ok:
-                            # A confirmed mismatch is finished. So is an answer that
-                            # arrived after the interrupt was already consumed: the
-                            # member is idle and nothing is pending, so keeping the
-                            # durable copy would only replay it onto a later tool.
-                            stale_after_resume = (
-                                result.reason == "interrupt_resume_unavailable"
-                                and not self._round.has_pending_interrupt()
-                                and not self._round.has_in_flight_round()
-                            )
-                            if result.reason == "unsupported_interactive_input" or stale_after_resume:
+                            # Only a confirmed mismatch can terminate an unclaimed reply.
+                            if result.reason == "unsupported_interactive_input":
                                 await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
                                 continue
                             # Busy, or the interrupt is not readable yet: leave the mail.
