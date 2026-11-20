@@ -677,6 +677,9 @@ class ReadFileTool(Tool):
     ) -> Tuple[str, int, Optional[int]]:
         """Read `limit` lines starting after skipping `offset` lines (0-based skip).
 
+        Internal contract: `offset` here stays 0-based skip; the tool-facing
+        1-based line number is converted at the call site (see ``invoke``).
+
         apply_size_cap: apply MAX_SIZE_BYTES check only when reading without an explicit
         user-supplied limit (mirrors TS: maxSizeBytes is passed only when limit is None).
 
@@ -727,8 +730,11 @@ class ReadFileTool(Tool):
                     inferred_total,
                 )
             else:
+                # offset 此处为 0 基 skip；面向模型的行号 = offset + 1，
+                # 并带总行数上界，降低自纠成本。
                 return (
-                    f"Error: The file exists but no content was returned at offset {offset}. "
+                    f"Error: The file exists but line {offset + 1} is past its end "
+                    f"(the file has at most {offset} lines). "
                     "Use a smaller offset or read from the beginning.",
                     0,
                     # No content at all: every line before `offset` exists, so the
@@ -1038,7 +1044,11 @@ class ReadFileTool(Tool):
                           "Please use a smaller or fully-bounded range (e.g. '1-20').",
                 )
 
-        offset: int = int(inputs.get("offset", 0))
+        # offset 为 1 基行号（与工具卡「开始读取的行号」及 memory 系分页契约一致）。
+        # 内部账目（_read_text / _ReadStateRecord / 续读指引）仍按 0 基 skip 记，
+        # 仅在边界处转换。offset <= 1 均从首行读，兼容按旧 skip 习惯传 0 的调用方。
+        offset: int = int(inputs.get("offset", 1))
+        skip_lines = max(0, offset - 1)
         raw_limit = inputs.get("limit")
         user_supplied_limit: bool = raw_limit is not None
         limit: int = (
@@ -1084,7 +1094,7 @@ class ReadFileTool(Tool):
                 # MAX_SIZE_BYTES cap only applies when no explicit limit was given
                 # (mirrors TS: maxSizeBytes passed only when limit is undefined).
                 rendered, text_line_count, inferred_total = await self._read_text(
-                    file_path, offset, limit, apply_size_cap=not user_supplied_limit
+                    file_path, skip_lines, limit, apply_size_cap=not user_supplied_limit
                 )
         except MaxFileReadTokenExceededError as exc:
             return ToolOutput(success=False, error=str(exc))
@@ -1111,8 +1121,8 @@ class ReadFileTool(Tool):
             record=_ReadStateRecord(
                 mtime_ns=mtime_ns,
                 size_bytes=size_bytes,
-                is_partial=user_supplied_limit or offset > 0,
-                offset=offset,
+                is_partial=user_supplied_limit or skip_lines > 0,
+                offset=skip_lines,
                 line_count=line_count,
                 inferred_total=inferred_total,
             ),
@@ -1270,7 +1280,7 @@ class WriteFileTool(Tool):
                                     f"Error: File has not been fully read yet. "
                                     f"You have read {lines_read} of "
                                     f"{read_state.total_lines} lines. "
-                                    f"Continue with read_file offset={resume_offset} before writing."
+                                    f"Continue with read_file offset={resume_offset + 1} before writing."
                                     f"until the whole file is covered, then write. "
                                     f"A full-file overwrite cannot use partial reads — "
                                     f"it would lose the unread content."
