@@ -225,9 +225,10 @@ async def _admit_interactive_input(
             return DeliverResult.failure("interrupt_resume_unavailable")
         if member_result.ok or member_result.reason != "unsupported_interactive_input":
             return member_result
+    if result.reason != "unsupported_interactive_input":
+        return result
     if (
-        result.reason == "unsupported_interactive_input"
-        and callable(getattr(leader, "has_pending_interrupt", None))
+        callable(getattr(leader, "has_pending_interrupt", None))
         and not _holds_a_different_interrupt(leader)
         and _in_flight_teammate_may_own_answer(leader)
     ):
