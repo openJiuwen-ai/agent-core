@@ -92,8 +92,8 @@ class SysOperationRail(DeepAgentRail):
         # LOCAL 并写穿宿主。add_ability 对有状态工具用 refresh=True 注册: 已存在则先 remove
         # 再 add, 天然处理这种残留 rebind。
         for tool in self.tools:
-            if getattr(agent, "_uses_event_tool_registration", lambda: False)():
-                agent._queue_tool_registration(tool)
+            if getattr(agent, "uses_event_tool_registration", lambda: False)():
+                agent.queue_tool_registration(tool)
             else:
                 agent.ability_manager.add_ability(tool.card, tool)
 

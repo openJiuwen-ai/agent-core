@@ -1193,14 +1193,14 @@ class DeepAgent(BaseAgent):
         self._pending_rails.append(rail)
         logger.info("[DeepAgent] %s added from environment", type(rail).__name__)
 
-    def _uses_event_tool_registration(self) -> bool:
+    def uses_event_tool_registration(self) -> bool:
         """Return whether startup tool instances use the event bridge."""
         return (
             self._deep_config is not None
             and self._deep_config.tool_registration_mode == "event"
         )
 
-    def _queue_tool_registration(self, tool: Tool) -> None:
+    def queue_tool_registration(self, tool: Tool) -> None:
         """Queue one concrete startup tool for FIFO event registration."""
         if not isinstance(tool, Tool):
             raise TypeError("startup tool registration requires a concrete Tool")

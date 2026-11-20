@@ -553,7 +553,7 @@ def apply_deep_agent_parts(agent: DeepAgent, parts: DeepAgentParts) -> None:
                 parts.config.tool_registration_mode == "event"
                 and id(tool) in event_tool_ids
             ):
-                agent._queue_tool_registration(tool)
+                agent.queue_tool_registration(tool)
             else:
                 agent.ability_manager.add_ability(tool.card, tool)
             if tool.card is not None:

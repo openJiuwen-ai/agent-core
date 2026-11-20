@@ -619,15 +619,16 @@ class DeepAgentSpec(BaseModel):
                 )
             if self.subagent_registration_mode == "event":
                 selected_event_types = set(self.event_subagent_types or ())
-                event_subagent_configs = [
-                    item
-                    for item in resolved_subagents
-                    if isinstance(item, SubAgentConfig)
-                    and (
-                        self.event_subagent_types is None
-                        or item.agent_card.name in selected_event_types
-                    )
-                ]
+                event_subagent_configs = []
+                for item in resolved_subagents:
+                    if not isinstance(item, SubAgentConfig):
+                        continue
+                    if (
+                        self.event_subagent_types is not None
+                        and item.agent_card.name not in selected_event_types
+                    ):
+                        continue
+                    event_subagent_configs.append(item)
                 event_subagent_ids = {id(item) for item in event_subagent_configs}
                 subagents = [
                     item for item in resolved_subagents
