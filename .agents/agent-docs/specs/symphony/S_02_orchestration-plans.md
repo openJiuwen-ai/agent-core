@@ -18,7 +18,7 @@ files: [openjiuwen/symphony/graph_engine.py, openjiuwen/symphony/orchestration/s
 
 Skill 节点的 `metadata.inputs` 和 `metadata.outputs` 提供已声明的端口名、类型和可用的必填标志。该节点已知的缺项通过 `metadata.missing_inputs` 提示。子智能体图沿用 `plan_kind=expert_tasks`，任务节点的 `external_inputs` 引用具名资料，依赖边以 `source_output` 和 `target_input` 表达交接。
 
-子智能体规划可沿已发布的关系补充候选专家。模型接收的每位候选只有 `id`、`name` 和 `description`。节点的 `outputs` 由本轮任务定义，Core 根据 `handoffs` 生成下游 `inputs`。
+子智能体规划可沿已发布的关系补充候选专家。模型接收的每位候选只有 `id`、`name` 和 `description`。一个交付物可由单个节点完成。多个任务可复用同一专家，候选也可闲置，缺少匹配专家的任务可分给内联角色。节点的 `outputs` 由本轮任务定义，Core 根据 `handoffs` 生成下游 `inputs`。
 
 子智能体模型草稿可省略成功状态和节点标题。Core 在任务和交接通过校验后输出 `ready`，并优先用显式 `title` 生成节点标签，省略时取 `task` 的首句或首行。节点引用的外部资料名若未在 `inputs` 提供，由 Core 汇总为图级缺项。若节点把自己的入边产物名或接收端口名也列为外部资料，Core 通过该入边交接。宿主已提供或草稿显式列为缺项的同名外部资料仍单独保留，其他节点的入边不参与判定。显式缺项可以补充类型和用途。
 
