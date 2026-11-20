@@ -6,7 +6,7 @@ import pytest
 from openjiuwen.core.runner.drunner import server_adapter as server_adapter_module
 from openjiuwen.core.runner.drunner.server_adapter import create_server_adapter
 from openjiuwen.core.runner.drunner.server_adapter.agent_adapter import AgentAdapter
-from openjiuwen.core.runner.runner_config import RunnerConfig, set_runner_config
+from openjiuwen.core.runner.runner_config import RunnerConfig, get_runner_config, set_runner_config
 from openjiuwen.extensions.a2a.a2a_server_adapter import A2AServerAdapter
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -14,9 +14,12 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 class TestA2AServerAdapter:
     @pytest.fixture(autouse=True)
     def reset_runner_config(self):
+        previous_config = get_runner_config()
         set_runner_config(RunnerConfig())
-        yield
-        set_runner_config(RunnerConfig())
+        try:
+            yield
+        finally:
+            set_runner_config(previous_config)
 
     def test_agent_adapter_should_skip_a2a_server_adapter_when_disabled(self, monkeypatch):
         created = {}

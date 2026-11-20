@@ -158,6 +158,22 @@ class TestRowsToDocuments:
         assert "Column name:" not in col_doc.text
         assert "Alice" in col_doc.text or "30" in col_doc.text
 
+    @staticmethod
+    @pytest.mark.parametrize("headers", [[None, "Score", ""], [" ", "Score", None], [None, None, None]])
+    @pytest.mark.parametrize("include_header", [True, False])
+    def test_blank_headers_preserve_row_values(headers, include_header):
+        rows = [headers, ["Alice", 0, "pass"]]
+        docs = _rows_to_documents(rows, "S", "b", 0, include_header=include_header)
+        row_docs = [d for d in docs if d.metadata["source_type"] == "row"]
+        assert len(row_docs) == 1
+        if include_header:
+            middle = "Score" if headers[1] else "Column 2"
+            assert row_docs[0].text == f"Column 1: Alice, {middle}: 0, Column 3: pass"
+        else:
+            assert row_docs[0].text == "Alice, 0, pass"
+        assert row_docs[0].id_ == "b_s0_r2"
+        assert row_docs[0].metadata["row_index"] == 2
+
 
 # ---------------------------------------------------------------------------
 # ExcelParser.supports
@@ -309,6 +325,9 @@ class TestExcelParserXlsx:
             # Empty headers should get fallback names
             fallback_names = col_names - {"Score"}
             assert len(fallback_names) >= 1
+            row_docs = [d for d in docs if d.metadata["source_type"] == "row"]
+            assert len(row_docs) == 1
+            assert row_docs[0].text == "Column 1: Alice, Score: 90, Column 3: pass"
         finally:
             os.unlink(path)
 
@@ -326,6 +345,20 @@ class TestExcelParserXlsx:
 # ---------------------------------------------------------------------------
 class TestExcelParserCsv:
     """ExcelParser.parse() tests for .csv files"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("suffix, delimiter", [(".csv", ","), (".tsv", "\t")])
+    async def test_parse_blank_headers_preserves_row(self, tmp_path, suffix, delimiter):
+        path = tmp_path / f"blank_headers{suffix}"
+        path.write_text(
+            delimiter.join(["", "Score", " "]) + "\n" + delimiter.join(["Alice", "0", "pass"]) + "\n",
+            encoding="utf-8",
+        )
+        docs = await ExcelParser().parse(str(path), doc_id="blank")
+        row_docs = [d for d in docs if d.metadata["source_type"] == "row"]
+        assert len(row_docs) == 1
+        assert row_docs[0].text == "Column 1: Alice, Score: 0, Column 3: pass"
+        assert row_docs[0].id_ == "blank_s0_r2"
 
     @pytest.mark.asyncio
     async def test_parse_csv_row_and_column_docs(self):
