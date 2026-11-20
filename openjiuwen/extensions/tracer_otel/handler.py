@@ -202,6 +202,26 @@ def _serialize(value: Any) -> str:
     return str(value)
 
 
+def _build_error_summary(exception: Exception) -> str:
+    """Build a safe status.description summary for a failed invocation.
+
+    Only the numeric error code and the exception class name enter this
+    non-redacted standard field: business messages may contain inputs or
+    credentials, so they stay in the redacted private attributes/events.
+    """
+    code = None
+    status = getattr(exception, "status", None)
+    if status is not None:
+        code = getattr(status, "code", None)
+    if code is None:
+        code = getattr(exception, "error_code", None)
+    if isinstance(code, bool) or not isinstance(code, (int, str)):
+        code = None
+    class_name = type(exception).__name__
+    summary = class_name if code is None else "%s %s" % (code, class_name)
+    return summary[:256]
+
+
 def _normalize_llm_payload(value: Any) -> Any:
     """Recursively convert Pydantic models to plain dicts via ``model_dump()``.
 
@@ -1699,7 +1719,12 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                         # Record interrupt payload for debuggability without error semantics
                         state.span.set_attribute(OJ_WORKFLOW_ERROR_MESSAGE, str(exception))
                     else:
-                        state.span.set_status(Status(StatusCode.ERROR))
+                        state.span.set_status(
+                            Status(
+                                StatusCode.ERROR,
+                                description=_build_error_summary(exception),
+                            )
+                        )
                         state.span.set_attribute(OJ_WORKFLOW_ERROR_MESSAGE, str(exception))
                         state.span.set_attribute(OJ_STATUS, NodeStatus.ERROR.value)
                         if isinstance(exception, BaseError):
