@@ -2628,7 +2628,13 @@ class DeepAgent(BaseAgent):
                     await self._write_round_result_to_stream(result, session)
             except Exception as e:
                 logger.error(f"Task loop stream error: {e}", exc_info=True)
-                error_result = {"output": str(e), "result_type": "error"}
+                # str(e) flattens the exception chain; error_origin_class keeps a
+                # structured origin so hosts can classify the failure stage.
+                error_result = {
+                    "output": str(e),
+                    "result_type": "error",
+                    "error_origin_class": f"{type(e).__module__}.{type(e).__qualname__}",
+                }
                 await self._write_round_result_to_stream(error_result, session)
             finally:
                 # Only close the stream emitter to send END_FRAME,
