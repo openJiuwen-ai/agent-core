@@ -26,6 +26,7 @@ from openjiuwen.core.events.builtins.event_types.agent_register import (
 
 if TYPE_CHECKING:
     from openjiuwen.core.events.bus import ExtensionEventBus
+    from openjiuwen.harness.schema.config import SubAgentConfig
 
 
 class _AgentRegistrationOps:
@@ -37,11 +38,15 @@ class _AgentRegistrationOps:
     async def register(
         self,
         ops: EventHandlerOps,
-        data: AgentRegisterInput,
+        data: AgentRegisterInput | "SubAgentConfig",
     ) -> AgentRegisterValue:
         """Trigger ``agent.register`` for one agent declaration."""
         if ops.session_context is None or not ops.session_context.session_id:
             raise RuntimeError("agent.register requires a session")
+        from openjiuwen.harness.schema.config import SubAgentConfig
+
+        if isinstance(data, SubAgentConfig):
+            data = AgentRegisterInput.from_subagent_config(data)
         prepared = prepare_agent_register_input(data)
         output = await self._bus.trigger(
             Event(AGENT_REGISTER, prepared),

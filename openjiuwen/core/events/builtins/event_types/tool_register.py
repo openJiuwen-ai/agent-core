@@ -23,11 +23,12 @@ from openjiuwen.core.foundation.tool import (
     RestfulApiCard,
     Tool,
     ToolCard,
-    tool as build_local_function,
 )
+from openjiuwen.core.foundation.tool import tool as build_local_function
 
 if TYPE_CHECKING:
     from openjiuwen.core.events.bus import ExtensionEventBus
+    from openjiuwen.harness.deep_agent import DeepAgent
 
 TOOL_REGISTER = "tool.register"
 ToolRegisterSource: TypeAlias = Tool | RestfulApiCard | Callable[..., Any]
@@ -79,6 +80,18 @@ class ToolRegisterInput:
 
     source: ToolRegisterSource
     card: ToolCard | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolRegisterTriggerContext:
+    """Internal CORE context used while an agent is being initialized.
+
+    Startup registration has a live :class:`DeepAgent` but intentionally has no
+    user ``SessionContext`` yet. The context is accepted only by the CORE
+    handler; public ``ops.tool.register`` continues to require a session.
+    """
+
+    agent: "DeepAgent"
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +216,28 @@ def _require_session_context(ops: EventHandlerOps | None):
     return ops.session_context
 
 
+def _resolve_agent(ops: EventHandlerOps | None) -> "DeepAgent":
+    """Resolve the live agent from internal startup or public session context."""
+    trigger_context = getattr(ops, "trigger_context", None)
+
+    from openjiuwen.harness.deep_agent import DeepAgent
+
+    if isinstance(trigger_context, ToolRegisterTriggerContext):
+        if not isinstance(trigger_context.agent, DeepAgent):
+            raise RuntimeError("tool.register trigger context requires a bound DeepAgent")
+        return trigger_context.agent
+
+    session = _require_session_context(ops)
+    from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
+
+    agent = get_agent_runtime().get(session.session_id)
+    if agent is None:
+        raise RuntimeError("session agent is not bound or has been released")
+    if not isinstance(agent, DeepAgent):
+        raise RuntimeError("tool.register requires a bound DeepAgent")
+    return agent
+
+
 def match_pattern_func(value: object, pattern: MatchPattern) -> bool:
     """Match valid tool registration requests with an empty pattern."""
     return isinstance(value, ToolRegisterInput) and not pattern
@@ -240,17 +275,8 @@ def register(bus: ExtensionEventBus) -> None:
     ) -> ToolRegisterOutput:
         """Bind and expose a real executable Tool on the live DeepAgent."""
         del event_next
-        session = _require_session_context(ops)
+        agent = _resolve_agent(ops)
         data = prepare_tool_register_input(event.event_input)
-
-        from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
-        from openjiuwen.harness.deep_agent import DeepAgent
-
-        agent = get_agent_runtime().get(session.session_id)
-        if agent is None:
-            raise RuntimeError("session agent is not bound or has been released")
-        if not isinstance(agent, DeepAgent):
-            raise RuntimeError("tool.register requires a bound DeepAgent")
 
         tool = _materialize_tool(data)
         await agent.load_plugin_ability(tools=tool)

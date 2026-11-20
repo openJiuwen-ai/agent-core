@@ -4,16 +4,18 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 方案状态 | 已实现；可执行工具登记、预置登记、事件链和输入边界已验证 |
+| 方案状态 | 已实现；公共登记、启动阶段登记、事件链和输入边界已验证 |
 | 适用范围 | agent-core `rsi-native-agent-os-rework` 的 Events 模块 |
 | 关联特性 | [F_10 `ops.agent.register`](F_10_ev10-agent-register-ops.md)、[F_07 EV-07 总体方案](F_07_ev07-agent-runtime-business-events.md) |
 | 实现位置 | `builtins/event_types/tool_register.py`、`builtins/handler_ops/tool_register.py` |
 
-本文维护 `ops.tool.register` 方法及其同名事件的可执行工具登记契约。当前能力支持已有 `Tool`、`RestfulApiCard` 和 Python callable；其中 `LocalFunction`、`RestfulApi` 以及未来的 `Tool` 子类都通过同一个来源字段进入事件链。Ops 只传递来源，CORE 在确认当前 `DeepAgent` 后创建需要的运行时对象并通过现有扩展绑定路径完成登记。`tool.call`、工具搜索和独立卸载不在本特性范围内。
+本文维护 `ops.tool.register` 方法及其同名事件的可执行工具登记契约。当前能力支持已有 `Tool`、`RestfulApiCard` 和 Python callable；其中 `LocalFunction`、`RestfulApi` 以及未来的 `Tool` 子类都通过同一个来源字段进入事件链。公共 Ops 入口只传递来源，CORE 在确认当前 `DeepAgent` 后创建需要的运行时对象并通过现有扩展绑定路径完成登记。Harness 启动阶段则直接触发同一事件，使用内部 `ToolRegisterTriggerContext` 携带 live `DeepAgent`，不伪造用户 `SessionContext`。`tool.call`、工具搜索和独立卸载不在本特性范围内。
 
 ## 2. 能力与边界
 
-`await ops.tool.register(spec)` 在当前会话登记一份可执行工具。Ops 把 `ToolRegisterSpec` 转换为 `ToolRegisterInput(source=..., card=...)`，不创建运行时 `Tool`，并以当前 Handler 的 `SessionContext` 触发一次新的 `tool.register` 事件链；USER / BUILTIN Handler 可以审查、替换或短路，CORE 确认绑定的 `DeepAgent` 后再创建并登记工具，最后返回 `ToolRegisterValue`。
+`await ops.tool.register(spec)` 在当前会话登记一份可执行工具。Ops 把 `ToolRegisterSpec` 转换为 `ToolRegisterInput(source=..., card=...)`，不创建运行时 `Tool`，并以当前 Handler 的 `SessionContext` 触发一次新的 `tool.register` 事件链；USER / BUILTIN Handler 可以审查、替换或短路，CORE 确认绑定的 `DeepAgent` 后再创建并登记工具，最后返回 `ToolRegisterValue`。公共入口仍要求有效 session。
+
+启动阶段由 harness 直接构造 `ToolRegisterInput(source=tool)` 并调用 `ExtensionEventBus.trigger(..., trigger_context=ToolRegisterTriggerContext(agent=agent))`。该上下文只对 CORE 可见，优先于 session 解析；USER / BUILTIN Handler 看到的事件输入不变，公共 `ops.tool.register` 的 session 约束也不变。事件成功后 harness 才从 FIFO 队列移除工具，失败则保留未完成项并向上抛出，不静默回退到 legacy 直注册。
 
 事件在当前进程内携带来源对象，不使用 `ContextVar` 保存本次注册状态。已有 `LocalFunction` / `RestfulApi` 或其它 `Tool` 子类直接复用；`RestfulApiCard` 由 CORE 构造 `RestfulApi`；Python callable 由 CORE 使用可选的 `ToolCard` 包装为 `LocalFunction`，未提供卡片时由 callable 的名称、文档字符串和签名自动生成卡片。通用 `ToolCard` 单独出现时会被拒绝，因为它没有执行实现。工具卡片负责保存 input schema 和后续可扩展的元数据。CORE 通过 `DeepAgent.load_plugin_ability()` 复用 `extension_binder`，由它维护 `AbilityManager`、`Runner.resource_mgr` 和配置登记。
 
@@ -22,7 +24,7 @@ ToolRegisterSpec
   → ops.tool.register(spec)
   → source: Tool / RestfulApiCard / callable
   → 构造 ToolRegisterInput(source=source, card=card)，不创建 Tool
-  → Event("tool.register", prepared), 当前 SessionContext
+  → Event("tool.register", prepared), 当前 SessionContext（公共）或 ToolRegisterTriggerContext（启动）
   → USER → BUILTIN → CORE
   → CORE: RestfulApiCard → RestfulApi；callable → LocalFunction；Tool → 原实例
   → DeepAgent.load_plugin_ability()
@@ -47,6 +49,8 @@ await ops.tool.register(spec: ToolRegisterSpec) -> ToolRegisterValue
 | `card` | `ToolCard | None`，默认 `None`。 | 仅用于 callable 的显式卡片；也可省略并由 callable 自动推导。若 `source` 已是 `Tool` 或 `RestfulApiCard`，则必须省略或传入同一个卡片对象。 |
 
 `ToolRegisterInput.source` 是本次进程内的来源对象，不属于可序列化的数据；EventBus 不跨进程传输它。`ToolRegisterInput.card` 和 `RestfulApiCard.input_params` 保存工具输入 Schema；如果是 Mapping，入口会校验其为对象型 JSON Schema，并拒绝嵌入 callable 等运行时对象。未来的卡片字段随 `ToolCard` 子类扩展，不需要修改事件输入字段。
+
+启动阶段只允许传入已经构造好的具体 `Tool`。`ToolRegisterTriggerContext` 是 CORE 内部上下文，不属于 `ToolRegisterSpec` / `ToolRegisterInput` 的业务字段，也不提升为 `openjiuwen.core.events` 顶层公共导出。
 
 ### 3.2 输出、匹配与失败
 
@@ -97,7 +101,7 @@ await bus.trigger(Event(OPS_BUILD_EVENT_TYPE, None))
 
 | 层 | 实现与责任 |
 | --- | --- |
-| EventType / CORE | `builtins/event_types/tool_register.py` 定义 `ToolRegisterSpec/Input/Value/Output`、来源校验、卡片 JSON Schema 校验、Matcher、输入/输出 Validator 和 CORE。CORE 通过 `AgentRuntime` 的 session ID 确认绑定 `DeepAgent`；已有 `Tool` 原样复用，callable 转为 `LocalFunction`，`RestfulApiCard` 在此处创建 `RestfulApi`，再调用 `load_plugin_ability()`。 |
+| EventType / CORE | `builtins/event_types/tool_register.py` 定义 `ToolRegisterSpec/Input/Value/Output`、来源校验、卡片 JSON Schema 校验、Matcher、输入/输出 Validator 和 CORE。CORE 先检查内部 `ToolRegisterTriggerContext`，用于无 session 的 harness 启动；否则按公共 `SessionContext` 的 session ID 通过 `AgentRuntime` 确认绑定 `DeepAgent`。已有 `Tool` 原样复用，callable 转为 `LocalFunction`，`RestfulApiCard` 在此处创建 `RestfulApi`，再调用 `load_plugin_ability()`。 |
 | Ops 方法 | `builtins/handler_ops/tool_register.py` 的 `_ToolRegistrationOps.register(ops, spec)` 只构造 `ToolRegisterInput(source=..., card=...)`，不创建运行时 `Tool`，触发同名事件，校验输出并解包；`build()` 把方法登记为 `tool.register`。 |
 | Harness 绑定层 | `DeepAgent.load_plugin_ability()` 复用 `extension_binder.apply_extension_hot()`，负责能力卡、具体资源、`DeepAgentConfig.tools` 和失败回滚；本特性不另建工具注册表。 |
 
@@ -112,6 +116,7 @@ await bus.trigger(Event(OPS_BUILD_EVENT_TYPE, None))
 | RestfulApiCard 登记 | 传入 `RestfulApiCard`。 | USER / BUILTIN 看到原 card，CORE 构造 `RestfulApi` 并复用同一卡片完成登记。 | `test_tool_register_materializes_restful_api_card`。 |
 | callable 自动卡片 | 只传入命名 callable，不提供 `card`。 | USER / BUILTIN 看到 callable，CORE 根据名称、文档字符串和签名生成 `LocalFunction` 卡片。 | `test_tool_register_normalizes_default_schema_in_event`。 |
 | 未绑定 Agent | 直接触发事件且 Session 未绑定 Runtime Agent。 | CORE 明确失败，不静默成功。 | `test_tool_register_event_requires_the_bound_runtime_agent`。 |
+| 启动阶段登记 | 以 `ToolRegisterTriggerContext(agent=agent)` 触发已有 Tool。 | 无 SessionContext 仍由 CORE 绑定同一 agent；公共 Ops 约束不变。 | `test_tool_register_event_accepts_internal_agent_context_without_session`、`test_event_mode_factory_tool_uses_core_handler_without_session`。 |
 | USER 短路 | 在 `tool.register` 前返回合法 Output。 | CORE 不执行。 | `test_tool_register_short_circuit_skips_core`。 |
 | 非法 Schema | 顶层 Schema 不是 object。 | 在 CORE 前失败。 | `test_tool_register_rejects_invalid_schema_before_core`。 |
 | 实现边界 | 只传通用 `ToolCard`，或卡片 Schema 内放 callable。 | 通用卡片因缺少执行实现被拒绝；Schema 内 callable 在事件入口拒绝。 | `test_tool_register_requires_a_real_implementation`、`test_tool_register_event_rejects_callable_nested_in_schema`。 |
@@ -128,6 +133,6 @@ uv run --frozen pytest tests/unit_tests/core/events/test_registration_events_rew
 
 - `tool.register` 是当前进程内事件；`Tool` / callable 不应跨进程或通过序列化协议传递。
 - `tool.call`、工具搜索和独立卸载仍未实现；返回成功不提供独立卸载凭据。
-- 具体权限策略、跨进程实现、退役排空和真实业务入口接入不在本特性测试范围内。
+- 具体权限策略、跨进程实现、退役排空和真实业务入口接入不在本特性测试范围内。启动队列是 harness 的生命周期契约，不改变 Events 的公共 Ops API。
 
 参考：[F_07 总体方案](F_07_ev07-agent-runtime-business-events.md)、[F_10 Agent 注册](F_10_ev10-agent-register-ops.md)、[S_01 公共契约](../specs/S_01_events-contract.md)、[Events 模块规则](../../AGENTS.md)。
