@@ -950,7 +950,7 @@ class DeepAgent(BaseAgent):
         # must remain absent until the registration event succeeds; the apply
         # phase queues those instances and adds pure cards separately.
         defer_event_tools = (
-            self._defer_event_tool_registration
+            getattr(self, "_defer_event_tool_registration", False)
             and config.tool_registration_mode == "event"
         )
         for name, card in new_by_name.items():
