@@ -20,21 +20,19 @@ from openjiuwen.symphony.orchestration.language import planner_language_instruct
 from openjiuwen.symphony.orchestration.model import ModelResponseObserver, invoke_json, model_usage_context
 from openjiuwen.symphony.orchestration.planning.beam import BEAM_DEFAULT_MAX_SKILLS, BidirectionalBeamPlanner
 from openjiuwen.symphony.orchestration.planning.fast import FastOneShotPlanner
-from openjiuwen.symphony.orchestration.planning.utils import (
-    CAN_FEED, eligible_can_feed_edges, normalize_known_skill_ids, skill_id, skill_payload,
-)
+from openjiuwen.symphony.orchestration.planning.utils import CAN_FEED, normalize_known_skill_ids, skill_payload
 from openjiuwen.symphony.retrieval.search.runtime.lexical import LexicalDocument, LexicalIndex
 from openjiuwen.symphony.shared.fingerprint.normalization import DataTypeVocabulary, normalize_io_name
 
 _SYSTEM_PROMPT = """
-Plan the user's deliverables as a DAG. Give each task its assignment and relevant constraints.
+Plan a DAG for this request. Give each task its assignment, constraints and outputs.
 Keep independent work parallel, requested reviews independent, and optional research
 within the task that may use it.
 
 Return one JSON object in this form.
 {
   "tasks": [
-    {"id":"extract","task":"Extract the readings.","role":{"name":"Analyst","description":"Extract measurements."},
+    {"id":"extract","task":"Extract the readings.","expert_id":"<id from experts>",
      "external_inputs":["readings_file"],"outputs":[{"name":"values","type":"json"}]},
     {"id":"plot","task":"Plot the values.","role":{"name":"Chart maker","description":"Visualize measurements."},
      "outputs":[{"name":"chart","type":"image"}]}
@@ -42,7 +40,7 @@ Return one JSON object in this form.
   "handoffs":[{"source":"extract","target":"plot","source_output":"values"}]
 }
 
-For an installed expert, replace role with expert_id from experts. If experts is empty, use inline roles.
+Use expert_id from experts for matching work. When experts is empty, every task must use role.
 Add a handoff only when the target needs the named source output to begin.
 Use target_input only to rename or group outputs.
 A task's external_inputs lists only materials from outside the DAG. Reuse names from inputs and include
@@ -147,34 +145,10 @@ async def build_expert_task_plan(
         query, artifacts, model=model, config=config, mode=mode, language=language,
         candidate_ids=candidate_ids, model_response_observer=model_response_observer, inputs=inputs,
     )
-    experts = {expert_id: known[expert_id] for expert_id in selected_ids}
-    edges = eligible_can_feed_edges(
-        artifacts.graph.get("edges", []),
-        known_skill_ids=set(experts),
-        min_confidence=config.min_edge_confidence,
-    )
-    expert_handoffs = {
-        (skill_id(edge["source"]), skill_id(edge["target"])): (
-            (edge.get("evidence") or {}).get("supporting_fields") or {}
-        )
-        for edge in edges
-    }
+    experts = {expert_id: skill_payload(known[expert_id]) for expert_id in selected_ids}
     prompt = {
-        "experts": [
-            {**skill_payload(expert), "inputs": expert.get("inputs", []), "outputs": expert.get("outputs", [])}
-            for expert in experts.values()
-        ],
+        "experts": list(experts.values()),
         "unavailable_candidate_ids": [expert_id for expert_id in candidate_ids or () if expert_id not in known],
-        "published_expert_handoffs": [
-            {
-                "source_id": source,
-                "target_id": target,
-                "port_mappings": support.get("port_mappings", []),
-                "source_outputs": support.get("source_outputs", []),
-                "target_inputs": support.get("target_inputs", []),
-            }
-            for (source, target), support in expert_handoffs.items()
-        ],
         "query": query,
         "inputs": [item.model_dump(exclude_none=True) for item in inputs],
     }
