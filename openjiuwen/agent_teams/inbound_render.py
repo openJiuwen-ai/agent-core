@@ -98,15 +98,15 @@ def _render_block(tag: str, attrs: list[str], body: str, note: str = "") -> str:
 
 
 def render_inbound(
-    *,
-    content: str,
-    sender: str,
-    message_id: str,
-    msg_type: str,
-    time_info: str,
-    for_controller: bool = False,
-    note_kind: str | None = None,
-    note_text: str | None = None,
+        *,
+        content: str,
+        sender: str,
+        message_id: str,
+        msg_type: str,
+        time_info: str,
+        for_controller: bool = False,
+        note_kind: str | None = None,
+        note_text: str | None = None,
 ) -> str:
     """Render one inbound member/user message as ``<team-inbound>`` XML.
 
@@ -142,13 +142,13 @@ def render_inbound(
 
 
 def render_event(
-    *,
-    kind: str,
-    body: str,
-    task_id: str | None = None,
-    for_controller: bool = False,
-    note_kind: str | None = None,
-    note_text: str | None = None,
+        *,
+        kind: str,
+        body: str,
+        task_id: str | None = None,
+        for_controller: bool = False,
+        note_kind: str | None = None,
+        note_text: str | None = None,
 ) -> str:
     """Render one framework event as a ``<team-event>`` XML block.
 
@@ -179,6 +179,37 @@ def render_event(
     if for_controller:
         attrs.append('for="controller"')
     return _render_block("team-event", attrs, body, _render_note(note_kind, note_text))
+
+
+def render_budget_wrap_up_event(payload: dict | None = None) -> str:
+    """Render the budget wrap-up trigger as a standard team event.
+
+    Uses the same ``<team-event>`` envelope as every other framework
+    trigger so the agent treats it as a system event rather than a user
+    question. ``payload`` carries the task-board details collected by the
+    rail's ``prepare_wrap_up_round`` (``{"repooled": [...], "counts":
+    {pending, blocked, completed, in_progress}}``); when absent the event
+    still renders with zero counts.
+    """
+    from openjiuwen.agent_teams.i18n import t
+
+    data = payload or {}
+    raw_counts = data.get("counts")
+    counts = raw_counts if isinstance(raw_counts, dict) else {}
+    tasks = data.get("repooled") or []
+    task_text = ", ".join(str(t) for t in tasks) or t(
+        "dispatcher.budget_wrap_up_none",
+    )
+    return render_event(
+        kind="budget-wrap-up",
+        body=t(
+            "dispatcher.budget_wrap_up",
+            pending=int(counts.get("pending", 0)),
+            blocked=int(counts.get("blocked", 0)),
+            completed=int(counts.get("completed", 0)),
+            tasks=task_text,
+        ),
+    )
 
 
 def render_team_context(*, body: str) -> str:
@@ -256,6 +287,7 @@ __all__ = [
     "INBOUND_TYPE_DIRECT",
     "SNAPSHOT_EVENT_KINDS",
     "drop_superseded_snapshots",
+    "render_budget_wrap_up_event",
     "render_event",
     "render_inbound",
     "render_team_context",

@@ -44,6 +44,7 @@ control event and awaits an ack resolved solely by the supervisor coroutine):
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 import uuid
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
@@ -168,10 +169,10 @@ class NativeHarness(DeepAgent):
     """
 
     def __init__(
-        self,
-        agent_spec: "DeepAgentSpec",
-        build_context: "BuildContext | None" = None,
-        extra_rails: "list[AgentRail] | None" = None,
+            self,
+            agent_spec: "DeepAgentSpec",
+            build_context: "BuildContext | None" = None,
+            extra_rails: "list[AgentRail] | None" = None,
     ) -> None:
         """Initialize a NativeHarness that configures itself from a spec.
 
@@ -282,7 +283,7 @@ class NativeHarness(DeepAgent):
 
     @property
     def paused_at_idle(self) -> bool:
-        """PM-72：pause 落定在 IDLE（无在跑回合、挂起中断待答）的显式标记。
+        """pause 落定在 IDLE（无在跑回合、挂起中断待答）的显式标记。
 
         kernel 的 pending_resume 冷恢复标记据此区分「无回合可续」（跳过
         resume 等用户输入）与「II 起轮的暂停回合」（同样空 query 但应照常
@@ -552,10 +553,10 @@ class NativeHarness(DeepAgent):
     # ------------------------------------------------------------------
 
     async def subscribe(
-        self,
-        *,
-        on_state: Callable[..., Any] | None = None,
-        on_round: Callable[..., Any] | None = None,
+            self,
+            *,
+            on_state: Callable[..., Any] | None = None,
+            on_round: Callable[..., Any] | None = None,
     ) -> None:
         """Register optional lifecycle callbacks on the harness event bus.
 
@@ -686,9 +687,9 @@ class NativeHarness(DeepAgent):
     # ------------------------------------------------------------------
 
     async def schedule_auto_invoke_on_spawn_done(
-        self,
-        query: str,
-        delay: float = 0.5,
+            self,
+            query: str,
+            delay: float = 0.5,
     ) -> None:
         """Route a SESSION_SPAWN-completion auto-invoke through the supervisor.
 
@@ -745,14 +746,14 @@ class NativeHarness(DeepAgent):
         await self.send(SystemText(text), immediate=False)
 
     def launch_async_tool(
-        self,
-        task_id: str,
-        coro_factory: "Callable[[], Any]",
-        *,
-        tool_name: str,
-        description: str,
-        format_completed: "Callable[[Any], str | None] | None" = None,
-        format_failed: "Callable[[str], str | None] | None" = None,
+            self,
+            task_id: str,
+            coro_factory: "Callable[[], Any]",
+            *,
+            tool_name: str,
+            description: str,
+            format_completed: "Callable[[Any], str | None] | None" = None,
+            format_failed: "Callable[[str], str | None] | None" = None,
     ) -> None:
         """Launch a background async-tool task tracked by this harness.
 
@@ -839,9 +840,9 @@ class NativeHarness(DeepAgent):
             logger.warning("[NativeHarness] unknown control event: %r", cmd)
 
     def _fail_remaining_commands(
-        self,
-        crashed_cmd: Any,
-        crash_exc: BaseException | None,
+            self,
+            crashed_cmd: Any,
+            crash_exc: BaseException | None,
     ) -> None:
         """Reject the acks of the crashed command and all queued commands.
 
@@ -1094,9 +1095,9 @@ class NativeHarness(DeepAgent):
         phase = self._st.phase
         if phase is not HarnessState.RUNNING:
             if (
-                phase is HarnessState.IDLE
-                and self._st.active is None
-                and self._has_pending_tool_interrupt()
+                    phase is HarnessState.IDLE
+                    and self._st.active is None
+                    and self._has_pending_tool_interrupt()
             ):
                 # 挂起工具中断待答的 IDLE——pause 落定 PAUSED，
                 # 否则「团队已暂停」回执与内部状态割裂，且 kernel 的
@@ -1175,7 +1176,7 @@ class NativeHarness(DeepAgent):
             if self._st.paused_at_idle:
                 # pause 落定在 IDLE（无在跑回合）——续轮会把空串当挂起中断
                 # 的答复喂给工具（_handle_resume）。留在 PAUSED 等用户输入
-                #（_on_send 的 PAUSED 分支）。
+                # （_on_send 的 PAUSED 分支）。
                 logger.info(
                     "[NativeHarness] resume skipped: paused at IDLE, "
                     "awaiting user input"
@@ -1221,9 +1222,9 @@ class NativeHarness(DeepAgent):
         self._ack(ack, None)
 
     async def _settle_round_done(
-        self,
-        active: ActiveRound,
-        cmd: _CmdRoundFinished,
+            self,
+            active: ActiveRound,
+            cmd: _CmdRoundFinished,
     ) -> None:
         """Round finished naturally; reuse DeepAgent's multi-round decision.
 
@@ -1354,6 +1355,56 @@ class NativeHarness(DeepAgent):
             await self._transition(HarnessState.IDLE)
             return
 
+        # Stop-condition evaluators (iteration budget / total budget /
+        # timeout / completion promise). The supervisor bypasses
+        # DeepAgent._run_task_loop, so this is the only evaluation point for
+        # the team runtime. A budget stop wins over queued follow-ups —
+        # the round is over.
+        # A text-only round never fires AFTER_REACT_ITERATION, so the rail's
+        # tick-based exhaustion flag may be stale at settle time; refresh it
+        # with the non-mutating ledger probe before evaluating.
+        rail = getattr(self, "_task_completion_rail", None)
+        refresh_budget = getattr(rail, "refresh_budget_state", None)
+        if refresh_budget is not None:
+
+            try:
+                refresh_budget()
+            except Exception:  # noqa: BLE001 - probe must never break a settle
+                logger.warning(
+                    "[NativeHarness] budget state refresh failed",
+                    exc_info=True,
+                )
+        try:
+            should_continue = coordinator.should_continue()
+        except Exception:  # noqa: BLE001 - evaluation must never break a round
+            logger.warning(
+                "[NativeHarness] stop-condition evaluation failed",
+                exc_info=True,
+            )
+            should_continue = True
+        if not should_continue:
+            logger.warning(
+                "[NativeHarness] task loop stopped by %s (round_id=%s)",
+                coordinator.stop_reason,
+                cmd.round_id,
+            )
+            # 成员侧 total 耗尽收口：本成员已停轮，立即把自己的在途任务
+            # 回池，不再等 leader 收尾轮。回调仅成员接线，
+            # leader 侧为 None。fail-open：回池失败不阻断停轮。
+            repool = getattr(rail, "on_total_budget_exhausted", None)
+            if repool is not None and getattr(
+                    rail, "total_budget_exhausted", False,
+            ):
+                try:
+                    await repool()
+                except Exception:  # noqa: BLE001 - 回池失败只告警
+                    logger.warning(
+                        "[NativeHarness] total-budget repool callback failed",
+                        exc_info=True,
+                    )
+            await self._transition(HarnessState.IDLE)
+            return
+
         # Decision priority (matches _run_task_loop):
         #   follow-up (external immediate=False sends) > remaining task-plan task.
         follow_ups = await self._drain_pending_follow_ups(session)
@@ -1368,6 +1419,51 @@ class NativeHarness(DeepAgent):
         # still ran first.
         if is_resume:
             await self._transition(HarnessState.IDLE)
+            return
+
+        # Budget wrap-up: grant exactly one final outer round for the
+        # delivery summary even when the task plan is empty — the cap
+        # round's control payload is withheld, so the summary is the
+        # user-visible answer. The rail enters the wrap-up state at the next
+        # BEFORE_TASK_ITERATION.
+        if (
+                rail is not None
+                and rail.budget_wrap_up_pending
+                and active.original_query
+        ):
+            logger.warning(
+                "[NativeHarness] budget wrap-up round granted "
+                "(prev_round_id=%s iteration_cap=%s total_exhausted=%s)",
+                cmd.round_id,
+                rail.iteration_cap_hit,
+                rail.total_budget_exhausted,
+            )
+            # Drive the wrap-up round with a dedicated team event instead of
+            # replaying the previous round's query (which may be a stale
+            # task-board/follow-up batch). The rail consumes the wrap-up
+            # slot (stop members / put unfinished tasks back) first so the
+            # event body carries the current task-board details.
+            payload = None
+            prepare = getattr(rail, "prepare_wrap_up_round", None)
+            if callable(prepare):
+                try:
+                    # Duck-typed hook: the real rail method is async, but a
+                    # test double / older rail may expose a sync variant.
+                    prepared = prepare()
+                    if inspect.isawaitable(prepared):
+                        prepared = await prepared
+                    payload = prepared if isinstance(prepared, dict) else None
+                except Exception:  # noqa: BLE001 - fall back to generic event
+                    logger.warning(
+                        "[NativeHarness] wrap-up preparation failed",
+                        exc_info=True,
+                    )
+            from openjiuwen.agent_teams.inbound_render import (
+                render_budget_wrap_up_event,
+            )
+
+            nxt = self._start_round(render_budget_wrap_up_event(payload))
+            await self._emit_round("started", nxt.round_id)
             return
 
         # A continuation round that resumed a paused InteractiveInput round has
@@ -1407,11 +1503,11 @@ class NativeHarness(DeepAgent):
     # documented so stage 2 can lift them out without reshaping callers.
 
     def _start_round(
-        self,
-        query: "str | list[str] | InteractiveInput",
-        is_follow_up: bool = False,
-        failure_retry: bool = False,
-        resume_continuation: bool = False,
+            self,
+            query: "str | list[str] | InteractiveInput",
+            is_follow_up: bool = False,
+            failure_retry: bool = False,
+            resume_continuation: bool = False,
     ) -> ActiveRound:
         """Create an ActiveRound (with a pre-round baseline snapshot) and schedule it.
 
@@ -1469,10 +1565,10 @@ class NativeHarness(DeepAgent):
         return active
 
     async def _run_round(
-        self,
-        active: ActiveRound,
-        is_follow_up: bool,
-        resume_continuation: bool = False,
+            self,
+            active: ActiveRound,
+            is_follow_up: bool,
+            resume_continuation: bool = False,
     ) -> None:
         """Drive one outer round through the task-loop kernel.
 
@@ -1506,8 +1602,8 @@ class NativeHarness(DeepAgent):
         ctx = AgentCallbackContext(agent=self, inputs=inv_inputs, session=self._session)
         try:
             async with ctx.lifecycle(
-                AgentCallbackEvent.BEFORE_INVOKE,
-                AgentCallbackEvent.AFTER_INVOKE,
+                    AgentCallbackEvent.BEFORE_INVOKE,
+                    AgentCallbackEvent.AFTER_INVOKE,
             ):
                 await self.loop_controller.submit_round(
                     self._session,
@@ -1527,7 +1623,22 @@ class NativeHarness(DeepAgent):
                 #   graceful abort force-finishes the inner loop at an iteration
                 #   boundary: it carries no answer.
                 if not self._is_control_result(result):
-                    await self._write_round_result_to_stream(result, self._session)
+                    # Budget marking at the round boundary: the supervisor
+                    # never runs DeepAgent._run_task_loop, so the stop-reason
+                    # tag must be applied here, BEFORE the result is written.
+                    result = self._tag_budget_result_at_boundary(result)
+                    rail = getattr(self, "_task_completion_rail", None)
+                    if rail is not None and rail.should_suppress_budget_result(result):
+                        # Pre-wrap-up control payload: the granted wrap-up
+                        # round is the user-visible answer, not this canned
+                        # budget-stopped round.
+                        logger.info(
+                            "[NativeHarness] round_id=%s budget-stop control "
+                            "payload withheld (wrap-up round follows)",
+                            active.round_id,
+                        )
+                    else:
+                        await self._write_round_result_to_stream(result, self._session)
                 # Expose the round result to AFTER_INVOKE rails (fired in the
                 # lifecycle's finally). Control results carry no real answer, so
                 # leave result as None for them.
@@ -1559,6 +1670,50 @@ class NativeHarness(DeepAgent):
         if not isinstance(result, dict):
             return False
         return bool(result.get("error")) or result.get("result_type") == COOPERATIVE_STOP_TYPE
+
+    def _tag_budget_result_at_boundary(self, result: Any) -> Any:
+        """Apply the budget tag when this round is the loop's last.
+
+        Mirrors ``DeepAgent._run_task_loop``'s publish-then-tag sequence:
+        the supervisor evaluates the same ``LoopCoordinator`` evaluator
+        chain at the round boundary, so a budget stop reason is available
+        before the round result is written to the stream.
+        """
+        coordinator = self.loop_coordinator
+        if coordinator is None:
+            return result
+        try:
+            should_continue = coordinator.should_continue()
+        except Exception:  # noqa: BLE001 - evaluation must never break a round
+            logger.warning(
+                "[NativeHarness] stop-condition evaluation failed",
+                exc_info=True,
+            )
+            return result
+        if should_continue:
+            return result
+        tagged = self._tag_budget_stop_result(result, coordinator.stop_reason)
+        if tagged is not result:
+            logger.warning(
+                "[NativeHarness] task loop exhausted: stop_reason=%s "
+                "rounds=%d",
+                coordinator.stop_reason,
+                coordinator.current_iteration,
+            )
+        return tagged
+
+    def refresh_loop_evaluators(self) -> None:
+        """Rebuild the coordinator's evaluator chain from the rail.
+
+        The team layer wires ``budget_tick`` / wrap-up hooks AFTER the
+        harness (and its coordinator) are built, so the chain must be
+        refreshed once the wiring lands.
+        """
+        coordinator = self.loop_coordinator
+        rail = getattr(self, "_task_completion_rail", None)
+        if coordinator is None or rail is None:
+            return
+        coordinator.set_evaluators(rail.build_evaluators())
 
     async def _log_slow_round_until_done(self, active: ActiveRound) -> None:
         """Log non-terminal slow-round warnings until the round task finishes."""
@@ -1820,10 +1975,10 @@ class NativeHarness(DeepAgent):
         )
 
     async def _emit_round(
-        self,
-        event: str,
-        round_id: int,
-        result: dict | None = None,
+            self,
+            event: str,
+            round_id: int,
+            result: dict | None = None,
     ) -> None:
         """Fire ``harness.round`` for a round lifecycle transition.
 
