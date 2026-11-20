@@ -30,7 +30,6 @@ from openjiuwen.core.context_engine.token.tokenizer_selector import TokenizerSel
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.runner.callback import lazy_callback_framework as _fw
-from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback import trigger as callback_trigger
 from openjiuwen.core.runner.callback.events import ContextEvents
 from openjiuwen.core.session.agent import Session
