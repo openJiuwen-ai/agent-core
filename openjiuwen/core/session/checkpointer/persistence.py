@@ -56,6 +56,7 @@ from openjiuwen.core.session.checkpointer import (
     Storage,
     WORKFLOW_NAMESPACE_GRAPH,
 )
+from openjiuwen.core.session.checkpointer.step_storage import AgentStepStorage, StepResume
 from openjiuwen.core.session.constants import FORCE_DEL_WORKFLOW_STATE_KEY
 
 
@@ -169,8 +170,13 @@ class BaseSingleStateStorage(BaseStorage, ABC):
         log_kwargs.update(self._entity_log_extra(entity_id))
         return log_kwargs
 
-    async def save(self, session: BaseSession):
-        """Save state to KV store."""
+    async def save(self, session: BaseSession) -> bool:
+        """Save state to KV store.
+
+        Returns:
+            True when the blob was written, False when it could not be
+            serialized. KV failures still raise.
+        """
         state = self._get_state_to_save(session)
         session_id = session.session_id()
         entity_id = self._get_entity_id(session)
@@ -181,7 +187,7 @@ class BaseSingleStateStorage(BaseStorage, ABC):
                 f"Failed to serialize {self._entity_label} state",
                 **self._log_kwargs(session_id, entity_id, "serialize"),
             )
-            return
+            return False
 
         try:
             dump_type, blob = state_blob
@@ -204,6 +210,7 @@ class BaseSingleStateStorage(BaseStorage, ABC):
                 **self._log_kwargs(session_id, entity_id, "save"),
             )
             raise
+        return True
 
     async def recover(self, session: BaseSession, inputs: InteractiveInput = None):
         """Recover state from KV store."""
@@ -742,6 +749,7 @@ class PersistenceCheckpointer(Checkpointer):
         self._agent_team_storage = AgentTeamStorage(kv_store)
         self._workflow_storage = WorkflowStorage(kv_store)
         self._graph_state = GraphStore(kv_store)
+        self._step_storage = AgentStepStorage(kv_store)
 
     async def pre_agent_execute(self, session: BaseSession, inputs):
         """Prepare agent execution by recovering agent state."""
@@ -753,6 +761,9 @@ class PersistenceCheckpointer(Checkpointer):
             metadata={"operation": "pre_execute", "storage_type": "persistence"}
         )
         await self._agent_storage.recover(session)
+        # Step increments carry the whole state, so they must be applied after
+        # the older blob and before the interaction inputs.
+        await self._step_storage.recover(session)
         if inputs is not None:
             session.state().update({INTERACTIVE_INPUT: [inputs]})
 
@@ -769,7 +780,7 @@ class PersistenceCheckpointer(Checkpointer):
             session.state().update_global({INTERACTIVE_INPUT: [inputs]})
 
     async def interrupt_agent_execute(self, session: BaseSession):
-        """Save agent state when interaction is required."""
+        """Record the interrupt as a step increment instead of a full blob."""
         session_logger.info(
             "Agent checkpoint save on interrupt",
             event_type=LogEventType.CHECKPOINT_SAVE,
@@ -777,7 +788,7 @@ class PersistenceCheckpointer(Checkpointer):
             agent_id=session.agent_id(),
             metadata={"reason": "interaction_required", "storage_type": "persistence"}
         )
-        await self._agent_storage.save(session)
+        await self._step_storage.end(session, interrupted=True)
 
     async def post_agent_execute(self, session: BaseSession):
         """Save agent state after execution completes."""
@@ -788,6 +799,40 @@ class PersistenceCheckpointer(Checkpointer):
             agent_id=session.agent_id(),
             metadata={"reason": "agent_finished", "storage_type": "persistence"}
         )
+        log_base = dict(
+            session_id=session.session_id(),
+            agent_id=session.agent_id(),
+        )
+        if self._step_storage.has_records(session):
+            status = self._step_storage.status(session)
+            if status in ("active", "resume_pending"):
+                session_logger.debug(
+                    "Agent steps still in progress, skipping commit",
+                    event_type=LogEventType.CHECKPOINT_SAVE,
+                    **log_base,
+                    metadata={"reason": "step_active", "storage_type": "persistence"},
+                )
+                return
+            if status == "interrupted":
+                await self._step_storage.append(session, kind="interrupt")
+                session_logger.info(
+                    "Agent steps kept for interrupt",
+                    event_type=LogEventType.CHECKPOINT_SAVE,
+                    **log_base,
+                    metadata={"reason": "step_interrupt", "storage_type": "persistence"},
+                )
+                return
+            if status == "idle":
+                saved = await self._agent_storage.save(session)
+                if saved:
+                    await self._step_storage.clear(session.session_id(), session.agent_id())
+                session_logger.info(
+                    "Agent steps cleared after completion",
+                    event_type=LogEventType.CHECKPOINT_CLEAR,
+                    **log_base,
+                    metadata={"reason": "step_cleanup", "storage_type": "persistence"},
+                )
+                return
         await self._agent_storage.save(session)
 
     async def post_agent_team_execute(self, session: BaseSession):
@@ -943,6 +988,7 @@ class PersistenceCheckpointer(Checkpointer):
                 metadata={"operation": "release", "storage_type": "persistence"}
             )
             await self._agent_storage.clear(agent_id, session_id)
+            await self._step_storage.clear(session_id, agent_id)
         else:
             session_logger.info(
                 "Session cleared",
@@ -953,6 +999,7 @@ class PersistenceCheckpointer(Checkpointer):
             # Delete all keys matching the session prefix
             prefix = f"{session_id}:"
             await self._kv_store.delete_by_prefix(prefix)
+            self._step_storage.forget_session(session_id)
             session_logger.debug(
                 "All session resources released",
                 event_type=LogEventType.CHECKPOINT_CLEAR,
@@ -963,6 +1010,29 @@ class PersistenceCheckpointer(Checkpointer):
     def graph_store(self) -> Store:
         """Return the graph store instance."""
         return self._graph_state
+
+    async def save_agent_step(
+        self,
+        session: BaseSession,
+        iteration: int,
+        query: str = "",
+        final: bool = False,
+    ) -> None:
+        await self._step_storage.append(
+            session,
+            kind="final" if final else "step",
+            iteration=iteration,
+            query=query,
+        )
+
+    def begin_agent_steps(self, session: BaseSession) -> StepResume | None:
+        return self._step_storage.begin(session)
+
+    def peek_agent_step_resume(self, session: BaseSession) -> StepResume | None:
+        return self._step_storage.peek_resume(session)
+
+    async def end_agent_steps(self, session: BaseSession, interrupted: bool) -> None:
+        await self._step_storage.end(session, interrupted=interrupted)
 
 
 def _enable_sqlite_wal(engine: AsyncEngine) -> None:
