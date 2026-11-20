@@ -148,8 +148,12 @@ async def test_build_context_usage_snapshot_for_manual_context_operation() -> No
     cached_tool = ToolInfo(name="cached_tool", description="cached", parameters={})
     agent._last_model_tools = [cached_tool]
     list_tool_info = AsyncMock(return_value=[])
+    compose_prompt_sections = AsyncMock(return_value=None)
 
-    with patch.object(agent.ability_manager, "list_tool_info", list_tool_info):
+    with (
+        patch.object(agent.ability_manager, "list_tool_info", list_tool_info),
+        patch.object(agent, "_compose_prompt_sections", compose_prompt_sections),
+    ):
         payload = await agent.build_context_usage_snapshot(
             context,
             session=session,
@@ -169,6 +173,7 @@ async def test_build_context_usage_snapshot_for_manual_context_operation() -> No
     assert payload["kv_cache"]["session"]["calls_total"] == 0
     assert payload["parts"]["tools"]["tokens"] > 0
     list_tool_info.assert_not_awaited()
+    compose_prompt_sections.assert_not_awaited()
     assert session.write_stream.await_count == 0
 
 

@@ -22,7 +22,7 @@ _CACHED_TZLOCAL = tzlocal()
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace
-from opentelemetry.trace import SpanKind, Status, StatusCode
+from opentelemetry.trace import NonRecordingSpan, SpanContext, SpanKind, Status, StatusCode, TraceFlags
 
 from openjiuwen.core.common.exception.codes import StatusCode as OJStatusCode
 from openjiuwen.core.common.exception.errors import BaseError
@@ -83,11 +83,8 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_ERROR,
     OJ_GEN_AI_METADATA,
     OJ_GEN_AI_REASONING_DURATION_MS,
-    OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS,
+    OJ_GEN_AI_RESPONSE_TPOT_MS,
     OJ_GEN_AI_TRACE_NAME,
-    OJ_GEN_AI_USAGE_INPUT_COST,
-    OJ_GEN_AI_USAGE_OUTPUT_COST,
-    OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_GEN_AI_USER_ID,
     OJ_INNER_ERROR,
     OJ_INTERACTIVE_INPUTS,
@@ -128,6 +125,35 @@ def _get_parent_context(state: OtelSpanState | None) -> otel_context.Context | N
     if state is None:
         return None
     return trace.set_span_in_context(state.span)
+
+
+def _explicit_parent_context(instance_info: dict | None) -> otel_context.Context | None:
+    """Build a parent context from explicit embedded-side span refs, or None.
+
+    嵌入侧（studio 双写桥）llm span 的逻辑父不在本 handler 的 span manager
+    表中，环境回退又会被链路中的上下文污染破坏（部署实证：llm span 与
+    node span 并列、误挂死根）。identity 通道显式携带 node span 的
+    (parent_trace_id, parent_span_id[, parent_trace_flags])，此处构造
+    NonRecordingSpan 父上下文。refs 缺失或非法（非 hex / 全零）返回 None，
+    调用方走既有 逻辑父→环境 解析，行为不变。flags 缺省按已采样处理：
+    显式 refs 只来自活着的 recording span，宁可多采不丢数据。
+    """
+    info = instance_info or {}
+    trace_hex = str(info.get("parent_trace_id") or "")
+    span_hex = str(info.get("parent_span_id") or "")
+    try:
+        trace_id = int(trace_hex, 16)
+        span_id = int(span_hex, 16)
+    except ValueError:
+        return None
+    if not (0 < span_id < 2**64 and 0 < trace_id < 2**128):
+        return None
+    try:
+        flags = TraceFlags(int(str(info.get("parent_trace_flags") or "1"), 16) & TraceFlags.SAMPLED)
+    except ValueError:
+        flags = TraceFlags(TraceFlags.SAMPLED)
+    ctx = SpanContext(trace_id=trace_id, span_id=span_id, is_remote=True, trace_flags=flags)
+    return trace.set_span_in_context(NonRecordingSpan(ctx))
 
 
 
@@ -297,58 +323,101 @@ def _unwrap_llm_payload(value: Any) -> Any:
     return normalized
 
 
+#: Upper bound for a plausible time-to-first-chunk, in seconds.
+#:
+#: ``first_token_time`` is declared as a *moment* (a timestamp string, same
+#: family as ``request_start_time``), while the attribute it feeds is a
+#: *duration*. A numeric moment such as ``"1793198938.1"`` would otherwise be
+#: stamped as a 56-year TTFT, so anything above this bound is treated as a
+#: mis-typed moment and skipped.
+_MAX_TTFT_SECONDS = 3600.0
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    """Best-effort ``int`` for provider usage fields.
+
+    Providers can report ``None``, ``""`` or sentinel strings such as
+    ``"N/A"``. A malformed value must not raise: these calls run inside
+    ``on_llm_end`` before the span is finalized.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    """Best-effort ``float``; mirrors :func:`_as_int` for cost/latency fields."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _set_llm_response_attrs(otel_span: trace.Span, outputs: Any) -> None:
     """Set GenAI response / usage / cost / latency attributes on the span.
 
     Reads ``finish_reason`` and ``usage_metadata`` (input/output tokens, cache
     read/write tokens, reasoning tokens, response model, per-kind costs,
     first-token timing) off an ``AssistantMessage`` payload, normalized via
-    ``model_dump`` semantics. Present values are set unconditionally — a
-    recorded 0 is a fact, not an absence.
+    ``model_dump`` semantics; decorator-measured streams instead carry usage
+    as a container-level ``usage_metadata`` sibling of ``outputs`` (see the
+    note at the unwrap call below). Present values are set unconditionally —
+    a recorded 0 is a fact, not an absence.
     """
     obj = _unwrap_llm_payload(outputs)
-    if not isinstance(obj, dict):
-        return
-    finish_reason = obj.get("finish_reason")
-    # "null" is the schema default for AssistantMessage.finish_reason, i.e.
-    # "provider did not report one" — not a zero value, so it stays filtered.
-    if finish_reason and str(finish_reason) != "null":
-        otel_span.set_attribute(GEN_AI_RESPONSE_FINISH_REASONS, [str(finish_reason)])
-    usage = obj.get("usage_metadata")
+    # Decorator-measured streams attach usage as a container-level sibling of
+    # "outputs": unwrap drills into the chunk list, which cannot carry usage
+    # itself, so the sibling is read before the unwrapped-object fallback
+    # (rail payloads embed usage on the message and keep that path). A chunk
+    # list also skips the finish_reason block instead of aborting the read.
+    sibling = outputs.get("usage_metadata") if isinstance(outputs, dict) else None
+    usage = sibling if isinstance(sibling, dict) else None
+    if usage is None:
+        usage = obj.get("usage_metadata") if isinstance(obj, dict) else None
+    if isinstance(obj, dict):
+        finish_reason = obj.get("finish_reason")
+        # "null" is the schema default for AssistantMessage.finish_reason, i.e.
+        # "provider did not report one" — not a zero value, so it stays filtered.
+        if finish_reason and str(finish_reason) != "null":
+            otel_span.set_attribute(GEN_AI_RESPONSE_FINISH_REASONS, [str(finish_reason)])
     if not isinstance(usage, dict):
         return
     otel_span.set_attribute(GEN_AI_RESPONSE_MODEL, str(usage.get("model_name") or ""))
-    otel_span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, int(usage.get("input_tokens") or 0))
-    otel_span.set_attribute(GEN_AI_USAGE_OUTPUT_TOKENS, int(usage.get("output_tokens") or 0))
+    otel_span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, _as_int(usage.get("input_tokens")))
+    otel_span.set_attribute(GEN_AI_USAGE_OUTPUT_TOKENS, _as_int(usage.get("output_tokens")))
     # Prefer the explicit cache_read_tokens split; fall back to cache_tokens.
     cache_read = usage.get("cache_read_tokens") or usage.get("cache_tokens")
-    otel_span.set_attribute(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, int(cache_read or 0))
+    otel_span.set_attribute(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, _as_int(cache_read))
     cache_write = usage.get("cache_write_tokens") or usage.get("cache_creation_input_tokens")
-    otel_span.set_attribute(GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS, int(cache_write or 0))
-    otel_span.set_attribute(GEN_AI_USAGE_REASONING_OUTPUT_TOKENS, int(usage.get("reasoning_tokens") or 0))
-    otel_span.set_attribute(OJ_GEN_AI_USAGE_TOTAL_COST, float(usage.get("total_cost") or 0))
-    otel_span.set_attribute(OJ_GEN_AI_USAGE_INPUT_COST, float(usage.get("input_cost") or 0))
-    otel_span.set_attribute(OJ_GEN_AI_USAGE_OUTPUT_COST, float(usage.get("output_cost") or 0))
+    otel_span.set_attribute(GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS, _as_int(cache_write))
+    otel_span.set_attribute(GEN_AI_USAGE_REASONING_OUTPUT_TOKENS, _as_int(usage.get("reasoning_tokens")))
     # Streaming / reasoning latency. TTFT comes from the semantically explicit
     # `ttft_seconds` field; `first_token_time` is kept as a **legacy fallback**
     # only — by contract it is a "first token instant" (timestamp string, same
-    # family as `request_start_time`), so a non-numeric value simply skips the
-    # attribute. The *_ms keys are schema-transparent: raw-dict callers and
-    # future UsageMetadata fields flow through unchanged. All parses are
-    # guarded — a malformed value skips its attribute; it must never raise and
-    # abort the span finalization that follows in on_llm_end.
+    # family as `request_start_time`). Because the fallback is a *moment* while
+    # the attribute is a *duration*, a numeric moment must be rejected by range
+    # rather than by type: `float("1793198938.1")` parses fine and used to be
+    # stamped as a 56-year TTFT. The *_ms keys are schema-transparent: raw-dict
+    # callers and future UsageMetadata fields flow through unchanged. All parses
+    # are guarded — a malformed value skips its attribute; it must never raise
+    # and abort the span finalization that follows in on_llm_end.
     ttft_seconds = usage.get("ttft_seconds")
     if ttft_seconds is None:
         ttft_seconds = usage.get("first_token_time") or ""
     if ttft_seconds != "":
-        try:
-            otel_span.set_attribute(GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK, float(ttft_seconds))
-        except (TypeError, ValueError):
-            pass
-    inter_token = usage.get("inter_token_latency_ms")
+        ttft_value = _as_float(ttft_seconds, -1.0)
+        if 0.0 <= ttft_value <= _MAX_TTFT_SECONDS:
+            otel_span.set_attribute(GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK, ttft_value)
+    # TPOT payload keys: tpot_ms is canonical; inter_token_latency_ms is the
+    # legacy producer key (agent-studio usage payload) — still accepted so
+    # every studio release keeps flowing, written once under the single key.
+    inter_token = usage.get("tpot_ms")
+    if inter_token is None:
+        inter_token = usage.get("inter_token_latency_ms")
     if inter_token is not None:
         try:
-            otel_span.set_attribute(OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS, float(inter_token))
+            otel_span.set_attribute(OJ_GEN_AI_RESPONSE_TPOT_MS, float(inter_token))
         except (TypeError, ValueError):
             pass
     reasoning_duration = usage.get("reasoning_duration_ms")
@@ -371,6 +440,13 @@ class OtelAgentHandler(TraceExtAgentHandler):
     LLM spans use ``SpanKind.CLIENT`` and ``gen_ai.*`` semantic conventions;
     all other types use ``SpanKind.INTERNAL`` and ``openjiuwen.agent.*``.
     """
+
+    # Capability probe for embedding applications (e.g. agent-studio's
+    # trace-compat gate): this build consumes decorator-measured llm spans —
+    # a container-level "usage_metadata" sibling on the end payload and
+    # workflow_id/workflow_name identity keys — as pure additions, without
+    # any span-merge logic. Bump when the consumed shape changes.
+    LLM_SPAN_DECORATOR_CAPABILITY = 1
 
     def __init__(self, otel_tracer: trace.Tracer, config: OtelTracerConfig, trace_id: str | None = None):
         super().__init__()
@@ -397,7 +473,18 @@ class OtelAgentHandler(TraceExtAgentHandler):
         parent_ctx: otel_context.Context | None,
         agent_span: TraceAgentSpan,
     ) -> OtelSpanState:
-        otel_span = self._otel_tracer.start_span(name=name, kind=kind, context=parent_ctx)
+        start_time = agent_span.start_time or datetime.now(tz=_CACHED_TZLOCAL).replace(tzinfo=None)
+        # The SDK start_span expects int nanoseconds; the datetime form is
+        # kept for OJ_START_TIME / elapsed-time math. Passing the true start
+        # (same idiom as the workflow/component span site) keeps the span's
+        # own timestamps on the business clock instead of the event-processing
+        # wall clock, so the duration is real even when events flush together.
+        otel_span = self._otel_tracer.start_span(
+            name=name,
+            kind=kind,
+            context=parent_ctx,
+            start_time=int(start_time.timestamp() * 1e9),
+        )
         # Span base fields — use span value if present, otherwise set ourselves
         otel_span.set_attribute(OJ_TRACE_ID, agent_span.trace_id)
         # Instrumentation provider on every span (standard key; the non-standard
@@ -409,7 +496,6 @@ class OtelAgentHandler(TraceExtAgentHandler):
             otel_span.set_attribute(OJ_SESSION_ID, session_id)
         otel_span.set_attribute(OJ_INVOKE_ID, agent_span.invoke_id or "")
         otel_span.set_attribute(OJ_PARENT_INVOKE_ID, agent_span.parent_invoke_id or "")
-        start_time = agent_span.start_time or datetime.now(tz=_CACHED_TZLOCAL).replace(tzinfo=None)
         otel_span.set_attribute(OJ_START_TIME, str(start_time))
         context_token = otel_context.attach(trace.set_span_in_context(otel_span))
         state = OtelSpanState(
@@ -423,19 +509,25 @@ class OtelAgentHandler(TraceExtAgentHandler):
 
     # --- helper: end span and pop from manager ---
 
-    def _end_and_pop(self, invoke_id: str) -> None:
+    def _end_and_pop(self, invoke_id: str, end_time: datetime | None = None) -> None:
         state = self._span_manager.pop(invoke_id)
         if state is None:
             return
         state.span.set_status(Status(StatusCode.OK))
-        state.span.end()
+        # Explicit end timestamp (true business end) instead of the
+        # event-processing wall clock — spans flushed in one pass would
+        # otherwise end ~instantly and report a zero duration.
+        state.span.end(
+            end_time=int(end_time.timestamp() * 1e9) if end_time is not None else None
+        )
         otel_context.detach(state.context_token)
 
     # --- helper: set end-time attributes before closing a span ---
 
-    def _set_end_attrs(self, otel_span: trace.Span, agent_span: TraceAgentSpan) -> None:
+    def _set_end_attrs(self, otel_span: trace.Span, agent_span: TraceAgentSpan) -> datetime:
         """Set TraceSpan end-time fields as attributes before span closes.
-        Uses span values if present, otherwise sets ourselves (matching TraceAgentHandler)."""
+        Uses span values if present, otherwise sets ourselves (matching TraceAgentHandler).
+        Returns the resolved end_time so the caller can stamp it on span.end()."""
         end_time = agent_span.end_time or datetime.now(tz=_CACHED_TZLOCAL).replace(tzinfo=None)
         otel_span.set_attribute(OJ_END_TIME, str(end_time))
         if agent_span.elapsed_time is not None:
@@ -451,10 +543,11 @@ class OtelAgentHandler(TraceExtAgentHandler):
         if agent_span.child_invokes_id is not None:
             otel_span.set_attribute(OJ_CHILD_INVOKE_IDS, _serialize(agent_span.child_invokes_id))
         otel_span.set_attribute(OJ_STATUS, agent_span.status or NodeStatus.FINISH.value)
+        return end_time
 
     # --- helper: set error on span and end ---
 
-    def _mark_error_and_end(self, invoke_id: str, error: Any) -> None:
+    def _mark_error_and_end(self, invoke_id: str, error: Any, end_time: datetime | None = None) -> None:
         state = self._span_manager.pop(invoke_id)
         if state is None:
             return
@@ -473,7 +566,9 @@ class OtelAgentHandler(TraceExtAgentHandler):
             )
         otel_span.set_attribute(ERROR_TYPE, type(error).__name__)
         otel_span.record_exception(error)
-        otel_span.end()
+        otel_span.end(
+            end_time=int(end_time.timestamp() * 1e9) if end_time is not None else None
+        )
         otel_context.detach(state.context_token)
 
     # --- helper: set GenAI agent identity attributes on any span ---
@@ -485,7 +580,10 @@ class OtelAgentHandler(TraceExtAgentHandler):
         ``agent_id`` / ``agent_name`` / ``agent_description`` /
         ``conversation_id`` / ``user_id`` / ``metadata``. Events raised
         without them (other rails, direct handler callers) simply skip the
-        attributes.
+        attributes. Decorator-measured llm spans forward the same info plus
+        ``workflow_id`` / ``workflow_name``; ``component_*`` keys are
+        deliberately not mapped — ``openjiuwen.workflow.component_id`` is the
+        backend's shell discriminator and inner llm spans must not claim it.
         """
         info = instance_info or {}
         agent_id = info.get("agent_id")
@@ -502,8 +600,17 @@ class OtelAgentHandler(TraceExtAgentHandler):
             otel_span.set_attribute(GEN_AI_CONVERSATION_ID, str(info["conversation_id"]))
         if info.get("user_id"):
             otel_span.set_attribute(OJ_GEN_AI_USER_ID, str(info["user_id"]))
-        if info.get("metadata"):
+        # First writer wins for metadata: decorator identity stamps it at span
+        # start, and a later rail-forwarded info must not clobber it.
+        if info.get("metadata") and OJ_GEN_AI_METADATA not in (otel_span.attributes or {}):
             otel_span.set_attribute(OJ_GEN_AI_METADATA, _serialize(info["metadata"]))
+        # Workflow context from decorator-forwarded identity: written only when
+        # absent so the start-time value survives a second identity forward.
+        existing = otel_span.attributes or {}
+        if info.get("workflow_id") and OJ_WORKFLOW_ID not in existing:
+            otel_span.set_attribute(OJ_WORKFLOW_ID, str(info["workflow_id"]))
+        if info.get("workflow_name") and OJ_WORKFLOW_NAME not in existing:
+            otel_span.set_attribute(OJ_WORKFLOW_NAME, str(info["workflow_name"]))
 
     # --- helper: set common agent attributes (non-LLM) ---
 
@@ -531,7 +638,10 @@ class OtelAgentHandler(TraceExtAgentHandler):
 
     async def on_llm_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         try:
-            parent_ctx = self._resolve_parent_context(span)
+            # 显式父 refs（嵌入桥经 identity 通道带来）> 逻辑父 > 环境回退
+            parent_ctx = _explicit_parent_context(instance_info)
+            if parent_ctx is None:
+                parent_ctx = self._resolve_parent_context(span)
             state = self._start_and_push(
                 name=f"chat {instance_info.get('class_name', 'unknown')}",
                 kind=SpanKind.CLIENT,
@@ -599,6 +709,9 @@ class OtelAgentHandler(TraceExtAgentHandler):
             session_logger.warning("otel agent handler: on_llm_request failed: %s", exc)
 
     async def on_llm_end(self, span: TraceAgentSpan, outputs, **kwargs):
+        # end_time lives outside try so the finally guard can stamp the same
+        # resolved end time even when attribute serialization raised.
+        end_time = None
         try:
             state = self._span_manager.get(span.invoke_id)
             if state is None:
@@ -615,14 +728,23 @@ class OtelAgentHandler(TraceExtAgentHandler):
                             _redacted_json(messages, self._config, field="completions"),
                         )
                     _set_llm_response_attrs(state.span, outputs)
-                self._set_end_attrs(state.span, span)
-            self._end_and_pop(span.invoke_id)
+                end_time = self._set_end_attrs(state.span, span)
+            self._end_and_pop(span.invoke_id, end_time)
         except Exception as exc:
             session_logger.warning("otel agent handler: on_llm_end failed: %s", exc)
+        finally:
+            # Finalization must not depend on attribute serialization succeeding:
+            # a skipped _end_and_pop leaks the span, keeps its state in the
+            # manager and never detaches the context token.
+            try:
+                if self._span_manager.get(span.invoke_id) is not None:
+                    self._end_and_pop(span.invoke_id, end_time)
+            except Exception as exc:
+                session_logger.warning("otel agent handler: span finalization failed: %s", exc)
 
     async def on_llm_error(self, span: TraceAgentSpan, error, **kwargs):
         try:
-            self._mark_error_and_end(span.invoke_id, error)
+            self._mark_error_and_end(span.invoke_id, error, span.end_time)
         except Exception as exc:
             session_logger.warning("otel agent handler: on_llm_error failed: %s", exc)
 
@@ -670,16 +792,17 @@ class OtelAgentHandler(TraceExtAgentHandler):
         state = self._span_manager.get(span.invoke_id)
         if state is None:
             return
+        end_time = None
         if state.recorded:
             if outputs is not None:
                 state.span.set_attribute(OJ_AGENT_OUTPUTS, redact(outputs, self._config))
-            self._set_end_attrs(state.span, span)
-        self._end_and_pop(span.invoke_id)
+            end_time = self._set_end_attrs(state.span, span)
+        self._end_and_pop(span.invoke_id, end_time)
 
     # --- helper: mark error on a non-LLM span and end ---
 
     def _error_non_llm_span(self, span: TraceAgentSpan, error: Any) -> None:
-        self._mark_error_and_end(span.invoke_id, error)
+        self._mark_error_and_end(span.invoke_id, error, span.end_time)
 
     # ================================================================
     # Plugin (Tool) events — SpanKind.INTERNAL
@@ -846,6 +969,27 @@ class OtelAgentHandler(TraceExtAgentHandler):
         except Exception as exc:
             session_logger.warning("otel agent handler: on_retriever_error failed: %s", exc)
 
+    def drop_agent_span(self, invoke_id: str) -> None:
+        """Best-effort close of an agent span whose end/error event never arrived.
+
+        Degradation-tolerant emitters (e.g. studio's retrieval tool) fire
+        on_retriever_end / on_retriever_error through ``Tracer.trigger``; when
+        the trigger itself raises, the emitter can only drop the span on its
+        side. Without this hook the OTel span opened by on_*_start stays
+        half-open in this manager forever. The span is closed with OK status
+        (the business call may well have succeeded — only telemetry delivery
+        failed) plus a drop marker event. Never raises.
+        """
+        try:
+            state = self._span_manager.get(invoke_id)
+            if state is not None and state.recorded:
+                state.span.add_event(
+                    "oj.span.dropped", attributes={"reason": "end event undelivered by emitter"}
+                )
+            self._end_and_pop(invoke_id)
+        except Exception as exc:
+            session_logger.warning("otel agent handler: drop_agent_span failed: %s", exc)
+
     # ================================================================
     # Embedding events — INTERNAL span, embeddings operation (issue #1833).
     # Core emitter: APIEmbedding._get_embeddings fires these under a traced
@@ -1006,8 +1150,33 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         self._cached_root_ctx: otel_context.Context | None = None
         self._cached_trace_id: str | None = None
         self._cached_session_id: str | None = None
+        # Stream-consumer end nodes whose on_call_start arrived at the first
+        # chunk (metadata.defer_span_start): span creation is deferred to the
+        # on_call_finalize marker. Stash holds the begin payload plus stream
+        # chunks observed during the deferral window, replayed on the span
+        # when it materializes (on_call_finalize, or on_call_done fallback
+        # with the original begin timestamp when the marker never arrives).
+        self._deferred_end_starts: dict[str, dict] = {}
+
+    def _has_live_spans(self) -> bool:
+        """Whether any tracked workflow span is still recording.
+
+        Tracer.init() broadcasts set_trace_id/set_session_id to every
+        registered handler singleton, including handlers currently tracing a
+        live run for another session (e.g. a fresh lightweight agent session
+        created inside a running workflow component). Resetting caches or
+        force-cleaning spans at that moment would detach the live run's
+        ambient context mid-node and force-end in-flight spans, so resets
+        must be deferred while any tracked span is still recording.
+        """
+        tracked = list(self._layer_root_spans.values()) + list(self._component_spans.values())
+        return any(state.span.is_recording() for state in tracked)
 
     def set_trace_id(self, trace_id: str) -> None:
+        if self._has_live_spans():
+            # A live run is being traced for another session; a foreign
+            # tracer's init must not clear caches or force-clean its spans.
+            return
         if trace_id and trace_id != self._trace_id:
             self._cached_root_ctx = None
             self._cached_trace_id = None
@@ -1015,6 +1184,10 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         super().set_trace_id(trace_id)
 
     def set_session_id(self, session_id: str) -> None:
+        if self._has_live_spans():
+            # Per-event session binding keeps serving the live run; rebind
+            # once the run finishes.
+            return
         if session_id and session_id != self._cached_session_id:
             self._cached_root_ctx = None
             self._cached_trace_id = None
@@ -1039,6 +1212,37 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 session_logger.warning("otel workflow handler: cleanup component span failed: %s", exc)
         self._layer_root_spans.clear()
         self._component_spans.clear()
+
+    def drop_workflow_spans(self) -> None:
+        """Best-effort close of tracked workflow spans whose end never arrived.
+
+        Mirrors ``OtelAgentHandler.drop_agent_span``: a leaked span (emitter
+        died before on_call_done / on_call_error) keeps ``is_recording()``
+        true forever, which permanently short-circuits the rebind guard in
+        set_trace_id / set_session_id — every later session in the process
+        would keep serving the leaked run's binding. Ops / embedder code that
+        knows the run is dead calls this to force-close the tracked spans and
+        unblock rebinding. Never raises.
+        """
+        try:
+            for state in list(self._layer_root_spans.values()) + list(
+                self._component_spans.values()
+            ):
+                try:
+                    state.span.add_event(
+                        "oj.span.dropped",
+                        attributes={"reason": "end event undelivered by emitter"},
+                    )
+                except Exception as exc:
+                    session_logger.warning(
+                        "otel workflow handler: mark dropped event failed: %s", exc
+                    )
+            self._cleanup_stale_spans()
+            self._cached_root_ctx = None
+            self._cached_trace_id = None
+            self._cached_session_id = None
+        except Exception as exc:
+            session_logger.warning("otel workflow handler: drop_workflow_spans failed: %s", exc)
 
     @staticmethod
     def _detach_state(state: OtelSpanState) -> None:
@@ -1186,130 +1390,234 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     ):
         try:
             parent_node_id = kwargs.get("parent_node_id", "")
-            parent_ctx = self._resolve_parent_context(parent_node_id, metadata)
-
-            if metadata is None:
-                metadata = {}
-            is_workflow_root = "workflow_id" in metadata and "component_id" not in metadata
-            component_type = metadata.get("component_type", "")
-            is_llm_component = any(s in component_type for s in _LLM_SUBSTRINGS)
-            span_kind = SpanKind.CLIENT if is_llm_component else SpanKind.INTERNAL
-
-            is_tool_component = any(s in component_type for s in _TOOL_SUBSTRINGS)
-            is_retrieval_component = any(s in component_type for s in _RETRIEVAL_SUBSTRINGS)
-            if is_workflow_root:
-                span_name = invoke_id
-            elif is_llm_component:
-                request_model = str(metadata.get("model_name") or metadata.get("model") or "")
-                span_name = f"chat {request_model}" if request_model else "chat"
-            elif is_tool_component:
-                tool_name = str(metadata.get("component_name") or invoke_id)
-                span_name = f"execute_tool {tool_name}"
-            elif is_retrieval_component:
-                retrieval_name = str(metadata.get("component_name") or invoke_id)
-                span_name = f"retrieval {retrieval_name}"
-            else:
-                span_name = f"component.{invoke_id}"
-
-            otel_span = self._otel_tracer.start_span(
-                name=span_name,
-                kind=span_kind,
-                context=parent_ctx,
-            )
-            # P0 perf: skip all attribute work for non-recording spans
-            if not otel_span.is_recording():
-                start_time = None
-                state = OtelSpanState(
-                    span=otel_span, context_token=None, invoke_id=invoke_id,
-                    start_time=start_time,
-                    workflow_id=metadata.get("workflow_id") if metadata else None,
-                )
-                self._span_manager.push(invoke_id, state)
-                if is_workflow_root:
-                    self._layer_root_spans[parent_node_id] = state
-                    self._layer_root_spans[invoke_id] = state
-                    self._cached_root_ctx = trace.set_span_in_context(otel_span)
-                    self._cached_trace_id = self._trace_id
-                else:
-                    self._component_spans[invoke_id] = state
+            # Stream-consumer end nodes: on_call_start fires at the FIRST CHUNK
+            # (passive stream consumption), so opening the span here makes the
+            # end node appear before the upstream nodes still streaming in the
+            # waterfall and inflates its duration by the whole streaming
+            # window. Stash the payload and open the span at the
+            # on_call_finalize marker; on_call_done falls back to the
+            # first-chunk timestamp when the marker never arrives (error
+            # path), preserving old semantics.
+            if metadata and metadata.get("defer_span_start"):
+                self._deferred_end_starts[invoke_id] = {
+                    "metadata": metadata,
+                    "source_ids": source_ids,
+                    "session_id": kwargs.get("session_id"),
+                    "parent_node_id": parent_node_id,
+                    "begin_time": datetime.now(tz=_CACHED_TZLOCAL).replace(tzinfo=None),
+                    "stream_inputs": [],
+                    "stream_outputs": [],
+                }
                 return
-            # OTel standard + base attributes
-            start_time = datetime.now(tz=_CACHED_TZLOCAL).replace(tzinfo=None)
-            otel_span.set_attribute(OJ_TRACE_ID, self._trace_id)
-            # Workflow events carry no TraceWorkflowSpan, so the session id arrives
-            # per-event; fall back to the tracer-injected one for direct callers.
-            session_id = kwargs.get("session_id") or self._session_id
-            if session_id:
-                otel_span.set_attribute(OJ_SESSION_ID, session_id)
-            otel_span.set_attribute(OJ_INVOKE_ID, invoke_id)
-            otel_span.set_attribute(OJ_PARENT_NODE_ID, parent_node_id)
-            otel_span.set_attribute(OJ_START_TIME, str(start_time))
-            if source_ids is not None:
-                otel_span.set_attribute(OJ_SOURCE_IDS, _serialize(source_ids))
-            # LLM component: gen_ai attributes
-            if is_llm_component:
-                otel_span.set_attribute(GEN_AI_OPERATION_NAME, _OPERATION_NAME_CHAT)
-                request_model = str(metadata.get("model_name") or metadata.get("model") or "")
-                if request_model:
-                    otel_span.set_attribute(GEN_AI_REQUEST_MODEL, request_model)
-            elif is_tool_component:
-                otel_span.set_attribute(GEN_AI_OPERATION_NAME, _OPERATION_NAME_EXECUTE_TOOL)
-                otel_span.set_attribute(
-                    GEN_AI_TOOL_NAME,
-                    str(metadata.get("component_name") or invoke_id),
-                )
-            elif is_retrieval_component:
-                otel_span.set_attribute(GEN_AI_OPERATION_NAME, _OPERATION_NAME_RETRIEVAL)
-                # Static retrieval facts exported by the component through
-                # ComponentExecutable.trace_metadata() (core plumbing).
-                top_k = metadata.get("top_k")
-                if isinstance(top_k, int):
-                    otel_span.set_attribute(GEN_AI_RETRIEVAL_TOP_K, top_k)
-                data_source_ids = metadata.get("data_source_ids")
-                if isinstance(data_source_ids, list) and data_source_ids:
-                    otel_span.set_attribute(GEN_AI_DATA_SOURCE_ID, [str(i) for i in data_source_ids])
-                request_model = metadata.get("request_model")
-                if request_model:
-                    otel_span.set_attribute(GEN_AI_REQUEST_MODEL, str(request_model))
+            self._create_workflow_span(
+                invoke_id=invoke_id,
+                metadata=metadata,
+                inputs=inputs,
+                source_ids=source_ids,
+                session_id=kwargs.get("session_id"),
+                parent_node_id=parent_node_id,
+            )
+        except Exception as exc:
+            session_logger.warning("otel workflow handler: on_call_start failed: %s", exc)
 
-            self._set_workflow_attrs(otel_span, metadata, invoke_id)
+    def _create_workflow_span(
+        self,
+        invoke_id: str,
+        metadata: dict,
+        inputs: Any,
+        source_ids: list,
+        session_id: str | None,
+        parent_node_id: str,
+        start_time=None,
+    ) -> None:
+        """Open a workflow / component span (extracted from on_call_start).
 
-            if inputs is not None:
-                otel_span.set_attribute(OJ_WORKFLOW_INPUTS, redact(inputs, self._config))
-                if is_retrieval_component:
-                    query = _extract_retrieval_query(inputs)
-                    if query is not None:
-                        otel_span.set_attribute(GEN_AI_RETRIEVAL_QUERY_TEXT, redact(query, self._config))
+        ``start_time`` defaults to the clock; the deferred-end-node fallback
+        passes the stashed first-chunk timestamp to reproduce the pre-deferral
+        [begin, done] window.
+        """
+        parent_ctx = self._resolve_parent_context(parent_node_id, metadata)
 
-            # Attach the span as the ambient OTel context for the duration of
-            # component execution, so spans created inside the component
-            # (embedding spans from the core emitter, HTTP client
-            # instrumentation) parent onto it instead of becoming orphan
-            # roots.  Detached wherever the span state is popped.
-            context_token = otel_context.attach(trace.set_span_in_context(otel_span))
+        if metadata is None:
+            metadata = {}
+        is_workflow_root = "workflow_id" in metadata and "component_id" not in metadata
+        component_type = metadata.get("component_type", "")
+        is_llm_component = any(s in component_type for s in _LLM_SUBSTRINGS)
+        span_kind = SpanKind.CLIENT if is_llm_component else SpanKind.INTERNAL
+
+        is_tool_component = any(s in component_type for s in _TOOL_SUBSTRINGS)
+        is_retrieval_component = any(s in component_type for s in _RETRIEVAL_SUBSTRINGS)
+        if is_workflow_root:
+            span_name = invoke_id
+        elif is_llm_component:
+            request_model = str(metadata.get("model_name") or metadata.get("model") or "")
+            span_name = f"chat {request_model}" if request_model else "chat"
+        elif is_tool_component:
+            tool_name = str(metadata.get("component_name") or invoke_id)
+            span_name = f"execute_tool {tool_name}"
+        elif is_retrieval_component:
+            retrieval_name = str(metadata.get("component_name") or invoke_id)
+            span_name = f"retrieval {retrieval_name}"
+        else:
+            span_name = f"component.{invoke_id}"
+
+        otel_span = self._otel_tracer.start_span(
+            name=span_name,
+            kind=span_kind,
+            context=parent_ctx,
+            # The SDK start_span expects int nanoseconds; the datetime form is
+            # kept for OJ_START_TIME / elapsed-time math.
+            start_time=int(start_time.timestamp() * 1e9) if isinstance(start_time, datetime) else start_time,
+        )
+        # P0 perf: skip all attribute work for non-recording spans
+        if not otel_span.is_recording():
             state = OtelSpanState(
-                span=otel_span, context_token=context_token, invoke_id=invoke_id, start_time=start_time,
+                span=otel_span, context_token=None, invoke_id=invoke_id,
+                start_time=None,
                 workflow_id=metadata.get("workflow_id") if metadata else None,
             )
             self._span_manager.push(invoke_id, state)
-
-            # Register in layer / component mappings
             if is_workflow_root:
                 self._layer_root_spans[parent_node_id] = state
-                # Also register this workflow root as the parent for its children
-                # Children's parent_node_id will be "" for root workflow,
-                # and the node_id of the host component for sub-workflows.
                 self._layer_root_spans[invoke_id] = state
-                # Cache OTel context for subsequent root spans
                 self._cached_root_ctx = trace.set_span_in_context(otel_span)
                 self._cached_trace_id = self._trace_id
             else:
                 self._component_spans[invoke_id] = state
+            return
+        # OTel standard + base attributes
+        if start_time is None:
+            start_time = datetime.now(tz=_CACHED_TZLOCAL).replace(tzinfo=None)
+        otel_span.set_attribute(OJ_TRACE_ID, self._trace_id)
+        # Workflow events carry no TraceWorkflowSpan, so the session id arrives
+        # per-event; fall back to the tracer-injected one for direct callers.
+        session_id = session_id or self._session_id
+        if session_id:
+            otel_span.set_attribute(OJ_SESSION_ID, session_id)
+        otel_span.set_attribute(OJ_INVOKE_ID, invoke_id)
+        otel_span.set_attribute(OJ_PARENT_NODE_ID, parent_node_id)
+        otel_span.set_attribute(OJ_START_TIME, str(start_time))
+        if source_ids is not None:
+            otel_span.set_attribute(OJ_SOURCE_IDS, _serialize(source_ids))
+        # LLM component: gen_ai attributes
+        if is_llm_component:
+            otel_span.set_attribute(GEN_AI_OPERATION_NAME, _OPERATION_NAME_CHAT)
+            request_model = str(metadata.get("model_name") or metadata.get("model") or "")
+            if request_model:
+                otel_span.set_attribute(GEN_AI_REQUEST_MODEL, request_model)
+        elif is_tool_component:
+            otel_span.set_attribute(GEN_AI_OPERATION_NAME, _OPERATION_NAME_EXECUTE_TOOL)
+            otel_span.set_attribute(
+                GEN_AI_TOOL_NAME,
+                str(metadata.get("component_name") or invoke_id),
+            )
+        elif is_retrieval_component:
+            otel_span.set_attribute(GEN_AI_OPERATION_NAME, _OPERATION_NAME_RETRIEVAL)
+            # Static retrieval facts exported by the component through
+            # ComponentExecutable.trace_metadata() (core plumbing).
+            top_k = metadata.get("top_k")
+            if isinstance(top_k, int):
+                otel_span.set_attribute(GEN_AI_RETRIEVAL_TOP_K, top_k)
+            data_source_ids = metadata.get("data_source_ids")
+            if isinstance(data_source_ids, list) and data_source_ids:
+                otel_span.set_attribute(GEN_AI_DATA_SOURCE_ID, [str(i) for i in data_source_ids])
+            request_model = metadata.get("request_model")
+            if request_model:
+                otel_span.set_attribute(GEN_AI_REQUEST_MODEL, str(request_model))
+
+        self._set_workflow_attrs(otel_span, metadata, invoke_id)
+
+        if inputs is not None:
+            otel_span.set_attribute(OJ_WORKFLOW_INPUTS, redact(inputs, self._config))
+            if is_retrieval_component:
+                query = _extract_retrieval_query(inputs)
+                if query is not None:
+                    otel_span.set_attribute(GEN_AI_RETRIEVAL_QUERY_TEXT, redact(query, self._config))
+
+        # Attach the span as the ambient OTel context for the duration of
+        # component execution, so spans created inside the component
+        # (embedding spans from the core emitter, HTTP client
+        # instrumentation) parent onto it instead of becoming orphan
+        # roots.  Detached wherever the span state is popped.
+        context_token = otel_context.attach(trace.set_span_in_context(otel_span))
+        state = OtelSpanState(
+            span=otel_span, context_token=context_token, invoke_id=invoke_id, start_time=start_time,
+            workflow_id=metadata.get("workflow_id") if metadata else None,
+        )
+        self._span_manager.push(invoke_id, state)
+
+        # Register in layer / component mappings
+        if is_workflow_root:
+            self._layer_root_spans[parent_node_id] = state
+            # Also register this workflow root as the parent for its children
+            # Children's parent_node_id will be "" for root workflow,
+            # and the node_id of the host component for sub-workflows.
+            self._layer_root_spans[invoke_id] = state
+            # Cache OTel context for subsequent root spans
+            self._cached_root_ctx = trace.set_span_in_context(otel_span)
+            self._cached_trace_id = self._trace_id
+        else:
+            self._component_spans[invoke_id] = state
+
+    async def on_call_finalize(self, invoke_id: str, **kwargs):
+        """Open the deferred end-node span at the finalize marker.
+
+        Core emits this once a stream-consumer end node has fully consumed
+        its stream and starts real finalization (sanitize / collect /
+        post-invoke); the span opened here covers the actual execution
+        window. Stream chunks buffered during the deferral window are
+        replayed onto the span. Unknown invoke_ids (no stash) are ignored —
+        e.g. markers observed by a handler that never saw the begin event.
+        """
+        try:
+            deferred = self._deferred_end_starts.pop(invoke_id, None)
+            if deferred is None:
+                return
+            self._materialize_deferred_span(invoke_id, deferred, start_time=None)
         except Exception as exc:
-            session_logger.warning("otel workflow handler: on_call_start failed: %s", exc)
+            session_logger.warning("otel workflow handler: on_call_finalize failed: %s", exc)
+
+    def _materialize_deferred_span(self, invoke_id: str, deferred: dict, start_time) -> None:
+        self._create_workflow_span(
+            invoke_id=invoke_id,
+            metadata=deferred["metadata"],
+            inputs=deferred.get("inputs"),
+            source_ids=deferred["source_ids"],
+            session_id=deferred["session_id"],
+            parent_node_id=deferred["parent_node_id"],
+            start_time=start_time,
+        )
+        state = self._span_manager.get(invoke_id)
+        if state is not None:
+            # Same contract as on_pre_invoke on the live path: keep the live
+            # inputs reference so _refresh_inputs_attribute re-serializes
+            # post-transform values at on_call_done, and apply the component
+            # metadata observed mid-window.
+            if deferred.get("inputs") is not None:
+                state.inputs = deferred["inputs"]
+            if deferred.get("component_metadata") is not None:
+                self._set_workflow_attrs(state.span, deferred["component_metadata"], invoke_id)
+            outputs = deferred.get("outputs")
+            if outputs is not None and state.recorded:
+                state.span.set_attribute(OJ_WORKFLOW_OUTPUTS, redact(outputs, self._config))
+        # Replay stream chunks observed while the span was deferred so the
+        # end-node span keeps its OJ_STREAM_INPUTS / OJ_STREAM_OUTPUTS
+        # payload parity with the pre-deferral behavior.
+        for chunk in deferred["stream_inputs"]:
+            self._span_manager.append_stream_input(invoke_id, chunk)
+        for chunk in deferred["stream_outputs"]:
+            self._span_manager.append_stream_output(invoke_id, chunk)
 
     async def on_call_done(self, invoke_id: str, outputs: Any = None, **kwargs):
         try:
+            # Deferred end node whose finalize marker never arrived (stream
+            # error / interrupt): fall back to the old [first-chunk, done]
+            # window using the stashed begin timestamp.
+            deferred = self._deferred_end_starts.pop(invoke_id, None)
+            if deferred is not None:
+                self._materialize_deferred_span(
+                    invoke_id, deferred, start_time=deferred["begin_time"]
+                )
             state = self._span_manager.get(invoke_id)
             if state is not None and state.recorded:
                 self._refresh_inputs_attribute(invoke_id)
@@ -1361,7 +1669,18 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     ):
         try:
             state = self._span_manager.get(invoke_id)
-            if state is None or not state.recorded:
+            if state is None:
+                # Deferred end node: the batch-invoke inputs event can fire
+                # inside the deferral window (the stream begin won the
+                # single-fire guard). Buffer the payload for replay at
+                # materialization; without this, mix-mode end nodes lose
+                # OJ_WORKFLOW_INPUTS versus the pre-deferral behavior.
+                deferred = self._deferred_end_starts.get(invoke_id)
+                if deferred is not None:
+                    deferred["inputs"] = inputs
+                    deferred["component_metadata"] = component_metadata
+                return
+            if not state.recorded:
                 return
             if inputs is not None:
                 # Store reference for on_invoke / on_call_done to re-serialize
@@ -1379,7 +1698,15 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     async def on_pre_stream(self, invoke_id: str, chunk, need_send: bool = False, **kwargs):
         try:
             if isinstance(chunk, dict):
-                self._span_manager.append_stream_input(invoke_id, chunk)
+                state = self._span_manager.get(invoke_id)
+                if state is not None:
+                    self._span_manager.append_stream_input(invoke_id, chunk)
+                else:
+                    # Deferred end node: buffer input chunks for replay when
+                    # the span materializes at the finalize marker.
+                    deferred = self._deferred_end_starts.get(invoke_id)
+                    if deferred is not None:
+                        deferred["stream_inputs"].append(chunk)
         except Exception as exc:
             session_logger.warning("otel workflow handler: on_pre_stream failed: %s", exc)
 
@@ -1392,6 +1719,18 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     ):
         try:
             if exception is not None:
+                # Deferred end node on the error path: neither materializer
+                # runs — core raises before the finalize marker (stream_call)
+                # and before on_call_done (call), so without this pop the
+                # stash leaks and the end-node span silently disappears on
+                # error/interrupt. Open the span from the stashed first-chunk
+                # timestamp (same fallback window as on_call_done) so the
+                # error marking below has a span to annotate.
+                deferred = self._deferred_end_starts.pop(invoke_id, None)
+                if deferred is not None:
+                    self._materialize_deferred_span(
+                        invoke_id, deferred, start_time=deferred["begin_time"]
+                    )
                 # Distinguish GraphInterrupt (control-flow signal) from real errors,
                 # mirroring builtin TraceWorkflowHandler.on_invoke:
                 #   - GraphInterrupt -> openjiuwen.status="interrupted", no OTel ERROR,
@@ -1466,7 +1805,16 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     async def on_post_invoke(self, invoke_id: str, outputs, inputs=None, **kwargs):
         try:
             state = self._span_manager.get(invoke_id)
-            if state is None or not state.recorded:
+            if state is None:
+                # Deferred end node: outputs event inside the deferral
+                # window. trace_component_done carries no outputs, so this
+                # event is the ONLY source of OJ_WORKFLOW_OUTPUTS for end
+                # nodes — buffer it or the final-answer payload is lost.
+                deferred = self._deferred_end_starts.get(invoke_id)
+                if deferred is not None:
+                    deferred["outputs"] = outputs
+                return
+            if not state.recorded:
                 return
             if outputs is not None:
                 state.span.set_attribute(OJ_WORKFLOW_OUTPUTS, redact(outputs, self._config))
@@ -1485,7 +1833,14 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     async def on_post_stream(self, invoke_id: str, chunk, **kwargs):
         try:
             state = self._span_manager.get(invoke_id)
-            if state is None or not state.recorded:
+            if state is None:
+                # Deferred end node: buffer output chunks for replay when the
+                # span materializes at the finalize marker.
+                deferred = self._deferred_end_starts.get(invoke_id)
+                if deferred is not None and isinstance(chunk, dict):
+                    deferred["stream_outputs"].append(chunk)
+                return
+            if not state.recorded:
                 return
             if isinstance(chunk, dict):
                 self._span_manager.append_stream_output(invoke_id, chunk)

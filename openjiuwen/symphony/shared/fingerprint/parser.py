@@ -347,6 +347,9 @@ class SkillManifestParser:
             )
 
         metadata: dict[str, Any] = {"entrypoint": shown_path}
+        aliases = _normalize_tags(frontmatter.get("aliases", frontmatter.get("alias")))
+        if aliases:
+            metadata["aliases"] = list(aliases)
         version = _string_value(frontmatter.get("version"))
         if version:
             metadata["version"] = version
