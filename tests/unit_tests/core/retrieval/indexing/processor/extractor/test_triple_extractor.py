@@ -265,3 +265,44 @@ class TestTripleExtractor:
         triples = await extractor.extract([])
         assert len(triples) == 0
         mock_llm_client.invoke.assert_not_called()
+
+class TestTripleExtractorForwardsModelName:
+    """issue #2460: model_name 必须转交给 LLM 调用，否则形参只是摆设"""
+
+    @pytest.mark.asyncio
+    async def test_extract_forwards_model_name(self, mock_llm_client, mock_completion):
+        mock_llm_client.invoke = AsyncMock(return_value=mock_completion)
+        extractor = TripleExtractor(llm_client=mock_llm_client, model_name="chosen-model", temperature=0.3)
+
+        await extractor.extract([TextChunk(id_="1", text="Alice knows Bob", doc_id="doc_1")])
+
+        assert mock_llm_client.invoke.await_count == 1
+        kwargs = mock_llm_client.invoke.await_args.kwargs
+        assert kwargs["model"] == "chosen-model"
+        # 原有参数不能被挤掉
+        assert kwargs["temperature"] == 0.3
+
+    @pytest.mark.asyncio
+    async def test_validate_forwards_model_name(self, mock_llm_client):
+        """校验阶段同样是一次 LLM 调用，也必须带上同一个模型名"""
+        extraction = MagicMock()
+        extraction.content = json.dumps({"triples": [["Alice", "knows", "Bob"]]})
+        # 校验阶段复用同一个解析器，因此也返回 triples 形状
+        validation = MagicMock()
+        validation.content = json.dumps({"triples": [["Alice", "knows", "Bob"]]})
+
+        calls = []
+
+        async def _side_effect(messages, **kwargs):
+            calls.append(kwargs)
+            return extraction if len(calls) == 1 else validation
+
+        mock_llm_client.invoke = AsyncMock(side_effect=_side_effect)
+        extractor = TripleExtractor(
+            llm_client=mock_llm_client, model_name="chosen-model", validate=True
+        )
+
+        await extractor.extract([TextChunk(id_="1", text="Alice knows Bob", doc_id="doc_1")])
+
+        assert len(calls) == 2
+        assert all(c.get("model") == "chosen-model" for c in calls)

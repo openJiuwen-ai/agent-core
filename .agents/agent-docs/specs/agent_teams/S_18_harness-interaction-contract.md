@@ -12,7 +12,7 @@ author_email: chengshuo5@huawei.com
 
 # S_18 Harness 交互契约（HarnessProtocol / MemberRuntime）
 
-最近一次修订日期：2026-10-10
+最近一次修订日期：2026-11-10
 
 本 spec 定义 agent_teams harness 层的对外交互契约。阶段 1（NativeHarness 接管 task
 loop）的实现细节见 [[F_27_native-harness-task-loop]]；阶段 B（NativeHarness 收编
@@ -239,3 +239,38 @@ BLOCK 背压遵循公共协议：stop 时消费者需继续排空事件。
 统一工厂也支持 `create_harness(manifest, provider="native_v2", config={"deep_agent": {...}})`，
 相应 context 使用 `build_harness_context(manifest, provider="native_v2", ...)`。该路径通过
 `NativeV2HarnessProvider` 转发到本构造入口，manifest 的 persona/MCP/rails 仍由原生装配处理。
+
+## Goal round
+
+`NativeHarness.enable_goal(stop_config, *, ready=None)` 在 `start()` 之前调用后，harness 持有一个
+`goal_manager`（未开启时为 None，下述路径全部不可达）。见 `F_20261110_1922_team-goal-mode`。
+
+- **收尾优先级**：`_settle_round_done` 的顺序是 排队输入（pending / follow-up）> **goal 续跑** >
+  task-plan 续跑 > IDLE。外部输入永远先于 goal；graceful abort、interrupt、崩溃重试这些提前返回的
+  分支不起 goal round。
+- **起轮条件**：`ready()`（若有）返回 True，且 goal 为 ACTIVE。goal round 以
+  `run_kind=RunKind.GOAL`、`run_context=RunContext(session_id, extra={goal_id, revision})` 提交，其余与
+  普通 round 相同（同样可被 pause / abort）。
+- **`nudge_goal()`**：请求 supervisor 重查一次；只有 IDLE 的 harness 会因此起轮，运行中的请求被丢弃
+  （那一轮收尾时会做同样的检查）。可从任意 task 调用。`GoalManager` 的 `notify_work` 即它。
+- **BLOCKED 的重新打开**：刚收尾的一轮不是 goal round（即它处理的是外部输入）时，BLOCKED 的 goal 先被
+  `resume()` 再判定。goal round 收尾后不会重新打开，goal 因此不能自己解除阻塞。触顶后每来一次外部
+  输入换得一次新的尝试。
+- **事件**：`subscribe(on_goal=)` 订阅 `harness.goal`，参数 `goal`（记录的 dict，清除后为 None）。它由
+  改动记录的那个 task 触发，不在 supervisor 协程内。
+- **`session`**：只读属性，暴露 harness 所跑的 session（goal 记录的存放处）。
+
+`TeamHarness` 的对应表面：构造参数 `goal`、`goal_enabled`、`goal_manager`、`goal_session`、
+`set_goal_hooks(ready=, on_goal=)`（自下一次 `start` 生效；每个运行周期重建的 native 都会重新套用）、
+`nudge_goal()`。
+
+## 会话执行设置（F_20261104_1721_session-execution-settings）
+
+`NativeHarness` 从成员 BuildContext 绑定工具环境 resolver。身份属于成员，策略属于 team 会话；
+子 session 共享 session ID 不影响成员身份隔离。运行中策略在工具边界解析，不能固定在首轮请求里。
+`TeamDatabase.session_settings` 以 session_id 保存 JSON settings 与 version。initialize 不覆盖已有行，
+replace 使用 expected_version 做 CAS。平台应在成员执行前初始化，远程成员从同一数据库读取已提交值；
+读取失败不得执行带旧策略的命令。Core 不解释平台 JSON 字段。
+
+冷恢复接入当前 runtime_spec.build_context 时，build_context_seed 同步深拷贝当前值（包括 None），
+避免 leader 使用新策略而进程派生成员从 checkpoint 的旧 seed 重建。见 `B_20261104_2054_recovered-context-seed-and-execution-environment`。

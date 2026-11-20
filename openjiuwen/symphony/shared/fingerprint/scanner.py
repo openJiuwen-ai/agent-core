@@ -198,6 +198,7 @@ class SkillFolderScanner:
         max_scan_asset_bytes: int = _DEFAULT_MAX_SCAN_ASSET_BYTES,
         capability_type: str = "skill",
         source: str = "skill-folder",
+        excluded_paths: Sequence[Path] = (),
     ) -> None:
         self.root = Path(root)
         self.parser = parser or SkillManifestParser()
@@ -212,6 +213,7 @@ class SkillFolderScanner:
         self.max_scan_asset_bytes = max_scan_asset_bytes
         self.capability_type = capability_type
         self.source = source
+        self.excluded_paths = tuple(Path(path).resolve() for path in excluded_paths)
 
     def scan(self) -> ScanResult:
         """Scan safely; one malformed Skill does not abort the remaining inventory."""
@@ -241,6 +243,7 @@ class SkillFolderScanner:
             max_directory_entries=self.max_directory_entries,
             max_entrypoints=self.max_entrypoints,
             budget=budget,
+            excluded_paths=self.excluded_paths,
         )
         diagnostics = list(discovery_diagnostics)
         candidates: list[tuple[CapabilityDescriptor, ParsedSkillManifest]] = []
@@ -292,6 +295,7 @@ class SkillFolderScanner:
                     max_scan_files=self.max_scan_asset_files,
                     max_scan_bytes=self.max_scan_asset_bytes,
                     budget=budget,
+                    excluded_paths=self.excluded_paths,
                 )
             except BaseError:
                 raise
@@ -467,6 +471,9 @@ def _discover_entrypoints(
     max_directory_entries: int,
     max_entrypoints: int,
     budget: _ScanBudget,
+    excluded_paths: tuple[Path, ...] = (),
+    filename: str = "SKILL.md",
+    stop_at_entrypoint: bool = False,
 ) -> tuple[list[Path], list[ScanDiagnostic]]:
     entrypoints: list[Path] = []
     diagnostics: list[ScanDiagnostic] = []
@@ -494,8 +501,13 @@ def _discover_entrypoints(
             continue
 
         subdirectories: list[Path] = []
+        found_entrypoint = False
         for entry in children:
             child = directory / entry.name
+            if child in excluded_paths:
+                continue
+            if entry.name == filename:
+                found_entrypoint = True
             child_mode = entry.mode
             if child_mode is None:
                 diagnostics.append(
@@ -516,7 +528,7 @@ def _discover_entrypoints(
                     )
                 )
                 continue
-            if stat.S_ISREG(child_mode) and child.name == "SKILL.md":
+            if stat.S_ISREG(child_mode) and child.name == filename:
                 if len(entrypoints) >= max_entrypoints:
                     _raise_inventory_error("Skill discovery exceeds the configured entrypoint limit")
                 entrypoints.append(child)
@@ -526,7 +538,8 @@ def _discover_entrypoints(
             if max_depth is None or depth < max_depth:
                 subdirectories.append(child)
 
-        pending.extend((child, depth + 1) for child in reversed(subdirectories))
+        if not (stop_at_entrypoint and found_entrypoint):
+            pending.extend((child, depth + 1) for child in reversed(subdirectories))
 
     entrypoints.sort(key=lambda item: (_relative_display(item, root).casefold(), _relative_display(item, root)))
     return entrypoints, diagnostics
@@ -545,6 +558,7 @@ def _hash_safe_assets(
     max_scan_files: int,
     max_scan_bytes: int,
     budget: _ScanBudget,
+    excluded_paths: tuple[Path, ...] = (),
 ) -> _ContentHashResult:
     asset_paths, diagnostics = _collect_safe_asset_paths(
         skill_root,
@@ -554,6 +568,7 @@ def _hash_safe_assets(
         max_directory_entries=max_directory_entries,
         max_scan_files=max_scan_files,
         budget=budget,
+        excluded_paths=excluded_paths,
     )
     if diagnostics:
         fatal = any(item.severity == "error" for item in diagnostics)
@@ -677,6 +692,7 @@ def _collect_safe_asset_paths(
     max_directory_entries: int,
     max_scan_files: int,
     budget: _ScanBudget,
+    excluded_paths: tuple[Path, ...] = (),
 ) -> tuple[list[tuple[str, Path]], list[ScanDiagnostic]]:
     assets: list[tuple[str, Path]] = []
     diagnostics: list[ScanDiagnostic] = []
@@ -704,6 +720,8 @@ def _collect_safe_asset_paths(
         subdirectories: list[Path] = []
         for entry in children:
             child = directory / entry.name
+            if child in excluded_paths:
+                continue
             relative_path = _relative_display(child, skill_root)
             child_mode = entry.mode
             if child_mode is None:

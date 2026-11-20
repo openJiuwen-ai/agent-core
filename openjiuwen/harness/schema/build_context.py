@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
+    from openjiuwen.core.sys_operation.execution_environment import ExecutionEnvironment
     from openjiuwen.harness.moa.config import MoAConfig
     from openjiuwen.harness.workspace.workspace import Workspace
 
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
 # distributed remote, cold recovery) sees None here and falls back to the
 # previous behaviour.
 PARENT_SYS_OPERATION_EXTRAS_KEY = "_parent_sys_operation"
+EXTENSION_BUS_EXTRAS_KEY = "openjiuwen.extension_bus"
 
 
 def parent_sys_operation(context: Any) -> Any:
@@ -48,11 +50,29 @@ def parent_sys_operation(context: Any) -> Any:
     return extras.get(PARENT_SYS_OPERATION_EXTRAS_KEY)
 
 
+def extension_bus(context: Any) -> Any:
+    """Return an explicitly injected extension bus from a build context."""
+    if context is None:
+        return None
+    direct = getattr(context, "extension_bus", None)
+    if direct is not None:
+        return direct
+    extras = getattr(context, "extras", None) or {}
+    for key in (EXTENSION_BUS_EXTRAS_KEY, "extension_bus", "_extension_bus", "team.extension_bus"):
+        bus = extras.get(key)
+        if bus is not None:
+            return bus
+    return None
+
+
 @dataclass
 class BuildContext:
     """Opaque runtime carrier handed to capability providers at build time.
 
     Attributes:
+        extension_bus: Optional host-provided extension event bus. It is a live
+            runtime handle and is not serialized; ``None`` keeps prompt
+            attachment processing on its original no-extension path.
         language: Resolved language code (e.g. "cn" / "en").
         member_name: Team member name, when building a team member.
         role: Team role value (e.g. "leader" / "teammate"), when applicable.
@@ -68,6 +88,8 @@ class BuildContext:
             member has no project of its own.
         extras: Escape-hatch mapping for platform handles when subclassing is
             not convenient.
+        tool_owner_id: Optional invocation owner for stateful tools; ``None``
+            preserves Card ownership.
         moa: Invocation policy for this root agent only; not inherited by
             capability providers or serialized as part of a spec.
     """
@@ -80,7 +102,16 @@ class BuildContext:
     project_dir: Optional[str] = None
     team_outputs_dir: Optional[str] = None
     extras: dict[str, Any] = field(default_factory=dict)
+    tool_owner_id: str | None = None
+    """Optional invocation owner for stateful tools; None preserves Card ownership."""
     moa: MoAConfig | None = None
+    extension_bus: Any = None
+
+    async def resolve_execution_environment(self) -> "ExecutionEnvironment":
+        """Resolve a fresh tool environment; platforms may supply session policy."""
+        from openjiuwen.core.sys_operation.execution_environment import ExecutionEnvironment
+
+        return ExecutionEnvironment()
 
     def derive(self, **overrides: Any) -> "BuildContext":
         """Return a shallow per-member copy with ``overrides`` applied.
@@ -163,7 +194,9 @@ def build_context_from_seed(seed: Optional[dict[str, Any]]) -> Optional["BuildCo
 __all__ = [
     "BuildContext",
     "PARENT_SYS_OPERATION_EXTRAS_KEY",
+    "EXTENSION_BUS_EXTRAS_KEY",
     "parent_sys_operation",
+    "extension_bus",
     "register_build_context_factory",
     "build_context_from_seed",
 ]

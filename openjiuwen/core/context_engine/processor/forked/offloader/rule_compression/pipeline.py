@@ -12,6 +12,7 @@ from typing import Callable
 from openjiuwen.core.common.logging import context_engine_logger as logger
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.processor.compression_events import log_compression_applied
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.common import (
     extract_file_path_argument,
 )
@@ -116,6 +117,16 @@ class RuleCompressionPipeline:
             result.content_type.value,
             len(original),
             len(content),
+        )
+        log_compression_applied(
+            logger,
+            session_id=self._safe_context_value(context, "session_id", "unknown_session"),
+            processor=type(self).__name__,
+            strategy=f"rule:{result.content_type.value}",
+            trigger=pass_name,
+            before_chars=len(original),
+            after_chars=len(content),
+            tool_call_id=str(getattr(message, "tool_call_id", "unknown") or "unknown"),
         )
         return message.model_copy(update={"content": content, "metadata": metadata})
 

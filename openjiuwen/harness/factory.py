@@ -143,7 +143,11 @@ def _inject_general_purpose_subagent(
         return effective_subagents
 
     desc = GENERAL_PURPOSE_AGENT_DESC.get(resolved_language, GENERAL_PURPOSE_AGENT_DESC["cn"])
-    gp_rails = [r for r in (rails or []) if not isinstance(r, SubagentRail)]
+    # Hosts such as Swarm mount independent authorization rails on child agents.
+    gp_rails = [
+        r for r in (rails or [])
+        if not isinstance(r, SubagentRail) and getattr(r, "inherit_to_subagents", True)
+    ]
     if not any(isinstance(r, SysOperationRail) for r in gp_rails):
         gp_rails = [SysOperationRail(), *gp_rails]
     gp_rails = gp_rails or None
@@ -180,12 +184,15 @@ class DeepAgentParts:
         tool_cards: Tool cards to register on the agent's ability manager.
         tool_instances: Concrete tool instances to register on the shared
             resource manager so their cards become executable.
+        extension_bus: Optional live EventBus used by prompt attachment events;
+            it is intentionally not part of ``DeepAgentConfig``.
     """
 
     config: DeepAgentConfig
     rails: List[AgentRail]
     tool_cards: List[ToolCard]
     tool_instances: List[Tool]
+    extension_bus: Any = None
 
 
 def resolve_deep_agent_parts(
@@ -221,6 +228,7 @@ def resolve_deep_agent_parts(
     enable_model_anomaly_detection_rail: bool = True,
     enable_sys_operation: bool = True,
     trajectory_span_processor: TrajectorySpanProcessor | None = None,
+    extension_bus: Any = None,
     **config_kwargs: Any,
 ) -> DeepAgentParts:
     """Assemble DeepAgent config + rails + tools without creating an instance.
@@ -238,6 +246,7 @@ def resolve_deep_agent_parts(
             its ``config.sys_operation`` is then None and no tool resources are
             registered for it. Other arguments are documented on
             :func:`create_deep_agent`.
+        extension_bus: Optional live EventBus for prompt attachment events.
     """
     if card is None:
         card = AgentCard(
@@ -417,6 +426,7 @@ def resolve_deep_agent_parts(
         rails=all_rails,
         tool_cards=normalized_tools,
         tool_instances=tool_instances,
+        extension_bus=extension_bus,
     )
 
 
@@ -430,6 +440,7 @@ def apply_deep_agent_parts(agent: DeepAgent, parts: DeepAgentParts) -> None:
     :func:`create_deep_agent` path) or a ``NativeHarness`` configuring itself
     (forward construction, no throwaway template).
     """
+    agent.set_extension_bus(parts.extension_bus)
     agent.configure(parts.config)
 
     # Register concrete tool instances through the ability manager so the card
@@ -488,6 +499,7 @@ def create_deep_agent(
     parallel_tool_calls: bool = True,
     enable_security_rail: bool = True,
     enable_model_anomaly_detection_rail: bool = True,
+    extension_bus: Any = None,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a DeepAgent instance.
@@ -524,6 +536,8 @@ def create_deep_agent(
         skills: Skill definitions (P1).
         backend: Backend protocol instance (P2).
         sys_operation: System operation.
+        extension_bus: Optional live EventBus for prompt attachment events;
+            it is not serialized into the agent config.
         vision_model_config: Shared vision-model
             configuration injected into all vision
             tools registered by DeepAgent rails.
@@ -583,8 +597,9 @@ def create_deep_agent(
         parallel_tool_calls=parallel_tool_calls,
         enable_security_rail=enable_security_rail,
         enable_model_anomaly_detection_rail=enable_model_anomaly_detection_rail,
+        extension_bus=extension_bus,
         **config_kwargs,
     )
-    agent = DeepAgent(parts.config.card)
+    agent = DeepAgent(parts.config.card, extension_bus=parts.extension_bus)
     apply_deep_agent_parts(agent, parts)
     return agent

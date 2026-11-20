@@ -428,6 +428,8 @@ def _openai_chat_reasoning_plan(
             model=model,
             reasoning=reasoning,
         )
+    if provider == "openrouter":
+        return _openrouter_reasoning_plan(model.lower(), reasoning)
     return _reasoning_effort_plan(reasoning, disabled_value="none")
 
 

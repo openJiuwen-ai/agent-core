@@ -25,7 +25,6 @@ from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
-    Awaitable,
     Callable,
     Optional,
 )
@@ -35,7 +34,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.experts.catalog import ExpertCatalog
     from openjiuwen.agent_teams.messager import Messager
     from openjiuwen.agent_teams.models.allocator import ModelAllocator
-    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec  # isort: skip
     from openjiuwen.agent_teams.reliability.factory import ReliabilityComponents
     from openjiuwen.agent_teams.team_context import TaskOutcomeTracker, TaskRevisionTracker
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
@@ -62,6 +61,7 @@ class ExpertBinding:
 class TeamHandleKey:
     """extras keys under which team live handles ride on the build context."""
 
+    EXTENSION_BUS = "team.extension_bus"
     TEAM_BACKEND = "team.team_backend"
     WORKSPACE_MANAGER = "team.workspace_manager"
     MODEL_ALLOCATOR = "team.model_allocator"
@@ -265,6 +265,17 @@ def get_worktree_manager(context: Any) -> Optional["WorktreeManager"]:
     return _get(context, TeamHandleKey.WORKTREE_MANAGER)
 
 
+def get_extension_bus(context: Any) -> Optional[Any]:
+    """Return the host-initialized extension bus handle, or None.
+
+    Seeded by ``TeamRuntimeManager`` into the spec's build-context extras
+    before the leader build paths run; per-member derive copies carry it
+    into the rail factories. None means no extension wiring: the policy
+    rail then builds its sections locally at construction time.
+    """
+    return _get(context, TeamHandleKey.EXTENSION_BUS)
+
+
 __all__ = [
     "ExpertBinding",
     "TeamHandleKey",
@@ -274,6 +285,7 @@ __all__ = [
     "get_model_allocator",
     "get_messager",
     "get_permissions_override",
+    "get_extension_bus",
     "get_swarmflow_model_resolver",
     "get_swarmflow_worker_base_spec",
     "get_swarmflow_human_base_spec",

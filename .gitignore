@@ -258,8 +258,10 @@ CLAUDE.local.md
 
 images/
 *.txt
+!/openjiuwen/symphony/config.tree.txt
 *.bin
 *.sqlite3
+*.tmp
 tests/system_tests/config_llm_local.yaml
 
 # Harness workspace scaffolding that unit tests write to the repo root when they
@@ -293,3 +295,5 @@ tests/unit_tests/extensions/context_evolver/memory_file/
 
 # Local design testing material is not versioned.
 /.agents/agent-docs/designs/testing/
+# Local Persistent Agent development visualization
+/persistent_agents_development_visualisation/

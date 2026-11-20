@@ -4,14 +4,16 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 from pathlib import Path
 
 from openjiuwen.agent_teams.paths import (
+    GROUP_PATH_HASH_LENGTH,
     group_conversation_dir,
+    group_conversation_dirs,
     group_conversation_registry_dir,
+    group_path_hash,
     team_home,
     team_workspace_dir,
 )
@@ -38,7 +40,13 @@ class GroupConversationLog:
         self.session_id = session_id
         self._workspace_path = Path(workspace_path).expanduser().resolve() if workspace_path is not None else None
         self._registry_dir = group_conversation_registry_dir(team_name)
-        self._registration = self._registry_dir / (hashlib.sha256(session_id.encode("utf-8")).hexdigest() + ".json")
+        # Registrations written before hashes were shortened keep their name.
+        self._registrations = tuple(
+            self._registry_dir / (group_path_hash(session_id, length) + ".json")
+            for length in (GROUP_PATH_HASH_LENGTH, None)
+        )
+        short, legacy = self._registrations
+        self._registration = legacy if legacy.is_file() else short
         # Resolve now to reject invalid identities and conflicting roots early.
         _ = self.path
 
@@ -99,10 +107,12 @@ class GroupConversationLog:
         return messages
 
     def _delete_session(self) -> None:
-        path = self.path
-        if path.exists():
-            shutil.rmtree(path)
-        self._registration.unlink(missing_ok=True)
+        # Both layouts can exist when old and new versions shared this home.
+        for path in group_conversation_dirs(self.team_name, self.session_id, workspace_path=self._workspace()):
+            if path.exists():
+                shutil.rmtree(path)
+        for registration in self._registrations:
+            registration.unlink(missing_ok=True)
 
     @classmethod
     def delete_registered(cls, team_name: str, session_id: str | None = None) -> None:
@@ -112,12 +122,15 @@ class GroupConversationLog:
         registry_dir = group_conversation_registry_dir(team_name)
         with cross_process_file_lock(registry_dir):
             for path in registry_dir.glob("*.json"):
+                # Deleting a session removes both of its registration names.
+                if not path.is_file():
+                    continue
                 registration = json.loads(path.read_text(encoding="utf-8"))
                 if registration["team_name"] != team_name:
                     raise ValueError("Conversation workspace registration belongs to another team")
                 if session_id is not None and registration["session_id"] != session_id:
                     continue
                 log = cls(team_name, registration["session_id"])
-                if log._registration != path:
+                if path not in log._registrations:
                     raise ValueError("Conversation workspace registration has an invalid filename")
                 log._delete_session()

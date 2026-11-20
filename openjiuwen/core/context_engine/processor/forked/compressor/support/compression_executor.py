@@ -124,6 +124,11 @@ class CompressionExecutor:
     def last_response(self) -> Any:
         return self._last_response
 
+    def rebind_model(self, model: Any) -> None:
+        """Bind an isolated executor copy to a model and discard its old response."""
+        self._model = model
+        self._last_response = None
+
     async def invoke(
         self,
         request: CompressionRequest,

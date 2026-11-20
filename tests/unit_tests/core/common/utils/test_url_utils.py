@@ -59,3 +59,64 @@ class TestRedactUrlPassword:
         result = redact_url_password(url)
         assert "secret" not in result
         assert "ssl=true" in result
+
+    def test_invalid_port_does_not_leak_password(self):
+        url = "redis://:secret@host:abc/0"
+        result = redact_url_password(url)
+        assert result == "redis://:***@host:abc/0"
+        assert "secret" not in result
+
+    def test_out_of_range_port_does_not_leak_password(self):
+        url = "redis://user:secret@host:99999999/db"
+        result = redact_url_password(url)
+        assert result == "redis://user:***@host:99999999/db"
+        assert "secret" not in result
+
+    def test_ipv6_host_keeps_brackets(self):
+        url = "postgresql://u:secret@[::1]:5432/db"
+        result = redact_url_password(url)
+        assert result == "postgresql://u:***@[::1]:5432/db"
+        assert "secret" not in result
+
+    def test_password_with_at_sign(self):
+        # Main path: ``netloc.rpartition("@")`` keeps the whole password, so the
+        # '@' inside it must not truncate the redaction. Assert the full output,
+        # not just the absence of a substring -- a partial leak would slip through.
+        url = "redis://user:p@ss@host:6379/0"
+        result = redact_url_password(url)
+        assert result == "redis://user:***@host:6379/0"
+
+    def test_password_with_at_sign_and_no_username(self):
+        url = "redis://:p@ss@host:6379/0"
+        result = redact_url_password(url)
+        assert result == "redis://:***@host:6379/0"
+
+    def test_unparseable_url_fallback_redacts_password_with_at_sign(self):
+        # Malformed IPv6 makes ``urlparse`` raise, so this exercises the regex
+        # fallback: the match must run to the last '@' or the password tail leaks.
+        url = "redis://user:p@ss@[::1/db"
+        result = redact_url_password(url)
+        assert result == "redis://user:***@[::1/db"
+        assert "ss@" not in result
+
+    def test_unparseable_url_fallback_redacts_long_password_tail(self):
+        url = "redis://user:abc@defghijklmnop@[::1/db"
+        result = redact_url_password(url)
+        assert result == "redis://user:***@[::1/db"
+        assert "defghijklmnop" not in result
+
+    def test_unparseable_url_fallback_redacts_password_without_username(self):
+        url = "redis://:secret@[::1/db"
+        result = redact_url_password(url)
+        assert result == "redis://:***@[::1/db"
+        assert "secret" not in result
+
+    def test_unparseable_url_without_credentials_is_unchanged(self):
+        url = "redis://[::1/db"
+        assert redact_url_password(url) == url
+
+    def test_fallback_leaves_query_at_sign_alone(self):
+        # No password here: the '@' sits in the query. Redacting up to it would
+        # destroy the authority and the query, so the fallback must not match.
+        url = "redis://[::1?x=a@b"
+        assert redact_url_password(url) == url

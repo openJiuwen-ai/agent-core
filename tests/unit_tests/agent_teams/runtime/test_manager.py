@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import (
     AsyncMock,
     MagicMock,
+    Mock,
 )
 
 import pytest
@@ -434,6 +435,10 @@ async def test_cold_recovery_resets_leader_execution_before_activation(monkeypat
         calls.append("reset")
         return 1
 
+    async def create_tables() -> bool:
+        calls.append("tables")
+        return True
+
     async def add_to_pool(entry: ActiveTeam) -> None:
         assert entry.agent is agent
         calls.append("activate")
@@ -441,6 +446,7 @@ async def test_cold_recovery_resets_leader_execution_before_activation(monkeypat
     backend = SimpleNamespace(
         db=SimpleNamespace(
             initialize=initialize,
+            create_cur_session_tables=create_tables,
             member=SimpleNamespace(reset_cold_recovery_execution_status=reset_execution),
         )
     )
@@ -459,7 +465,8 @@ async def test_cold_recovery_resets_leader_execution_before_activation(monkeypat
         inputs=None,
     )
 
-    assert calls == ["initialize", "reset", "activate"]
+    # Session tables are ensured (initialize is idempotent) before pooling.
+    assert calls == ["initialize", "reset", "initialize", "tables", "activate"]
 
 
 class TestRunOrganizationTurn:
@@ -509,6 +516,7 @@ class TestRunOrganizationTurn:
         entry.interact_gate.close_and_drain.assert_not_called()
         session.post_run.assert_not_called()
         agent.invoke.assert_not_called()
+        assert manager.activate.await_args.kwargs["preserve_conversation_mode"] is True
 
     @pytest.mark.asyncio
     async def test_idle_marker_ends_turn_and_runs_finalize(self):
@@ -545,14 +553,20 @@ class TestRunOrganizationTurn:
             )
         )
         manager.finalize = AsyncMock(side_effect=finalize)
+        activated = []
+
+        async def on_activated():
+            activated.append(chunks_consumed.copy())
 
         result = await manager.run_organization_turn(
             team_name="team-a",
             session_id="session-1",
             inputs={"query": "claim task"},
+            on_activated=on_activated,
         )
 
         assert result is True
+        assert activated == [[]]
         agent.stream.assert_called_once()
         agent.invoke.assert_not_awaited()
         assert chunks_consumed == ["content", "idle"]
@@ -875,3 +889,28 @@ class TestIdempotentPauseDoesNotRefreshMark:
             assert resolve_cancellation_cause("session-1") is None
         finally:
             reset_cancellation_causes()
+
+
+@pytest.mark.asyncio
+async def test_resume_from_pause_marks_the_conversation_as_continued():
+    """A resumed leader keeps its history, so it must not be routed into build_team again."""
+    manager = TeamRuntimeManager()
+    manager._pre_run_with_inputs = AsyncMock()
+    backend = SimpleNamespace(mark_history_restored=Mock())
+    entry = SimpleNamespace(
+        agent=SimpleNamespace(team_backend=backend),
+        state=RuntimeState.PAUSED,
+        interact_gate=SimpleNamespace(reset=AsyncMock()),
+    )
+
+    activation = await manager._apply_action(
+        RunAction(kind=RunActionKind.RESUME_FROM_PAUSE, require_spec=False),
+        spec=SimpleNamespace(team_name="team-a"),
+        team_session=SimpleNamespace(get_session_id=lambda: "session-1"),
+        pool_entry=entry,
+        inputs={"query": "again"},
+    )
+
+    backend.mark_history_restored.assert_called_once_with()
+    assert entry.state is RuntimeState.RUNNING
+    assert activation.agent is entry.agent
