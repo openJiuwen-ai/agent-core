@@ -23,7 +23,7 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
-from openjiuwen.agent_teams.tools.database.engine import DbSessions, retry_on_locked
+from openjiuwen.agent_teams.tools.database.engine import DbSessions, retry_on_locked, retry_on_transient
 from openjiuwen.core.single_agent import AgentCard
 
 
@@ -449,6 +449,118 @@ async def test_retry_on_locked_recovers_after_transient_pool_timeout(monkeypatch
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_retry_on_transient_retries_watchdog_timeout_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``DbSessions`` watchdog ``TimeoutError`` is transient and retried."""
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
+    calls = 0
+
+    async def op() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TimeoutError("DbSessions.write() exceeded the watchdog")
+        return "ready"
+
+    assert await retry_on_transient(op, label="test_op") == "ready"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_retry_on_transient_caps_watchdog_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each watchdog hit already waited the full watchdog, so it is retried only once.
+
+    Keeps a wedged driver from stalling a caller (e.g. leader activation) for
+    ``_DB_RETRY_ATTEMPTS`` full watchdog periods before the error surfaces.
+    """
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
+    calls = 0
+
+    async def op() -> None:
+        nonlocal calls
+        calls += 1
+        raise TimeoutError(f"DbSessions.write() exceeded the watchdog (attempt {calls})")
+
+    with pytest.raises(TimeoutError, match=f"attempt {engine_module._WATCHDOG_RETRY_ATTEMPTS}"):
+        await retry_on_transient(op, label="test_op")
+    assert calls == engine_module._WATCHDOG_RETRY_ATTEMPTS
+    assert engine_module._WATCHDOG_RETRY_ATTEMPTS < engine_module._DB_RETRY_ATTEMPTS
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_retry_on_transient_raises_last_error_after_exhaustion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unlike ``retry_on_locked`` there is no fallback: the last error propagates."""
+    from sqlalchemy.exc import TimeoutError as SATimeoutError
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
+    calls = 0
+
+    async def op() -> None:
+        nonlocal calls
+        calls += 1
+        raise SATimeoutError(f"QueuePool limit reached (attempt {calls})")
+
+    with pytest.raises(SATimeoutError, match=f"attempt {engine_module._DB_RETRY_ATTEMPTS}"):
+        await retry_on_transient(op, label="test_op")
+    assert calls == engine_module._DB_RETRY_ATTEMPTS
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_retry_on_transient_retries_lock_contention(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``database is locked`` is contention: backing off lets the other writer finish."""
+    import sqlite3
+
+    from sqlalchemy.exc import OperationalError
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
+    calls = 0
+
+    async def op() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OperationalError("CREATE TABLE", {}, sqlite3.OperationalError("database is locked"))
+        return "ready"
+
+    assert await retry_on_transient(op, label="test_op") == "ready"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_retry_on_transient_raises_permanent_operational_error_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A permanent ``OperationalError`` is not retried: back-off would only stall every caller."""
+    import sqlite3
+
+    from sqlalchemy.exc import OperationalError
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
+    calls = 0
+
+    async def op() -> None:
+        nonlocal calls
+        calls += 1
+        raise OperationalError("CREATE TABLE", {}, sqlite3.OperationalError("disk I/O error"))
+
+    with pytest.raises(OperationalError, match="disk I/O error"):
+        await retry_on_transient(op, label="test_op")
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_mark_messages_read_batch(file_db: TeamDatabase) -> None:
     """The batch mark-read API marks a whole mailbox drain in one call."""
     db = file_db
@@ -507,6 +619,38 @@ async def test_session_ddl_runs_under_write_lock(
     # The DDL must have acquired the process-wide write lock. A regression
     # back to ``engine.begin()`` never calls ``write()`` and fails here.
     assert entered == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "drop",
+    [
+        lambda db: db.drop_cur_session_tables(),
+        lambda db: db.drop_session_tables_by_id("pool_session"),
+        lambda db: db.cleanup_all_runtime_state(),
+        lambda db: db.force_delete_team_session("t1"),
+    ],
+    ids=["drop_cur", "drop_by_id", "cleanup_all", "force_delete"],
+)
+async def test_session_table_drops_wait_for_write_lock(file_db: TeamDatabase, drop) -> None:
+    """Session-table drops serialise with bind-time DDL and DAO writes.
+
+    Regression guard for "no such table: team_task_<hash>": drops used to run
+    on a bare ``engine.begin()`` outside the write lock, so a delete / release
+    could interleave with an in-flight bind or write of the same session.
+    """
+    async with file_db._sessions._write_lock:
+        task = asyncio.create_task(drop(file_db))
+        await asyncio.sleep(0.2)
+        assert not task.done()
+    await asyncio.wait_for(task, timeout=10)
+
+    async with file_db.read_session_local() as session:
+        rows = await session.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'team_task_%'")
+        )
+        assert rows.scalars().all() == []
 
 
 @pytest.mark.asyncio

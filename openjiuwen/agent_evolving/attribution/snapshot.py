@@ -13,11 +13,14 @@ Nothing here imports the host; every function is pure over the inputs.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
+from dataclasses import replace
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 from openjiuwen.agent_evolving.attribution.nodes import TrajectoryNode, detect_language, user_request_nodes
+from openjiuwen.agent_evolving.attribution.turns import TurnResolver
 from openjiuwen.agent_evolving.trajectory import messages as trajectory_messages
 from openjiuwen.agent_evolving.trajectory.messages import MessageField, tool_call_id
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
@@ -217,7 +220,8 @@ def _append_turn_fallback_nodes(
     among the projected nodes (the normal case, where the commit did land)
     is deduplicated so no message appears twice.
     """
-    existing: set[tuple[str, str]] = {(node.role, node.content or "") for node in nodes if node.content is not None}
+    existing = {(node.role, node.content or "", node.turn_id) for node in nodes if node.content is not None}
+    resolver = TurnResolver(records)
     fallback: list[TrajectoryNode] = []
     for span in records:
         if not isinstance(span, Mapping):
@@ -225,6 +229,7 @@ def _append_turn_fallback_nodes(
         input_text, output_text = _turn_io(span)
         identity = span_identity(span)
         trace_id, span_id = identity if identity is not None else (None, None)
+        turn_id, turn_number = resolver.resolve(trace_id, span_id)
         start_ns = _time(span, "startTimeUnixNano")
         end_ns = _time(span, "endTimeUnixNano")
         # The input message arrived when the turn started; the output reply
@@ -236,9 +241,9 @@ def _append_turn_fallback_nodes(
         ):
             if not text:
                 continue
-            if (role, text) in existing:
+            if (role, text, turn_id) in existing:
                 continue
-            existing.add((role, text))
+            existing.add((role, text, turn_id))
             fallback.append(
                 TrajectoryNode(
                     node_id="",
@@ -253,6 +258,8 @@ def _append_turn_fallback_nodes(
                     start_ts_ns=ts_ns,
                     end_ts_ns=ts_ns,
                     source_kind="turn",
+                    turn_id=turn_id,
+                    turn_number=turn_number,
                 )
             )
     if not fallback:
@@ -368,13 +375,21 @@ def build_subject_nodes(
                 error=errored,
             )
         )
-    return _append_turn_fallback_nodes(
-        nodes,
-        records,
-        subject_id=subject_id,
-        display_name=display_name,
-        kind=kind,
-    )
+    resolver = TurnResolver(records)
+    result = []
+    for node in nodes:
+        source = None
+        if node.role == "assistant" and node.source_kind != "turn":
+            for call in node.tool_calls:
+                source = llm_by_call.get(str(tool_call_id(call)))
+                if source is not None:
+                    break
+            if source is None:
+                source = llm_by_signature.get(_message_signature({"role": node.role, "content": node.content}))
+        trace_id, span_id = source[:2] if source is not None else (node.trace_id, node.span_id)
+        turn_id, turn_number = resolver.resolve(trace_id, span_id)
+        result.append(replace(node, turn_id=turn_id, turn_number=turn_number))
+    return _append_turn_fallback_nodes(result, records, subject_id=subject_id, display_name=display_name, kind=kind)
 
 
 def build_nodes_from_snapshot(snapshot: Mapping[str, Any]) -> dict[str, list[TrajectoryNode]]:
@@ -468,7 +483,10 @@ def assign_node_ids(
     """Assign stable ``<subagent_key>:<seq>`` ids reusing previous mappings.
 
     Nodes already mapped keep their seq; new nodes continue from
-    ``max_seq + 1`` per subject so ids stay stable across snapshot refreshes.
+    ``max_seq + 1`` per subject. A native event may have several context
+    representations; view aliases keep those rows distinct without losing
+    their shared native provenance. Repeated identical views use occurrence
+    ordinals. Existing native-only mappings remain readable.
     Returns the reassigned nodes and the updated mapping.
     """
     updated: dict[str, dict[str, int]] = {
@@ -478,17 +496,36 @@ def assign_node_ids(
     for subagent, nodes in nodes_by_subagent.items():
         subject_map = updated.setdefault(subagent, {})
         max_seq = max(subject_map.values(), default=-1)
-        used_keys: set[str] = set()
-        subject_nodes: list[TrajectoryNode] = []
+        used_seqs: set[int] = set()
+        occurrences: dict[str, int] = {}
+        identities: list[tuple[str, str]] = []
         for node in nodes:
-            key = node_native_key(node)
-            if key in subject_map and key not in used_keys:
-                seq = subject_map[key]
-                used_keys.add(key)
-            else:
+            native_key = node_native_key(node)
+            rendered = json.dumps(
+                [node.role, node.content, node.name, node.tool_calls, node.tool_call_id],
+                ensure_ascii=False, sort_keys=True,
+            )
+            digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+            view_key = f"{native_key}:view:{digest}"
+            occurrence = occurrences.get(view_key, 0)
+            occurrences[view_key] = occurrence + 1
+            if occurrence:
+                view_key = f"{view_key}:occurrence:{occurrence}"
+            identities.append((native_key, view_key))
+        # A new representation inserted before an existing one must not take
+        # the existing representation's persisted sequence via the native alias.
+        reserved = {subject_map[view_key] for _, view_key in identities if view_key in subject_map}
+        subject_nodes: list[TrajectoryNode] = []
+        for node, (native_key, view_key) in zip(nodes, identities):
+            seq = subject_map.get(view_key)
+            if seq is None and subject_map.get(native_key) not in reserved:
+                seq = subject_map.get(native_key)
+            if seq is None or seq in used_seqs:
                 max_seq += 1
                 seq = max_seq
-                subject_map[key] = seq
+            used_seqs.add(seq)
+            subject_map[view_key] = seq
+            subject_map.setdefault(native_key, seq)
             subject_nodes.append(node.with_node_id(f"{subagent}:{seq}"))
         assigned[subagent] = subject_nodes
     return assigned, updated

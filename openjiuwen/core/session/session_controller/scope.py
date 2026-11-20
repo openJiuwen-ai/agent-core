@@ -4,6 +4,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import unquote
 
 
 class Scope(ABC):
@@ -189,7 +190,9 @@ class GroupUserSubject(Subject):
 
     Used for the isolated perspective of a specific user within a group chat,
     e.g., recording a user's personal preferences or temporary state within the group.
-    String format: group:{group_id}:user:{user_id}
+    Legacy string format: group:{group_id}:user:{user_id}. Ids containing ':'
+    use the distinct group-user-v2 prefix and percent escaping. Legacy percent
+    sequences always remain literal, preserving persisted session identities.
     """
 
     def __init__(self, group_id: str, user_id: str):
@@ -202,17 +205,25 @@ class GroupUserSubject(Subject):
         self.user_id = user_id
 
     def __str__(self) -> str:
-        return f"group:{self.group_id}:user:{self.user_id}"
+        """Keep legacy keys unchanged; version only ids requiring escaping."""
+        if ":" not in self.group_id and ":" not in self.user_id:
+            return f"group:{self.group_id}:user:{self.user_id}"
+        group_id = self.group_id.replace("%", "%25").replace(":", "%3A")
+        user_id = self.user_id.replace("%", "%25").replace(":", "%3A")
+        return f"group-user-v2:{group_id}:user:{user_id}"
 
     @classmethod
     def from_string(cls, subject_str: str) -> 'GroupUserSubject':
+        """Decode versioned keys while preserving literal legacy percent signs."""
         parts = subject_str.split(":")
-        if len(parts) != 4 or parts[0] != "group" or parts[2] != "user":
+        if len(parts) != 4 or parts[0] not in ("group", "group-user-v2") or parts[2] != "user":
             raise ValueError(
                 f"GroupUserSubject must have format "
                 f"'group:{{group_id}}:user:{{user_id}}', got '{subject_str}'"
             )
         group_id, user_id = parts[1], parts[3]
+        if parts[0] == "group-user-v2":
+            group_id, user_id = unquote(group_id), unquote(user_id)
         if not group_id or not user_id:
             raise ValueError("GroupUserSubject group_id and user_id cannot be empty")
         return cls(group_id, user_id)
@@ -284,7 +295,9 @@ class SessionScope:
         # Subject parsing
         subject = None
         if subject_str:
-            if subject_str.startswith("direct:"):
+            if subject_str.startswith("group-user-v2:"):
+                subject = GroupUserSubject.from_string(subject_str)
+            elif subject_str.startswith("direct:"):
                 subject = DirectSubject.from_string(subject_str)
             elif subject_str.startswith("group:") and ":user:" in subject_str:
                 subject = GroupUserSubject.from_string(subject_str)

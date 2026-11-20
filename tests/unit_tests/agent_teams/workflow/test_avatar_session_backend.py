@@ -26,7 +26,17 @@ from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import Avat
 from openjiuwen.agent_teams.workflow.backends.external_fork import ForkCredentials
 from openjiuwen.agent_teams.workflow.backends.external_turns import ExternalTurnOutcome
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
-from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UserMessage
+from openjiuwen.core.foundation.llm.schema.message import (
+    AssistantMessage,
+    OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
+    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
+    ToolMessage,
+    UserMessage,
+)
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PROMPT_ATTACHMENT_HISTORY_METADATA_KEY,
+)
 from openjiuwen.harness_protocol import HarnessProtocolError
 
 
@@ -509,6 +519,111 @@ def test_round_boundary_index_maps_rounds_to_message_index():
     assert _round_boundary_index(msgs, None, keep_after=False) is None
 
 
+def _attachment_snapshot(content: str = "# Runtime State\n- Current channel: web") -> UserMessage:
+    """A RuntimePromptRail-style runtime snapshot, as PromptAttachmentManager persists it.
+
+    The product stack (jiuwenswarm ``RuntimePromptRail`` -> agent-core
+    ``PromptAttachmentManager.sync_to_context``) writes runtime state into the
+    conversation as a ``UserMessage`` carrying the attachment-history marker,
+    ahead of the round's real query. It is framework state, not a ``send()``.
+    """
+    return UserMessage(
+        content=content,
+        metadata={PROMPT_ATTACHMENT_HISTORY_METADATA_KEY: True},
+    )
+
+
+def _user_turn(content: str) -> UserMessage:
+    """A real ``send()`` turn, marked the way ``_admit_user_message`` marks one."""
+    return UserMessage(
+        content=content,
+        metadata={OPENJIUWEN_MESSAGE_ORIGIN_METADATA: OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER},
+    )
+
+
+def test_round_boundary_index_skips_runtime_attachment_messages():
+    """A runtime attachment snapshot is framework state, not round 1.
+
+    Regression for the fork boundary being off by one in the product stack: the
+    rail's snapshot is a ``UserMessage`` sitting before the first real query, so
+    counting bare ``UserMessage`` instances made every boundary land one round
+    early (``before/1`` inherited no conversation at all, ``after/2`` of a
+    3-round parent inherited everything).
+    """
+    from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import _round_boundary_index
+
+    msgs = [
+        _attachment_snapshot(),          # 0: framework runtime state, not a round
+        _user_turn("u1"),                # 1: round 1 starts here
+        AssistantMessage(content="a1"),  # 2
+        _user_turn("u2"),                # 3: round 2
+        AssistantMessage(content="a2"),  # 4
+        _user_turn("u3"),                # 5: round 3
+        AssistantMessage(content="a3"),  # 6
+    ]
+    # before/1 keeps round 1 only -> boundary is the start of round 2 (index 3)
+    assert _round_boundary_index(msgs, 1, keep_after=False) == 3
+    # before/2 keeps rounds 1-2 -> boundary is the start of round 3 (index 5)
+    assert _round_boundary_index(msgs, 2, keep_after=False) == 5
+    # before/3 keeps every round -> boundary past the end
+    assert _round_boundary_index(msgs, 3, keep_after=False) == len(msgs)
+    # after/2 starts at round 2 (index 3), dropping round 1
+    assert _round_boundary_index(msgs, 2, keep_after=True) == 3
+    # after/3 keeps only the last round (index 5)
+    assert _round_boundary_index(msgs, 3, keep_after=True) == 5
+    # out of range still degrades to a full-context fork: 3 real rounds, not 4
+    assert _round_boundary_index(msgs, 4, keep_after=False) is None
+    assert _round_boundary_index(msgs, 4, keep_after=True) is None
+
+
+def test_round_boundary_index_skips_unmarked_framework_injections():
+    """Framework-injected user messages without an origin marker are not rounds.
+
+    ``react_agent`` injects retry / iteration-limit notices as ``UserMessage``
+    with only a ``source_kind`` marker (no ``external_user`` origin), and the
+    context compressors rebuild summaries as bare ``UserMessage``. None of them
+    is a ``send()``, so none may shift the round boundary.
+    """
+    from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import _round_boundary_index
+
+    msgs = [
+        _attachment_snapshot(),
+        _user_turn("u1"),
+        AssistantMessage(content="a1"),
+        # react_agent's empty-response retry notice (source_kind only).
+        UserMessage(
+            content="Your previous reply was empty.",
+            metadata={OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA: "empty_response"},
+        ),
+        AssistantMessage(content="a1-retry"),
+        _user_turn("u2"),
+        AssistantMessage(content="a2"),
+    ]
+    # Two real rounds only: the retry notice does not start round 2.
+    assert _round_boundary_index(msgs, 1, keep_after=False) == 5  # round 2 starts at index 5
+    assert _round_boundary_index(msgs, 2, keep_after=True) == 5
+    assert _round_boundary_index(msgs, 3, keep_after=False) is None  # only 2 real rounds
+
+
+def test_round_boundary_index_counts_unmarked_rounds_when_no_marker_present():
+    """With no marked turn anywhere, every ``UserMessage`` still counts as a round.
+
+    A compacted context can lose the ``external_user`` marker (compressors
+    rebuild summaries as bare messages), and ``MockBackend`` / engine-level
+    tests build unmarked messages. Treating "no markers at all" as "no rounds"
+    would silently degrade every fork to a full-context copy — a worse failure
+    than the off-by-one, because it looks like success. So the bare-message
+    reading stays the fallback.
+    """
+    from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import _round_boundary_index
+
+    msgs = _rounds(3)  # no metadata on any message
+    assert _round_boundary_index(msgs, 2, keep_after=False) == 4
+    assert _round_boundary_index(msgs, 2, keep_after=True) == 2
+    assert _round_boundary_index(msgs, 4, keep_after=False) is None
+
+
+
 def _rounds(n: int) -> list[Any]:
     msgs: list[Any] = []
     for i in range(n):
@@ -607,6 +722,232 @@ def test_open_session_with_fork_data_seeds_child_context(monkeypatch):
     assert h.started_with.get_session_id().startswith("t/wf/")
     assert h.started_with.get_session_id().endswith("wf-sess-child-0")
     assert harnesses[0].native.sid == "child-sess"
+
+
+def test_round_boundary_index_skips_mid_round_marked_injections():
+    """Steering / resume inputs carry the round marker but do not open a round.
+
+    ``_admit_user_message`` stamps the same ``external_user`` origin on every
+    input it consumes — a ``send()`` query, a steering batch injected while the
+    round is already running, and a workflow-interrupt resume continuing it. So
+    the origin alone cannot be the round signal: counting a steering message as
+    a round makes the boundary cut mid-round, handing the child a query whose
+    assistant reply and closing ToolMessages were left behind.
+    """
+    from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import _round_boundary_index
+
+    def _marked(content: str, source: str) -> UserMessage:
+        return UserMessage(
+            content=content,
+            metadata={
+                OPENJIUWEN_MESSAGE_ORIGIN_METADATA: OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+                OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA: source,
+            },
+        )
+
+    msgs = [
+        _attachment_snapshot(),                                  # 0
+        _marked("remember A", "query"),                          # 1 round 1 opens
+        AssistantMessage(content="", tool_calls=[]),             # 2
+        ToolMessage(content="tool output", tool_call_id="t1"),    # 3
+        _marked("[STEERING] mind the format", "steering"),       # 4 mid-round, not a round
+        AssistantMessage(content="OK A"),                        # 5 round 1's real reply
+        _marked("remember B", "query"),                          # 6 round 2 opens
+        AssistantMessage(content="OK B"),                        # 7
+    ]
+    # before/1 must keep all of round 1 — through its reply, past the steering
+    # message — so the boundary is the start of round 2, not the steering index.
+    assert _round_boundary_index(msgs, 1, keep_after=False) == 6
+    # after/2 starts at round 2 for the same reason.
+    assert _round_boundary_index(msgs, 2, keep_after=True) == 6
+    # Two real rounds only: the steering message is not the third.
+    assert _round_boundary_index(msgs, 3, keep_after=False) is None
+
+    # A resume (workflow interrupt) continues the round that is already open.
+    resumed = [
+        _attachment_snapshot(),
+        _marked("remember A", "query"),
+        _marked("resumed input", "resume"),
+        AssistantMessage(content="OK A"),
+        _marked("remember B", "query"),
+        AssistantMessage(content="OK B"),
+    ]
+    assert _round_boundary_index(resumed, 1, keep_after=False) == 4
+    assert _round_boundary_index(resumed, 2, keep_after=True) == 4
+
+
+def test_round_boundary_index_steering_only_context_falls_back():
+    """A context whose only marked message is steering still counts rounds.
+
+    ``_has_round_markers`` applies the same round-opening test, so a context
+    like this is read as unmarked rather than as "no rounds at all" — the
+    latter would silently degrade every fork to a full-context copy.
+    """
+    from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import _round_boundary_index
+
+    msgs = [
+        UserMessage(content="q1"),  # bare, as an engine-level context has them
+        AssistantMessage(content="a1"),
+        UserMessage(
+            content="[STEERING] note",
+            metadata={
+                OPENJIUWEN_MESSAGE_ORIGIN_METADATA: OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+                OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA: "steering",
+            },
+        ),
+        UserMessage(content="q2"),
+        AssistantMessage(content="a2"),
+    ]
+    # The bare messages are still read as rounds; the steering one is not.
+    assert _round_boundary_index(msgs, 1, keep_after=False) == 3
+    assert _round_boundary_index(msgs, 2, keep_after=True) == 3
+    assert _round_boundary_index(msgs, 3, keep_after=False) is None
+
+
+def _probe_rounds(n: int) -> list[Any]:
+    """A product-stack-shaped parent context: runtime attachment, then n clean rounds.
+
+    Mirrors what an avatar's native actually holds: the rail's runtime snapshot
+    sits ahead of the first real query, each round is a marked ``send()`` plus a
+    bare ``OK`` reply. The replies carry no probe value, so an inherited probe
+    can only come from the round that asked for it — the same clean-evidence
+    rule the manual regression script follows.
+    """
+    msgs: list[Any] = [_attachment_snapshot()]
+    for i in range(n):
+        msgs.append(_user_turn(f"remember P{i + 1}"))
+        msgs.append(AssistantMessage(content="OK"))
+    return msgs
+
+
+def _inherited_probes(fork_data: dict | None) -> list[str]:
+    """Probe ids of the rounds a child would inherit from ``fork_data``."""
+    from openjiuwen.core.session.vcs.codec import decode_message
+
+    if fork_data is None:
+        return []
+    probes: list[str] = []
+    for item in fork_data["messages"]:
+        message = decode_message(item)
+        content = str(getattr(message, "content", ""))
+        if getattr(message, "role", "") == "user" and content.startswith("remember "):
+            probes.append(content.removeprefix("remember "))
+    return probes
+
+
+@pytest.mark.parametrize(
+    ("fork_mode", "keep_rounds", "expected_probes"),
+    [
+        # before/N keeps the head through round N.
+        ("before", 1, ["P1"]),
+        ("before", 2, ["P1", "P2"]),
+        ("before", 3, ["P1", "P2", "P3"]),
+        # after/N keeps the tail from round N on. after/3 is the decisive probe:
+        # a 3-round parent must hand the child round 3 alone.
+        ("after", 2, ["P2", "P3"]),
+        ("after", 3, ["P3"]),
+        # Out of range (3 real rounds) is not an error: it degrades to a
+        # full-context fork rather than silently cutting at a bogus boundary.
+        ("before", 4, ["P1", "P2", "P3"]),
+        ("after", 4, ["P1", "P2", "P3"]),
+    ],
+)
+def test_capture_fork_keeps_contract_rounds_with_runtime_attachment(
+    monkeypatch, fork_mode, keep_rounds, expected_probes
+):
+    """A fork hands the child exactly the rounds its keep_rounds names.
+
+    End-to-end over the real ``capture_fork`` against a parent context shaped
+    like the product stack's (a runtime prompt-attachment message ahead of the
+    first round). Before the fix every boundary landed one round early here:
+    ``before/1`` inherited no round at all, ``after/2`` of a 3-round parent
+    inherited all three, ``after/3`` inherited two, and ``after/4`` cut to the
+    last round instead of degrading to full.
+    """
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+
+    async def scenario():
+        mgr = _mgr(workflow_name="wf")
+        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "p"})
+        harnesses[0].native.messages = _probe_rounds(3)
+        return await mgr.capture_fork(sid, keep_rounds=keep_rounds, fork_mode=fork_mode)
+
+    fork_data = asyncio.run(scenario())
+    assert _inherited_probes(fork_data) == expected_probes
+
+
+def test_fork_before_and_after_partition_at_the_named_round(monkeypatch):
+    """``before/N`` and ``after/N+1`` split at round N+1 — asserted absolutely.
+
+    Complementarity alone cannot carry this: ``before/N`` and ``after/N+1``
+    resolve to the *same* index by construction, so "no overlap, nothing
+    dropped" holds for any consistently shifted boundary — including the
+    pre-fix one that counted the attachment snapshot as round 1. The assertions
+    below therefore pin each side to the rounds it must carry, and pin the
+    message count of the head so a framework message counted as a round fails
+    here rather than passing as a tidy-looking partition.
+    """
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+
+    async def scenario():
+        mgr = _mgr(workflow_name="wf")
+        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "p"})
+        harnesses[0].native.messages = _probe_rounds(3)
+        out = []
+        for n in (1, 2):
+            head = await mgr.capture_fork(sid, keep_rounds=n, fork_mode="before")
+            tail = await mgr.capture_fork(sid, keep_rounds=n + 1, fork_mode="after")
+            out.append((n, head, tail))
+        return out
+
+    for n, head, tail in asyncio.run(scenario()):
+        expected_head = [f"P{i + 1}" for i in range(n)]
+        expected_tail = [f"P{i + 1}" for i in range(n, 3)]
+        # Absolute: each side carries exactly the rounds its keep_rounds names.
+        assert _inherited_probes(head) == expected_head
+        assert _inherited_probes(tail) == expected_tail
+        # The head's own size is pinned too: the attachment snapshot plus one
+        # (query, reply) pair per kept round. Counting that snapshot as a round
+        # would drop a pair here and fail, where a probe-only check on a
+        # consistently shifted boundary might not.
+        assert len(head["messages"]) == 1 + 2 * n
+        # And the partition still holds, now as a consequence rather than the
+        # whole claim.
+        assert _inherited_probes(head) + _inherited_probes(tail) == ["P1", "P2", "P3"]
+
+
+def test_fork_child_is_seeded_with_only_the_contract_rounds(monkeypatch):
+    """The rounds survive capture *and* injection into the child's context.
+
+    ``after/3`` carried end to end: capture_fork -> open_session(fork_data=) ->
+    the child's seeded context engine and session state. Asserting the child's
+    own context (not just fork_data) covers the injection path a boundary-only
+    test would miss.
+    """
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+
+    async def scenario():
+        mgr = _mgr(workflow_name="wf")
+        psid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "p"})
+        harnesses[0].native.messages = _probe_rounds(3)
+        fork_data = await mgr.capture_fork(psid, keep_rounds=3, fork_mode="after")
+        await mgr.open_session(kind="agent", instructions=None, opts={"label": "c"}, fork_data=fork_data)
+        return harnesses[-1]
+
+    child = asyncio.run(scenario())
+    seeded = child.native.seeded[0][1]
+    probes = [
+        str(m.content).removeprefix("remember ")
+        for m in seeded
+        if getattr(m, "role", "") == "user" and str(m.content).startswith("remember ")
+    ]
+    assert probes == ["P3"]  # round 3 only; rounds 1-2 were cut at the fork
+    # The same context was written back to the child's session state.
+    state_messages = child.child.state_updates[0]["context"]["default_context_id"]["messages"]
+    assert len(state_messages) == len(seeded)
 
 
 def test_mirror_fallback_seeds_history_only_on_first_turn(monkeypatch):
@@ -890,6 +1231,77 @@ def test_external_session_rebinds_activity_sink_per_turn(monkeypatch):
     ]
     # Turn 1's id is gone once turn 2 ran (rebind, not accumulate).
     assert turns[0].activity_binds[-1][3] == "corr2"
+
+
+def test_external_session_binds_trajectory_once_before_start(monkeypatch):
+    from openjiuwen.harness_providers.trajectory import HarnessTrajectoryRecorder
+
+    recorder = object()
+    create_calls: list[dict] = []
+    events: list[tuple[str, Any]] = []
+
+    def _create(cls, **kwargs):
+        create_calls.append(kwargs)
+        return recorder
+
+    monkeypatch.setattr(HarnessTrajectoryRecorder, "create", classmethod(_create))
+
+    class _Runtime:
+        provider_name = "codex"
+
+        def __init__(self):
+            self.recorder = None
+
+        def bind_trajectory_recorder(self, value):
+            self.recorder = value
+            events.append(("bind", value))
+
+    runtime = _Runtime()
+
+    class _Turns(_FakeTurns):
+        def __init__(self, member_runtime, *, member_name, auth_hint_models=None):
+            super().__init__(resume=False, require=False)
+            self.runtime = member_runtime
+
+        async def start(self, team_session):
+            events.append(("start", self.runtime.recorder))
+            assert self.runtime.recorder is recorder
+            self.started += 1
+
+    async def _build(**kwargs):
+        return runtime
+
+    monkeypatch.setattr(asb_mod, "ExternalMemberTurns", _Turns)
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.external.cli_agent.spawn.build_cli_workflow_runtime",
+        _build,
+    )
+    entry = ExternalCliAgentSpec(cli_agent="codex")
+    mgr = AvatarSessionManager(
+        team_name="t",
+        session_id="product-session",
+        run_id="r1",
+        external_cli_agents=(entry,),
+        gate_agent_type=lambda name: entry,
+        external_cwd=lambda member, configured_entry: None,
+    )
+
+    async def _scenario():
+        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "Coder", "agent_type": "codex"})
+        first = await mgr.send_turn(sid, "one", {"label": "Coder", "agent_type": "codex"}, None, history=())
+        second = await mgr.send_turn(sid, "two", {"label": "Coder", "agent_type": "codex"}, None, history=())
+        await mgr.aclose()
+        return sid, first, second
+
+    sid, first, second = asyncio.run(_scenario())
+
+    assert first.text == "ext:one" and second.text == "ext:two"
+    assert [kind for kind, _ in events] == ["bind", "start"]
+    assert events[0][1] is recorder
+    subject = create_calls[0]["subject"]
+    assert subject.subject_id == f"team-member:product-session:t:{sid}"
+    assert subject.display_name == "Coder"
+    assert len(create_calls) == 1
 
 
 def test_external_session_first_turn_resolves_model_plan_before_builder(monkeypatch):
@@ -1266,12 +1678,24 @@ def test_agent_session_avatar_starts_under_its_own_trajectory_subject(monkeypatc
     """The avatar's supervisor starts under a ``team_member`` subject named by its label."""
     from openjiuwen.agent_teams.harness import team_harness as th_mod
     from openjiuwen.harness.execution_subject import current_execution_subject
+    from openjiuwen.extensions.observability.span_context import (
+        clear_root_span,
+        get_root_span,
+        reset_state,
+        set_root_span,
+    )
+    from opentelemetry.sdk.trace import TracerProvider
 
     start_subjects: list = []
+    start_roots: list = []
+    provider = TracerProvider()
+    team_root = provider.get_tracer("avatar-observability-test").start_span("team.t")
+    set_root_span(team_root, session_id="product-sess")
 
     class _SubjectRecordingHarness(_FakeHarness):
         async def start(self, *, team_session=None) -> None:
             start_subjects.append(current_execution_subject())
+            start_roots.append(get_root_span(session_id=team_session.get_session_id()))
             await super().start(team_session=team_session)
 
     def _fake_build(*, agent_spec, role, member_name, build_context=None, **kw):
@@ -1289,13 +1713,20 @@ def test_agent_session_avatar_starts_under_its_own_trajectory_subject(monkeypatc
         await mgr.aclose()
         return sid
 
-    sid = asyncio.run(scenario())
+    try:
+        sid = asyncio.run(scenario())
+    finally:
+        clear_root_span(session_id="product-sess", expected_span=team_root)
+        team_root.end()
+        reset_state()
+        provider.shutdown()
 
     subject = start_subjects[0]
     assert subject.subject_id == f"team-member:product-sess:t:{sid}"
     assert subject.display_name == "sre"
     assert subject.kind == "team_member"
     assert subject.session_id == "product-sess"
+    assert start_roots == [team_root]
     assert current_execution_subject() is None
 
 
@@ -1310,7 +1741,7 @@ def test_agent_session_picks_expert_spec_and_prepends_persona(monkeypatch):
     expert_spec = DeepAgentSpec(tools=[], agent_template_spec={"agent_card": {"id": "clip", "name": "clip"}})
     entry = SwarmflowExpertEntry("clip", "视频镜头师", "PERSONA", expert_spec, None)
 
-    def _gate(opts):
+    async def _gate(opts):
         return entry if opts.get("agent_template") == "clip" else None
 
     async def scenario():

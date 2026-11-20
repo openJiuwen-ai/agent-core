@@ -83,7 +83,7 @@ Streaming uses a peek-ahead pattern to detect the last chunk before yielding it.
 
 ### Encoding and Permission Edge Cases
 
-- **Text mode** — `encoding` parameter (default `utf-8`) used for all text read/write. Encoding errors in binary-to-text conversion use `errors="replace"` as fallback
+- **Text mode** — `encoding` parameter (default `utf-8`) used for all text read/write. `encoding="auto"` on the local backend detects BOM, UTF-8, GB18030/GBK and Big5 before reading, choosing the most plausible CJK decoding when multiple candidates match; the harness `read_file` tool only uses it as a retry after a strict UTF-8 decode failure. Encoding errors in binary-to-text conversion use `errors="replace"` as fallback
 - **Permissions** — `_apply_permissions()` and `_copy_permissions()` are best-effort on Unix; failures are logged but don't fail the operation
 - **Head/Tail/Line Range** — only available in text mode; binary mode rejects these parameters
 

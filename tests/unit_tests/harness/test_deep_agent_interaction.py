@@ -965,3 +965,95 @@ async def test_interaction_timeout_is_visible_and_cancels_real_executor() -> Non
     finally:
         await agent.stop()
         await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_timed_out_round_closes_observability_spans_before_trace_flush() -> None:
+    """A cancelled model call must end with its round, before run finalization."""
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
+    from openjiuwen.extensions.observability import span_context
+    from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
+    from openjiuwen.extensions.observability.config import ObservabilityConfig
+    from openjiuwen.extensions.observability.semconv import (
+        GEN_AI_CONVERSATION_ID,
+        OJ_SPAN_FORCED_CLOSE_REASON,
+        OJ_TRACE_ROOT,
+    )
+    from openjiuwen.harness.observability.rail import AgentObservabilityRail
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracker = span_context.ActiveSpanTracker()
+    provider.add_span_processor(tracker)
+    span_context.set_active_span_tracker(tracker)
+    tracer = provider.get_tracer("timeout-observability-test")
+    span_context.reset_state()
+    root = tracer.start_span("run.root")
+    root.set_attribute(OJ_TRACE_ROOT, True)
+    root.set_attribute(GEN_AI_CONVERSATION_ID, "timeout-observability")
+    span_context.set_root_span(root)
+    handler = OtelCallbackHandler(ObservabilityConfig(enabled=True), tracer=tracer)
+
+    class WaitingModel(FakeReactAgent):
+        async def invoke(self, inputs, session, **kwargs):
+            request = handler._open_llm_span({"messages": [], "model": "fake"})
+            assert request is not None
+            self.invoke_running.set()
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                self.cancelled_count += 1
+                raise
+            finally:
+                self.invoke_running.clear()
+
+    await Runner.start()
+    agent = DeepAgent(AgentCard(name="timeout-observability", description="test"))
+    agent.configure(DeepAgentConfig(enable_task_loop=True, completion_timeout=0.05))
+    fake = WaitingModel(agent.card)
+    agent.set_react_agent(fake, initialized=True)
+
+    class TestObservabilityRail(AgentObservabilityRail):
+        async def before_task_iteration(self, ctx):
+            span_context.set_root_span(root)
+            await super().before_task_iteration(ctx)
+
+    observer = TestObservabilityRail(tracer=tracer)
+
+    try:
+        await agent.start()
+        await agent.register_rail(observer)
+        assert agent.agent_callback_manager.has_hooks(AgentCallbackEvent.BEFORE_TASK_ITERATION)
+        stream = await agent.attach_output()
+        assert stream is not None
+        await agent.send_input(SendInputRequest(
+            request_id="timeout-observability",
+            inputs={"query": "wait for cancellation"},
+        ))
+        chunks = [chunk async for chunk in stream]
+        assert any(getattr(chunk, "type", None) == "answer" for chunk in chunks)
+        assert fake.cancelled_count == 1
+
+        finished = exporter.get_finished_spans()
+        rounds = [span for span in finished if ".task_iteration." in span.name]
+        models = [span for span in finished if span.name == "chat fake"]
+        assert len(rounds) == 1
+        assert len(models) == 1
+        assert root.is_recording()
+        assert span_context.flush_child_spans(trace_id=root.context.trace_id) == 0
+        assert all(
+            span.attributes.get(OJ_SPAN_FORCED_CLOSE_REASON) != "trace_safety_flush"
+            for span in (*rounds, *models)
+        )
+    finally:
+        await agent.stop()
+        root.end()
+        await Runner.stop()
+        provider.shutdown()
+        span_context.reset_state()
+        span_context.set_active_span_tracker(None)

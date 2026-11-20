@@ -294,9 +294,23 @@ def _coerce_lark_cli_error(exc: Exception) -> BaseError:
 
 
 _lark_cli_install_guard = threading.Lock()
+_INSTALL_GUARD_TIMEOUT_SECONDS = 0.5
 _lark_cli_install_attempted = False
 _lark_cli_install_last_error = ""
 _lark_cli_install_last_attempt = 0.0
+
+
+@contextlib.asynccontextmanager
+async def _install_guard():
+    deadline = time.monotonic() + _INSTALL_GUARD_TIMEOUT_SECONDS
+    while not _lark_cli_install_guard.acquire(blocking=False):
+        if time.monotonic() >= deadline:
+            raise _fetch_error("lark-cli install state is busy")
+        await asyncio.sleep(0.01)
+    try:
+        yield
+    finally:
+        _lark_cli_install_guard.release()
 
 
 async def _ensure_lark_cli_installed() -> None:
@@ -307,7 +321,7 @@ async def _ensure_lark_cli_installed() -> None:
     """
 
     global _lark_cli_install_attempted, _lark_cli_install_last_error, _lark_cli_install_last_attempt
-    with _lark_cli_install_guard:
+    async with _install_guard():
         if _lark_cli_install_attempted:
             if time.monotonic() - _lark_cli_install_last_attempt >= _LARK_CLI_INSTALL_COOLDOWN:
                 _lark_cli_install_attempted = False
@@ -325,7 +339,7 @@ async def _ensure_lark_cli_installed() -> None:
         return
     npm_binary = shutil.which("npm") or shutil.which("npm.cmd")
     if npm_binary is None:
-        with _lark_cli_install_guard:
+        async with _install_guard():
             _lark_cli_install_last_error = "npm is not installed in the deployment environment"
         raise _fetch_error("npm is not installed; cannot auto-install lark-cli")
     kwargs: dict[str, object] = {
@@ -347,14 +361,14 @@ async def _ensure_lark_cli_installed() -> None:
         if process is not None:
             with contextlib.suppress(Exception):
                 process.kill()
-        with _lark_cli_install_guard:
+        async with _install_guard():
             _lark_cli_install_last_error = "npm install timed out"
         raise _fetch_error("lark-cli auto-install timed out") from exc
     if process is None or process.returncode != 0:
         stdout_text = bytes(stdout or b"").decode("utf-8", errors="replace")
         stderr_text = bytes(stderr or b"").decode("utf-8", errors="replace")
         detail = _safe_cli_output(stderr_text or stdout_text or "npm install failed")
-        with _lark_cli_install_guard:
+        async with _install_guard():
             _lark_cli_install_last_error = detail
         raise _fetch_error(f"lark-cli auto-install failed: {detail}")
 

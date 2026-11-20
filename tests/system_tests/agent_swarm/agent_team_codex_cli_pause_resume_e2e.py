@@ -169,7 +169,7 @@ def _first_query(workspace_path: Path, marker: str) -> str:
     return (
         "请建立一个 persistent 团队，只创建一个 Codex SDK 外部成员。\n"
         "1. 先调用 build_team。\n"
-        f"2. 调用 spawn_external_cli 创建 {_MEMBER_NAME}，cli_agent='codex'。\n\n"
+        f"2. 调用 spawn_teammate 创建 {_MEMBER_NAME}，cli_agent='codex'。\n\n"
         "第一轮必须先创建任务和指派任务，再发送包含暗号的 direct message：\n"
         f"3. 用 create_task 创建 task_id={_BEFORE_TASK_ID} 的 before_pause.md 任务。"
         "任务标题和内容都不能包含下面的 SESSION_TOKEN。"

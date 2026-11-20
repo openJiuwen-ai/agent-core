@@ -48,6 +48,12 @@ class InMemoryCheckpointer(Checkpointer):
                 "Begin to restore workflow session before workflow execute",
                 event_type=LogEventType.CHECKPOINT_RESTORE, **log_message
             )
+            # 修复6 统一前置校验：InteractiveInput 恢复必须有可恢复的
+            # checkpoint，否则静默全新起跑难定位崩溃（此前仅 Persistence
+            # 后端校验，默认 InMemory 后端仍是原始 bug）。
+            await self.validate_interactive_resume(
+                session, workflow_store, self._graph_store, "in_memory"
+            )
             await workflow_store.recover(session, inputs)
             session_logger.info(
                 "Succeed to restore workflow session before workflow execute",

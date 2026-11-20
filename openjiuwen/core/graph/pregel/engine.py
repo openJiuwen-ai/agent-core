@@ -93,8 +93,7 @@ class PregelLoop:
 
     @staticmethod
     def _is_resume(state: GraphState) -> bool:
-        return state is not None and (
-                bool(state.pending_node) or bool(state.pending_buffer) or bool(state.channel_values))
+        return state is not None and state.is_resumable()
 
     async def _run_step(self) -> bool:
         # Add GRAPH_SUPER_STEP_START log

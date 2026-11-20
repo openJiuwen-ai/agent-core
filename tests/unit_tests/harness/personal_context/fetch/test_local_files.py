@@ -785,3 +785,117 @@ def test_local_files_prioritizes_new_and_modified_sources_before_history(tmp_pat
         modified.name,
     ]
     assert second_items[2].revision_id != first_items[-1].revision_id
+
+
+def _write_docx(path: Path) -> None:
+    import docx
+
+    document = docx.Document()
+    document.add_paragraph("第一段")
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "名称"
+    table.cell(0, 1).text = "数量"
+    table.cell(1, 0).text = "服务器"
+    table.cell(1, 1).text = "2"
+    document.add_paragraph("结尾段")
+    document.save(str(path))
+
+
+def test_local_files_reads_docx_paragraphs_and_tables_in_document_order(tmp_path: Path):
+    root = tmp_path / "source"
+    root.mkdir()
+    _write_docx(root / "采购文件.docx")
+
+    batches = asyncio.run(_batches(LocalFilesFetchService(_config(root), home=tmp_path / "home")))
+    items = _items(batches)
+
+    assert len(items) == 1
+    content = items[0].content
+    assert content == "第一段\n名称 | 数量\n服务器 | 2\n结尾段"
+    assert items[0].metadata["content_truncated"] is False
+    assert items[0].raw_snapshot is not None
+
+
+def test_local_files_docx_uses_dedicated_size_limit():
+    assert local_files._max_size(".docx") == 20 * 1024 * 1024
+    assert local_files._max_size(".DOCX") == 20 * 1024 * 1024
+    assert local_files._max_size(".pdf") == 20 * 1024 * 1024
+    assert local_files._max_size(".txt") == 1 * 1024 * 1024
+
+
+def test_local_files_docx_extraction_stops_after_content_cap(tmp_path: Path, monkeypatch):
+    root = tmp_path / "source"
+    root.mkdir()
+    _write_docx(root / "large.docx")
+    monkeypatch.setattr(local_files, "_MAX_CONTENT_CHARS", 6)
+
+    items = _items(asyncio.run(_batches(LocalFilesFetchService(_config(root), home=tmp_path / "home"))))
+
+    assert len(items) == 1
+    assert len(items[0].content) == 6
+    assert items[0].metadata["content_truncated"] is True
+
+
+def test_local_files_docx_rejects_oversized_decompressed_xml(tmp_path: Path, monkeypatch):
+    root = tmp_path / "source"
+    root.mkdir()
+    _write_docx(root / "bomb.docx")
+    monkeypatch.setattr(local_files, "_DOCX_MAX_XML_SIZE", 10)
+
+    service = LocalFilesFetchService(_config(root), home=tmp_path / "home")
+    prepared = asyncio.run(
+        service.prepare_run(run_id="run-1", run_started_at=datetime.now(UTC), cursor=None)
+    )
+    candidates = tuple(prepared)
+
+    batch = asyncio.run(service.fetch(run_id="run-1", cursor=None, candidates=candidates).__anext__())
+
+    assert batch.items == ()
+    assert batch.failures == (
+        {
+            "offset": 0,
+            "item_ref": "bomb.docx",
+            "code": 154002,
+            "message": "文件读取或解析失败",
+        },
+    )
+
+
+def test_local_files_skips_word_lock_files(tmp_path: Path):
+    root = tmp_path / "source"
+    root.mkdir()
+    _write_docx(root / "~$采购文件.docx")
+    (root / "note.md").write_text("note", encoding="utf-8")
+
+    service = LocalFilesFetchService(_config(root), home=tmp_path / "home")
+    candidates = asyncio.run(
+        service.prepare_run(run_id="run-1", run_started_at=datetime.now(UTC), cursor=None)
+    )
+
+    assert [str(candidate["relative_path"]) for candidate in candidates] == ["note.md"]
+
+
+def test_local_files_marks_broken_docx_as_item_failure_and_continues(tmp_path: Path):
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "broken.docx").write_bytes(b"not a docx")
+    (root / "tail.txt").write_text("tail", encoding="utf-8")
+    service = LocalFilesFetchService(_config(root), home=tmp_path / "home")
+    prepared = asyncio.run(
+        service.prepare_run(run_id="run-1", run_started_at=datetime.now(UTC), cursor=None)
+    )
+    by_name = {str(candidate["relative_path"]): candidate for candidate in prepared}
+    candidates = (by_name["broken.docx"], by_name["tail.txt"])
+
+    batch = asyncio.run(service.fetch(run_id="run-1", cursor=None, candidates=candidates).__anext__())
+
+    assert [item.title for item in batch.items] == ["tail.txt"]
+    assert batch.success_offsets == (1,)
+    assert batch.failures == (
+        {
+            "offset": 0,
+            "item_ref": "broken.docx",
+            "code": 154002,
+            "message": "文件读取或解析失败",
+        },
+    )

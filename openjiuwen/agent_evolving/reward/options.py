@@ -25,6 +25,10 @@ class RewardOptions:
     criteria: criteria given by the caller, used as they are (batch runs); None writes them from the Task.
     log: called with a line of text for every step the run takes.
     warnings: notes to put into the result's warnings (the call adds its own to a copy, not to this list).
+    materials: a dict the run fills with what a later step may reuse: "screenshots" [(label, base64)],
+        "deliverable" {name: text} and "knowledge" (the chosen guides' text). None keeps nothing.
+    since_ns / until_ns: the task trace's first and last event time (ns since the epoch); deliverable files are
+        only read inside it. None leaves that side unbounded.
     """
 
     txt_response: str = ""
@@ -35,6 +39,9 @@ class RewardOptions:
     criteria: list[dict[str, Any]] | None = None
     log: Callable[[str], None] = quiet
     warnings: list[str] = field(default_factory=list)
+    materials: dict[str, Any] | None = None
+    since_ns: int | None = None
+    until_ns: int | None = None
 
     def for_run(self):
         """A private copy for one run: `log` is always callable and `warnings` is a list the stages may append to."""

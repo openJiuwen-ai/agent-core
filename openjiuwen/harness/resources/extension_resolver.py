@@ -256,6 +256,18 @@ def render_agent_template_system_prompt(
     return "\n\n".join(text for text in rendered if text)
 
 
+def render_prompt_content(content: dict[str, str], *, language: str, params: dict[str, Any]) -> str:
+    """Render one localized prompt section body.
+
+    Picks ``content[language]`` (then English, then Chinese, then any text) and
+    substitutes ``{{ name }}`` placeholders found in ``params``; unknown
+    placeholders are left as written. The same rule every AgentTemplate prompt
+    section is rendered with, exposed for callers that hold a section body
+    rather than a whole template.
+    """
+    return _render_template(_select_content(content, language), params)
+
+
 def _resolve_skill(spec: SkillSpec) -> ResolvedSkill:
     return ResolvedSkill(directory=spec.dir, mode=spec.mode, enabled_skills=spec.enabled_skills)
 
@@ -299,6 +311,7 @@ __all__ = [
     "ResourceKind",
     "ResourceRef",
     "render_agent_template_system_prompt",
+    "render_prompt_content",
     "resolve_agent_template_parts",
     "resolve_plugin_parts",
 ]

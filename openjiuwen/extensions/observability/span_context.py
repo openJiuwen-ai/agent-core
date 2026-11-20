@@ -506,6 +506,11 @@ class LlmSpanState:
     stream_phase: tuple[str, str] | None = None
     stream_phase_last_sequence: int = 0
     stream_opened: bool = False
+    # Recorded input attributes as they held a model-group routed-model
+    # placeholder, before the first route filled it. Each later route attempt
+    # refills from these, so a failover renames the input to the route that
+    # actually received it rather than keeping the first attempt's name.
+    routed_input_original: dict[str, str] | None = None
 
 
 _root_span_ctx: ContextVar[Span | None] = ContextVar("observability_root_span", default=None)
@@ -716,6 +721,28 @@ def set_root_span(span: Span, *, session_id: str | None = None) -> None:
     if sid:
         with _root_registry_lock:
             _root_registry[sid] = span
+
+
+@contextmanager
+def bind_root_span_context(span: Span | None, *, session_id: str) -> Iterator[None]:
+    """Temporarily bind a root span to a session in this execution context only.
+
+    Unlike :func:`set_root_span`, this does not add an entry to the shared
+    session registry. It is for child executions whose callback session differs
+    from the session that owns the root span.
+    """
+    sid = _normalize_session_id(session_id)
+    if span is None or not sid:
+        yield
+        return
+
+    span_token = _root_span_ctx.set(span)
+    session_token = _root_session_ctx.set(sid)
+    try:
+        yield
+    finally:
+        _root_session_ctx.reset(session_token)
+        _root_span_ctx.reset(span_token)
 
 
 def get_root_span(*, session_id: str | None = None) -> Span | None:

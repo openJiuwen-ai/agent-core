@@ -22,6 +22,11 @@ _CONFIG_FIELDS = {
 }
 
 
+def cli_agent_for_provider(provider: str | None) -> str | None:
+    """The CLI kind an AgentTemplate runtime provider runs as, or ``None`` when unsupported."""
+    return _PROVIDER_TO_CLI.get(provider or "")
+
+
 def external_cli_agent_spec_from_template(
     template: AgentTemplateSpec,
 ) -> ExternalCliAgentSpec | None:
@@ -64,3 +69,36 @@ def external_cli_agent_spec_from_template(
             "skills": [skill.model_dump(mode="json") for skill in template.skills],
         }
     )
+
+
+def merge_external_cli_config(
+    declared: ExternalCliAgentSpec,
+    template_config: ExternalCliAgentSpec,
+) -> ExternalCliAgentSpec:
+    """Launch config of an external-CLI member spawned from an expert template.
+
+    The team's declared config for the CLI kind is the base — it holds the
+    host deployment knowledge (command, cwd, env, SSH transport, built-in
+    model catalog ...). The template adds only what belongs to the expert:
+    its skills (appended after the declared ones), ``skill_conflict``, and the
+    ``runtime.config`` keys it sets to a non-default value.
+
+    Raises:
+        ValueError: The two configs are for different CLI kinds.
+    """
+    if declared.cli_agent != template_config.cli_agent:
+        raise ValueError(
+            f"template runs on cli_agent {template_config.cli_agent!r}, "
+            f"declared config is for {declared.cli_agent!r}"
+        )
+    overlay: dict[str, object] = {"skill_conflict": template_config.skill_conflict}
+    for name in _CONFIG_FIELDS - {"skill_conflict"}:
+        value = getattr(template_config, name)
+        if value != ExternalCliAgentSpec.model_fields[name].get_default():
+            overlay[name] = value
+    skills = list(declared.skills)
+    for skill in template_config.skills:
+        if skill not in skills:
+            skills.append(skill)
+    overlay["skills"] = skills
+    return declared.model_copy(update=overlay)

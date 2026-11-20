@@ -30,3 +30,15 @@ def test_cli_console_script_points_to_harness_cli() -> None:
     assert pyproject["project"]["scripts"]["openjiuwen"] == (
         "openjiuwen.harness.cli.cli:cli"
     )
+
+
+def test_agent_builder_plugin_manifest_is_packaged() -> None:
+    """ResourceRetriever loads resource/plugins.json from its package dir.
+
+    Keep that manifest in the wheel: without it the installed default is an
+    empty plugin list, so build-time plugin retrieval silently finds nothing.
+    """
+    pyproject = _load_pyproject()
+    patterns = pyproject["tool"]["setuptools"]["package-data"]["openjiuwen"]
+
+    assert "dev_tools/agent_builder/resource/*.json" in patterns

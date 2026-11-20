@@ -14,8 +14,10 @@ The module is organised in two layers:
   transaction shells over the helpers above.
 """
 
+import asyncio
+import json
 from dataclasses import replace
-from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional
 
 from sqlalchemy import case, func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -31,6 +33,7 @@ from openjiuwen.agent_teams.schema.status import (
     is_valid_transition,
 )
 from openjiuwen.agent_teams.schema.task import (
+    REVISION_DIFF_MIN_CHARS,
     GraphMutationResult,
     NewTaskSpec,
 )
@@ -38,6 +41,7 @@ from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current
 from openjiuwen.agent_teams.tools.database.graph import (
     TASK_DEPENDENCY_REJECT_STATUSES,
     TASK_TERMINAL_STATUSES,
+    TASK_WORKING_STATUSES,
     detect_cycle_in_adjacency,
 )
 from openjiuwen.agent_teams.tools.models import (
@@ -280,10 +284,54 @@ async def _stage_new_tasks(
                 assignee=spec.assignee,
                 reviewer=spec.reviewer,
                 max_review_rounds=spec.max_review_rounds,
+                parent_task_id=spec.parent_task_id,
+                created_by=spec.created_by,
+                parent_revision=spec.parent_revision,
                 updated_at=now,
             )
         )
     await session.flush()
+
+
+def _load_change_notes(raw: Optional[str]) -> list[dict]:
+    """Parse the ``change_notes`` column (F_129 / D8); malformed values read as empty."""
+    if not raw:
+        return []
+    try:
+        notes = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return [note for note in notes if isinstance(note, dict)] if isinstance(notes, list) else []
+
+
+async def _suspend_parent_in_session(
+    session: AsyncSession,
+    parent_task_id: str,
+    owner: str,
+    now: int,
+) -> None:
+    """Park the subtask creator's executing task at ``BLOCKED`` (F_128).
+
+    CAS on ``IN_PROGRESS`` + owner: a parent that was cancelled, reassigned or
+    submitted since the tool read it no longer matches, and the whole batch
+    rolls back with the real cause. Runs before the edges are validated —
+    an executing task cannot take new dependencies, a blocked one can.
+    """
+    team_task_model = _get_task_model()
+    result = await session.execute(
+        update(team_task_model)
+        .where(
+            team_task_model.task_id == parent_task_id,
+            team_task_model.status == TaskStatus.IN_PROGRESS.value,
+            team_task_model.assignee == owner,
+        )
+        .values(status=TaskStatus.BLOCKED.value, resume_pending=True, updated_at=now)
+    )
+    if (result.rowcount or 0) == 0:
+        raise _MutationFailure(
+            f"Task {parent_task_id} is no longer in progress under {owner}; no subtasks were created"
+        )
+    team_logger.info("Task %s suspended by %s until its subtasks finish", parent_task_id, owner)
 
 
 async def _load_endpoints_and_validate(
@@ -512,6 +560,25 @@ class TaskDao:
                 row.content = self._deref_row(row)
         return rows
 
+    async def _hydrate_row_off_loop(self, row: Optional[TeamTaskBase]) -> Optional[TeamTaskBase]:
+        """``_hydrate_row`` on a worker thread, after the read session closed.
+
+        Dereferencing is synchronous file IO; doing it inside ``read()`` held
+        a pooled reader connection and blocked the event loop that every
+        in-process team member shares. ``to_thread`` copies the context, so
+        the bound session id still resolves the file path.
+        """
+        if row is None or not self._is_placeholder(row.content):
+            return row
+        return await asyncio.to_thread(self._hydrate_row, row)
+
+    async def _hydrate_rows_off_loop(self, rows: Iterable[TeamTaskBase]) -> List[TeamTaskBase]:
+        """``_hydrate_rows`` on a worker thread; see ``_hydrate_row_off_loop``."""
+        rows = list(rows)
+        if not any(self._is_placeholder(row.content) for row in rows):
+            return rows
+        return await asyncio.to_thread(self._hydrate_rows, rows)
+
     async def create_task(
         self,
         task_id: str,
@@ -547,17 +614,35 @@ class TaskDao:
         team_task_model = _get_task_model()
         async with self._sessions.read() as session:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
-            return self._hydrate_row(result.scalar_one_or_none())
+            row = result.scalar_one_or_none()
+        return await self._hydrate_row_off_loop(row)
 
-    async def get_team_tasks(self, team_name: str, status: Optional[str] = None) -> List[TeamTaskBase]:
-        """Get all tasks for a team, optionally filtered by status."""
+    async def get_team_tasks(
+        self,
+        team_name: str,
+        status: Optional[str] = None,
+        *,
+        hydrate: bool = True,
+    ) -> List[TeamTaskBase]:
+        """Get all tasks for a team, optionally filtered by status.
+
+        Args:
+            team_name: Team whose board to read.
+            status: Optional status filter.
+            hydrate: Read each spilled ``content`` body from its session file.
+                ``False`` leaves the ``#file#`` placeholder in place, for
+                callers that only look at ids / status / assignee.
+        """
         team_task_model = _get_task_model()
         async with self._sessions.read() as session:
             query = select(team_task_model).where(team_task_model.team_name == team_name)
             if status:
                 query = query.where(team_task_model.status == status)
             result = await session.execute(query)
-            return self._hydrate_rows(result.scalars().all())
+            rows = result.scalars().all()
+        if not hydrate:
+            return list(rows)
+        return await self._hydrate_rows_off_loop(rows)
 
     async def count_tasks_terminality(self, team_name: str) -> tuple[int, int]:
         """Return ``(total_tasks, non_terminal_tasks)`` for a team in one query.
@@ -594,7 +679,8 @@ class TaskDao:
         team_task_model = _get_task_model()
         async with self._sessions.read() as session:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id.in_(task_ids)))
-            return self._hydrate_rows(result.scalars().all())
+            rows = result.scalars().all()
+        return await self._hydrate_rows_off_loop(rows)
 
     async def open_task_counts_by_assignee(self, team_name: str) -> dict[str, int]:
         """Count non-terminal tasks per assignee in one grouped query.
@@ -618,6 +704,105 @@ class TaskDao:
             )
             return {assignee: int(count) for assignee, count in result.all()}
 
+    async def get_subtask_statuses(self, team_name: str, parent_task_id: str) -> List[tuple[str, str]]:
+        """Return ``(task_id, status)`` of every direct subtask of a task (F_128).
+
+        Narrow projection: callers only decide "is it a parent / are its
+        subtasks still open / which ones to cascade-cancel".
+        """
+        team_task_model = _get_task_model()
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(team_task_model.task_id, team_task_model.status).where(
+                    team_task_model.team_name == team_name,
+                    team_task_model.parent_task_id == parent_task_id,
+                )
+            )
+            return [(row[0], row[1]) for row in result.all()]
+
+    async def get_unseen_revisions(self, team_name: str) -> List[tuple[str, str, str, bool, int]]:
+        """``(task_id, status, assignee, resume_pending, revision)`` of every assigned,
+        unfinished task whose assignee has not seen its current revision (F_129).
+
+        Narrow projection for the scheduler's revision scan, which runs on
+        every board wake: no bodies are read.
+        """
+        team_task_model = _get_task_model()
+        terminal = [status for status in TASK_TERMINAL_STATUSES]
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(
+                    team_task_model.task_id,
+                    team_task_model.status,
+                    team_task_model.assignee,
+                    team_task_model.resume_pending,
+                    team_task_model.revision,
+                ).where(
+                    team_task_model.team_name == team_name,
+                    team_task_model.assignee.is_not(None),
+                    team_task_model.status.not_in(terminal),
+                    team_task_model.revision > team_task_model.observed_revision,
+                )
+            )
+            return [(row[0], row[1], row[2], bool(row[3]), int(row[4])) for row in result.all()]
+
+    async def get_task_revisions(self, team_name: str, task_ids: List[str]) -> dict[str, int]:
+        """``task_id -> revision`` of the given tasks; missing ids are absent (F_129). No bodies are read."""
+        if not task_ids:
+            return {}
+        team_task_model = _get_task_model()
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(team_task_model.task_id, team_task_model.revision).where(
+                    team_task_model.team_name == team_name,
+                    team_task_model.task_id.in_(task_ids),
+                )
+            )
+            return {row[0]: int(row[1] or 0) for row in result.all()}
+
+    async def get_unseen_edits(self, team_name: str, assignee: str) -> List[TeamTaskBase]:
+        """Rows of ``assignee``'s working tasks edited since it last saw them (F_129).
+
+        Read on every admitted input of an autonomous member, so bodies are
+        left unread: ``content`` may be a spill placeholder.
+        """
+        team_task_model = _get_task_model()
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(team_task_model).where(
+                    team_task_model.team_name == team_name,
+                    team_task_model.assignee == assignee,
+                    team_task_model.status.in_(list(TASK_WORKING_STATUSES)),
+                    team_task_model.revision > team_task_model.observed_revision,
+                )
+            )
+            return list(result.scalars().all())
+
+    async def get_subtasks(self, team_name: str, parent_task_id: str) -> List[TeamTaskBase]:
+        """Return a task's direct subtask rows (F_129), bodies left unread.
+
+        For briefs that render id / title / assignee / status / revision only;
+        ``content`` may be a spill placeholder.
+        """
+        team_task_model = _get_task_model()
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(team_task_model).where(
+                    team_task_model.team_name == team_name,
+                    team_task_model.parent_task_id == parent_task_id,
+                )
+            )
+            return list(result.scalars().all())
+
+    async def get_parent_task_id(self, task_id: str) -> Optional[str]:
+        """Return a task's ``parent_task_id`` alone (F_128), ``None`` for a top-level or missing task."""
+        team_task_model = _get_task_model()
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(team_task_model.parent_task_id).where(team_task_model.task_id == task_id)
+            )
+            return result.scalar_one_or_none()
+
     async def get_tasks_by_assignee(
         self, team_name: str, assignee_id: str, status: Optional[str] = None
     ) -> List[TeamTaskBase]:
@@ -631,7 +816,8 @@ class TaskDao:
             if status:
                 query = query.where(team_task_model.status == status)
             result = await session.execute(query)
-            return self._hydrate_rows(result.scalars().all())
+            rows = result.scalars().all()
+        return await self._hydrate_rows_off_loop(rows)
 
     async def get_other_active_task_id(
         self, team_name: str, member_name: str, exclude_task_id: str
@@ -700,7 +886,8 @@ class TaskDao:
                     team_task_model.assignee == member_name,
                     team_task_model.status == TaskStatus.PENDING.value,
                 )
-                .values(status=to_status.value, updated_at=now)
+                # A resume is consumed by the start it marks (F_128).
+                .values(status=to_status.value, resume_pending=False, updated_at=now)
             )
             await session.commit()
             started = result.rowcount == 1
@@ -761,6 +948,9 @@ class TaskDao:
                 .values(
                     status=to_status.value,
                     assignee=member_name,
+                    # The claimant takes the task as it stands; the board it
+                    # claimed from showed this revision (F_129).
+                    observed_revision=team_task_model.revision,
                     updated_at=now,
                 )
             )
@@ -807,8 +997,17 @@ class TaskDao:
                     team_task_model.status.in_(reassignable),
                 )
                 # The completion text describes the former owner's delivery;
-                # it is cleared atomically with the hand-over (F_119).
-                .values(assignee=to_assignee, summary=None, note=None, updated_at=now)
+                # it is cleared atomically with the hand-over (F_119). So is a
+                # pending resume: the new owner never suspended it (F_128).
+                # The new owner's start handoff shows the current revision (F_129).
+                .values(
+                    assignee=to_assignee,
+                    summary=None,
+                    note=None,
+                    resume_pending=False,
+                    observed_revision=team_task_model.revision,
+                    updated_at=now,
+                )
             )
             await session.commit()
             swapped = result.rowcount == 1
@@ -866,6 +1065,10 @@ class TaskDao:
             # The completion text belongs to the released owner's delivery (F_119).
             task.summary = None
             task.note = None
+            # A reset task starts over; it is no longer a suspended owner's resume (F_128).
+            task.resume_pending = False
+            # Whoever starts it next is shown the current revision (F_129).
+            task.observed_revision = task.revision
             task.updated_at = get_current_time()
             await session.commit()
             team_logger.info("Task %s reset from %s to PENDING", task_id, origin_task_status)
@@ -1146,12 +1349,24 @@ class TaskDao:
         task_id: str,
         title: Optional[str] = None,
         content: Optional[str] = None,
+        *,
+        change_note: Optional[str] = None,
+        changed_by: Optional[str] = None,
+        parent_revision: Optional[int] = None,
     ) -> Optional[TeamTaskBase]:
-        """Update task content (title, content, etc.).
+        """Update a task's title / content, bumping its revision (F_129).
+
+        A real change (title differs, or content differs from the current
+        body) bumps ``revision`` in the same write, and appends
+        ``change_note`` to ``change_notes`` against that revision. Before a
+        long body is overwritten, the revision its assignee last saw is kept
+        as a snapshot so a revision push can show a diff (D9); older
+        snapshots are dropped. ``parent_revision`` re-aligns a subtask to its
+        parent without touching its content (the subtask owner's confirm).
 
         Returns the post-write row — selected inside the same write
-        transaction, so its ``status`` is the committed state at update
-        time — or ``None`` when the task is missing or in-review locked.
+        transaction, so its ``status`` and ``revision`` are the committed
+        state — or ``None`` when the task is missing or in-review locked.
         The row is not hydrated: ``content`` may still be a spill
         placeholder; use :meth:`get_task` to read the body.
         """
@@ -1166,9 +1381,7 @@ class TaskDao:
             # IN_REVIEW stays locked: a task submitted for verification is
             # frozen so the reviewer evaluates against stable content. PLANNING
             # and IN_PROGRESS are editable — the leader revises a live task and
-            # the assignee is told to re-read via a targeted TASK_UPDATED notice
-            # (see TeamTaskManager.update_task), instead of the old
-            # reset-to-pending + cancel_member.
+            # its assignee learns of the new revision (F_129).
             if task.status == TaskStatus.IN_REVIEW.value:
                 team_logger.error(
                     "Cannot update task %s because it is currently %s",
@@ -1177,26 +1390,125 @@ class TaskDao:
                 )
                 return None
 
-            updated = False
+            revised = False
+            snapshot: Callable[[], None] | None = None
             if title is not None and task.title != title:
                 task.title = title
-                updated = True
+                revised = True
             if content is not None:
-                # Spill always overwrites the session file (task_id unchanged →
-                # same path), so the content path counts as a change regardless
-                # of the DB value. The DB row keeps the constant ``#file#`` on
-                # success; on IO failure ``_to_stored`` degrades to the raw
-                # text, which then must be persisted (design-v5 block B).
-                stored = self._to_stored(task.team_name, content, task_id=task_id)
-                if task.content != stored:
-                    task.content = stored
-                updated = True
+                previous = self._deref_row(task) if self._is_placeholder(task.content) else task.content
+                if previous != content:
+                    snapshot = self._seen_revision_snapshot(task, previous, content)
+                    # Spill overwrites the session file (task_id unchanged →
+                    # same path). The DB row keeps the constant ``#file#`` on
+                    # success; on IO failure ``_to_stored`` degrades to the raw
+                    # text, which then must be persisted (design-v5 block B).
+                    task.content = self._to_stored(task.team_name, content, task_id=task_id)
+                    revised = True
+            if revised:
+                task.revision = (task.revision or 0) + 1
+                if change_note:
+                    notes = _load_change_notes(task.change_notes)
+                    notes.append({"revision": task.revision, "note": change_note, "by": changed_by or ""})
+                    task.change_notes = json.dumps(notes, ensure_ascii=False)
+            realigned = parent_revision is not None and task.parent_revision != parent_revision
+            if realigned:
+                task.parent_revision = parent_revision
 
-            if updated:
+            if revised or realigned:
                 await session.commit()
-                team_logger.info("Task %s updated", task_id)
+                team_logger.info("Task %s updated (revision %s)", task_id, task.revision)
+            if snapshot is not None:
+                await asyncio.to_thread(snapshot)
 
             return task
+
+    def _seen_revision_snapshot(self, task: TeamTaskBase, previous: str, content: str) -> Callable[[], None] | None:
+        """The file work that keeps the body the assignee last saw (F_129 / D9).
+
+        Only the assignee's observed revision is a diff baseline, so only it
+        is kept: it is written the first time it is about to be overwritten
+        (when it is still the current body) and every older snapshot goes.
+        Short bodies are not snapshotted. The work is returned rather than
+        done, so the caller runs it off the event loop once the edit is
+        committed; it reads only values captured here. IO failures only cost
+        the diff.
+        """
+        file_store = self._file_store
+        if not task.assignee or file_store is None:
+            return None
+        if max(len(previous), len(content)) < REVISION_DIFF_MIN_CHARS:
+            return None
+        session_id = self._session_id()
+        if not session_id:
+            return None
+        from openjiuwen.agent_teams.team_workspace.session_file_store import KIND_TASK_REVISION, FileAddress
+
+        team_name, task_id = task.team_name, task.task_id
+        observed = task.observed_revision
+        address = (
+            FileAddress(
+                team_name=team_name,
+                session_id=session_id,
+                kind=KIND_TASK_REVISION,
+                object_id=task_id,
+                revision=task.revision,
+            )
+            if observed == task.revision
+            else None
+        )
+
+        def _write() -> None:
+            try:
+                if address is not None:
+                    file_store.put(previous, address)
+                file_store.remove_task_revisions(
+                    team_name=team_name, session_id=session_id, task_id=task_id, below=observed
+                )
+            except (ValueError, OSError) as exc:
+                team_logger.warning("revision snapshot of task %s failed: %s", task_id, exc)
+
+        return _write
+
+    async def get_revision_snapshot(self, team_name: str, task_id: str, revision: int) -> Optional[str]:
+        """Return a task body snapshot at ``revision`` (F_129 / D9), ``None`` when absent."""
+        session_id = self._session_id()
+        file_store = self._file_store
+        if file_store is None or not session_id:
+            return None
+        from openjiuwen.agent_teams.team_workspace.session_file_store import KIND_TASK_REVISION, FileAddress
+
+        address = FileAddress(
+            team_name=team_name,
+            session_id=session_id,
+            kind=KIND_TASK_REVISION,
+            object_id=task_id,
+            revision=revision,
+        )
+        try:
+            return await asyncio.to_thread(file_store.get, address)
+        except (ValueError, OSError):
+            return None
+
+    async def observe_revision(self, task_id: str, member_name: str, revision: int) -> bool:
+        """Record that ``member_name``, the task's assignee, was shown ``revision`` (F_129).
+
+        Monotonic (never moves back) and owner-bound: a delivery to someone
+        who no longer holds the task records nothing.
+        """
+        team_task_model = _get_task_model()
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                update(team_task_model)
+                .where(
+                    team_task_model.task_id == task_id,
+                    team_task_model.assignee == member_name,
+                    team_task_model.observed_revision < revision,
+                )
+                .values(observed_revision=revision)
+            )
+            await session.commit()
+            return (result.rowcount or 0) == 1
 
     async def mutate_dependency_graph(
         self,
@@ -1204,12 +1516,17 @@ class TaskDao:
         *,
         new_tasks: Optional[List[NewTaskSpec]] = None,
         add_edges: Optional[List[tuple[str, str]]] = None,
+        suspend_parent: Optional[tuple[str, str]] = None,
     ) -> GraphMutationResult:
         """Atomic dependency-graph mutation: insert nodes and/or edges.
 
         The body is a five-step pipeline kept inside one transaction;
         each step lives in a top-level helper. Business-rule rejections
         flow through ``_MutationFailure``, caught once at the bottom.
+
+        ``suspend_parent`` is ``(task_id, owner)``: that ``IN_PROGRESS`` task
+        is parked at ``BLOCKED`` in the same transaction, before its new
+        edges are validated (member subtasks, F_128).
         """
         new_tasks = list(new_tasks or [])
         add_edges = list(add_edges or [])
@@ -1234,6 +1551,8 @@ class TaskDao:
             try:
                 now = get_current_time()
                 await _stage_new_tasks(session, team_name, new_tasks, now)
+                if suspend_parent is not None:
+                    await _suspend_parent_in_session(session, *suspend_parent, now)
                 endpoint_tasks = await _load_endpoints_and_validate(session, add_edges)
                 new_edge_set = await _check_cycle_and_compute_new_edges(session, team_name, add_edges)
                 await _apply_new_edges(session, team_name, new_edge_set, endpoint_tasks)

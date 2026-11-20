@@ -238,9 +238,6 @@ class TestHandler:
 
         await handler.on_anomaly_detected(_notice_event("dev-1"))
         await handler.on_anomaly_detected(_notice_event("dev-2"))
-        await handler.handle_local_anomaly(_anomaly(
-            AnomalyKind.MODEL_ROUTE_NOTICE, Severity.MEDIUM, evidence={"model_failure": _notice_verdict()},
-        ))
 
         assert len(host.delivered) == 1
 
@@ -268,15 +265,22 @@ class TestHandler:
 
     @pytest.mark.asyncio
     @pytest.mark.level0
-    async def test_leader_own_route_notice_is_delivered(self):
+    async def test_leader_own_route_notice_waits_for_the_next_input(self):
+        """The leader's own switch starts no round; the notice rides its next admitted input."""
         handler, host = _handler()
 
         await handler.handle_local_anomaly(_anomaly(
             AnomalyKind.MODEL_ROUTE_NOTICE, Severity.MEDIUM, evidence={"model_failure": _notice_verdict()},
         ))
 
-        assert len(host.delivered) == 1
-        assert "[模型路由通知]" in host.delivered[0]
+        assert host.delivered == []
+        pending = handler.take_pending_route_notices()
+        assert len(pending) == 1
+        assert "[模型路由通知]" in pending[0]
+        assert handler.take_pending_route_notices() == [], "taking the notices clears them"
+
+        await handler.on_anomaly_detected(_notice_event("dev-1"))
+        assert host.delivered == [], "the same failure reported by a member later is dropped too"
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -332,7 +336,7 @@ class TestRailExtraction:
 
 class TestNoticeContent:
     @pytest.mark.level1
-    def test_notice_names_both_models_by_group_position(self):
+    def test_notice_names_the_failed_model_not_the_replacement(self):
         detector = ModelStreamErrorDetector()
         usable = [
             {"model_name": "D", "provider": "deepseek", "endpoint": "api.d.com", "position": 2},
@@ -345,12 +349,13 @@ class TestNoticeContent:
         assert anomaly is not None
         assert anomaly.summary.startswith(
             "模型组中第 1 顺位 C（openai, api.a.com）API Key 校验未通过（HTTP 401），"
-            "已自动改用第 2 顺位 D（deepseek, api.d.com）"
+            "已自动切换到组内其他可用模型"
         )
+        assert "D（" not in anomaly.summary, "the replacement is not named: the router picks per call"
         assert "E（" not in anomaly.summary
 
     @pytest.mark.level1
-    def test_notice_ends_at_the_replacement_model(self):
+    def test_notice_claims_no_specific_replacement(self):
         detector = ModelStreamErrorDetector()
         failure = {**_FAILURE, "model_name": "GLM-5.3-flash"}
         usable = [{"model_name": "GLM-5.3-Flash", "provider": "openai", "endpoint": "api.a.com", "position": 2}]
@@ -361,7 +366,7 @@ class TestNoticeContent:
         assert anomaly is not None
         assert anomaly.summary == (
             "模型组中第 1 顺位 GLM-5.3-flash（openai, api.a.com）API Key 校验未通过（HTTP 401），"
-            "已自动改用第 2 顺位 GLM-5.3-Flash（openai, api.a.com）"
+            "已自动切换到组内其他可用模型"
         )
 
     @pytest.mark.level1
@@ -412,7 +417,7 @@ class TestNoticeContent:
         assert anomaly is not None
         assert anomaly.summary.startswith(
             "#1 C (openai, api.a.com) in the model group rejected the API key (HTTP 401); "
-            "switched to #2 D (deepseek, api.d.com) automatically"
+            "switched to another available model in the group automatically"
         )
 
     @pytest.mark.level1

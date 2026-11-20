@@ -67,7 +67,21 @@ async def inprocess_spawn(
     # built cache — no re-scan of the team-workspace md files.
     # Injected at TeamAgent construction time so it cannot race configure.
     team_agent.share_workspace_cache_with(teammate)
+    # Same injection slot for the team-level swarmflow handles: the
+    # teammate's setup_agent must wire the leader's governor / budget /
+    # resolver instances (one L1/L3 authority and one token pool per team),
+    # and it must precede configure for the same reason as above.
+    team_agent.share_swarmflow_with(teammate)
     teammate.configure(spec, ctx)
+    # Attach the leader's session-level background task controller AFTER
+    # configure (before it the teammate has no harness, so the call would be
+    # a no-op): the teammate's swarmflow tool then registers its runs in the
+    # SAME session registry, so the embedder's pause/stop and the harness
+    # teardown's stop_by_owner reach them exactly like the leader's runs. A
+    # leader without a controller (embedder holds none) attaches nothing.
+    controller = team_agent.background_task_controller
+    if controller is not None:
+        teammate.set_background_task_controller(controller)
 
     # Share the leader's checkpoint dict so this teammate's
     # ``checkpoint()`` tool writes into the leader-visible namespace.

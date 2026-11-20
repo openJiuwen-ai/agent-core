@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
+from contextlib import aclosing
 from typing import Any, AsyncGenerator, Dict
 
 from a2a.types import AgentCard as A2AAgentCard
@@ -111,11 +112,13 @@ class A2ARemoteClient(RemoteClient):
         try:
             if timeout:
                 async with asyncio.timeout(timeout):
-                    async for chunk in self.client.stream(inputs=inputs):
-                        yield self._with_session_id(chunk, session_id)
+                    async with aclosing(self.client.stream(inputs=inputs)) as stream:
+                        async for chunk in stream:
+                            yield self._with_session_id(chunk, session_id)
             else:
-                async for chunk in self.client.stream(inputs=inputs):
-                    yield self._with_session_id(chunk, session_id)
+                async with aclosing(self.client.stream(inputs=inputs)) as stream:
+                    async for chunk in stream:
+                        yield self._with_session_id(chunk, session_id)
         except asyncio.TimeoutError:
             logger.error(f"[A2ARemoteClient] Stream timeout for {self.config.id}")
             await self.stop()

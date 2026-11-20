@@ -1,6 +1,10 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import pytest
+
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import (
     ModelClientConfig,
     ModelRequestConfig,
@@ -362,10 +366,10 @@ def test_custom_endpoint_claude_sonnet_45_uses_manual_budget_capability() -> Non
     assert plan.sdk_params == {"thinking": {"type": "enabled", "budget_tokens": 16384}}
 
 
-def test_anthropic_client_raises_max_tokens_above_thinking_budget() -> None:
+def test_anthropic_client_rejects_max_tokens_not_above_thinking_budget() -> None:
     # Both the official API and Anthropic-compatible gateways require
-    # max_tokens to exceed a manual thinking budget; the client raises the
-    # ceiling instead of shrinking the requested thinking depth.
+    # max_tokens to exceed a manual thinking budget; do not silently raise a
+    # configured output limit above the caller's value.
     client = AnthropicModelClient(
         ModelRequestConfig(
             model="claude-sonnet-4-5",
@@ -378,19 +382,19 @@ def test_anthropic_client_raises_max_tokens_above_thinking_budget() -> None:
         ),
     )
 
-    params = client._build_anthropic_params(
-        messages="hello",
-        tools=None,
-        temperature=None,
-        top_p=None,
-        model=None,
-        stop=None,
-        max_tokens=4096,
-        stream=False,
-    )
+    with pytest.raises(BaseError, match="max_tokens must be greater than thinking.budget_tokens") as exc_info:
+        client._build_anthropic_params(
+            messages="hello",
+            tools=None,
+            temperature=None,
+            top_p=None,
+            model=None,
+            stop=None,
+            max_tokens=4096,
+            stream=False,
+        )
 
-    assert params["thinking"] == {"type": "enabled", "budget_tokens": 16384}
-    assert params["max_tokens"] == 16384 + 1024
+    assert exc_info.value.status is StatusCode.MODEL_CONFIG_ERROR
 
 
 def test_explicit_extra_body_reasoning_controls_are_not_overridden() -> None:
@@ -895,6 +899,47 @@ def test_generic_openai_profile_infers_qianfan_from_api_base_for_glm() -> None:
     assert plan.extra_body == {"thinking": {"type": "disabled"}}
 
 
+def test_zhipu_glm53_flash_exposes_only_intensity_and_never_disables_thinking() -> None:
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        endpoint_profile="openai",
+        api_key="sk-test",
+        api_base="https://open.bigmodel.cn/api/paas/v4",
+    )
+
+    capability = get_reasoning_capability(
+        provider="OpenAI",
+        model="GLM-5.3-Flash",
+        protocol="openai",
+        api_base=client_config.api_base,
+        endpoint_profile=client_config.endpoint_profile,
+    )
+    plan = resolve_reasoning_plan(
+        client_config,
+        ModelRequestConfig(
+            model="GLM-5.3-Flash",
+            reasoning=ReasoningConfig(mode="enabled", effort="low"),
+        ),
+    )
+    disabled = resolve_reasoning_plan(
+        client_config,
+        ModelRequestConfig(
+            model="GLM-5.3-Flash",
+            reasoning=ReasoningConfig(mode="disabled"),
+        ),
+    )
+
+    assert capability.options == ("low", "high", "max")
+    assert capability.recommended == "max"
+    assert plan.sdk_params == {}
+    assert plan.extra_body == {
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "low",
+    }
+    assert disabled.sdk_params == {}
+    assert disabled.extra_body == {}
+
+
 def test_volcengine_deepseek_model_uses_deepseek_wire_shape_from_api_base() -> None:
     plan = resolve_reasoning_plan(
         ModelClientConfig(
@@ -1111,6 +1156,40 @@ def test_openrouter_uses_effort_none_for_disabled_reasoning() -> None:
     )
 
     assert plan.extra_body == {"reasoning": {"effort": "none"}}
+
+
+def test_openrouter_unlisted_models_keep_gateway_reasoning_wire() -> None:
+    for model in ("deepseek/deepseek-v4.1-flash", "openai/future-reasoning-model"):
+        for endpoint_profile in (None, "openrouter"):
+            config = ModelClientConfig(
+                client_provider="OpenAI",
+                api_key="sk-test",
+                api_base="https://openrouter.ai/api/v1",
+                endpoint_profile=endpoint_profile,
+            )
+            plan = resolve_reasoning_plan(
+                config,
+                ModelRequestConfig(model=model),
+                explicit_kwargs={"reasoning": ReasoningConfig(mode="disabled")},
+            )
+
+            assert plan.sdk_params == {}
+            assert plan.extra_body == {"reasoning": {"effort": "none"}}
+
+
+def test_openrouter_unlisted_model_preserves_explicit_reasoning_effort() -> None:
+    plan = resolve_reasoning_plan(
+        ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="sk-test",
+            api_base="https://openrouter.ai/api/v1",
+        ),
+        ModelRequestConfig(model="deepseek/unlisted-model"),
+        explicit_kwargs={"reasoning": ReasoningConfig(mode="enabled", effort="low")},
+    )
+
+    assert plan.sdk_params == {}
+    assert plan.extra_body == {"reasoning": {"enabled": True, "effort": "low"}}
 
 
 def test_openrouter_anthropic_mode_uses_gateway_reasoning_shape() -> None:

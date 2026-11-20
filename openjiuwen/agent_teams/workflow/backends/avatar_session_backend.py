@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Sequence
+from typing import Any, Awaitable, Callable, Sequence
 
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
@@ -59,9 +59,18 @@ from openjiuwen.agent_teams.workflow.engine.backends.base import AgentResult
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError, WorkflowAborted
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UserMessage
+from openjiuwen.core.foundation.llm.schema.message import (
+    AssistantMessage,
+    OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
+    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
+    UserMessage,
+)
 from openjiuwen.core.kv_cache.kv_cache_types import KVCacheRuntimeProtocol
 from openjiuwen.core.session.vcs.codec import encode_message
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PROMPT_ATTACHMENT_HISTORY_METADATA_KEY,
+)
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -100,6 +109,12 @@ _SCHEMA_TURN_NUDGE = (
 )
 # Default ceiling on how long a human turn waits for a person before giving up.
 _DEFAULT_HUMAN_TIMEOUT = 600.0
+
+# Wire marker for an explicit skip: the person pressed "skip" instead of
+# answering, so the turn is skipped immediately rather than keeping the
+# question pending until the human timeout. Transports send this verbatim
+# (the host maps its own skip flag onto it); a real reply never equals it.
+HUMAN_REPLY_SKIP = "__swarmflow_skip__"
 
 # One-shot intent classification (see ``_classify_intent``): is the person's raw
 # reply a request to edit the script/flow and rerun, or a plain continue? Kept
@@ -216,7 +231,7 @@ class AvatarSessionManager:
         skill_visibility_fn: Callable[[Any, str], Any] | None = None,
         external_cli_agents: Sequence[Any] = (),
         gate_agent_type: Callable[[str], Any] | None = None,
-        gate_agent_template: Callable[[dict], Any] | None = None,
+        gate_agent_template: Callable[[dict], Awaitable[Any]] | None = None,
         external_cwd: Callable[[str, Any], str | None] | None = None,
         team_backend: Any = None,
         progress_sink: Any = None,
@@ -242,6 +257,11 @@ class AvatarSessionManager:
         # usual path would drop them) are parked here and consumed by
         # ``_await_human_reply`` before it registers a new future.
         self._pending_reply_buffer: dict[str, str] = {}
+        # Raw replies already handed to a human turn, kept so a retry of a
+        # failed classify/format attempt reuses them instead of re-asking the
+        # person. Peeked (not popped): every retry of the same correlation
+        # reads the same reply; a newer buffered/waited reply overwrites it.
+        self._human_reply_reuse: dict[str, str] = {}
         self._on_human_prompt = on_human_prompt
         self._on_human_replied = on_human_replied
         self._human_timeout = human_timeout if human_timeout is not None else _DEFAULT_HUMAN_TIMEOUT
@@ -321,7 +341,7 @@ class AvatarSessionManager:
         gate = self._gate_agent_template
         if kind != "human" and opts.get("agent_template") and gate is None:
             raise BackendError("this backend has no expert gate; agent_template is unavailable")
-        expert = gate(opts) if (kind != "human" and gate is not None) else None
+        expert = await gate(opts) if (kind != "human" and gate is not None) else None
         if kind == "human":
             base = self._human_base_spec
         elif expert is not None:
@@ -774,6 +794,7 @@ class AvatarSessionManager:
                 fut.cancel()
         self._pending_human.clear()
         self._pending_reply_buffer.clear()
+        self._human_reply_reuse.clear()
         if self._reply_topic_subscribed and self._messager is not None and self._session_id is not None:
             from openjiuwen.agent_teams.schema.events import swarmflow_human_reply_topic
 
@@ -811,6 +832,7 @@ class AvatarSessionManager:
                 fut.cancel()
         self._pending_human.clear()
         self._pending_reply_buffer.clear()
+        self._human_reply_reuse.clear()
         live = [state for state in list(self._sessions.values()) if state.harness is not None]
 
         external = [state for state in list(self._sessions.values()) if state.external is not None]
@@ -951,8 +973,22 @@ class AvatarSessionManager:
                 member_name=state.member_name,
                 display_name=opts.get("label") or state.member_name,
             )
-            with execution_subject_scope(avatar_subject):
-                await harness.start(team_session=team_session)
+            from openjiuwen.extensions.observability.span_context import (
+                bind_root_span_context,
+                get_root_span,
+            )
+
+            team_root = (
+                get_root_span(session_id=self._session_id)
+                if self._session_id
+                else None
+            )
+            # The avatar callback looks up by its child session id. Bind the
+            # owning Team root only in the context copied by its supervisor;
+            # child ids are not globally unique across concurrent Team runs.
+            with bind_root_span_context(team_root, session_id=state.session_id):
+                with execution_subject_scope(avatar_subject):
+                    await harness.start(team_session=team_session)
             if fork_data is not None and fork_data.get("messages"):
                 await self._seed_fork_context(harness, state, fork_data)
             await harness.subscribe(
@@ -1280,6 +1316,21 @@ class AvatarSessionManager:
             )
         except Exception as e:
             raise BackendError(f"external session build failed for {state.member_name}: {e}") from e
+        from openjiuwen.agent_teams.agent.team_agent import team_member_execution_subject
+        from openjiuwen.agent_teams.external.member_runtime import _bind_harness_trajectory_recorder
+
+        subject = team_member_execution_subject(
+            session_id=self._session_id or "",
+            team_name=self._team_name,
+            member_name=state.member_name,
+            display_name=(opts or {}).get("label") or state.member_name,
+        )
+        _bind_harness_trajectory_recorder(
+            runtime,
+            subject=subject,
+            team_name=self._team_name,
+            member_name=state.member_name,
+        )
         # Same lazy-import constraint as plan_external_model above: model_compat
         # lives under agent_teams.external. The pool names back the auth-failure
         # workaround list the two-audience copy needs.
@@ -1338,7 +1389,7 @@ class AvatarSessionManager:
         yields ``skipped`` so the engine returns ``None`` for the turn.
         """
         raw = await self._await_human_reply(state, prompt, opts, correlation_id)
-        if raw is None:  # timed out / no answer
+        if raw is None or raw == HUMAN_REPLY_SKIP:  # timed out / explicit skip
             return AgentResult(skipped=True)
         # NEW: classify intent before formatting (best-effort; any failure
         # degrades to the existing formatting path rather than failing the turn).
@@ -1427,12 +1478,17 @@ class AvatarSessionManager:
         # Consume a buffered reply first (don't re-push the prompt).
         buffered = self._pending_reply_buffer.pop(corr, None)
         if buffered is not None:
+            self._human_reply_reuse[corr] = buffered
             if self._on_human_replied is not None:
                 try:
                     self._on_human_replied(state.member_name, corr, buffered)
                 except Exception:
                     team_logger.debug("[swarmflow] human-replied notify failed for %s", state.member_name)
             return buffered
+        # A retry of a failed classify/format attempt reuses the raw reply it
+        # already obtained instead of asking the person again.
+        if self._human_reply_reuse.get(corr) is not None:
+            return self._human_reply_reuse[corr]
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         self._pending_human[corr] = fut
@@ -1458,6 +1514,7 @@ class AvatarSessionManager:
                 self._on_human_replied(state.member_name, corr, raw)
             except Exception:
                 team_logger.debug("[swarmflow] human-replied notify failed for %s", state.member_name)
+        self._human_reply_reuse[corr] = raw
         return raw
 
     # ------------------------------------------------------------------
@@ -1563,17 +1620,86 @@ def _output_text(result: Any) -> str:
     return str(result or "")
 
 
+#: ``source`` values ``_admit_user_message`` stamps for input that opens a new
+#: round. It admits every consumed input under the same ``external_user``
+#: origin, so the origin alone does not separate a ``send()`` from a steering
+#: message injected mid-round or a workflow-interrupt resume continuing the
+#: round already open. ``None`` covers a marked message that carries no
+#: ``source_kind`` (an older persisted context).
+_ROUND_OPENING_SOURCE_KINDS = frozenset({None, "query"})
+
+
+def _message_metadata(m: Any) -> dict:
+    """Read a message's metadata defensively (persisted messages may carry none)."""
+    metadata = getattr(m, "metadata", None)
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _is_round_opening_message(m: Any, *, markers_present: bool) -> bool:
+    """Return whether ``m`` opens a conversation round (one ``send()``).
+
+    Only a ``UserMessage`` can open a round, but not every ``UserMessage`` is one:
+    the harness writes framework state into the conversation in the same shape.
+    The runtime prompt-attachment snapshot/delta lands *before* the round's real
+    query, and ``react_agent`` injects retry / iteration-limit notices mid-round,
+    so counting bare ``UserMessage`` instances shifted every fork boundary.
+
+    ``markers_present`` selects the reading:
+
+    - ``True`` — some turn carries the ``external_user`` origin that
+      ``_admit_user_message`` stamps on consumed input. That origin is necessary
+      but not sufficient: the same call stamps it on steering batches and on a
+      workflow-interrupt resume, neither of which opens a round (a steering
+      message lands *inside* the round already running). So the ``source_kind``
+      must also name a round-opening input — otherwise the boundary would cut
+      mid-round, handing the child a query whose reply and closing ToolMessages
+      were left behind.
+    - ``False`` — nothing is marked (an engine-level MockBackend context, or a
+      compacted one whose compressors rebuilt summaries as bare messages). Fall
+      back to the plain reading, minus the injections we can still name. Reading
+      "no markers" as "no rounds" would degrade every fork to a silent
+      full-context copy — a worse failure than an off-by-one, because it looks
+      like success.
+    """
+    if not isinstance(m, UserMessage):
+        return False
+    metadata = _message_metadata(m)
+    if metadata.get(PROMPT_ATTACHMENT_HISTORY_METADATA_KEY):
+        return False  # runtime attachment snapshot/delta, never a round
+    if markers_present:
+        if metadata.get(OPENJIUWEN_MESSAGE_ORIGIN_METADATA) != OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER:
+            return False
+        return metadata.get(OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA) in _ROUND_OPENING_SOURCE_KINDS
+    # Unmarked context: a message carrying only a source_kind is a framework
+    # injection (empty_response / iteration_limit), not a round.
+    return not metadata.get(OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA)
+
+
+def _has_round_markers(msgs: Sequence[Any]) -> bool:
+    """Return whether any message is a marked round-opening input.
+
+    Deliberately the same test :func:`_is_round_opening_message` applies in its
+    marked branch, not just the origin: a context whose only marked messages are
+    steering injections carries no round signal, and treating it as marked would
+    count zero rounds and degrade every fork to a silent full-context copy.
+    """
+    return any(_is_round_opening_message(m, markers_present=True) for m in msgs)
+
+
 def _round_boundary_index(msgs: Sequence[Any], keep_rounds: int | None, keep_after: bool) -> int | None:
     """Map a round-based split to a message index, or ``None`` when out of range.
 
     ``keep_after=False`` (the "before" family): the boundary is the index just
-    past the ``keep_rounds``-th ``UserMessage`` (its assistant reply and any
+    past the ``keep_rounds``-th round-opening message (its assistant reply and any
     closing ToolMessage travel with it, so the kept head is not cut mid-call).
 
     ``keep_after=True`` (the "after" family): the boundary is the index of the
-    ``keep_rounds``-th ``UserMessage`` itself (the tail from that round on is
+    ``keep_rounds``-th round-opening message itself (the tail from that round on is
     kept, and ``ForkContext``'s ``_trim_leading_orphan_tool_messages`` drops any
     leading orphan ToolMessages whose assistant is not inherited).
+
+    A round is one ``send()``; see :func:`_is_round_opening_message` for why that
+    is not the same as "a ``UserMessage``".
 
     A ``None`` ``keep_rounds`` or a value larger than the actual round count
     returns ``None`` — the caller silently falls back to a full-context fork
@@ -1581,16 +1707,17 @@ def _round_boundary_index(msgs: Sequence[Any], keep_rounds: int | None, keep_aft
     """
     if keep_rounds is None:
         return None
+    markers_present = _has_round_markers(msgs)
     count = 0
     for i, m in enumerate(msgs):
-        if not isinstance(m, UserMessage):
+        if not _is_round_opening_message(m, markers_present=markers_present):
             continue
         count += 1
         if count == keep_rounds:
             if keep_after:
                 return i
             for j in range(i + 1, len(msgs)):
-                if isinstance(msgs[j], UserMessage):
+                if _is_round_opening_message(msgs[j], markers_present=markers_present):
                     return j
             return len(msgs)
     return None

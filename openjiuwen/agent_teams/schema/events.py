@@ -28,6 +28,17 @@ from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.workflow.engine.progress import PhasePlan
 
 
+def _topic_part(value: object) -> str:
+    """Escape ``:`` inside a topic component so it cannot fake a separator.
+
+    Topics are ``session:{sid}:team:{team}:...``. Team/session ids are
+    human-supplied; a level name containing the literal ``:team:`` can make
+    two different (session, team) pairs render the same topic and receive each
+    other's events. Escape ``%`` first, then ``:``.
+    """
+    return str(value).replace("%", "%25").replace(":", "%3A")
+
+
 class TeamTopic(str, Enum):
     """Topic categories for team event routing."""
 
@@ -45,7 +56,7 @@ class TeamTopic(str, Enum):
         Returns:
             Topic string in the format "session:{session_id}:team:{team_name}:{topic}".
         """
-        return f"session:{session_id}:team:{team_name}:{self.value}"
+        return f"session:{_topic_part(session_id)}:team:{_topic_part(team_name)}:{self.value}"
 
 
 def swarmflow_human_reply_topic(
@@ -60,8 +71,14 @@ def swarmflow_human_reply_topic(
     ``None`` falls back to the legacy session+team scope (single-run safe).
     """
     if run_id:
-        return f"session:{session_id}:team:{team_name}:run:{run_id}:swarmflow_human_reply"
-    return f"session:{session_id}:team:{team_name}:swarmflow_human_reply"
+        return (
+            f"session:{_topic_part(session_id)}:team:{_topic_part(team_name)}:"
+            f"run:{_topic_part(run_id)}:swarmflow_human_reply"
+        )
+    return (
+        f"session:{_topic_part(session_id)}:team:{_topic_part(team_name)}:"
+        "swarmflow_human_reply"
+    )
 
 
 def format_swarmflow_human_reply_target(
@@ -297,6 +314,10 @@ class TaskCreatedEvent(BaseEventMessage):
     """Event published when a task is created"""
     task_id: str = Field(..., description="Task unique identifier")
     status: str = Field(..., description="Initial task status")
+    parent_task_id: Optional[str] = Field(
+        default=None,
+        description="Parent task a member split this subtask from; creating it suspends the parent",
+    )
 
 
 class TaskPlanRequestEvent(BaseEventMessage):
@@ -326,6 +347,7 @@ class TaskUpdatedEvent(BaseEventMessage):
         description="Task status at edit time; content edits never change it, "
         "but carrying it lets consumers resync a stale view from this event",
     )
+    revision: Optional[int] = Field(default=None, description="Task revision after the edit (F_129)")
 
 
 class TaskClaimedEvent(BaseEventMessage):
@@ -341,6 +363,10 @@ class TaskStartedEvent(BaseEventMessage):
     when the scheduler dispatches it to the assignee.
     """
     task_id: str = Field(..., description="Task unique identifier")
+    resumed: bool = Field(
+        default=False,
+        description="True when a parent task restarts after its subtasks finished, not a first start",
+    )
 
 
 class TaskCompletedEvent(BaseEventMessage):
@@ -464,6 +490,15 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
             "pause→resume, the tree continues) or 'relaunch' (script-edit re-run "
             "under the same run_id, the phase/agent structure is reset). None on "
             "a fresh launch."
+        ),
+    )
+    executor: Optional[str] = Field(
+        default=None,
+        description=(
+            "Member name currently hosting the run, leader included (the "
+            "relaunch host when resumed). The single attribution key: narration "
+            "routing, completion injections and resume handoff all read it. "
+            "None only when no team context is available (or on legacy events)."
         ),
     )
     workflow_name: Optional[str] = Field(default=None, description="The swarmflow script's META name")

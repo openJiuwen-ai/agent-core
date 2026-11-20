@@ -1850,6 +1850,129 @@ class TestGenAiSemconvAttrs:
         assert OJ_END_TIME in s.attributes
         assert handler._span_manager.get(agent_span.invoke_id) is None
 
+    async def test_llm_end_reads_ttft_from_the_explicit_ttft_seconds_field(self):
+        """`gen_ai.response.time_to_first_chunk` 的主数据源是 `ttft_seconds`。
+
+        这是本 PR 的核心行为：react_agent 只写 `ttft_seconds`，若 handler 键名写错（例如
+        `usage.get("ttft")`）或又退回只读 `first_token_time`，生产上每条流式 LLM span 都会
+        静默丢掉 TTFC 属性。零延迟必须落成 0.0——旧实现 `or ""` 会把 0.0 当空值丢掉。
+        """
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        message = AssistantMessage(
+            content="x",
+            usage_metadata=UsageMetadata(ttft_seconds=0.42),
+        )
+        await handler.on_llm_end(span=agent_span, outputs=message)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.42)
+
+        # 零延迟：写成 0.0，而不是被当成「没给」而跳过属性。
+        _EXPORTER.clear()
+        zero_span = span_manager.create_agent_span()
+        await handler.on_llm_start(
+            span=zero_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        await handler.on_llm_end(
+            span=zero_span,
+            outputs=AssistantMessage(
+                content="x",
+                usage_metadata=UsageMetadata(ttft_seconds=0.0),
+            ),
+        )
+
+        s_zero = _EXPORTER.get_finished_spans()[0]
+        assert s_zero.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == 0.0
+
+    async def test_llm_end_prefers_ttft_seconds_over_legacy_first_token_time(self):
+        """两者同时存在时取 `ttft_seconds`；`first_token_time` 只在它缺省时兜底。
+
+        `first_token_time` 按契约是「首 token 时刻」（时间戳字符串）；把它当延迟解析只是
+        历史遗留。优先级写反时本用例转红。
+        """
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        await handler.on_llm_end(
+            span=agent_span,
+            outputs=AssistantMessage(
+                content="x",
+                usage_metadata=UsageMetadata(
+                    ttft_seconds=0.35,
+                    first_token_time="9.99",
+                ),
+            ),
+        )
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.35)
+
+        # 只给 legacy 字段（老调用方）：仍然取得到，行为不倒退。
+        _EXPORTER.clear()
+        legacy_span = span_manager.create_agent_span()
+        await handler.on_llm_start(
+            span=legacy_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        await handler.on_llm_end(
+            span=legacy_span,
+            outputs=AssistantMessage(
+                content="x",
+                usage_metadata=UsageMetadata(first_token_time="0.42"),
+            ),
+        )
+
+        s_legacy = _EXPORTER.get_finished_spans()[0]
+        assert s_legacy.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.42)
+
+    @pytest.mark.parametrize("malformed", [["bad"], {"bad": 1}, "not-a-number"])
+    async def test_llm_end_malformed_ttft_seconds_skips_attr_not_finalization(self, malformed):
+        """非数值 `ttft_seconds`（raw-dict 调用方给的 list/dict/str）不设属性、不抛异常。
+
+        `except (TypeError, ValueError)` 收窄回 `ValueError` 时，list/dict 会抛 TypeError 并
+        打断 `on_llm_end`，`_set_end_attrs`/`_end_and_pop` 都不再执行，span 永远不结束。
+        """
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        raw = {
+            "outputs": {
+                "usage_metadata": {
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "ttft_seconds": malformed,
+                    # 显式字段优先：即使它畸形，也不拿 legacy 时刻值顶替。
+                    "first_token_time": "9.99",
+                }
+            }
+        }
+        await handler.on_llm_end(span=agent_span, outputs=raw)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK not in s.attributes
+        # 收尾照常：结束属性写下、span 关闭、manager 已摘除。
+        assert OJ_END_TIME in s.attributes
+        assert handler._span_manager.get(agent_span.invoke_id) is None
+
     async def test_embedding_start_sets_dimension_count(self):
         """EMBEDDING span: embeddings operation, GenAI "{operation} {model}"
         naming, request model and dimension count (core emitter:

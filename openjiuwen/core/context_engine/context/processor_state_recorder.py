@@ -86,9 +86,10 @@ class ContextProcessorStateRecorder:
     async def emit(self, context: Any, state: ContextCompressionState) -> None:
         self._record(state)
         logger.info(
-            "context compression state: status=%s phase=%s processor=%s "
+            "context compression state: status=%s reason=%s phase=%s processor=%s "
             "session_id=%s context_id=%s op=%s before=%s after=%s saved=%s",
             state.status,
+            state.reason,
             state.phase,
             state.processor,
             self._session_id,
@@ -210,6 +211,7 @@ class ContextProcessorStateRecorder:
             )),
             compact_summary=state_input.compact_summary or "",
             error=state_input.error,
+            reason=state_input.reason,
         )
 
     @staticmethod
@@ -404,6 +406,16 @@ class ContextProcessorStateRecorder:
         saved = summary_input.saved
         if status == "started":
             return f"Compressing {before.messages} messages, ~{self._compact_number(before.tokens)} tokens"
+        if status == "paused":
+            return (
+                f"Context compression paused; context remains ~{self._compact_number(before.tokens)} tokens. "
+                "It will be re-evaluated when the task resumes."
+            )
+        if status == "cancelled":
+            return (
+                f"Context compression cancelled; context remains ~{self._compact_number(before.tokens)} tokens. "
+                "It will be re-evaluated on the next request."
+            )
         if status == "failed":
             return (
                 f"Context processor failed; context remains ~{self._compact_number(before.tokens)} tokens"

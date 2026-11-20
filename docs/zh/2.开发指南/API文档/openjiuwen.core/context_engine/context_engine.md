@@ -36,7 +36,7 @@ async create_context(
 ) -> ModelContext:
 ```
 
-创建或获取指定 session 与 context_id 对应的 ModelContext。若池中已存在则加载 session 状态后返回；否则新建并缓存。
+创建或获取指定 session 与 context_id 对应的 ModelContext。若池中已存在则加载 session 状态后返回；否则新建并缓存。若缓存中的上下文没有任何处理器（例如仅为预置 `history_messages` 而创建），本次传入的 `processors` 会挂载到该上下文；已有的处理器保持不变。
 
 **参数**：
 

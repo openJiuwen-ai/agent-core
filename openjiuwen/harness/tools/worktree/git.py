@@ -125,7 +125,7 @@ async def get_current_branch(cwd: str) -> str | None:
 
 
 async def get_default_branch(cwd: str) -> str:
-    """Detect the default branch (main/master).
+    """Detect a locally available origin default or tracked branch.
 
     Tries symbolic-ref first, then falls back to probing common names.
 
@@ -139,13 +139,18 @@ async def get_default_branch(cwd: str) -> str:
         ["symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
         cwd=cwd,
     )
-    if r.ok:
+    if r.ok and await rev_parse(f"{r.stdout}^{{commit}}", cwd):
         # "origin/main" -> "main"
         return r.stdout.split("/", 1)[-1]
-    # Fallback: try common names
-    for name in ("main", "master"):
+    # A single-branch clone need not have origin/HEAD or main/master refs.
+    # Conventional default names win over the checked-out branch: a repo that
+    # was pushed rather than cloned has no origin/HEAD either, and its feature
+    # branch must not become the team's worktree base.
+    current = await get_current_branch(cwd)
+    candidates = dict.fromkeys(name for name in ("main", "master", "develop", current) if name)
+    for name in candidates:
         check = await _run_git(
-            ["rev-parse", "--verify", f"origin/{name}"],
+            ["rev-parse", "--verify", f"refs/remotes/origin/{name}^{{commit}}"],
             cwd=cwd,
         )
         if check.ok:

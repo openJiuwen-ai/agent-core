@@ -477,6 +477,33 @@ async def test_add_graph_auto_generates_missing_task_ids(task_manager):
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_add_graph_task_created_event_carries_assignee(task_manager, message_bus):
+    """Created events state the assignee from creation time (B_20261116).
+
+    Scheduled dispatch seeds every task PENDING with an assignee; the
+    TaskCreatedEvent's member_name carries it so trajectory lane grouping can
+    attribute a pending task to its owner before the scheduler starts it.
+    Unassigned creations keep member_name unset.
+    """
+    result = await task_manager.add_graph(
+        [
+            TaskGraphSpec(title="Owned", content="c", task_id="t-owned", assignee="member1"),
+            TaskGraphSpec(title="Pool", content="c", task_id="t-pool"),
+        ]
+    )
+    assert result.ok, result.reason
+
+    created_payloads = {
+        call.kwargs["message"].payload["task_id"]: call.kwargs["message"].payload
+        for call in message_bus.publish.call_args_list
+        if getattr(call.kwargs.get("message"), "event_type", None) == TeamEvent.TASK_CREATED
+    }
+    assert created_payloads["t-owned"]["member_name"] == "member1"
+    assert created_payloads["t-pool"].get("member_name") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_add_graph_empty_specs(task_manager):
     """An empty batch is a no-op success."""
     result = await task_manager.add_graph([])
@@ -1837,3 +1864,37 @@ def test_dispatch_mode_is_exposed_read_only(db, message_bus):
     )
 
     assert manager.dispatch_mode == "scheduled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_open_tasks_counts_only_non_terminal_tasks(task_manager):
+    assert not await task_manager.has_open_tasks()
+
+    await task_manager.add_graph(
+        [
+            TaskGraphSpec(title="done", content="c", task_id="done"),
+            TaskGraphSpec(title="dropped", content="c", task_id="dropped"),
+        ]
+    )
+    assert await task_manager.has_open_tasks()
+
+    assert await task_manager.claim("done")
+    assert (await task_manager.complete("done")).ok
+    assert await task_manager.cancel("dropped") is not None
+    assert not await task_manager.has_open_tasks()
+
+    await task_manager.add_graph([TaskGraphSpec(title="review", content="c", task_id="review")])
+    assert await task_manager.claim("review")
+    assert await task_manager.db.task.update_task_status("review", TaskStatus.IN_REVIEW.value)
+    assert await task_manager.has_open_tasks()
+    assert await task_manager.board_counts() == (3, 1)
+
+    assert await task_manager.db.task.update_task_status("review", TaskStatus.COMPLETED.value)
+    await task_manager.add_graph(
+        [
+            TaskGraphSpec(title="next", content="c", task_id="next", depends_on=("later",)),
+            TaskGraphSpec(title="later", content="c", task_id="later"),
+        ]
+    )
+    assert await task_manager.has_open_tasks()

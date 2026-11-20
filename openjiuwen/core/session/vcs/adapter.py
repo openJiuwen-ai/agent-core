@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """Adapter wiring a VersioningManager to a real Session + ContextEngine.
 
 ``for_session`` builds the three manager callbacks without modifying any
@@ -60,9 +60,17 @@ async def _snapshot(session, context_engine) -> dict:
 
 
 async def _apply(session, context_engine, snapshot: dict) -> None:
-    """Apply a ``{context, state}`` snapshot back onto the live `session`."""
+    """Restore a snapshot, retaining live context instances and runtime settings.
+
+    Only contexts absent from the snapshot are removed. Missing contexts are
+    created using engine defaults; snapshots do not serialize runtime processors.
+    """
     session_id = session.get_session_id()
-    for cid, cstate in snapshot.get(const.CONTEXT_KEY, {}).items():
+    contexts = snapshot.get(const.CONTEXT_KEY, {})
+    for cid in context_engine.list_context_ids(session_id):
+        if cid not in contexts:
+            await context_engine.clear_context(context_id=cid, session_id=session_id)
+    for cid, cstate in contexts.items():
         context = context_engine.get_context(cid, session_id)
         if context is None:
             context = await context_engine.create_context(cid, session)

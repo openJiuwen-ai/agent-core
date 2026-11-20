@@ -663,9 +663,9 @@ class TestIntelliRouterModelClientInvoke:
     """Test IntelliRouterModelClient.invoke()."""
 
     @pytest.fixture
-    def client(self, model_request_config, intelli_router_client_config):
+    def client(self, model_request_config, intelli_router_client_config, monkeypatch):
         mock_router = MagicMock()
-        IntelliRouterModelClient._create_router = MagicMock(return_value=mock_router)
+        monkeypatch.setattr(IntelliRouterModelClient, "_create_router", MagicMock(return_value=mock_router))
         yield IntelliRouterModelClient(model_request_config, intelli_router_client_config)
 
     @pytest.mark.asyncio
@@ -774,9 +774,9 @@ class TestIntelliRouterModelClientStream:
     """Test IntelliRouterModelClient.stream()."""
 
     @pytest.fixture
-    def client(self, model_request_config, intelli_router_client_config):
+    def client(self, model_request_config, intelli_router_client_config, monkeypatch):
         mock_router = MagicMock()
-        IntelliRouterModelClient._create_router = MagicMock(return_value=mock_router)
+        monkeypatch.setattr(IntelliRouterModelClient, "_create_router", MagicMock(return_value=mock_router))
         yield IntelliRouterModelClient(model_request_config, intelli_router_client_config)
 
     @pytest.mark.asyncio
@@ -877,11 +877,11 @@ class TestIntelliRouterModelClientMultimodal:
     """Test that multimodal methods raise errors for unsupported providers."""
 
     @pytest.fixture
-    def client(self, model_request_config, intelli_router_client_config):
+    def client(self, model_request_config, intelli_router_client_config, monkeypatch):
         mock_router = MagicMock()
         # Empty deployments -> _resolve_generation_provider returns "unknown"
         mock_router.deployments = []
-        IntelliRouterModelClient._create_router = MagicMock(return_value=mock_router)
+        monkeypatch.setattr(IntelliRouterModelClient, "_create_router", MagicMock(return_value=mock_router))
         yield IntelliRouterModelClient(model_request_config, intelli_router_client_config)
 
     @pytest.mark.asyncio
@@ -911,7 +911,7 @@ class TestIntelliRouterDashScopeGeneration:
     """Test DashScope generation methods with mocked API calls."""
 
     @pytest.fixture
-    def dashscope_client(self, model_request_config, intelli_router_client_config):
+    def dashscope_client(self, model_request_config, intelli_router_client_config, monkeypatch):
         """Client with a DashScope deployment so generation methods are allowed."""
         mock_router = MagicMock()
         mock_dep = MagicMock()
@@ -920,7 +920,7 @@ class TestIntelliRouterDashScopeGeneration:
         mock_dep.api_key = "test-dashscope-key"
         mock_dep.api_base = "https://dashscope.aliyuncs.com"
         mock_router.deployments = [mock_dep]
-        IntelliRouterModelClient._create_router = MagicMock(return_value=mock_router)
+        monkeypatch.setattr(IntelliRouterModelClient, "_create_router", MagicMock(return_value=mock_router))
         return IntelliRouterModelClient(model_request_config, intelli_router_client_config)
 
     # ------ generate_image ------

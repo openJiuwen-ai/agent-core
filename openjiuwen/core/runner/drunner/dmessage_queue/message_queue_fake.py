@@ -1,8 +1,8 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 import asyncio
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 import anyio
 
@@ -20,8 +20,10 @@ class FakeSubscription(SubscriptionBase):
     In-memory subscription for FakeMQ.
     """
 
-    def __init__(self, topic: str):
+    def __init__(self, topic: str, *, legacy_key_encoding: Literal["literal", "escaped"] = "literal") -> None:
+        """Configure the subscription's explicit unversioned decoding mode."""
         self.topic = topic
+        self._legacy_key_encoding = legacy_key_encoding
         self._handler: Optional[AsyncMessageHandler] = None
         self._queue = asyncio.Queue(10000)
         self._task: BackgroundTask | None = None
@@ -58,7 +60,7 @@ class FakeSubscription(SubscriptionBase):
                 if not self._active:
                     break
 
-                payload = deserialize_message(raw)
+                payload = deserialize_message(raw, legacy_key_encoding=self._legacy_key_encoding)
                 if self._handler:
                     await self._handler(payload)
 
@@ -77,7 +79,15 @@ class FakeMQ(MessageQueueBase):
     In-memory message queue for testing.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        wire_version: Literal[1, 2] = 1,
+        legacy_key_encoding: Literal["literal", "escaped"] = "literal",
+    ) -> None:
+        """Configure explicit writer and legacy reader formats for this queue."""
+        self._wire_version = wire_version
+        self._legacy_key_encoding = legacy_key_encoding
         self._topics: Dict[str, List[FakeSubscription]] = {}
         self._lock = asyncio.Lock()
         self._is_running = False
@@ -99,7 +109,7 @@ class FakeMQ(MessageQueueBase):
     def subscribe(self, topic: str) -> FakeSubscription:
         if not self._is_running:
             raise build_error(StatusCode.MESSAGE_QUEUE_TOPIC_SUBSCRIPTION_ERROR, reason="message queue is not running")
-        sub = FakeSubscription(topic)
+        sub = FakeSubscription(topic, legacy_key_encoding=self._legacy_key_encoding)
         self._topics.setdefault(topic, []).append(sub)
         logger.info(f"[FakeMQ] new subscription for topic={topic}")
         return sub
@@ -112,7 +122,9 @@ class FakeMQ(MessageQueueBase):
             logger.info(f"[FakeMQ] unsubscribed topic={topic}")
 
     async def produce_message(self, topic: str, message: QueueMessage):
-        data = serialize_message(message)
+        data = serialize_message(
+            message, wire_version=self._wire_version, legacy_key_encoding=self._legacy_key_encoding,
+        )
 
         async with self._lock:
             subs = list(self._topics.get(topic, []))

@@ -39,6 +39,11 @@ the **LLM context (conversation messages)**; agent kv-state rides along.
 - LogEntry carries a crc32; a torn/corrupt log tail stops reading without
   raising (crash recovery).
 - A single writer per (session) is assumed.
+- StateDelta paths without `path_encoding` retain legacy dot-splitting semantics;
+  new deltas carry `path_encoding=2` and escape dots/tildes. Default version 1
+  is omitted during serialization to preserve historical WAL checksums.
+- Snapshot restore deletes only absent contexts. Existing instances, processors
+  and token counters survive; missing contexts use engine creation defaults.
 
 ## Tests
 

@@ -25,6 +25,18 @@ from openjiuwen.rsi.harness_rsi.auto_harness.pipelines import (
 )
 
 
+@pytest.fixture(autouse=True)
+def github_cli_ready(monkeypatch):
+    """Keep entry-point tests from invoking host authentication or package managers."""
+    from openjiuwen.rsi.harness_rsi.auto_harness.infra import github_cli
+
+    monkeypatch.setattr(
+        github_cli,
+        "ensure_github_cli_ready",
+        lambda emit: github_cli.GitHubCliStatus(available=True, authenticated=True),
+    )
+
+
 def _install_renderer_stubs(fake_render):
     ui_module = types.ModuleType("openjiuwen.harness.cli.ui")
     renderer_module = types.ModuleType("openjiuwen.harness.cli.ui.renderer")

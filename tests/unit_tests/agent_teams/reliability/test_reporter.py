@@ -93,3 +93,17 @@ async def test_local_reporter_routes_to_bound_sink():
     )
     await reporter.report(anomaly)
     assert received == [anomaly]
+
+def test_local_reporter_take_route_notices_returns_and_clears():
+    box = ["[route notice] one"]
+
+    def _take():
+        taken = box[:]
+        box.clear()
+        return taken
+
+    reporter = LocalAnomalyReporter()
+    assert reporter.take_route_notices() == [], "unbound source yields nothing"
+    reporter.bind_route_notice_source(_take)
+    assert reporter.take_route_notices() == ["[route notice] one"]
+    assert reporter.take_route_notices() == [], "taking clears the pending notices"

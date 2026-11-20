@@ -80,20 +80,29 @@ def get_browser_agent_logger() -> logging.Logger:
     browser_logger.propagate = mirror_common
 
     log_path = get_browser_agent_log_path()
-    if log_path is None:
-        return browser_logger
-
     with _LOCK:
-        for handler in browser_logger.handlers:
+        current_handler = None
+        for handler in list(browser_logger.handlers):
             if getattr(handler, _BROWSER_HANDLER_MARKER, False):
-                if getattr(handler, "baseFilename", None) == str(log_path):
-                    return browser_logger
+                if (current_handler is None and log_path is not None
+                        and getattr(handler, "baseFilename", None) == str(log_path)):
+                    current_handler = handler
+                    continue
+                browser_logger.removeHandler(handler)
+                handler.close()
+
+        if current_handler is not None:
+            current_handler.setLevel(_get_level())
+            return browser_logger
+
+        if log_path is None:
+            return browser_logger
 
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
         file_handler = logging.FileHandler(
             log_path,
-            mode="w",
+            mode="a",
             encoding="utf-8",
         )
         setattr(file_handler, _BROWSER_HANDLER_MARKER, True)

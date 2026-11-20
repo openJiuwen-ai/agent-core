@@ -52,6 +52,9 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
         """
         content = event.payload.get("content", "")
         team_logger.info("user_input → deliver_input")
+        note = getattr(self._round, "note_user_input_delivered", None)
+        if callable(note):
+            note()
         await self._round.deliver_input(
             content,
             run_context=event.payload.get("run_context"),
@@ -113,7 +116,13 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
             payload.tool_call_id,
             payload.approved,
         )
-        await self._round.resume_interrupt(interactive_input)
+        result = await self._round.resume_interrupt(interactive_input)
+        if not result.ok:
+            team_logger.debug(
+                "[{}] approval event not admitted: {}; retaining durable mail",
+                member_name,
+                result.reason,
+            )
 
     async def on_task_plan_response(self, event: EventMessage) -> None:
         """Handle a leader decision for a submitted member plan."""
@@ -143,4 +152,4 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
             payload.tool_call_id,
             payload.approved,
         )
-        await self._round.resume_interrupt(interactive_input)
+        await self._round.resume_plan_interrupt(interactive_input)

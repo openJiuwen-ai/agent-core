@@ -143,15 +143,21 @@ class MessageBus:
 
         async with self._subscription_lock:
             for topic in (p2p_topic, pubsub_topic):
-                subscription = self._active_subscriptions.pop(topic, None)
-                if subscription is None:
+                if topic not in self._active_subscriptions:
                     continue
                 try:
-                    await subscription.deactivate()
-                    logger.debug(f"[{self.__class__.__name__}] cleanup_session: deactivated {topic}")
+                    # 只调 unsubscribe：它内部已含 deactivate，能一步完成
+                    # “停消费协程 + 摘除 MQ 订阅”。若先单独 deactivate，一旦它在
+                    # 收尾时抛错就会跳过 unsubscribe，导致 MQ 侧订阅残留。
+                    await self._mq.unsubscribe(topic)
+                    # 摘除成功后再 pop：若 pop 在前而 unsubscribe 抛错，MQ 侧订阅
+                    # 既残留又失去引用，_ensure_subscription 只查 _active_subscriptions，
+                    # 会判定为“未订阅”而再次 subscribe，撞上 topic 已存在的 ValueError。
+                    self._active_subscriptions.pop(topic, None)
+                    logger.debug(f"[{self.__class__.__name__}] cleanup_session: unsubscribed {topic}")
                 except Exception as exc:
                     logger.error(
-                        f"[{self.__class__.__name__}] cleanup_session: failed to deactivate {topic}: {exc}",
+                        f"[{self.__class__.__name__}] cleanup_session: failed to unsubscribe {topic}: {exc}",
                         exc_info=True,
                     )
 
@@ -186,16 +192,22 @@ class MessageBus:
         self._running = False
 
         async with self._subscription_lock:
-            for topic, subscription in list(self._active_subscriptions.items()):
+            # 只遍历 topic：subscription 在此已无他用，统一交给 unsubscribe
+            # 处理（其内部含 deactivate），日志文案与动作保持一致。
+            for topic in list(self._active_subscriptions.keys()):
                 try:
-                    await subscription.deactivate()
-                    logger.debug(f"[{self.__class__.__name__}] Deactivated subscription: {topic}")
+                    await self._mq.unsubscribe(topic)
+                    # 与 cleanup_session 一致：成功摘除后才丢弃本地引用，
+                    # 避免失败时 MQ 残留订阅失去引用、同 topic 无法再订阅。
+                    self._active_subscriptions.pop(topic, None)
+                    logger.debug(f"[{self.__class__.__name__}] stop: unsubscribed {topic}")
                 except Exception as e:
                     logger.error(
-                        f"[{self.__class__.__name__}] Failed to deactivate subscription '{topic}': {e}",
+                        f"[{self.__class__.__name__}] stop: failed to unsubscribe '{topic}': {e}",
                         exc_info=True
                     )
-            self._active_subscriptions.clear()
+            # 不再无条件 clear()：失败项已在上面保留引用，留待后续重试/排查；
+            # 成功项已逐项 pop。此处 clear 会把失败项也一并丢弃，抹掉失败痕迹。
 
         try:
             await self._mq.stop()

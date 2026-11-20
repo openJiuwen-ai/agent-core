@@ -15,7 +15,12 @@ from openjiuwen.agent_teams.reliability.remediation.local import LocalAutoRemedi
 from openjiuwen.agent_teams.reliability.remediation.policy import RemediationPolicy
 from openjiuwen.agent_teams.reliability.reporter import LocalAnomalyReporter
 from openjiuwen.agent_teams.reliability.signals import Signal, SignalKind
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCallInputs, ToolCallInputs
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    ModelCallInputs,
+    ToolCallInputs,
+    UserMessageInputs,
+)
 
 
 class _RecordingMonitor:
@@ -361,3 +366,65 @@ async def test_non_leader_rail_bind_local_sink_is_noop():
 
     rail = ReliabilityRail(monitor=_RecordingMonitor(), member_name="dev-1")
     rail.bind_local_sink(sink)  # no local reporter -> no-op, must not raise
+
+@pytest.mark.asyncio
+async def test_leader_rail_prepends_pending_route_notices_to_the_next_input():
+    """The leader's own route notices ride its next admitted input, oldest first."""
+    reporter = LocalAnomalyReporter()
+    box = ["[route notice] first", "[route notice] second"]
+
+    def _take():
+        taken = box[:]
+        box.clear()
+        return taken
+
+    reporter.bind_route_notice_source(_take)
+    rail = ReliabilityRail(monitor=_RecordingMonitor(), member_name="m1", local_reporter=reporter)
+    ctx = _ctx(UserMessageInputs(parts=["user message"]))
+
+    await rail.on_user_message(ctx)
+
+    assert ctx.inputs.parts == ["[route notice] first", "[route notice] second", "user message"]
+
+    second = _ctx(UserMessageInputs(parts=["next message"]))
+    await rail.on_user_message(second)
+    assert second.inputs.parts == ["next message"], "notices are told once"
+
+
+@pytest.mark.asyncio
+async def test_member_rail_without_reporter_leaves_inputs_alone():
+    """A member rail (no local reporter) never touches the admitted input."""
+    rail = ReliabilityRail(monitor=_RecordingMonitor(), member_name="m1")
+    ctx = _ctx(UserMessageInputs(parts=["user message"]))
+
+    await rail.on_user_message(ctx)
+
+    assert ctx.inputs.parts == ["user message"]
+
+
+@pytest.mark.asyncio
+async def test_leader_rail_without_bound_source_leaves_inputs_alone():
+    """A leader rail whose notice source is not bound yet leaves the input alone."""
+    rail = ReliabilityRail(monitor=_RecordingMonitor(), member_name="m1", local_reporter=LocalAnomalyReporter())
+    ctx = _ctx(UserMessageInputs(parts=["user message"]))
+
+    await rail.on_user_message(ctx)
+
+    assert ctx.inputs.parts == ["user message"]
+
+
+@pytest.mark.asyncio
+async def test_leader_rail_skips_a_non_list_parts_input():
+    """A malformed parts object never breaks the input or drains the notices."""
+    from types import SimpleNamespace
+
+    reporter = LocalAnomalyReporter()
+    box = ["[route notice] held"]
+    reporter.bind_route_notice_source(lambda: box[:])
+    rail = ReliabilityRail(monitor=_RecordingMonitor(), member_name="team-leader", local_reporter=reporter)
+    ctx = _ctx(ModelCallInputs())
+    ctx.inputs = SimpleNamespace(parts="not-a-list")
+
+    await rail.on_user_message(ctx)
+
+    assert box, "the notice stays pending for a well-formed later input"

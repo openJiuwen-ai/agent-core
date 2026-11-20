@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, Literal
@@ -244,6 +245,11 @@ def load_agent_template_package(manifest_path: str | Path) -> AgentTemplateSpec:
     )
 
 
+async def aload_agent_template_package(manifest_path: str | Path) -> AgentTemplateSpec:
+    """Async ``load_agent_template_package``, run in a worker thread."""
+    return await asyncio.to_thread(load_agent_template_package, manifest_path)
+
+
 def _load_plugin_manifest_json(manifest: Path) -> PluginSpec:
     payload = _read_json_mapping(manifest)
     package_type = payload.get("package_type")
@@ -356,7 +362,9 @@ def _first_display_description(value: Any) -> str:
 
 
 def _read_json_mapping(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    # Package manifests are edited on Windows too; tolerate the UTF-8 BOM that
+    # Notepad/PowerShell add instead of failing with JSONDecodeError.
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(payload, dict):
         raise ValueError(f"Manifest must contain a mapping: {path}")
     return payload
@@ -1115,6 +1123,7 @@ def _module_to_package_file(module_name: str, package_dir: Path) -> str | None:
 
 
 __all__ = [
+    "aload_agent_template_package",
     "find_agent_template_manifest",
     "find_plugin_manifest",
     "load_agent_template_package",

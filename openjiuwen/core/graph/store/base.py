@@ -37,6 +37,14 @@ class GraphState:
     pending_node: Dict[str, PendingNode]
     node_version: Dict[str, int]
 
+    def is_resumable(self) -> bool:
+        """有未完成节点/待发消息或 channel 值时引擎 init 才走恢复分支而非全新起跑。
+
+        恢复判定必须与 PregelLoop._is_resume 同口径，两处经本方法共享，
+        避免口径漂移。
+        """
+        return bool(self.pending_node) or bool(self.pending_buffer) or bool(self.channel_values)
+
 
 class Store(ABC):
     @abstractmethod

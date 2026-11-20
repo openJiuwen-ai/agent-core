@@ -435,7 +435,7 @@ async def test_task_tool_interruption_preserves_evidence_and_stops_producer(monk
         payload = output.data["browser_result"]
         reason = (
             "task_deadline_exhausted" if interruption in {"deadline", "outer_deadline"}
-            else "model_provider_unavailable"
+            else "model_timeout"  # This fixture proves a timeout, not its upstream cause.
         )
         assert payload["terminal_reason"] == reason
         if interruption == "outer_deadline":

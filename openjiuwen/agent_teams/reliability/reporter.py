@@ -81,10 +81,21 @@ class LocalAnomalyReporter:
 
     def __init__(self) -> None:
         self._sink: Callable[[Anomaly], Awaitable[None]] | None = None
+        self._route_notice_source: Callable[[], list[str]] | None = None
 
     def bind(self, sink: Callable[[Anomaly], Awaitable[None]]) -> None:
         """Bind the local sink that routes anomalies to the handler."""
         self._sink = sink
+
+    def bind_route_notice_source(self, source: Callable[[], list[str]]) -> None:
+        """Bind the drain for route notices waiting for the leader's next input."""
+        self._route_notice_source = source
+
+    def take_route_notices(self) -> list[str]:
+        """Return route notices waiting for the leader's next input, clearing them."""
+        if self._route_notice_source is None:
+            return []
+        return self._route_notice_source() or []
 
     async def report(self, anomaly: Anomaly) -> None:
         """Route the anomaly to the bound local sink, if any."""

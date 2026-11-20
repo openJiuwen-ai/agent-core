@@ -24,6 +24,7 @@ from opentelemetry.sdk.trace.export import SpanExportResult
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from openjiuwen.extensions.observability.config import ObservabilityConfig
+from openjiuwen.extensions.observability import file_exporter as file_exporter_module
 from openjiuwen.extensions.observability.file_exporter import TraceFileExporter
 
 
@@ -83,6 +84,47 @@ def test_export_writes_immediately(tmp_path: Path) -> None:
     spans = _read_spans(f)
     assert len(spans) == 1
     assert spans[0]["name"] == "llm.call"
+
+
+def test_empty_batch_neither_creates_a_file_nor_touches_mtime(tmp_path: Path) -> None:
+    """An export with no encodable span leaves the filesystem untouched.
+
+    Retention measures a file's age by mtime, so an empty batch must not
+    refresh it (that would reset the retention clock), and a day with only
+    empty batches must not grow stub files.
+    """
+    exporter = TraceFileExporter(root_dir=str(tmp_path), retention_days=7)
+    empty_day = _day_file(tmp_path)
+    empty_day.write_text("", encoding="utf-8")
+    old_time = time.time() - 2 * 86400
+    os.utime(empty_day, (old_time, old_time))
+
+    assert exporter.export([]) == SpanExportResult.SUCCESS
+    assert not empty_day.stat().st_size, "no stub content written"
+    assert empty_day.stat().st_mtime == old_time, "retention clock not refreshed"
+
+    # A batch whose every span lacks an end time is empty too.
+    provider = TracerProvider()
+    tracer = provider.get_tracer("empty-batch")
+    unfinished = tracer.start_span("never.ended")
+    assert exporter.export([unfinished]) == SpanExportResult.SUCCESS
+    assert empty_day.stat().st_mtime == old_time, "still untouched with only unended spans"
+    provider.shutdown()
+
+
+def test_first_encodable_line_opens_the_file(tmp_path: Path) -> None:
+    """A batch with one unended span before a good span still writes the good one."""
+    exporter = TraceFileExporter(root_dir=str(tmp_path), retention_days=7)
+    provider = TracerProvider()
+    tracer = provider.get_tracer("mixed-batch")
+    unfinished = tracer.start_span("never.ended")
+    good = _make_span("good.span", session_id="abc")
+
+    assert exporter.export([unfinished, good]) == SpanExportResult.SUCCESS
+
+    spans = _read_spans(_day_file(tmp_path))
+    assert [span["name"] for span in spans] == ["good.span"]
+    provider.shutdown()
 
 
 def test_each_line_is_valid_otlp_json_with_hex_ids(tmp_path: Path) -> None:
@@ -189,6 +231,36 @@ def test_shutdown_is_noop_does_not_lose_data(tmp_path: Path) -> None:
     exporter.export([span])
     exporter.shutdown()
     assert len(_read_spans(_day_file(tmp_path))) == 1
+
+
+def test_failed_encode_does_not_discard_the_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One span that fails to encode keeps its batch-mates on disk.
+
+    Lines are encoded and written one at a time, so an encode failure loses
+    only the span that failed -- not the batch it travelled with.
+    """
+    exporter = TraceFileExporter(root_dir=str(tmp_path), retention_days=7)
+    good_before = _make_span("good.before", session_id="abc")
+    bad = _make_span("bad.span", session_id="abc")
+    good_after = _make_span("good.after", session_id="abc")
+
+    original_encode = file_exporter_module._encode_span_line
+
+    def _fail_on_bad(span: ReadableSpan) -> str:
+        if getattr(span, "name", "") == "bad.span":
+            raise RuntimeError("encode boom")
+        return original_encode(span)
+
+    monkeypatch.setattr(file_exporter_module, "_encode_span_line", _fail_on_bad)
+
+    result = exporter.export([good_before, bad, good_after])
+
+    assert result == SpanExportResult.SUCCESS
+    names = [span["name"] for span in _read_spans(_day_file(tmp_path))]
+    assert names == ["good.before", "good.after"]
 
 
 def test_cleanup_deletes_old_trace_files(tmp_path: Path) -> None:

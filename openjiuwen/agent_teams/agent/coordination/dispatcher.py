@@ -46,6 +46,7 @@ from openjiuwen.agent_teams.agent.coordination.handlers import (
 )
 from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.group_chat.message_handler import GroupMessageHandler
+from openjiuwen.agent_teams.interaction.payload import DeliverResult
 from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -108,13 +109,25 @@ class AgentRoundController(Protocol):
         """Guarantee that content reaches the DeepAgent regardless of state."""
         ...
 
+    async def announce_task_revisions(self) -> None:
+        """Tell the member now about edits to its tasks it has not been told of (F_129).
+
+        A prompt, not a message: the member's task notice tracker decides what
+        (if anything) to say, so this is a no-op when it is up to date.
+        """
+        ...
+
     async def resume_interrupt(
         self,
         user_input: Any,
         *,
         run_context: RunContext | None = None,
-    ) -> None:
-        """Resume a pending HITL interrupt with structured input."""
+    ) -> DeliverResult:
+        """Return whether a structured interrupt answer was actually admitted."""
+        ...
+
+    async def resume_plan_interrupt(self, user_input: Any) -> None:
+        """Deliver an internal plan response using its existing runtime contract."""
         ...
 
 

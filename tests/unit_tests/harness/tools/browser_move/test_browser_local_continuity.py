@@ -378,6 +378,7 @@ async def test_llm_selected_result_tab_is_retained_in_the_next_jev_window_withou
 async def test_acknowledged_object_action_is_not_repeated_by_jev_but_read_and_handoff_remain(source):
     policy, llm, client, runtime, context, captured = setup_policy(goal="Add the selected item")
     page = runtime.ensure_page_state()
+    page.get_target(page.export_decision_targets()[0]["target_id"]).kind = ""  # Unknown business effect.
     page.decision_snapshot["page_guard"] = {"document": "doc-a", "history_length": 1}
     state = context.get_session_ref().get_state("")
     control = page.export_decision_targets()[0]

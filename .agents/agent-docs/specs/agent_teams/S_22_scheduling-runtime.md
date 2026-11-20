@@ -1,0 +1,275 @@
+---
+title: Scheduling Runtime（调度模式运行时）
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_22_scheduling-runtime
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: chengshuo5@huawei.com
+---
+
+# Scheduling Runtime（调度模式运行时）
+
+`agent_teams.agent.scheduling` 子系统的设计规约：leader 侧调度决策引擎 + 评审投票。本文描述"系统当前是什么样"。
+
+## 元信息
+
+| 项 | 值 |
+|---|---|
+| 类型 | spec |
+| 关联模块 | `openjiuwen/agent_teams/agent/scheduling/` |
+| 最近一次修订日期 | 2026-10-28 |
+| 关联 feature | `F_62_scheduled-dispatch-runtime-and-review-voting.md`、`F_63_scheduler-message-templating-and-delivery-render.md`（交接消息的两阶段渲染）、`F_65_runtime-idle-clock-stall-nudge.md`（自主模式改用 idle 时钟后，本模式 stale 计时的钉住策略与遗留）、`F_73_reviewer-feedback-skill-evolution-boundaries.md`（失败 feedback 与团队终态的可选宿主 callback）、`F_118_task-scoped-member-lifetime.md`（第三个幂等扫描：任务内联成员的退场请求；交接消息的上下游简述）、`F_119_scheduled-completion-handoff-via-note.md`（完成交接改走任务行 `summary` / `note`、leader 摘要带完成摘要、验收通过延迟告知）、`F_122_framework-bootstrapped-generic-team.md`（框架建队：第三个激活来源）、`F_128_scheduled-member-subtasks.md`（成员子任务：父任务恢复交接与开工优先、子任务不发 leader 终态摘要）；bugfix `B_06_scheduled-reassign-active-task-handoff-gap.md`（第四个幂等扫描：改派活跃任务后给新 owner 补发开工交接）、`B_09_all-done-prompt-stalls-remaining-work.md`（收尾文案不再暗示工作已结束；看板重新出现未终结任务时复位 `_all_done_announced`）、`F_129_task-revision-and-staleness.md`（第五个幂等扫描：把修改后的最新内容推给没看到的执行者、挂起父任务的子任务复核；调度模式编辑不再走事件 steer）、`B_10_task-assigned-to-retired-member-stalls.md`（开工 / 交接补发扫描跳过已退役负责人；任务级负责人的搁浅任务升级 leader） |
+
+## 范围 / 边界
+
+**这个规约管：**
+
+- `TeamScheduler` 的激活条件、触发集、双幂等扫描（开工 / 验票）与内存记账语义。
+- dispatch_mode 作为静态 spec 配置的消费方式（调度器构造/激活、verify 裁决策略、handler 类装配）。
+- 评审投票的数据面（票表、`review_round`）与判定面（`verdict.judge`、`settle_review`）分工。
+- `SchedulerHost` 窄协议与 kernel 接线（组合 wake、`SCHEDULER_SCAN` 回声、激活/失活时机）。
+- 成员交接消息的两阶段渲染契约（模板 key / 占位符标准 / 命名空间白名单 / 展开点 / 降级链）。
+- 失败轮次 reviewer feedback 与团队终态向宿主发布的可选 callback 契约。
+
+**这个规约不管：**
+
+- 事件总线、粗筛与 6+1 handler——归 `S_03_coordination-protocol`。
+- 任务状态机与票表字段布局——归 `S_12_schema-data-models`（本文只引用）。
+- 工具形态与权限集——归 `S_08_team-tools-contract`。
+
+## 不变量
+
+1. **调度器只在 `spec.dispatch_mode == "scheduled"` 的 leader kernel 上存在**：`CoordinationKernel.setup` 构造（休眠态）；其余 kernel（teammate、autonomous leader）的 `scheduler` 恒为 None。
+2. **激活条件 = team 已建成**。两个激活点：`kernel.notify_team_built()`（`build_team` 成功回调内，先于任何 teammate spawn / create_task——`build_team` 工具调用与 `bootstrap_mode="framework"` 下 `kernel.start()` 的框架建队共用这条回调，见 F_122）与 `kernel.start()`（team 行已存在——warm resume / 冷恢复）。`bootstrap_mode="framework"` 的 leader `start()` 返回时团队行必然存在（新建或已存在）、调度器必然已激活。`pause()` / `stop()` 即 `deactivate()`。
+3. **dispatch_mode 是静态 spec 配置**（F_62 评审定稿）：`TeamAgentSpec.dispatch_mode` 在构建期决定一切——rails/工具形态/提示词按模式装配、每套一份互不混写；`TeamSpec.dispatch_mode` 镜像它随 spawn 载荷到达成员进程；`build_team` **不选择协调模式**（`team_info.dispatch_mode` 列只是记录，spec 是运行时真相）；运行期没有任何模式切换路径。
+4. **调度器不理解事件，只理解看板**：任何触发（`task_*` / `member_*` transport 事件、`POLL_TASK`、`SCHEDULER_SCAN`、激活）都跑同一组五个幂等扫描（开工 / 交接补发 / 验票 / 退场 / 修改推送）到有界不动点（`_MAX_SCAN_PASSES`）。恢复没有独立路径——激活扫描就是恢复。成员拆出子任务后父任务的"继续"同样没有独立路径（F_128）：子任务全部终态 → 依赖刷新把父任务放回 `PENDING` → 开工扫描照常 `start_task`。事件仅承担两个扫描推不出的职责：终态摘要与 `TASK_LIST_DRAINED` 收尾（事件只发一次）。
+5. **交接 = leader 身份邮箱消息，投递即启动**：`_send_as_leader` 先写邮箱行（持久）再 `host.auto_start_member`（`UNSTARTED→STARTING` 拉起、`ERROR→RESTARTING` 复活、`DORMANT→RESTARTING` 唤醒，三条都是 CAS、幂等；给休眠成员派新任务即把它叫醒，F_118）。成员在线与否不是开工前置条件；成员侧零新代码（走既有 `MessageHandler`）。行里存的是**投递载荷不是文案**（`content=""` + `meta`），文案在投递时按模板渲染——见「消息面」段与 `S_12` 的 meta 三铁律。
+6. **`SchedulerHost.deliver_input` 只准注入 leader 自身**（终态摘要 / 升级 / 收尾）。对成员的输入永远走邮箱。**终态摘要只发顶层任务**（`parent_task_id` 为空）：成员的子任务（F_128）结果经父任务的恢复交接回到父任务执行者，leader 只在父任务完成时听到一次；子任务仍计入全部完成的判定。
+7. **开工规则**：成员无活跃任务（`{PLANNING, IN_PROGRESS, IN_REVIEW}`）时，取其名下 `PENDING(assignee)` 任务 `start_task`（DAO CAS；plan_mode 成员落 `PLANNING`）：**`resume_pending` 为真的任务（等着恢复的父任务，F_128）排在前面**，其余按 `updated_at` 最早——父任务挂起期间成员可能接了别的活，做了一半的任务不该排在新任务后面。标记就在候选行上，不额外查询；开工前读出、交给交接选模板，`start_task` 在同一条 CAS 里把它清掉。待恢复的任务跳过计划闸直落 `IN_PROGRESS`（判断在 `TeamTaskManager.start_task`）。并发/重复触发由 CAS 与一活跃探针消歧。
+8. **验票规则**：每轮 `(task_id, review_round)` 送审派发一次（内存去重，崩溃后至多重发一轮）；`verdict.judge` 三值判定——`pass ≥ ceil(threshold×n)` 过、fail 票使配额不可达即败、否则未定；settle 经 `task_manager.settle_review` 的 `IN_REVIEW` 源态 CAS，单判定者 + CAS 保证不双结算。
+9. **升级规则**：败局且 `review_round ≥ max_review_rounds`（任务列，NULL → `spec.default_max_review_rounds`）→ 不再自动打回，任务**留 `IN_REVIEW`**，升级注入 leader；未定且本轮开启超 `spec.review_stall_timeout` → 停摆升级（附已投/未投名单）。两类升级共用 `(task_id, review_round)` 去重；升级后决定性迟票仍可正常 settle。软催办（600s，包内常量 `_REVIEW_NUDGE_SECONDS`）只发给未投票 reviewer、每轮每窗一次。
+10. **投票判定策略在调度器，票据事实在 DB**：`verify_task`（scheduled 团队）只追加票行 + 发 `TASK_REVIEW_VOTE`，不翻转状态；autonomous 团队维持首裁即决。工具描述随语义分离（desc_key：`verify_task` / `verify_task_scheduled`）。策略更换 = 替换 `verdict.judge`，不碰票表与状态机。
+11. **leader 自发事件经 `SCHEDULER_SCAN` 回声可见**：`kernel._filter_self` 丢弃 self 事件时，若调度器激活且事件是 `task_*`，改投 `InnerEventType.SCHEDULER_SCAN`。coordination 无 handler 监听该 inner 事件；调度器视其为纯扫描提示。
+12. **异常语义**：`TeamScheduler.on_event` 吞普通异常（log + 下次触发重试幂等扫描），绝不让 bus loop 挂掉——与 `AsyncCallbackFramework.trigger` 的 swallow 语义对齐。
+13. **内存记账不持久化**：送审去重 / 催办节流 / 升级去重 / 摘要去重 / 交接已知对（`_handoff_known`）/ 已推送版本（`_revision_pushed`）/ 按策略退场的成员（`_policy_retired`）/ 搁浅已升级对（`_stranded_escalated`）都是进程内状态；leader 重启最坏重发一次送审或升级、每个活跃任务多读一次邮箱，按策略退场者名下的搁浅任务不再提醒。看板真相只在 DB，交接真相在邮箱。
+14. **各分发模式拥有自己的 task-board / stale handler 类，选择只发生在装配点**：
+    `ScheduledTaskBoardHandler` / `ScheduledStaleTaskHandler` 是调度模式的 task-board / stale
+    handler（verify 闸三事件与 `TASK_REVIEW_VOTE` 一律路由到 resume_polls-only 的
+    `on_task_board_event`——交接是调度器的 leader 身份邮箱消息，事件自反应会双投递；poll tick
+    只扫自己的 stale 活跃任务作漏投递兜底，无 leader stale-pending 自催——排队
+    `PENDING(assignee)` 是常态）；自主模式类保持原实现。装配规则：`EventDispatcher` 构造期
+    按静态 spec 模式查字面量类表装配（未知值 KeyError），每个角色相同、运行期不变。
+    **handler 方法内禁止出现 dispatch_mode 分支。**
+15. **调度模式的 stale 计时仍读 `task.updated_at`**（F_65 范围外）：自主模式已改用运行时
+    idle 时钟（`S_03` 不变量 20），调度模式则由 `ScheduledStaleTaskHandler` **覆写**
+    `_check_stale_claimed_tasks` / `_self_nudge_stale_claim` 钉住 pre-F_65 实现（活跃集含
+    `IN_REVIEW`、阈值 `_STALE_CLAIM_SECONDS`=10min），使自主基类切换不波及本模式。代价是
+    同款缺陷仍在：成员 idle 跨长 pause 后 resume，其活跃任务会被 `now - updated_at` 误判为
+    stale。迁移到 idle 时钟是 `F_65_runtime-idle-clock-stall-nudge.md` 记录的已知遗留。
+16. **review feedback callback 是可选旁路，不是调度判定的一部分**（F_73）：scheduler 只从
+    host harness 查找已声明式挂载且启用该能力的 `TeamSkillEvolutionRail`；每个失败 settle 后按
+    `(task_id, review_round)` 至多后台调用一次 `rail.handle_review_feedback(...)`，异常只记录、不改变
+    任务状态。团队看板全部终态时，scheduler 先等待当前 callback 收敛，再至多调用一次
+    `rail.finalize_review_feedback(...)`。scheduler 不读取轨迹、不归因 Skill、不调用 LLM、不写演进
+    存储，也不负责 Rail 的构造和审批传输。
+
+17. **退场扫描：任务内联成员的退场由调度器请求、成员自落**（F_118）。`_reconcile_retirements`
+    与开工 / 验票并列，候选 = `TeamBackend.list_retirable_members()`（`options.lifetime` 非空且
+    status == `READY`——**不含 `BUSY`**：成员在 round 中途被请求退场，它正在说的话的回复会落在
+    一个即将自落的成员身上而无人唤醒；`READY` 的状态事件在 round 结束时本来就会再触发扫描），
+    三条件同时成立才调**普通** `shutdown_member`：
+    (a) 名下无非终态任务（`open_task_counts_by_assignee`，`IN_REVIEW` / `PENDING` / `BLOCKED` 都算
+    开放——提交后的 author 要留着返工；验收通过不再唤醒 author，见下文"验收通过的延迟告知"）；(b) 本成员无未读消息
+    （`members_with_unread`，堵"刚被唤醒、`READY` 已写、消息还没读"的窗口——否则机制 18 会在
+    无 round 在飞时直接落终态，消息永远没人读）；(c) 已请求 / 已退场 / `UNSTARTED` /
+    `RESTARTING` 的不在候选集里。调度器**不直写** `DORMANT`、不拆 handle：请求与自落两阶段
+    由 S_03 机制 18 承接，终态由成员行的 `lifetime` 经 `retire_target` 决定；休眠类退场
+    `shutdown_member` **不发告别通知**（它只会躺着未读，且会让机制 18 的休眠延迟永远成立），
+    请求与自落之间到达的真实消息由机制 18 的「休眠例外」先投递再自落。被唤醒的成员再次满足
+    三条件即再次休眠，没有"醒了就常驻"的特例。
+
+18. **交接补发扫描：活跃任务的当前 owner 必须持有开工交接**（B_06）。开工扫描（不变量 7）只在
+    任务离开 `PENDING` 的那一刻发交接；leader `update_task(assignee=...)` 改派一个 `PLANNING` /
+    `IN_PROGRESS` 任务时状态原地保留（`TASK_REASSIGNABLE_STATUSES`），不再经过那一刻——新 owner
+    只收到瞬时 `TASK_CLAIMED`，runtime 未起（`UNSTARTED` / `DORMANT`）则无人接收，且不变量 14 的
+    调度类 handler 没有首启板巡视可以补课。`_reconcile_handoffs` 与开工并列：对每个
+    `PLANNING` / `IN_PROGRESS` 且有 assignee 的任务，查 owner 邮箱里是否已有 leader 身份、
+    `meta.template ∈ {scheduler_task_start, scheduler_task_start_plan, scheduler_task_resume}` 且 `refs.task == task_id` 的行
+    （`render.is_task_start_meta`；已读未读皆算——读过即已投递，未读则下次 sweep 必投），没有就
+    `_send_as_leader(owner, meta_task_start(task))`——与开工扫描逐字同一条交接，同样懒启动 owner。
+    幂等由邮箱行本身保证，进程内 `_handoff_known`（`(task_id, owner)`）只是省查询；
+    `_send_as_leader` 返回邮箱行是否落下，落下才记账，失败留给下次扫描重试。调度器仍不消费
+    "改派"事件：`TASK_REVOKED` / `TASK_CLAIMED` 的 self 回声只是一次扫描提示（不变量 11）。
+
+19. **修改推送扫描：执行者一定能拿到任务的最新版本**（F_129）。任务每次改标题 / 内容 `revision` 加一，
+    `observed_revision` 是当前执行者**确实被展示过**的版本（邮件投递渲染时推进，见 `S_12`）。
+    `_reconcile_revisions` 与其余扫描并列，只读一次窄投影 `unseen_revisions()`（有执行者、未终态、
+    `revision > observed_revision`）：`PLANNING` / `IN_PROGRESS` → `_send_as_leader(owner, meta_task_revised)`
+    推送最新完整内容；`BLOCKED` 且 `resume_pending`（挂起中的父任务）→ `meta_subtask_review` 请它复核过期子任务；
+    其余（`PENDING` / 普通 `BLOCKED`）不发——开工交接投递时本来就渲染最新版本。投递即推进 `observed_revision`，
+    条件随之消失，连改多次只发一封、内容是最终版本。进程内 `_revision_pushed`（`(task_id, revision)`）只防投递前
+    重发；开工 / 恢复交接发出时同样记账，避免同一扫描里再补一封修改推送。邮件持久、懒启动收件人，离线成员与
+    整队重启都由既有机制覆盖。调度器不消费 `TASK_UPDATED` 本身：编辑的 self 回声只是一次扫描提示。
+
+20. **已退役负责人的任务不开工、不补发；意外搁浅的交给 leader**（B_10）。`SHUTDOWN` 是永久退场，任何拉起
+    路径都不复活它（`startup_member` 只认 `UNSTARTED`，`recover_member` 只认 `ERROR` / `DORMANT`），负责人
+    也就没有运行时去跑自己的 stale 自催（不变量 14 的调度类 handler 只在成员自己身上）。每次扫描在多遍
+    循环之前取一次 `TeamBackend.list_retired_members()`（`SHUTDOWN` 成员名字的窄投影，DAO
+    `list_shutdown_members`），开工扫描与交接补发扫描在各自遍历到这些负责人的任务时经
+    `_skip_retired_owner` 跳过：`PENDING` 任务保持 `PENDING`（改派后开工扫描照常接手），活跃任务不补发；
+    交接补发扫描先判退役、再查 `_handoff_known`，所以交接已落邮箱后才退役的负责人同样被接住。
+    是否告诉 leader 看是谁让负责人离开的：**调度器按策略退场**的（`_reconcile_retirements` 对
+    `lifetime="shutdown"` 成员的请求成功时记进进程内 `_policy_retired`）只会在名下无未结束任务时被回收
+    （不变量 17），它名下再出现未结束任务只可能是离开之后才交给它的，按 `(task_id, owner)` 向 leader
+    `deliver_input` 一次 `scheduler.leader_escalation_retired_owner`；**leader 自己 `shutdown_member`** 的
+    （常驻成员，或被 leader 主动 / force 关停的任务级成员）遗留任务按该工具的约定归 leader 处置，只跳过不升级——
+    临时团队收尾时先关停成员再 `clean_team` 也不会被提醒打扰。退场原因不从 `lifetime` 推断：leader 也可能关停
+    任务级成员。`_policy_retired` 不持久化，leader 重启后这些成员名下的搁浅任务只跳过、不再提醒（源头校验已挡住
+    绝大多数情况）；`_stranded_escalated` 每次扫描结束时只保留本次仍遇到的搁浅对，改派或结束的任务自然出局。`IN_REVIEW` 不在两个扫描的遍历范围内——验收由 reviewer 推进，返工
+    回到 `IN_PROGRESS` 后再接住。`DORMANT` 不算退役：交接经 `auto_start_member` 唤醒它（不变量 17）。源头
+    另有一道闸：`create_task` / `update_task` 的指派校验拒绝 `SHUTDOWN` 与正在退出的 `SHUTDOWN_REQUESTED`
+    负责人（`S_08` 不变量 23）。
+
+## 接口契约
+
+```python
+@runtime_checkable
+class SchedulerHost(Protocol):
+    async def deliver_input(self, content: Any, *, use_steer: bool = True) -> None:
+        """Inject content into the leader's own input stream."""
+        ...
+
+    async def auto_start_member(self, member_name: str) -> bool:
+        """Best-effort start of one UNSTARTED member runtime."""
+        ...
+
+
+class TeamScheduler:
+    def __init__(self, host: SchedulerHost, *, blueprint: TeamAgentBlueprint, infra: TeamInfra) -> None: ...
+
+    @property
+    def is_active(self) -> bool: ...
+
+    async def activate(self) -> None: ...      # 幂等；激活即恢复扫描
+    def deactivate(self) -> None: ...
+    async def on_event(self, event: CoordinationEvent) -> None: ...
+```
+
+可选 Rail 入口使用 duck-typed 契约，不进入 `SchedulerHost`：
+
+```python
+rail = next(
+    candidate
+    for candidate in host.harness.find_rails(TeamSkillEvolutionRail)
+    if candidate.review_feedback_evolution_enabled
+)
+
+await rail.handle_review_feedback({
+    "team_id": str,
+    "session_id": str,
+    "task_id": str,
+    "review_round": int,
+    "task_title": str,
+    "task_content": str,
+    "assignee": str,
+    "feedback": str,
+})
+
+await rail.finalize_review_feedback({
+    "team_id": str,
+    "session_id": str,
+})
+```
+
+未挂载或未启用对应 Rail 时等价于未启用。task callback 由 scheduler 作为后台任务执行；终态入口
+等待已启动 callback 后执行。callback 不得依赖 scheduler 重试提供 exactly-once
+语义：去重状态只在当前 scheduler 进程内有效。
+
+kernel 侧：
+
+- `CoordinationKernel.scheduler` 属性暴露实例（测试/调试）。
+- `_build_wake_callback()`：有调度器时组合 "coordination dispatch → scheduler.on_event"，否则裸 dispatch。
+- `notify_team_built()`：build_team 成功回调（`TeamAgent._mark_team_built`）→ 存在调度器则 `activate()`。
+
+配置消费（全部只在 leader 侧，不跨进程镜像）：`TeamAgentSpec.verify_vote_threshold`（默认 2/3，(0,1]）、`default_max_review_rounds`（默认 3，≥1）、`review_stall_timeout`（默认 1800s，>0）、`enable_task_verification`（提示词驱动，`CapabilityOverrides` 可在 build_team 覆盖；该参数只在 scheduled 下向模型暴露——本节这些配置都只有 scheduled 才有消费者，见 [[F_76]] 与 `S_08` 不变量 21b）。
+
+## 数据结构
+
+- 票表 / `review_round` / `max_review_rounds` / `team_info` 能力列：见 `S_12`。
+- 调度器内存记账：`_review_dispatched: set[(task_id, round)]`、`_renudged_at: dict[(task_id, round), ms]`、`_escalated: set[(task_id, round)]`、`_digested_tasks: set[task_id]`、`_all_done_announced: bool`、`_review_feedback_dispatched: set[(task_id, round)]`、`_review_feedback_tasks: set[asyncio.Task]`、`_team_review_feedback_dispatched: bool`。其中团队终态 callback 标记在 `activate()` 复位；失败轮次去重随 scheduler 实例生命周期保留。`_all_done_announced` 保证每次看板清空只收尾一次，而不是整个生命周期只收尾一次（B_09）：除 `activate()` 外，每次扫描开头在标志为真时读一次看板，有非 `COMPLETED` / `CANCELLED` 的任务就复位，leader 在收尾之后建的任务全部完成时会再收尾一次。`TASK_LIST_DRAINED` 收尾前同样复查看板：事件晚到、看板已有未终结任务时不发收尾，也不触发团队终态 review feedback。两条收尾入口（终态摘要、清空事件）与复位都用 `TeamTaskManager.board_counts()` / `has_open_tasks()`（DAO `count_tasks_terminality` 的同一聚合 COUNT）判定看板。成员子任务（F_128）不会触发复位：成员只能在持有 `IN_PROGRESS` 父任务时建子任务，父任务未终态则看板不可能已清空。
+
+## 消息面
+
+两类收件人，两套机制——**成员走模板（投递时渲染），leader 走 i18n 短串（直投）**。
+
+### 成员交接：两阶段渲染（F_63）
+
+调度器**不组装文案**，只组装投递载荷：`render.meta_*` 产出
+`{"template", "refs", "params"}`，`_send_as_leader` 以 `content=""` + `meta=...` 落邮箱行。
+文案在**投递时刻**由 `message_template.expand_message` 渲染——按收件人语言加载
+`prompts/<lang>/<template>.md`，用 `refs` 指向的**当前**任务/成员行填充占位符。
+
+| 场景 | 收件人 | template key |
+|---|---|---|
+| 开工（build / plan 闸）；改派活跃任务后给新 owner 的补发交接是同一条（不变量 18） | assignee | `scheduler_task_start` / `scheduler_task_start_plan` |
+| 恢复（父任务的子任务全部终态后再次开工，F_128；开工扫描按候选行开工前的 `resume_pending` 选择，交接补发扫描一律用开工模板，上游简述即子任务结果） | 挂起它的那个 assignee | `scheduler_task_resume` |
+| 修改推送（执行中任务被修改、执行者没看到，F_129；修改说明 + 最新完整内容 + 长内容的差异） | 当前 assignee | `scheduler_task_revised` |
+| 子任务复核（挂起中的父任务被修改，F_129；修改说明 + 最新内容 + 子任务列表，过期标出） | 父任务当前 assignee | `scheduler_subtask_review` |
+| 送审派发 / 催办 | 每个 reviewer / 未投票 reviewer | `scheduler_review_request` / `scheduler_review_renudge` |
+| 打回返工（`params`: 聚合 fail feedback + 解析后轮数上限） | author | `scheduler_rework` |
+
+**占位符标准** `{{namespace.field}}`：单遍 `re.sub` 替换，**填充值永不二次扫描**（任务正文
+是 LLM 写的，防占位符注入）；命名空间**字段白名单**（无 getattr 直通，新增 DB 列不会
+无意泄进提示词）；未知命名空间/字段渲染为 `<missing:ns.field>`（模板 bug，不炸投递）。
+
+| 命名空间 | 数据源 | 时机 | 白名单 |
+|---|---|---|---|
+| `task.*` | 任务行（`refs.task`） | 投递时现查 | `task_id` `title` `content` `status` `assignee` `reviewer` `review_round` `max_review_rounds` `revision` + F_129 三个计算字段（只在模板用到时才计算，各自渲染整段含标题、无内容时为空串，渲染后折叠多余空行）：`change_notes`（`observed_revision < r ≤ revision` 区间内的修改说明，按版本排序）、`revision_diff`（正文或基线快照不短于 `REVISION_DIFF_MIN_CHARS` 时，以 `observed_revision` 版本快照为基线的 `unified_diff`，经可选 `revision_snapshot_getter` 读快照）、`subtask_brief`（每个子任务一行 `id · title · assignee · status`，相对父任务过期的标出，经可选 `subtasks_getter`）；以及两个计算字段 `upstream_brief` / `downstream_brief`（F_118 / D7、F_119：经可选 `task_links_getter` 多查一次依赖表与相关任务行，只取**直接依赖**（一跳）；上游每条 `task_id · title · assignee · <完成摘要>`（`message_template.completion_summary`：优先 `summary`，否则 `note` 首个非空行，压单行、渲染截断到 `SUMMARY_RENDER_LIMIT`），非空时末尾追加一行 `view_task(action='note', task_id=...)` 取全文提示；下游每条 `task_id · title · assignee`，空集渲染为语言固定短句"无"/"none"；两个投递点共用 `message_template.task_links` 绑定该 getter，缺 getter 时渲染为空集短句） |
+| `member.*` | 成员行（`refs.member`） | 投递时现查 | `member_name` `display_name` `desc` |
+| `param.*` | `meta.params` | 发送时定格 | 键即字段（标量）；只放表答不出的瞬时值 |
+
+**降级链**：模板缺失 / `refs` 指向的行已删 / meta 解析失败 → 投递点**从 meta 现场合成**
+一行 fallback（template key + task_id，成员 `view_task` 兜底），不预存副本；meta 整体缺失 =
+普通消息，原样投 `content`。
+
+`summary` / `note` 是任务行列、**不进事件**：`TASK_COMPLETED` / `TASK_SUBMITTED_FOR_REVIEW` 仍只是唤醒信号，
+正文从行里现查——与"能表查的一律现查"同一原则。
+
+**展开点共四处**（缺一处即漏投空消息）。渲染了 `task.content` 的展开回报 `ExpandedMessage.shown_revision`，进程内邮箱投递（`handlers/message.py`）与外部拉取（`external/client.py`）据此为执行者记下已看到的版本（F_129；外部拉取只在标记已读的读取时记录，`mark_read=False` 的预览不算）：`handlers/message.py` 的
+`_format_message`（进程内邮箱）与 `_notify_human_agent_inbound`（HITT 人类成员回调——
+人类可以是 assignee/reviewer）、`_bridge_deliverable_for`（bridge relay 必须转发**展开后**
+文本，远程执行者无 DB）、`external/format.py` + `client.read_inbox`（外部成员 pull）。
+模板消息**不挂 `reply-hint` note**——框架指令的响应是调工具，不是回信。
+
+### leader 直投：i18n `scheduler.*`
+
+| 场景 | 收件人 | key |
+|---|---|---|
+| 终态摘要 / 轮数升级 / 停摆升级 / 收尾 | leader（`deliver_input`，非 steer） | `scheduler.leader_task_done` / `scheduler.leader_escalation_rounds` / `scheduler.leader_escalation_stall` / `scheduler.leader_all_done` |
+
+leader 摘要不经邮箱 → 无 meta 通道、无投递时展开，维持 i18n 运行时短串。终态摘要
+（`render.render_leader_task_done(task, verified=)`）由多行组成：标题行（`scheduler.leader_task_done`）、
+完成摘要行（`scheduler.leader_task_done_summary`，摘要为空时省略）、详情提示行
+（`scheduler.leader_task_done_note_hint`，仅在有 `note` 或摘要被截断时出现）、看板提示行
+（`scheduler.leader_task_done_board_hint`）。它取代成员的 `send_message` 完成汇报（F_119）：调度模式
+成员完成或送审都不再汇报。
+
+### 验收通过的延迟告知（F_119）
+
+验收通过**不唤醒** author：`_settle_pass` 只结算并给 leader 发终态摘要，不再投递邮箱消息
+（`scheduler_verified_report` 已删除）。"通过"这一事实由 author 自己的 rail 在它**下一次输入**时
+告知——`team_context.TaskOutcomeTracker` 查 author 名下 `completed` 且带 reviewer、尚未告知的任务，
+渲染为 `<team-event kind="task-verified">` 内联进被接纳的输入（`TeamPolicyRail.on_user_message`；
+外部 CLI 成员在下一条消息里），投递后把 task_id 记入成员 session state 的
+`task_outcome_announced`。不经邮箱 → 不影响 `members_with_unread`，不阻塞退场 / 休眠落定 /
+团队收尾；事件语义 → 不进 `team.context` 附件。仅调度模式、非 leader 成员启用。
+
+## 与其它 spec 的关系
+
+- **`S_03_coordination-protocol`**：wake_callback 组合、`SCHEDULER_SCAN` 的产生点（`_filter_self`）、调度器生命周期挂点在该 spec 的 kernel 段登记；coordination"不做决策"铁律由本包承接决策而保持成立。
+- **`S_08_team-tools-contract`**：scheduled 形态 `create_task`（assignee 必填 + `max_review_rounds`）、成员拆子任务的 `create_task` 形态（不变量 30）、`verify_task` 按模式二分的语义与描述形态、`build_team` 不选协调模式（不变量 21）。
+- **`S_12_schema-data-models`**：状态机（`start` 边的 PLANNING/IN_PROGRESS 落点）、票表、任务行新列、`TASK_REVIEW_VOTE` 事件、消息表 `meta` 投递载荷列与其三铁律。
+- **`F_73_reviewer-feedback-skill-evolution-boundaries`**：定义 scheduler callback 之外的归因、成员轨迹、Skill Rail 与创建审批边界；本文只约束 callback 的派发时机和失败隔离。

@@ -428,6 +428,8 @@ def _openai_chat_reasoning_plan(
             model=model,
             reasoning=reasoning,
         )
+    if provider == "openrouter":
+        return _openrouter_reasoning_plan(model.lower(), reasoning)
     return _reasoning_effort_plan(reasoning, disabled_value="none")
 
 
@@ -498,6 +500,8 @@ def _profile_reasoning_plan(
             effort_in_extra_body=True,
             effort_normalizer=_normalize_glm_effort,
         )
+    if wire == "glm_53_flash":
+        return _glm_53_flash_reasoning_plan(reasoning)
     if wire == "glm_anthropic":
         return _anthropic_thinking_with_extra_effort_plan(
             reasoning,
@@ -574,6 +578,27 @@ def _normalize_glm_effort(effort: Any) -> str | None:
     if value in {"xhigh", "max"}:
         return "max"
     return None
+
+
+def _glm_53_flash_reasoning_plan(reasoning: ReasoningConfig) -> ReasoningPlan:
+    """Encode the always-enabled GLM-5.3-Flash thinking intensity control."""
+
+    if reasoning.mode == "disabled" or _is_disabled_reasoning_effort(reasoning.effort):
+        return ReasoningPlan()
+    effort = _normalize_glm_53_flash_effort(reasoning.effort)
+    if reasoning.mode == "auto" and not effort:
+        return ReasoningPlan()
+    extra_body: dict[str, Any] = {"thinking": {"type": "enabled"}}
+    if effort:
+        extra_body["reasoning_effort"] = effort
+    return ReasoningPlan(extra_body=extra_body)
+
+
+def _normalize_glm_53_flash_effort(effort: Any) -> str | None:
+    if not isinstance(effort, str):
+        return None
+    value = effort.strip().lower()
+    return value if value in {"low", "high", "max"} else None
 
 
 def _normalize_volcengine_seed_effort(effort: Any) -> str | None:

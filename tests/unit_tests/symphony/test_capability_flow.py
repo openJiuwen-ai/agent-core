@@ -671,6 +671,9 @@ def test_skillpack_adapter_renders_complete_sdd0010_root(tmp_path: Path) -> None
     }
     artifact_dir = tmp_path / "skillpack"
 
+    for node in package["materials"]["recipe"]["combination_structure"]["nodes"].values():
+        node["metadata"]["skill_type"] = "skill"
+
     outputs = SkillPackAdapter.render(package, artifact_dir)
 
     assert isinstance(SkillPackAdapter(), SkillArtifactAdapter)
@@ -680,12 +683,12 @@ def test_skillpack_adapter_renders_complete_sdd0010_root(tmp_path: Path) -> None
     text = outputs[0].read_text(encoding="utf-8")
     frontmatter = yaml.safe_load(text.split("---", 2)[1])
     assert frontmatter == {
-        "name": package["meta_name"],
+        "name": f"{package['meta_name']}-pack",
         "kind": "skillpack",
         "description": "[技能包] 基于 3 个能力协作完成的任务（web-search → summarize-paper → write-report）",
         "skills": ["web-search", "summarize-paper", "write-report"],
     }
-    assert "# write-report" in text
+    assert "# write-report-pack" in text
     assert "`web-search`：Search trusted sources." in text
     assert "`web-search.query`（text）：Research question" in text
     assert "当前为线性流程，无可并行步骤。" in text
@@ -722,6 +725,8 @@ def test_skillpack_adapter_rejects_non_skill_and_non_chain_packages(tmp_path: Pa
     assert recipe is not None
     package = CapabilityPackager.build_package(recipe)
     nodes = package["materials"]["recipe"]["combination_structure"]["nodes"]
+    for node in nodes.values():
+        node["metadata"]["skill_type"] = "skill"
     nodes["web-search"]["metadata"]["capability_type"] = "tool"
 
     with pytest.raises(SkillPackNotInstallableError, match="not a Skill"):

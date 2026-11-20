@@ -284,7 +284,9 @@ class BaseLogEvent:
             elif isinstance(value, Exception):
                 result[key] = str(value)
                 if event_data.get("error_code") is None:
-                    result["error_code"] = StatusCode.ERROR.code
+                    # error_code is typed str on BaseLogEvent; keep the JSON
+                    # shape stable instead of leaking the numeric status code.
+                    result["error_code"] = str(StatusCode.ERROR.code)
                 if event_data.get("error_message") is None:
                     result["error_message"] = str(value)
             else:

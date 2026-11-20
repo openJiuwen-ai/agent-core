@@ -282,8 +282,47 @@ async def _invoke_probe(llm, *, extra_body: Optional[dict]):
         )
 
 
+_PROBE_ROUTER_SCOPE = "image_modality_probe"
+
+
+def _isolated_probe_model(llm: Any) -> Any:
+    """A probe copy of ``llm`` whose model-group router state is its own.
+
+    The probe often runs right before a session's first message. On a model
+    group it would otherwise share the cached router with real calls, and a
+    failing first position -- exactly what the probe is likely to hit -- would
+    cool that deployment down for them too, silently diverting the first
+    message to the next position with no trace and no notice. A scoped config
+    gets its own router instance, so the probe's failures only affect the
+    probe. Non-group models have no shared router state and are used as-is.
+    """
+    client_config = getattr(llm, "model_client_config", None)
+    router_config = getattr(client_config, "intelli_router", None)
+    if router_config is None:
+        return llm
+    try:
+        from openjiuwen.core.foundation.llm import Model
+
+        scoped = client_config.model_copy(
+            deep=True,
+            update={
+                "intelli_router": router_config.model_copy(
+                    update={"router_scope": _PROBE_ROUTER_SCOPE}
+                )
+            },
+        )
+        return Model(
+            model_config=getattr(llm, "model_config", None),
+            model_client_config=scoped,
+        )
+    except Exception as exc:  # noqa: BLE001 - isolation must never break the probe
+        logger.debug("[ImageModalityProbe] falling back to the shared router: %s", exc)
+        return llm
+
+
 async def _run_probe(llm) -> Optional[bool]:
     """Send the probe request and interpret its outcome."""
+    llm = _isolated_probe_model(llm)
     try:
         response = await _invoke_probe(llm, extra_body=_THINKING_DISABLED_EXTRA_BODY)
     except asyncio.TimeoutError:

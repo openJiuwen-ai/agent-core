@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
@@ -14,11 +14,10 @@ from json_repair import repair_json
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.llm.request_context import disabled_thinking_fallback_scope
+from openjiuwen.symphony.interfaces import ModelResponseObserver
 from openjiuwen.symphony.shared.identity import sanitize_metadata, stable_metadata_sha256
 
 LOGGER = logging.getLogger(__name__)
-
-ModelResponseObserver = Callable[[Any, str, str | None], None | Awaitable[None]]
 
 _MODEL_USAGE_CONTEXT: ContextVar[tuple[str, str | None]] = ContextVar(
     "symphony_model_usage_context",

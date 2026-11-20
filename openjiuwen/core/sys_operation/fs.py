@@ -25,6 +25,9 @@ TAIL_CHUNK_SIZE = 1024
 class BaseFsOperation(BaseOperation, ABC):
     """Base file system operation"""
 
+    # Unknown backends must explicitly opt in only when conditional writes are atomic.
+    supports_conditional_write: bool = False
+
     def list_tools(self) -> List[ToolCard]:
         method_names = [
             "read_file",
@@ -66,6 +69,7 @@ class BaseFsOperation(BaseOperation, ABC):
             line_range: Specific line range to read (start, end) - 1-indexed, inclusive (text mode only).
                   If start <= 0 or end <= 0 or start > end, returns empty content.
             encoding: Character encoding for text mode (default: utf-8).
+                Use "auto" (local backend) to detect BOM, UTF-8, GB18030/GBK and Big5.
             chunk_size: Maximum number of bytes to read at once (default: 0, unlimited)
             only_read: Skip the cross-process file lock. Safe for read-only metadata
                 that no writer in this process is racing with; backends without
@@ -102,6 +106,7 @@ class BaseFsOperation(BaseOperation, ABC):
             line_range: Specific line range to read (start, end) - 1-indexed, inclusive (text mode only).
                   If start <= 0 or end <= 0 or start > end, returns empty content.
             encoding: Character encoding for text mode (default: utf-8).
+                Use "auto" (local backend) to detect BOM, UTF-8, GB18030/GBK and Big5.
             chunk_size: Buffer size for bytes mode reading (default: 8192 bytes).
             options: Extended configuration options (dict, optional).
 
@@ -139,6 +144,11 @@ class BaseFsOperation(BaseOperation, ABC):
             permissions: Octal file permissions (Unix/Linux only; ignored on Windows) (default: "644").
             encoding: Character encoding for text mode (default: utf-8).
             options: Extended configuration options (dict, optional).
+                ``expected_content_sha256`` requests an atomic compare-and-swap
+                against the current raw bytes. ``create_if_absent=True`` requests
+                an atomic create that cannot replace an existing target. These
+                conditions are mutually exclusive and require a backend that
+                advertises ``supports_conditional_write``.
 
         Returns:
             WriteFileResult: Structured result.

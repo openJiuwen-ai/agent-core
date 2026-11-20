@@ -44,11 +44,12 @@ class JevClient:
     def __init__(
         self,
         *,
-        base_url: str = DEFAULT_JEV_SETTINGS["JEV_BASE_URL"],
-        model: str = DEFAULT_JEV_SETTINGS["JEV_MODEL"],
+        base_url: str | None = None,
+        model: str | None = None,
         api_key: str = "",
         timeout: float = 30.0,
     ) -> None:
+        # Omitted arguments resolve from JEV_* env vars, then the in-repo defaults.
         settings = resolve_jev_settings()
         resolved_base_url = (base_url or settings["JEV_BASE_URL"]).rstrip("/")
         resolved_model = model or settings["JEV_MODEL"]

@@ -106,6 +106,8 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_GEN_AI_USAGE_OUTPUT_COST,
     OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_INFERENCE_ID,
+    OJ_MODEL_GROUP_ID,
+    OJ_MODEL_GROUP_ROUTE_ID,
     OJ_REQUEST_ID,
     OJ_REQUEST_MESSAGE_COUNT,
     OJ_REQUEST_NUMBER,
@@ -164,10 +166,22 @@ from openjiuwen.core.foundation.llm.schema.message import (
     OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
 )
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+from openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client import (
+    fill_routed_model,
+    has_routed_model_placeholder,
+)
 from openjiuwen.core.foundation.llm.call_scope import (
     expects_unified_llm_completion,
     get_current_llm_call_id,
     is_llm_observation_suppressed,
+)
+from openjiuwen.extensions.observability.content_addressing import (
+    build_sequence,
+    sequence_reference,
+)
+from openjiuwen.extensions.observability.sequence_registry import (
+    materialize_stated_value,
+    register_sequence,
 )
 
 
@@ -235,6 +249,28 @@ def _serialize_tool_calls(tool_calls: Any) -> str:
         return json.dumps(items, ensure_ascii=False, default=str)
     except (TypeError, ValueError):
         return str(items)
+
+
+def _set_sequence_addressed_attribute(span: Any, key: str, value: str) -> None:
+    """State one restated attribute, as a sequence reference when it registers.
+
+    The GenAI convention has every model call restate the whole conversation,
+    and a span stays in memory until export -- stating the value inline puts
+    hundreds of kilobytes on every queued chat span. Stating the reference
+    instead leaves the full value in the registry, where the storage encode
+    resolves it back into the record and the readable encode states it
+    verbatim, so every downstream consumer keeps receiving what it received
+    before.
+
+    Falls back to stating the full value when the value does not address
+    (not an array) or when the registry is over its byte cap: the fallback is
+    the pre-registry behavior, never a dropped attribute.
+    """
+    sequence = build_sequence(key, value)
+    if sequence is None or not register_sequence(sequence):
+        span.set_attribute(key, value)
+        return
+    span.set_attribute(key, sequence_reference(sequence.seq_hash, sequence.depth))
 
 
 def _get_field(value: Any, name: str, default: Any = None) -> Any:
@@ -616,6 +652,73 @@ class OtelCallbackHandler:
                 state.span.set_attribute(OJ_REQUEST_RETRY_COUNT, retry_count)
         except Exception as exc:
             logger.warning("otel: on_llm_response_started failed: {}", exc)
+
+    async def on_llm_route(self, *args: Any, route_metadata: dict | None = None, **kwargs: Any) -> None:
+        """Name the model a model-group request was routed to on its open span.
+
+        The span opens before the router picks a deployment, so it starts out
+        as the logical ``"*"`` model and records an input whose prompt still
+        holds the routed-model placeholder. Two events name the route, both
+        inside the same call: ``LLM_ROUTE_ATTEMPT`` when a request is sent to
+        a route (``status="sending"``, success or not) and ``LLM_ROUTE`` once
+        a route answered. Rename the span and its request model to the route,
+        record the group and route, and fill the placeholder in the recorded
+        input exactly as that request received it -- so a request that failed
+        before answering, and every failover attempt, shows the model it
+        actually went to.
+        """
+        try:
+            span = get_current_llm_span()
+            state = getattr(span, "otel_llm_state", None) if span else None
+            if state is None or not state.span.is_recording() or not isinstance(route_metadata, dict):
+                return
+            group_id = str(route_metadata.get("model_group_id") or "").strip()
+            if group_id:
+                state.span.set_attribute(OJ_MODEL_GROUP_ID, group_id)
+            model_name = str(route_metadata.get("model_name") or "").strip()
+            if not model_name:
+                return
+            state.span.update_name(f"chat {model_name}")
+            state.span.set_attribute(GEN_AI_REQUEST_MODEL, model_name)
+            route_id = str(route_metadata.get("route_id") or "").strip()
+            if route_id:
+                state.span.set_attribute(OJ_MODEL_GROUP_ROUTE_ID, route_id)
+            routed_model = str(route_metadata.get("routed_model") or "").strip()
+            if not routed_model:
+                return
+            self._fill_routed_model_in_input(state, routed_model)
+        except Exception as exc:
+            logger.warning("otel: on_llm_route failed: {}", exc)
+
+    @staticmethod
+    def _fill_routed_model_in_input(state: LlmSpanState, routed_model: str) -> None:
+        """Fill the routed-model placeholder in the span's recorded input.
+
+        Covers both places a prompt is recorded: the input messages and, for
+        providers that send dynamic context as system text, the system
+        instructions; exporters (e.g. Langfuse) derive their input from these.
+        Always fills from the input as first recorded, so each attempt states
+        what that attempt's request said.
+
+        The attributes may hold sequence references rather than content; the
+        placeholder lives in the content, so a stated reference is materialized
+        before matching, and the filled value is registered as its own
+        sequence -- a fill changes content, hence the chain that addresses it.
+        """
+        if state.routed_input_original is None:
+            attributes = getattr(state.span, "attributes", None) or {}
+            recorded = {}
+            for key in (GEN_AI_INPUT_MESSAGES, GEN_AI_SYSTEM_INSTRUCTIONS):
+                value = attributes.get(key)
+                if isinstance(value, str):
+                    recorded[key] = materialize_stated_value(value)
+            state.routed_input_original = {
+                key: value
+                for key, value in recorded.items()
+                if isinstance(value, str) and has_routed_model_placeholder(value)
+            }
+        for key, value in state.routed_input_original.items():
+            _set_sequence_addressed_attribute(state.span, key, fill_routed_model(value, routed_model))
 
     async def on_llm_output(self, *args: Any, **kwargs: Any) -> None:
         """Apply provider output facts and preserve the legacy terminal event.
@@ -1067,11 +1170,13 @@ class OtelCallbackHandler:
         tools = kwargs.get("tools")
         if tools:
             normalized_tools = _json_compatible(tools)
+            # Compact separators for the same reason as the restated inputs:
+            # a stated reference rebuilds verbatim only from a compact dump.
             try:
-                serialized_tools = json.dumps(normalized_tools, ensure_ascii=False)
+                serialized_tools = json.dumps(normalized_tools, ensure_ascii=False, separators=(",", ":"))
             except Exception:
-                serialized_tools = json.dumps(_controlled_string(tools), ensure_ascii=False)
-            span.set_attribute(GEN_AI_TOOL_DEFINITIONS, serialized_tools)
+                serialized_tools = json.dumps(_controlled_string(tools), ensure_ascii=False, separators=(",", ":"))
+            _set_sequence_addressed_attribute(span, GEN_AI_TOOL_DEFINITIONS, serialized_tools)
 
         self._propagate_session_context(span, include_additive=True)
         subject_id = str(span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "")
@@ -1672,6 +1777,10 @@ class OtelCallbackHandler:
         history -- stays in ``gen_ai.input.messages`` as a ``system`` entry, so
         its boundary and its history marker survive; flattening it in with the
         instructions would lose both.
+
+        Both attributes state a sequence reference when their value registers,
+        keeping the restated conversation out of the span's in-memory
+        footprint; see :func:`_set_sequence_addressed_attribute`.
         """
 
         normalized = self._normalize_messages(messages)
@@ -1690,14 +1799,19 @@ class OtelCallbackHandler:
                 continue
             input_messages.append(structured)
         if system_parts:
-            span.set_attribute(
+            _set_sequence_addressed_attribute(
+                span,
                 GEN_AI_SYSTEM_INSTRUCTIONS,
-                json.dumps(system_parts, ensure_ascii=False, default=str),
+                # Compact separators: the registry rebuilds a stated value by
+                # joining its per-element blobs, and only a compact dump makes
+                # that rebuild reproduce the attached bytes exactly.
+                json.dumps(system_parts, ensure_ascii=False, default=str, separators=(",", ":")),
             )
         if input_messages:
-            span.set_attribute(
+            _set_sequence_addressed_attribute(
+                span,
                 GEN_AI_INPUT_MESSAGES,
-                json.dumps(input_messages, ensure_ascii=False, default=str),
+                json.dumps(input_messages, ensure_ascii=False, default=str, separators=(",", ":")),
             )
 
     def _record_input_message_provenance(self, span: Span, messages: Any) -> None:

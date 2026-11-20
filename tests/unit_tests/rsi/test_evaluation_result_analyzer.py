@@ -1354,7 +1354,9 @@ class TestDiagnosisAgentStrategy:
             active_calls += 1
             max_active_calls = max(max_active_calls, active_calls)
             try:
-                call_order.append(Path(agent["workspace"]).name)
+                inline = prompt.split("### Inline Diagnosis Input JSON\n", 1)[1]
+                payload, _ = json.JSONDecoder().raw_decode(inline)
+                call_order.append(payload["case_facts"]["case_id"])
                 await asyncio.sleep(0.01)
                 return json.dumps(
                     {
@@ -1386,8 +1388,7 @@ class TestDiagnosisAgentStrategy:
 
         assert [result["case_id"] for result in results] == ["case_001", "case_002"]
         assert max_active_calls == 1
-        assert call_order[0].startswith("case_001")
-        assert call_order[1].startswith("case_002")
+        assert call_order == ["case_001", "case_002"]
 
     @pytest.mark.asyncio
     async def test_per_case_diagnosis_records_retryable_empty_output_without_aborting(

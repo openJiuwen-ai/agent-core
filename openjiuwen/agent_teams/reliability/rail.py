@@ -22,6 +22,7 @@ from openjiuwen.agent_teams.reliability.monitor import ReliabilityMonitor
 from openjiuwen.agent_teams.reliability.remediation.local import LocalAutoRemediator
 from openjiuwen.agent_teams.reliability.reporter import LocalAnomalyReporter
 from openjiuwen.agent_teams.reliability.signals import Signal, SignalKind
+from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
 
@@ -109,6 +110,34 @@ class ReliabilityRail(DeepAgentRail):
         """
         if self._local_reporter is not None:
             self._local_reporter.bind(sink)
+
+    def bind_route_notice_source(self, source: Callable[[], list[str]]) -> None:
+        """Bind the leader's pending route-notice drain (no-op for non-leader rails).
+
+        The leader's own route notices wait for its next admitted input instead
+        of steering one in: a call that already answered on the backup model
+        must not have its answer replaced by a notice round. The binding lives
+        on the shared reporter so rail rebuilds keep it.
+        """
+        if self._local_reporter is not None:
+            self._local_reporter.bind_route_notice_source(source)
+
+    async def on_user_message(self, ctx: AgentCallbackContext) -> None:
+        """Prepend the leader's own pending route notices to this input."""
+        if self._local_reporter is None:
+            return
+        parts = getattr(getattr(ctx, "inputs", None), "parts", None)
+        if not isinstance(parts, list) or not parts:
+            return
+        notices = self._local_reporter.take_route_notices()
+        if not notices:
+            return
+        try:
+            parts[0:0] = notices
+        except Exception:  # noqa: BLE001 - delivery must never break the input
+            # The notices are already taken, so this log line is their only
+            # trace; the next notice (if any) rides the input after this one.
+            team_logger.warning("route notices not delivered: {}", notices, exc_info=True)
 
     async def _emit(self, signal: Signal, ctx: AgentCallbackContext) -> None:
         """Feed the signal, then steer locally for any returned anomaly."""

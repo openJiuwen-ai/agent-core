@@ -2,11 +2,14 @@
 
 import asyncio
 import json
+import os
 import shutil
+import tempfile
+from pathlib import Path
 
 import pytest
 
-from openjiuwen.agent_evolving.reward import checks, evidence_agent, models, pipeline, workspace
+from openjiuwen.agent_evolving.reward import checks, evidence_agent, files, models, pipeline, workspace
 from openjiuwen.agent_evolving.reward.options import RewardOptions
 
 
@@ -222,6 +225,10 @@ async def test_the_agent_is_steered_to_run_pages_not_to_read_them(tmp_path, monk
     assert "score rules" in notes["output"]                                       # documents are read as before
     saved, _ = await checks.run_check({"tool": "read", "id": "c3"}, tmp_path, ["read"])
     assert "read_evidence" in saved["skipped"]
+    alone = Path(tempfile.mkdtemp())
+    (alone / "schedule.md").write_text("买泳镜 09:50")
+    implied, _ = await checks.run_check({"tool": "read"}, alone, ["read"])
+    assert "买泳镜 09:50" in implied["output"] and implied.get("path") == "schedule.md"
     shown = evidence_agent.shown({"tool": "browser", "actions": [
         {"index": 0, "action": {"type": "probe", "script": "() => " + "x" * 2000}, "ok": True, "value": {"score": 3}}]})
     assert shown["actions"] == [{"index": 0, "ok": True, "value": {"score": 3}}]  # the outcome, not the echo
@@ -239,6 +246,8 @@ async def test_the_agent_is_steered_to_run_pages_not_to_read_them(tmp_path, monk
     monkeypatch.setattr(models.Model, "__init__", lambda self, config: self.__dict__.update(name="m", vision=False))
 
     async def answer(self, system, user, images=()):
+        if system.startswith("You choose which evaluation guides"):
+            return {"guides": []}
         if system.startswith("You write evaluation criteria"):
             return {"criteria": [{"id": "play", "claims": [{"text": "Scores", "level": "floor"}]}]}
         judged.append(user)
@@ -250,6 +259,100 @@ async def test_the_agent_is_steered_to_run_pages_not_to_read_them(tmp_path, monk
     assert "line 1" not in judged[0] and "score rules" in judged[0]               # nor does the judge read page code
     assert seeds[0]["files"] == {"game.html": "500 lines", "notes.md": "2 lines"}
     assert "score rules" in seeds[0]["excerpts"] and "line 1" not in seeds[0]["excerpts"]   # documents, not page code
+
+
+@pytest.mark.asyncio
+async def test_auto_read_returns_an_index_instead_of_reading_more_than_eight_files(tmp_path):
+    for number in range(9):
+        (tmp_path / f"part{number}.md").write_text(f"body {number}", encoding="utf-8")
+    facts, shots = await checks.run_check({"tool": "read"}, tmp_path, ["read"])
+    assert facts["path"] == "9 files" and shots == []
+    assert facts["output"].startswith("folder; files:\n")
+    assert "part0.md" in facts["output"] and "part8.md" in facts["output"]
+    assert "body 0" not in facts["output"]
+
+
+@pytest.mark.asyncio
+async def test_auto_read_skips_binary_files_and_keeps_at_most_four_pictures(tmp_path, monkeypatch):
+    (tmp_path / "notes.md").write_text("readable notes", encoding="utf-8")
+    (tmp_path / "blob.bin").write_bytes(b"abc\0def")
+    monkeypatch.setattr(checks, "picture_or_none", lambda path: (b"picture", 1))
+    for number in range(6):
+        (tmp_path / f"p{number}.png").write_bytes(b"x")
+    facts, shots = await checks.run_check({"tool": "read"}, tmp_path, ["read"])
+    assert "readable notes" in facts["output"] and "abc" not in facts["output"]
+    assert "[binary file, not shown]" in facts["output"]
+    assert len(shots) == 4 and facts["output"].count("at most 4 pictures") == 2
+    binary, _ = await checks.run_check({"tool": "read", "path": "blob.bin"}, tmp_path, ["read"])
+    assert not evidence_agent.check_failed(binary)   # a binary receipt is not a failed check
+
+
+@pytest.mark.asyncio
+async def test_auto_read_stops_at_the_character_budget(tmp_path):
+    for number in range(6):
+        (tmp_path / f"long{number}.txt").write_text("x" * 6000, encoding="utf-8")
+    facts, _ = await checks.run_check({"tool": "read"}, tmp_path, ["read"])
+    assert "[cut: auto-read stopped at 30000 characters]" in facts["output"]
+    assert "===== long5.txt =====" not in facts["output"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_time_filter_falls_back_to_all_deliverables(tmp_path, monkeypatch):
+    def filtered_files(root, since_ns=None, until_ns=None):
+        return ({}, {}) if since_ns is not None else ({"old.md": "old body"}, {})
+
+    seen = {}
+
+    async def fake_score_with(task, root, config, options, **kwargs):
+        seen["options"] = options
+        seen["deliverable"] = kwargs["deliverable"]
+        return {}
+
+    monkeypatch.setattr(pipeline, "workspace_files", filtered_files)
+    monkeypatch.setattr(pipeline, "score_with", fake_score_with)
+    monkeypatch.setattr(checks, "available_tools", lambda root, config: [])
+    await pipeline.score_workspace("t", tmp_path, {}, RewardOptions(since_ns=1, until_ns=2))
+    assert seen["deliverable"] == {"old.md": "old body"}
+    assert any("时间范围" in warning for warning in seen["options"].warnings)
+    assert (seen["options"].since_ns, seen["options"].until_ns) == (None, None)   # checks read the same files
+
+
+@pytest.mark.asyncio
+async def test_oversized_files_are_not_read_into_context(tmp_path):
+    large = tmp_path / "large.txt"
+    large.write_bytes(b"x" * (files.MAX_FILE_BYTES + 1))
+    facts, _ = await checks.run_check({"tool": "read", "path": "large.txt"}, tmp_path, ["read"])
+    assert facts["too_large"] is True and facts["output"] == "[file too large, not shown]"
+    deliverable, _ = workspace.workspace_files(tmp_path)
+    assert deliverable == {"large.txt": files.TOO_LARGE}
+
+
+@pytest.mark.asyncio
+async def test_reads_keep_only_deliverables_modified_in_the_trace_time_range(tmp_path):
+    old, new = tmp_path / "old.md", tmp_path / "new.md"
+    old.write_text("old body", encoding="utf-8")
+    new.write_text("new body", encoding="utf-8")
+    os.utime(old, ns=(1_000, 1_000))
+    os.utime(new, ns=(3_000, 3_000))
+
+    deliverable, _ = workspace.workspace_files(tmp_path, 2_000, 4_000)
+    assert list(deliverable) == ["new.md"] and "new body" in deliverable["new.md"]
+
+    facts, _ = await checks.run_check({"tool": "read"}, tmp_path, ["read"], since_ns=2_000, until_ns=4_000)
+    assert "new body" in facts["output"] and "old body" not in facts["output"]
+    skipped, _ = await checks.run_check({"tool": "read", "path": "old.md"}, tmp_path, ["read"],
+                                        since_ns=2_000, until_ns=4_000)
+    assert "time range" in skipped["skipped"]
+
+    reference = tmp_path / workspace.INPUTS_DIR / "reference.md"
+    reference.parent.mkdir()
+    reference.write_text("reference body", encoding="utf-8")
+    os.utime(reference, ns=(1_000, 1_000))
+    deliverable, inputs = workspace.workspace_files(tmp_path, 2_000, 4_000)
+    assert list(deliverable) == ["new.md"] and inputs == {"reference.md": "reference body"}
+    allowed, _ = await checks.run_check({"tool": "read", "path": f"{workspace.INPUTS_DIR}/reference.md"},
+                                        tmp_path, ["read"], since_ns=2_000, until_ns=4_000)
+    assert "reference body" in allowed["output"]
 
 
 @pytest.mark.asyncio
@@ -405,6 +508,8 @@ async def test_what_keeps_the_work_unseen_is_said_as_it_happens(tmp_path, monkey
         return {c["id"]: ([failed], []) for c in criteria}
 
     async def answer(self, system, user, images=()):
+        if system.startswith("You choose which evaluation guides"):
+            return {"guides": []}
         if system.startswith("You write evaluation criteria"):
             return {"criteria": [{"id": "play", "claims": [{"text": "Scores", "level": "floor"}]}]}
         return {"claims": [{"index": 0, "status": "unknown"}], "summary": "s"}
@@ -513,10 +618,10 @@ async def test_pictures_reach_the_model_with_their_own_type():
     seen = []
 
     class Core:
-        async def invoke(self, messages, **kwargs):
+        async def stream(self, messages, **kwargs):
             del kwargs
             seen.append(messages[1]["content"])
-            return type("Answer", (), {"content": "{}"})()
+            yield type("Answer", (), {"content": "{}"})()
 
     model = models.Model.__new__(models.Model)
     model.name, model.extra = "m", {}

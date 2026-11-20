@@ -185,8 +185,9 @@ class TestChainSessionPersistence:
         assert state_data["data"] == {}
         assert state_data["meta"]["is_active"] is True
 
-        link_file = tmp_session_dir / "downstreams" / "agent2_session-2.link"
-        assert link_file.exists()
+        link_files = list((tmp_session_dir / "downstreams").glob("*.link"))
+        assert len(link_files) == 1
+        assert json.loads(link_files[0].read_text(encoding="utf-8"))["target_agent"] == "agent2"
 
     @pytest.mark.asyncio
     async def test_flush_removes_deleted_downstream(
@@ -195,7 +196,7 @@ class TestChainSessionPersistence:
         # flush deletes .link files for removed downstreams
         chain_session.add_downstream("agent2", "session-2")
         await chain_session.flush()
-        link_file = tmp_session_dir / "downstreams" / "agent2_session-2.link"
+        link_file = next((tmp_session_dir / "downstreams").glob("*.link"))
         assert link_file.exists()
 
         chain_session.remove_downstream("agent2", "session-2")
@@ -346,7 +347,7 @@ class TestChainSessionPersistenceAdvanced:
         # flush marks .link as removed=true before deleting it
         chain_session.add_downstream("agent2", "session-2")
         await chain_session.flush()
-        link_file = tmp_session_dir / "downstreams" / "agent2_session-2.link"
+        link_file = next((tmp_session_dir / "downstreams").glob("*.link"))
         assert link_file.exists()
 
         chain_session.remove_downstream("agent2", "session-2")
@@ -387,6 +388,60 @@ class TestChainSessionPersistenceAdvanced:
         policy = new_session.get_downstream_policy("agent2", "session-2")
         assert policy is not None
         assert policy.field_scopes == {"f1", "f2"}
+
+    @pytest.mark.asyncio
+    async def test_load_preserves_ids_containing_underscore(
+            self, chain_session, tmp_session_dir, session_scope, mock_agent_session
+    ):
+        # Our ids routinely contain '_' (e.g. agent_worker). Persisting only
+        # "{agent}_{session}.link" made load split at the first underscore and
+        # restored a different downstream, so can_see() became False.
+        chain_session.add_downstream(
+            "agent_worker", "session-2",
+            SharingPolicy(permission=Permission.READ)
+        )
+        await chain_session.flush()
+
+        new_session = ChainSession(
+            agent_id="agent1",
+            session_scope=session_scope,
+            session_id="session-1",
+            data_container=AgentSessionContainer(mock_agent_session),
+            session_dir=tmp_session_dir,
+        )
+        with patch.object(
+                AgentSessionContainer, "load",
+                return_value=AgentSessionContainer(mock_agent_session),
+        ):
+            await new_session.load()
+
+        assert new_session.has_downstream("agent_worker", "session-2")
+        assert not new_session.has_downstream("agent", "worker_session-2")
+
+    @pytest.mark.asyncio
+    async def test_load_legacy_link_without_ids(
+            self, chain_session, tmp_session_dir, session_scope, mock_agent_session
+    ):
+        # Links written before the payload carried ids still load by filename.
+        downstreams_dir = tmp_session_dir / "downstreams"
+        downstreams_dir.mkdir(parents=True, exist_ok=True)
+        link_file = downstreams_dir / "agent2_session-2.link"
+        link_file.write_text(json.dumps({"permission": {"level": 1}}), encoding="utf-8")
+
+        new_session = ChainSession(
+            agent_id="agent1",
+            session_scope=session_scope,
+            session_id="session-1",
+            data_container=AgentSessionContainer(mock_agent_session),
+            session_dir=tmp_session_dir,
+        )
+        with patch.object(
+                AgentSessionContainer, "load",
+                return_value=AgentSessionContainer(mock_agent_session),
+        ):
+            await new_session.load()
+
+        assert new_session.has_downstream("agent2", "session-2")
 
     @pytest.mark.asyncio
     async def test_load_corrupted_link_file(

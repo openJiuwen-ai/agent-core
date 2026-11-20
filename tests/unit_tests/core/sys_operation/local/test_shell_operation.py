@@ -1,11 +1,12 @@
 # -*- coding: UTF-8 -*-
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 import os
 import pathlib
 import platform
 import shutil
 import tempfile
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -15,11 +16,43 @@ from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.sys_operation import (
     LocalWorkConfig,
     OperationMode,
+    SysOperation,
     SysOperationCard,
 )
 from openjiuwen.core.sys_operation.local.shell_operation import ShellOperation
+from openjiuwen.core.sys_operation.local.utils import AsyncProcessHandler, OperationUtils
 from openjiuwen.core.sys_operation.result import ExecuteCmdStreamResult
 from openjiuwen.core.sys_operation.shell import ShellType
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(("requested", "expected"), [(900, 900), (None, 300)])
+async def test_execution_budget_is_not_replaced_by_hidden_shell_cap(
+        sys_op: SysOperation,
+        monkeypatch: pytest.MonkeyPatch,
+        stream: bool,
+        requested: int | None,
+        expected: int,
+) -> None:
+    """Both execution modes preserve explicit budgets and the default for None."""
+    monkeypatch.setenv("JW_EXECUTE_CMD_MAX_TIMEOUT", "1")
+    observed: list[int] = []
+    create_handler = OperationUtils.create_handler
+
+    def record_handler(**kwargs: Any) -> AsyncProcessHandler:
+        observed.append(kwargs["timeout"])
+        return create_handler(**kwargs)
+
+    monkeypatch.setattr(OperationUtils, "create_handler", record_handler)
+    if stream:
+        results = [result async for result in sys_op.shell().execute_cmd_stream("echo completed", timeout=requested)]
+        assert results
+        assert all(result.code == StatusCode.SUCCESS.code for result in results)
+    else:
+        result = await sys_op.shell().execute_cmd("echo completed", timeout=requested)
+        assert result.code == StatusCode.SUCCESS.code
+    assert observed == [expected]
 
 
 @pytest.fixture
@@ -507,6 +540,41 @@ def _make_shell_op(restrict: bool, roots: list[str] | None = None) -> ShellOpera
     op = object.__new__(ShellOperation)
     op._run_config = _FakeRunConfig(restrict=restrict, roots=roots)
     return op
+
+
+@pytest.mark.parametrize("command", [
+    '"C:\\Program Files\\nodejs\\node.exe" --version',
+    '"/c/Program Files/nodejs/node.exe" --version',
+    '"$APPDATA/npm/node_modules/@larksuite/cli/bin/lark-cli.exe" docs +create --title example',
+    'lark-cli.exe calendar +agenda',
+    "& 'C:\\Program Files\\nodejs\\node.exe' --version",
+])
+def test_windows_allowlist_recognizes_quoted_executable_paths(monkeypatch, command):
+    monkeypatch.setattr(os, "name", "nt")
+    op = _make_shell_op(restrict=False)
+    op._run_config.shell_allowlist = ["node", "lark-cli"]
+    assert op._check_allowlist(command)
+
+
+@pytest.mark.parametrize("command", [
+    '"C:\\Program Files\\unlisted.exe" --version',
+    'lark-cli-helper.exe --version',
+    '"node"-unlisted.exe --version',
+    '"C:\\Program Files\\node.exe --version',
+])
+def test_windows_allowlist_still_rejects_unlisted_or_malformed_executables(monkeypatch, command):
+    monkeypatch.setattr(os, "name", "nt")
+    op = _make_shell_op(restrict=False)
+    op._run_config.shell_allowlist = ["node", "lark-cli"]
+    assert not op._check_allowlist(command)
+
+
+def test_allowlist_preserves_explicit_executable_path_scope(monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
+    op = _make_shell_op(restrict=False)
+    op._run_config.shell_allowlist = [r"C:\trusted\node.exe"]
+    assert op._check_allowlist(r'"C:\trusted\node.exe" --version')
+    assert not op._check_allowlist(r'"C:\untrusted\node.exe" --version')
 
 
 def test_get_sandbox_roots_disabled():

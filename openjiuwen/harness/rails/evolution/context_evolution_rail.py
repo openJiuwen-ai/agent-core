@@ -218,7 +218,11 @@ class ContextEvolutionRail(DeepAgentRail):
 
         # Auto-summarize: only support matts_mode = "none", because other matts_mode need to call multiple invoke
         # To use other matts_mode, please manually use the trajectory_generator in the memory service
-        if self.auto_summarize and self._current_query:
+        # A cancelled round (round timeout / user abort / team stop) fires this
+        # cleanup under a hard cancel; its caller is already moving on, so the
+        # multi-second summarize LLM call must not run there.
+        cancelled = isinstance(result, dict) and result.get("stop_reason") == "cancelled"
+        if self.auto_summarize and self._current_query and not cancelled:
             try:
                 trajectory = self.extract_trajectory(ctx)
                 if trajectory:

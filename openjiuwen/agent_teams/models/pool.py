@@ -516,6 +516,29 @@ def materialize_model_group(compiled: Any, selection: Any | None = None) -> list
     ]
 
 
+def model_group_label(pool: list[ModelPoolEntry] | None) -> str | None:
+    """Name the model group behind a canonical model-group pool.
+
+    Shown wherever the pool's logical ``"*"`` model would otherwise leak to a
+    reader. Prefers the host-supplied ``metadata.model_group.display_name``,
+    then the router's ``model_group_id``.
+
+    Returns:
+        The label, or ``None`` when ``pool`` is not a model-group pool.
+    """
+    if not pool or len(pool) != 1:
+        return None
+    entry = pool[0]
+    if entry.model_name != INTELLI_ROUTER_UNIFIED_MODEL or entry.api_provider != INTELLI_ROUTER_PROVIDER:
+        return None
+    router = (entry.metadata.get("client") or {}).get("intelli_router")
+    if not isinstance(router, dict):
+        return None
+    group = entry.metadata.get("model_group")
+    display_name = group.get("display_name") if isinstance(group, dict) else None
+    return str(display_name or router.get("model_group_id") or INTELLI_ROUTER_UNIFIED_MODEL)
+
+
 def _entry_signature(entry: ModelPoolEntry) -> str:
     """Canonical signature of an entry's full config, excluding client identity.
 

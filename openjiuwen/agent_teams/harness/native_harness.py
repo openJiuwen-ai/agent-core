@@ -52,10 +52,22 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error, raise_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.run_context import RunContext
+from openjiuwen.core.context_engine.context.cancellation import (
+    CancellationCause,
+    clear_cancellation_cause,
+    mark_cancellation_cause,
+)
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
+from openjiuwen.core.single_agent.interrupt.response import InterruptKind
+from openjiuwen.core.single_agent.interrupt.state import (
+    INTERRUPTION_KEY,
+    match_answers,
+    pending_interrupts,
+    retarget_stale_permission_answer,
+)
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -129,6 +141,18 @@ def _query_text(query: "str | list[str] | InteractiveInput") -> str | None:
     if isinstance(query, list):
         return "\n".join(query)
     return None
+
+
+def _in_flight_round_already_carries_answer(query: Any, incoming: Any) -> bool:
+    """Return whether the running round already admitted this interrupt answer."""
+    if not isinstance(query, InteractiveInput) or not isinstance(incoming, InteractiveInput):
+        return False
+    for field in ("interrupt_answers", "user_inputs"):
+        running = getattr(query, field, None) or {}
+        asked = getattr(incoming, field, None) or {}
+        if isinstance(running, dict) and isinstance(asked, dict) and set(asked) & set(running):
+            return True
+    return False
 
 
 class NativeHarness(DeepAgent):
@@ -487,6 +511,7 @@ class NativeHarness(DeepAgent):
         from openjiuwen.core.runner import Runner
 
         config = self.deep_config
+        await self._close_memory_managers(config)
         sys_op = config.sys_operation if config is not None else None
         if sys_op is None:
             return
@@ -494,6 +519,25 @@ class NativeHarness(DeepAgent):
         # (or a dispose after Runner.stop already cleared everything) is a no-op.
         if Runner.resource_mgr.get_sys_operation(sys_op.id) is not None:
             Runner.resource_mgr.remove_sys_operation(sys_op.id)
+
+    async def _close_memory_managers(self, config: Any) -> None:
+        """Release the memory index managers this member's rails opened.
+
+        They live in the process-global ``INDEX_CACHE`` keyed by card id and
+        workspace, each with its own watchdog threads and SQLite connection.
+        """
+        workspace = getattr(config, "workspace", None) if config is not None else None
+        if workspace is None or self.card is None:
+            return
+        from openjiuwen.core.memory.lite.manager import aclose_memory_managers_for
+
+        try:
+            closed = await aclose_memory_managers_for(self.card.id, workspace)
+        except Exception:
+            logger.exception("[NativeHarness] closing memory managers failed")
+            return
+        if closed:
+            logger.info("[NativeHarness] closed %d memory manager(s) for %s", closed, self.card.id)
 
     def outputs(self) -> AsyncIterator[Any]:
         """Return an AsyncIterator over output chunks.
@@ -555,7 +599,9 @@ class NativeHarness(DeepAgent):
         IDLE on completion rather than continuing the task plan.
 
         Behavior by phase:
-        - IDLE: starts a new round with ``content``.
+        - IDLE: queues ordinary input while a permission interrupt is pending;
+          otherwise starts a round with ``content``. Use ``InteractiveInput``
+          to answer the pending permission.
         - RUNNING + immediate=True: steers the active round (injected at the
           next ReAct iteration top).
         - RUNNING + immediate=False: enqueued as a follow-up; consumed when the
@@ -571,6 +617,22 @@ class NativeHarness(DeepAgent):
         Returns:
             The monotonic sequence id of this message.
         """
+        return await self._send(content, immediate=immediate, run_context=run_context)
+
+    async def resume_interrupt(
+        self, content: InteractiveInput, *, run_context: RunContext | None = None,
+    ) -> str:
+        """Match and admit a Team answer in the supervisor's control command."""
+        return await self._send(content, run_context=run_context, require_pending_interrupt=True)
+
+    async def _send(
+        self,
+        content: Any,
+        *,
+        immediate: bool = False,
+        run_context: RunContext | None = None,
+        require_pending_interrupt: bool = False,
+    ) -> str:
         self._require_alive()
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         msg = InboxMessage(
@@ -579,7 +641,7 @@ class NativeHarness(DeepAgent):
             immediate=immediate,
             run_context=run_context,
         )
-        await self._control.put(_CmdSend(msg=msg, ack=ack))
+        await self._control.put(_CmdSend(msg=msg, ack=ack, require_pending_interrupt=require_pending_interrupt))
         return await ack
 
     async def abort(self, *, immediate: bool = False) -> None:
@@ -603,6 +665,14 @@ class NativeHarness(DeepAgent):
                 (False).
         """
         self._require_alive()
+        if self._st.active is not None:
+            mark_cancellation_cause(self.session_id, CancellationCause.CANCEL)
+        elif self._st.phase is HarnessState.PAUSED:
+            # Aborting a paused harness discards the parked round without
+            # any cancellation; the PAUSE mark's purpose ends here — drop
+            # it so the next round inside the TTL window is not mislabeled
+            # as user_pause.
+            clear_cancellation_cause(self.session_id)
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         await self._control.put(_CmdAbort(immediate=immediate, ack=ack))
         await ack
@@ -621,6 +691,12 @@ class NativeHarness(DeepAgent):
         coroutine returns only once PAUSED has been reached.
         """
         self._require_alive()
+        # Guard on an active round, mirroring abort(): _on_pause is a no-op
+        # from IDLE / PAUSED / without an active round, and a stray mark
+        # would relabel a later internal failure as user pause within the
+        # registry TTL.
+        if self._st.active is not None:
+            mark_cancellation_cause(self.session_id, CancellationCause.PAUSE)
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         await self._control.put(_CmdPause(ack=ack))
         await ack
@@ -641,6 +717,7 @@ class NativeHarness(DeepAgent):
         No-op in any other state.
         """
         self._require_alive()
+        clear_cancellation_cause(self.session_id)
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         await self._control.put(_CmdResume(ack=ack, query=query))
         await ack
@@ -846,6 +923,47 @@ class NativeHarness(DeepAgent):
 
     async def _on_send(self, cmd: _CmdSend) -> None:
         """Route a send according to current phase."""
+        if cmd.require_pending_interrupt:
+            if cmd.ack.done():
+                return
+            reason = None
+            if self._st.phase in (HarnessState.RUNNING, HarnessState.PAUSING):
+                active = self._st.active
+                query = active.original_query if active is not None else None
+                if _in_flight_round_already_carries_answer(query, cmd.msg.content):
+                    # This click is the card the running round already admitted.
+                    reason = "interrupt_already_resolved"
+                else:
+                    reason = "interrupt_resume_busy"
+            elif self._session is None:
+                reason = "interrupt_resume_unavailable"
+            elif not isinstance(cmd.msg.content, InteractiveInput):
+                reason = "unsupported_interactive_input"
+            else:
+                try:
+                    pending = pending_interrupts(self._session.get_state(INTERRUPTION_KEY))
+                except Exception:
+                    logger.warning("interrupt resume could not read pending state", exc_info=True)
+                    pending = None
+                if not pending:
+                    # Nothing is waiting yet. That is not proof the tool id is wrong.
+                    reason = "interrupt_resume_unavailable"
+                else:
+                    matched = match_answers(cmd.msg.content, pending)
+                    if (not matched.answers or matched.unmatched) and retarget_stale_permission_answer(
+                        cmd.msg.content, pending,
+                    ):
+                        matched = match_answers(cmd.msg.content, pending)
+                    if not matched.answers or matched.unmatched:
+                        reason = "unsupported_interactive_input"
+            if reason is not None:
+                # Expected non-admission must not escape and terminate the supervisor.
+                cmd.ack.set_exception(build_error(
+                    StatusCode.DEEPAGENT_RUNTIME_ERROR,
+                    error_msg="Interrupt answer was not admitted.",
+                    details={"operation": "interrupt_admission", "reason": reason},
+                ))
+                return
         seq = self._st.next_seq()
         msg = InboxMessage(
             seq=seq,
@@ -856,12 +974,24 @@ class NativeHarness(DeepAgent):
 
         phase = self._st.phase
         if phase is HarnessState.IDLE:
-            active = self._start_round(
-                msg.content,
-                run_context=msg.run_context,
-            )
-            await self._transition(HarnessState.RUNNING)
-            await self._emit_round("started", active.round_id)
+            if (
+                not isinstance(msg.content, InteractiveInput)
+                and self._session is not None
+                and any(
+                    item.kind == InterruptKind.PERMISSION
+                    for item in pending_interrupts(self._session.get_state(INTERRUPTION_KEY))
+                )
+            ):
+                # IDLE can still own a permission interrupt. Ordinary input is
+                # a follow-up, not an unaddressed answer to the paused tool.
+                self._st.pending_queue.append(msg)
+            else:
+                active = self._start_round(
+                    msg.content,
+                    run_context=msg.run_context,
+                )
+                await self._transition(HarnessState.RUNNING)
+                await self._emit_round("started", active.round_id)
         elif phase is HarnessState.RUNNING:
             active = self._st.active
             if msg.immediate and active is not None:
@@ -876,6 +1006,10 @@ class NativeHarness(DeepAgent):
                 # cannot overtake same-context messages queued before them.
                 self._st.pending_queue.append(msg)
         elif phase is HarnessState.PAUSED:
+            # Warm/interrupt resume via send bypasses resume(); the spent
+            # PAUSE mark must not survive into the resumed round, or a later
+            # internal failure would resolve to user_pause.
+            clear_cancellation_cause(self.session_id)
             if isinstance(msg.content, InteractiveInput):
                 # An interrupt-resume payload drives its own single round; it
                 # cannot be steered into a continuation.

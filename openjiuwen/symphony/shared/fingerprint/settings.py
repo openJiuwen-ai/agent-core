@@ -8,7 +8,7 @@ import json
 from dataclasses import asdict, dataclass
 
 FINGERPRINT_SCHEMA_VERSION = "1.0"
-EXTRACTION_PROTOCOL_VERSION = "symphony-capability-extraction-v2"
+EXTRACTION_PROTOCOL_VERSION = "symphony-capability-extraction-v3"
 EVALUATION_PROTOCOL_VERSION = "symphony-capability-evaluation-v1"
 
 
@@ -26,7 +26,7 @@ class FingerprintSettings:
     batch_size: int = 16
     max_concurrency: int = 4
     body_limit: int = 16_000
-    llm_max_tokens: int = 2_048
+    llm_max_tokens: int | None = 2_048
     llm_timeout: float | None = None
     evidence_text_limit: int = 512
     cache_enabled: bool = True

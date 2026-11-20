@@ -65,6 +65,11 @@ OJ_REQUEST_PURPOSE = "openjiuwen.request.purpose"
 # time is part of every request-relative duration, so a reader needs the count
 # to tell a slow provider from a retried one.
 OJ_REQUEST_RETRY_COUNT = "openjiuwen.request.retry_count"
+# Model-group routing of one LLM request. A model group sends every request to
+# the logical "*" model and its router picks the deployment inside the call;
+# these name the group and the route that served the request.
+OJ_MODEL_GROUP_ID = "openjiuwen.model_group.id"
+OJ_MODEL_GROUP_ROUTE_ID = "openjiuwen.model_group.route_id"
 OJ_CONTEXT_OPERATION_ID = "openjiuwen.context.operation.id"
 # Which compaction this is for its subject, counting operations rather than
 # model calls: a compaction the provider throttles is retried, and all of its

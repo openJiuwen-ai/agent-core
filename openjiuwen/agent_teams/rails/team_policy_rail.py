@@ -10,7 +10,8 @@ team-specific slices line up with the harness sections (safety, tools,
 memory, workspace, ...) by priority.
 
 Section layout owned by this rail (see ``prompts/sections.py`` for
-builders). **The leader takes only two of them** — everything else is
+builders). **The leader takes only two of them** (three under scheduled
+dispatch with a bound AgentGroup) — everything else is
 disclosed by the ``build_team`` tool result instead (F_76), because the
 variant of each convention is not settled until that call is made:
 
@@ -20,6 +21,11 @@ variant of each convention is not settled until that call is made:
                            factory gates the ``swarmflow`` tool on), and the
                            instruction to form the team first.
   P:11  team_role        - role policy + execution mode (non-LEADER roles)
+  P:12  team_bound_group - LEADER only, scheduled dispatch with a bound
+                           AgentGroup and the expert tools wired: names the
+                           group and says to look for experts there first
+                           and spawn them on demand (the same signal that
+                           scopes ``view_experts`` to the group).
   P:12  team_hitt        - HITT collaboration contract (static rules, gated on
                            hitt_enabled). Human members are tagged ``[human]``
                            in the roster message, not listed inline.
@@ -44,18 +50,26 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from openjiuwen.agent_teams.inbound_render import drop_superseded_snapshots, render_clock
+from openjiuwen.agent_teams.inbound_render import drop_superseded_snapshots, render_clock, render_team_policy_inline
 from openjiuwen.agent_teams.prompts import (
     build_leader_bootstrap_section,
+    build_leader_bound_group_section,
+    build_leader_policy_disclosure,
+    build_leader_prebuilt_section,
     build_team_extra_section,
     build_team_static_sections,
 )
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
 from openjiuwen.agent_teams.schema.team import TeamRole
-from openjiuwen.agent_teams.team_context import TaskOutcomeTracker, TeamContextTracker
+from openjiuwen.agent_teams.team_context import (
+    TaskOutcomeTracker,
+    TaskRevisionTracker,
+    TeamContextTracker,
+)
 from openjiuwen.agent_teams.timefmt import format_absolute_time
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.context_engine.processor.compressor.util import holds_team_policy
 from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -124,6 +138,7 @@ class TeamPolicyRail(DeepAgentRail):
         language: str = "cn",
         team_mode: str = "default",
         dispatch_mode: str = "autonomous",
+        bootstrap_mode: str = "leader",
         base_prompt: str | None = None,
         team_workspace_path: str | None = None,
         team_outputs_dir: str | None = None,
@@ -133,6 +148,8 @@ class TeamPolicyRail(DeepAgentRail):
         steer_batch_size: int = 2,
         fork_source: str | None = None,
         loader: TemplateLoader = load_template,
+        bound_group_name: str | None = None,
+        task_event_tracker: TaskOutcomeTracker | TaskRevisionTracker | None = None,
     ) -> None:
         super().__init__()
         self._language = language
@@ -148,6 +165,9 @@ class TeamPolicyRail(DeepAgentRail):
         # framework read-only loader (unit tests /
         # no backend). No second fallback here — the factory owns the wiring.
         self._loader = loader
+        self._team_backend = team_backend
+        self._recovered_bootstrap: PromptSection | None = None
+        self._continued_policy: bool | None = None
 
         # All team sections are static and built once. The HITT contract is
         # gated on the (sync) HITT capability flag rather than the live human
@@ -155,6 +175,11 @@ class TeamPolicyRail(DeepAgentRail):
         # human agent is spawned; the human roster itself rides the state lane
         # (tagged ``[human]``).
         hitt_enabled = team_backend.hitt_enabled() if team_backend is not None else False
+        # Scheduled peer messaging (F_126): the same backend gate the tool
+        # factory reads to pick the member ``send_message`` variant.
+        member_messaging = team_backend.member_messaging_enabled() is True if team_backend is not None else False
+        # Member subtasks (F_128): the gate that grants members ``create_task``.
+        member_subtasks = team_backend.member_subtasks_enabled() is True if team_backend is not None else False
         self._static_sections: list[PromptSection] = self._build_static_sections(
             role=role,
             member_prompt=member_prompt,
@@ -165,10 +190,36 @@ class TeamPolicyRail(DeepAgentRail):
             teammate_mode=teammate_mode,
             team_mode=team_mode,
             dispatch_mode=dispatch_mode,
+            member_messaging=member_messaging,
+            member_subtasks=member_subtasks,
             base_prompt=base_prompt,
             hitt_enabled=hitt_enabled,
             swarmflow_enabled=swarmflow_enabled,
+            bootstrap_mode=bootstrap_mode,
+            bound_group_name=bound_group_name,
         )
+
+        # A framework-built team (F_122) has no ``build_team`` result to carry
+        # the leader's policy, so the same disclosure text is rendered here —
+        # every variable it depends on is spec-settled (no leader choice is
+        # pending) — and handed to the tracker as a ``<team-policy>`` block.
+        # ``hitt_enabled`` is the spec ceiling: with no ``build_team`` call it
+        # is also the effective value.
+        policy_text: str | None = None
+        if role == TeamRole.LEADER and bootstrap_mode == "framework":
+            policy_text = render_team_policy_inline(
+                body=build_leader_policy_disclosure(
+                    lifecycle=lifecycle,
+                    teammate_mode=teammate_mode,
+                    team_mode=team_mode,
+                    dispatch_mode=dispatch_mode,
+                    member_messaging=member_messaging,
+                    member_subtasks=member_subtasks,
+                    language=language,
+                    hitt_enabled=hitt_enabled,
+                    loader=self._loader,
+                ),
+            )
 
         self._tracker = TeamContextTracker(
             team_backend=team_backend,
@@ -182,15 +233,22 @@ class TeamPolicyRail(DeepAgentRail):
             expose_human_agents_to_teammates=expose_human_agents_to_teammates,
             language=language,
             fork_source=fork_source,
+            policy_text=policy_text,
         )
-        # Scheduled dispatch only (F_119): a passed review does not wake the
-        # author, so the outcome rides its next admitted input instead.
-        # Autonomous dispatch keeps its live verified notice.
-        self._outcome_tracker: TaskOutcomeTracker | None = (
-            TaskOutcomeTracker(team_backend=team_backend, member_name=member_name)
-            if dispatch_mode == "scheduled" and team_backend is not None and role != TeamRole.LEADER
-            else None
+        # A task fact the member may have missed rides its next admitted
+        # input: under scheduled dispatch a passed review, which does not wake
+        # the author (F_119); under autonomous dispatch an edit (F_129). The
+        # leader needs neither. The tracker is the member's own, owned by its
+        # TeamAgent and borrowed here, so its baseline outlives this rail and
+        # is shared with the runtime's event-driven announcement. A second,
+        # rail-owned tracker would announce the same edit again, so a missing
+        # one disables the notices instead; the configurator always injects
+        # one for a non-leader member (covered by its wiring test).
+        self._outcome_tracker: TaskOutcomeTracker | TaskRevisionTracker | None = (
+            task_event_tracker if role != TeamRole.LEADER else None
         )
+        if role != TeamRole.LEADER and task_event_tracker is None and team_backend is not None:
+            team_logger.debug("[{}] no task notice tracker injected; task notices are off", member_name or "?")
 
     def init(self, agent: Any) -> None:
         """Cache the agent's shared prompt builder."""
@@ -265,14 +323,13 @@ class TeamPolicyRail(DeepAgentRail):
         await self._tracker.commit(session)
 
     async def _fold_task_outcomes(self, parts: list[str], session: Any) -> None:
-        """Prepend review passes not yet told to the member onto its input."""
+        """Prepend the task facts not yet told to the member onto its input."""
         if self._outcome_tracker is None:
             return
-        text = await self._outcome_tracker.pending_text(session)
-        if not text:
-            return
-        parts.insert(0, text)
-        await self._outcome_tracker.commit(session)
+        notice = await self._outcome_tracker.claim(session)
+        if notice is not None:
+            parts.insert(0, notice.text)
+            await self._outcome_tracker.persist(session)
 
     async def before_steering_drain(self, ctx: AgentCallbackContext) -> None:
         """Cap how much of the steering backlog one model call takes.
@@ -325,13 +382,55 @@ class TeamPolicyRail(DeepAgentRail):
         )
         parts[:] = kept
 
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Re-evaluate continuation on the first model call of each invocation."""
+        self._continued_policy = None
+
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Allow rebuilding after this invocation explicitly disbands its team."""
+        if ctx.inputs.tool_name == "clean_team":
+            self._continued_policy = None
+
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject the static sections, then catch state with no input to ride."""
         if self.system_prompt_builder is not None:
             for section in self._static_sections:
                 self.system_prompt_builder.add_section(section)
+            if self._continued_policy is None:
+                self._continued_policy = await self._continues_with_policy(ctx)
+            if self._continued_policy:
+                # Same section name, so this replaces the routing to build_team.
+                self.system_prompt_builder.add_section(self._recovered_bootstrap_section())
 
         await self._announce_unattached_state(ctx)
+
+    async def _continues_with_policy(self, ctx: AgentCallbackContext) -> bool:
+        """Whether this leader must not be routed to ``build_team``.
+
+        Applies to any run continuing the same session, cold recovered or
+        resumed from pause. The switch happens at a run boundary, so the prompt
+        prefix stays stable within a run. The transcript is checked, not just
+        the flag: a history without the policy clears the flag so ``build_team``
+        can still deliver it. Getting this wrong costs at most one round.
+        """
+        backend = self._team_backend
+        if self._role != TeamRole.LEADER or backend is None or not backend.history_restored():
+            return False
+        messages = ctx.context.get_messages() if ctx.context is not None else []
+        if not holds_team_policy(messages):
+            backend.clear_history_restored()
+            return False
+        return await backend.rejects_rebuild()
+
+    def _recovered_bootstrap_section(self) -> PromptSection:
+        if self._recovered_bootstrap is None:
+            self._recovered_bootstrap = build_leader_bootstrap_section(
+                swarmflow_enabled=False,
+                language=self._language,
+                loader=self._loader,
+                recovered=True,
+            )
+        return self._recovered_bootstrap
 
     async def _queue_team_context_attachment(self, ctx: AgentCallbackContext, session: Any) -> bool:
         """Register this member's team state as one dynamic attachment section.
@@ -435,9 +534,13 @@ class TeamPolicyRail(DeepAgentRail):
         teammate_mode: str,
         team_mode: str,
         dispatch_mode: str,
+        member_messaging: bool,
+        member_subtasks: bool,
         base_prompt: str | None,
         hitt_enabled: bool,
         swarmflow_enabled: bool,
+        bootstrap_mode: str,
+        bound_group_name: str | None,
     ) -> list[PromptSection]:
         """Construct the never-changing sections once at rail init time.
 
@@ -453,6 +556,8 @@ class TeamPolicyRail(DeepAgentRail):
             sections = self._build_leader_sections(
                 base_prompt=base_prompt,
                 swarmflow_enabled=swarmflow_enabled,
+                bootstrap_mode=bootstrap_mode,
+                bound_group_name=bound_group_name if dispatch_mode == "scheduled" else None,
             )
         else:
             sections = build_team_static_sections(
@@ -462,6 +567,8 @@ class TeamPolicyRail(DeepAgentRail):
                 teammate_mode=teammate_mode,
                 team_mode=team_mode,
                 dispatch_mode=dispatch_mode,
+                member_messaging=member_messaging,
+                member_subtasks=member_subtasks,
                 base_prompt=base_prompt,
                 language=self._language,
                 hitt_enabled=hitt_enabled,
@@ -480,19 +587,39 @@ class TeamPolicyRail(DeepAgentRail):
         *,
         base_prompt: str | None,
         swarmflow_enabled: bool,
+        bootstrap_mode: str,
+        bound_group_name: str | None,
     ) -> list[PromptSection]:
-        """Build the leader's prefix: bootstrap, plus the caller's own prompt.
+        """Build the leader's prefix: an opening section, plus the caller's own prompt.
 
-        The extra section stays here rather than moving into the ``build_team``
-        disclosure because it is not team policy: it is what the SDK caller told
-        *this* leader to do, and it has to be in force before the team exists —
-        it may well be the instruction that decides what team to build.
+        The opening section is ``team_bootstrap`` (route to ``build_team``) or,
+        for a framework-built team (F_122), ``team_prebuilt`` (the team exists,
+        the policy arrives as a ``<team-policy>`` block). The extra section
+        stays here rather than moving into the policy disclosure because it is
+        not team policy: it is what the SDK caller told *this* leader to do,
+        and it has to be in force before the team exists — it may well be the
+        instruction that decides what team to build.
         """
-        sections = [build_leader_bootstrap_section(
-            swarmflow_enabled=swarmflow_enabled,
-            language=self._language,
-            loader=self._loader,
-        )]
+        if bootstrap_mode == "framework":
+            opening = build_leader_prebuilt_section(language=self._language, loader=self._loader)
+        else:
+            opening = build_leader_bootstrap_section(
+                swarmflow_enabled=swarmflow_enabled,
+                language=self._language,
+                loader=self._loader,
+            )
+        sections = [opening]
+        # Scheduled dispatch with a bound AgentGroup (F_125 decision 14): name
+        # the group so the leader looks for experts there first — the same
+        # signal that scopes ``view_experts`` to it.
+        if bound_group_name is not None:
+            sections.append(
+                build_leader_bound_group_section(
+                    group=bound_group_name,
+                    language=self._language,
+                    loader=self._loader,
+                )
+            )
         extra = build_team_extra_section(base_prompt=base_prompt, language=self._language)
         if extra is not None:
             sections.append(extra)

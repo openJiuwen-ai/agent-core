@@ -151,7 +151,13 @@ async def _bind_rail(agent: DeepAgent, rail: AgentRail) -> ResourceRef:
     identity = type(rail).__name__
     if agent.find_rail_by_name(identity) is not None:
         raise ValueError(f"Rail already bound: {identity}")
-    await agent.register_rail(rail)
+    try:
+        await agent.register_rail(rail)
+    except BaseException:
+        # init may have registered runtime tools before selective routing fails.
+        # This instance has no ResourceRef yet, so outer rollback cannot see it.
+        await agent.unregister_rail(rail)
+        raise
     return ResourceRef(kind=ResourceKind.RAIL, identity=identity)
 
 

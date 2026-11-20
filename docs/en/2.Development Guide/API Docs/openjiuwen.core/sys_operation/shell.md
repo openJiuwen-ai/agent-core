@@ -10,6 +10,10 @@ class BaseShellOperation()
 
 ### abstractmethod async execute_cmd
 
+The local implementation honors the supplied `timeout` without a secondary
+`JW_EXECUTE_CMD_MAX_TIMEOUT` cap. Omitted or `None` values use 300 seconds;
+callers are responsible for validating and limiting the execution budget.
+
 ```python
 abstractmethod async execute_cmd(
     command: str,
@@ -36,6 +40,9 @@ Asynchronously execute Shell command.
 
 ### abstractmethod async execute_cmd_stream
 
+The local implementation uses the same timeout rules as `execute_cmd` and
+preserves the caller's execution budget.
+
 ```python
 abstractmethod async execute_cmd_stream(
     command: str,
@@ -60,3 +67,22 @@ Asynchronously execute Shell command in streaming mode.
 **Returns**:
 
 **AsyncIterator[[ExecuteCmdStreamResult](./result.md#class-executecmdstreamresult)]**, streaming command execution result.
+
+## Local Shell Process Lifetime
+
+These rules apply to local `ShellOperation`, not to sandbox-provider lifecycle management.
+
+POSIX commands detach the inherited controlling terminal before execution without
+leaving the owned group. Commands cannot use the SDK host's `/dev/tty` for
+interactive prompts. This is not a new OS session; an explicit PTY wrapper can
+still create its own terminal. Process-enumeration errors retain ownership and
+restart the empty-group observation interval. They do not count as evidence that
+previews have exited, and do not prevent an explicit stop from attempting cleanup.
+
+- Successful command completion does not imply that its background services have exited. Preview services remain until an explicit session stop or SDK process exit. Another tool call or a completed conversation turn does not stop them. No automatic lifetime or memory limit is imposed.
+- Linux uses a dedicated process group with a guardian retaining its identity. Windows uses a Job Object assigned before the command starts executing. Timeout, cancellation, early closure of an active stream, and background startup failure clean up the owned execution. Explicit Windows stops use a nonzero exit code.
+- The PID returned by `execute_cmd_background` remains the command PID, not the internal guardian PID. Ordinary shell background syntax is also supported, but redirect the child's standard input, output, and error to prevent inherited pipes from keeping the foreground call open.
+- Hosts bind and restore session context with `set_shell_session_id` / `reset_shell_session_id`. `kill_shell_processes_for_session(sid)` targets an exact session; `kill_shell_processes_for_session_tree(sid)` also targets child keys beginning with `sid + "_"`. The return value counts stopped executions, not individual descendant PIDs. A stop also covers process creation already in progress; a later invocation can reuse the same session.
+- Executions without a session ID are still owned by the SDK process but cannot be stopped by session. Normal SDK exit releases ownership. Windows Job handle closure and POSIX guardian detection of a closed host pipe also attempt to clean up remaining owned processes.
+
+This is not a security sandbox. POSIX programs that deliberately leave their group using `setsid` / `setpgid` are outside this containment; use a container or cgroup when they must be contained. The historical `JW_START_NEW_SESSION=false` setting still explicitly disables POSIX group ownership. In that mode, only direct-command termination is guaranteed; the SDK's shared process group is never signalled. Manually registering an externally created PID cannot retroactively establish full descendant ownership either.

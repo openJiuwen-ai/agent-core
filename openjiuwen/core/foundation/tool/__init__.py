@@ -2,6 +2,16 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard, Input, Output
+from openjiuwen.core.foundation.tool.client import (
+    ClientTool,
+    ClientToolContext,
+    ClientToolResult,
+    ClientToolStatus,
+    ClientToolUnavailable,
+    default_client_output,
+    is_client_tool,
+)
+from openjiuwen.core.foundation.tool.execution import ToolExecution
 from openjiuwen.core.foundation.tool.exposure import ToolExposure
 from openjiuwen.core.foundation.tool.function.function import LocalFunction
 from openjiuwen.core.foundation.tool.mcp.base import (
@@ -27,11 +37,19 @@ __all__ = [
     # all tools
     "Tool",
     "LocalFunction",
+    "ClientTool",
+    "ClientToolContext",
+    "ClientToolUnavailable",
     "RestfulApi",
     "MCPTool",
     # for tool info/tool call
     "ToolCard",
     "ToolExposure",
+    "ToolExecution",
+    "ClientToolResult",
+    "ClientToolStatus",
+    "default_client_output",
+    "is_client_tool",
     "RestfulApiCard",
     "ToolInfo",
     "ToolOutput",

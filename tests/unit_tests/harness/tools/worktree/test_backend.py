@@ -2,7 +2,11 @@
 
 """Tests for openjiuwen.harness.tools.worktree.backend."""
 
+import os
+import subprocess
+
 import pytest
+from unittest.mock import AsyncMock
 
 from openjiuwen.harness.tools.worktree.backend import (
     GitBackend,
@@ -13,6 +17,85 @@ from openjiuwen.harness.tools.worktree.backend import (
 )
 from openjiuwen.harness.tools.worktree.models import WorktreeConfig
 from tests.test_logger import logger
+
+
+@pytest.mark.asyncio
+async def test_remote_base_fetch_without_tracking_ref_falls_back_to_head(monkeypatch):
+    """Remote node: a single-branch refspec can fetch main without creating origin/main."""
+    head = "b" * 40
+    resolve = AsyncMock(side_effect=[None, None, head])
+    fetch = AsyncMock(return_value=True)
+    monkeypatch.setattr("openjiuwen.harness.tools.worktree.backend.get_default_branch", AsyncMock(return_value="main"))
+    monkeypatch.setattr("openjiuwen.harness.tools.worktree.backend.rev_parse", resolve)
+    monkeypatch.setattr("openjiuwen.harness.tools.worktree.backend.fetch_ref", fetch)
+
+    assert await GitBackend(remote_base=True)._resolve_base("repo") == ("HEAD", head)
+    fetch.assert_awaited_once_with("repo", "main")
+
+
+def _git_out(repo: str, *args: str) -> str:
+    return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _commit(repo: str, name: str) -> str:
+    with open(os.path.join(repo, name), "w", encoding="utf-8") as f:
+        f.write(name)
+    _git_out(repo, "add", name)
+    _git_out(repo, "commit", "-m", name)
+    return _git_out(repo, "rev-parse", "HEAD")
+
+
+@pytest.mark.asyncio
+async def test_local_base_prefers_current_branch_over_defaults_and_remote(tmp_git_repo):
+    """Unpushed commits on the checked-out branch are the base; origin/HEAD is never read."""
+    _git_out(tmp_git_repo, "branch", "-M", "main")
+    _git_out(tmp_git_repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git_out(tmp_git_repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    _git_out(tmp_git_repo, "checkout", "-q", "-b", "feature")
+    feature_sha = _commit(tmp_git_repo, "unpushed.txt")
+
+    assert await GitBackend()._resolve_base(tmp_git_repo) == ("feature", feature_sha)
+
+
+@pytest.mark.asyncio
+async def test_local_base_detached_head_uses_local_default_before_remote(tmp_git_repo):
+    _git_out(tmp_git_repo, "branch", "-M", "develop")
+    develop_sha = _git_out(tmp_git_repo, "rev-parse", "HEAD")
+    remote_sha = _commit(tmp_git_repo, "remote.txt")
+    _git_out(tmp_git_repo, "update-ref", "refs/remotes/origin/main", remote_sha)
+    _git_out(tmp_git_repo, "reset", "-q", "--hard", develop_sha)
+    _git_out(tmp_git_repo, "checkout", "-q", "--detach", remote_sha)
+
+    assert await GitBackend()._resolve_base(tmp_git_repo) == ("develop", develop_sha)
+
+
+@pytest.mark.asyncio
+async def test_local_base_falls_back_to_remote_then_detached_head(tmp_git_repo):
+    """Without any local branch, an existing origin/<default> wins; without that, HEAD."""
+    _git_out(tmp_git_repo, "branch", "-M", "main")
+    head = _git_out(tmp_git_repo, "rev-parse", "HEAD")
+    _git_out(tmp_git_repo, "checkout", "-q", "--detach")
+    _git_out(tmp_git_repo, "branch", "-D", "main")
+    assert await GitBackend()._resolve_base(tmp_git_repo) == ("HEAD", head)
+
+    _git_out(tmp_git_repo, "update-ref", "refs/remotes/origin/master", head)
+    assert await GitBackend()._resolve_base(tmp_git_repo) == ("origin/master", head)
+
+
+@pytest.mark.asyncio
+async def test_create_uses_resolved_commit_not_a_moving_ref(monkeypatch, tmp_path):
+    sha = "c" * 40
+    backend = GitBackend(WorktreeConfig(longpaths_support=False))
+    monkeypatch.setattr(backend, "_resolve_base", AsyncMock(return_value=("origin/develop", sha)))
+    monkeypatch.setattr("openjiuwen.harness.tools.worktree.backend.read_worktree_head_sha", AsyncMock(return_value=None))
+    add = AsyncMock()
+    monkeypatch.setattr("openjiuwen.harness.tools.worktree.backend.worktree_add", add)
+
+    result = await backend.create("fixed-base", "repo", str(tmp_path / "worktree"))
+
+    assert add.await_args.args[3] == sha
+    assert result.base_branch == "origin/develop"
+    assert result.head_commit == sha
 
 
 def _wt_target(tmp_path, slug: str) -> str:

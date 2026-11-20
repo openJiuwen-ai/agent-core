@@ -54,9 +54,9 @@ agent_teams/
 ├── context.py           # session_id 跨成员/跨模式共享 contextvars
 ├── i18n.py              # 运行时中/英文字符串（仅装运行时 hard-coded 串）+ `reply_hint_for(sender)`：按发件人选 reply-hint 文案（user 走无条件强制版，其余走通用条件版）——文案归它管，选哪条文案也归它管，两个消费点（coordination `MessageHandler` / external `format`）不各写一遍
 ├── timefmt.py           # 毫秒 epoch → "绝对本地时间 + 相对差" 渲染（喂 LLM/观测，文案走 i18n）；`format_absolute_time` 只出绝对时间，给写进对话历史、之后会被重读的入站文本用（B_04）
-├── inbound_render.py    # 入站消息/框架事件/团队状态 → <team-inbound>/<team-event>/<team-note>/<team-context> XML 渲染 + `render_clock`：每次输入附带的 `<team-clock now>` 当前时间锚点（`<team-inbound>` 的 time 只写绝对发送时间，见 B_04）（纯函数，喂 LLM；文案由 handler 从 i18n 取；`<team-note>` 嵌在它所修饰的 inbound / event 块内部，不平级）+ `render_team_policy`：外部 CLI 成员的系统提示词包成 `<team-policy tools="<mcp server>">`，首个子元素是 `<team-note kind="tool-namespace">`，一次声明裸工具名归属哪个 MCP server（正文是团队自己的 markdown，不做转义）+ `render_controller_input`：HITT 控制者指令渲染成 `<team-inbound from="controller">`，让 avatar 分得清控制者与团队侧的 `user`（见 interaction/AGENTS.md 运行约束 6）+ `SNAPSHOT_EVENT_KINDS`/`snapshot_kind_of`/`drop_superseded_snapshots`：判定哪些 event 是全量幂等快照、并从一批排队输入里整条剔除被覆盖的那几条（当前只有 task-board）。见 F_46 / F_70 / F_71 / F_72
-├── team_context.py      # TeamContextTracker：判定该告诉这个成员哪些团队状态（自身身份 / 团队元数据 / 成员名册），并把投递进度基线持久化到成员自己的 child AgentSession。两个调用方：TeamPolicyRail（进程内）与 CliRuntimeBase（外部 CLI）。见 F_70。另有 TaskOutcomeTracker（仅调度模式）：把尚未告知的"验收通过"作为 `<team-event kind="task-verified">` 并入成员下一次输入，基线是成员 session state 里已告知的 task_id，不经邮箱、不进 team.context 附件（F_119）
-├── message_template.py  # 框架模板消息的两阶段渲染：发送存意图（消息行 content 空 + meta={template,refs,params}），投递时按收件人语言加载 prompts/<lang>/<key>.md、用 {{task.*}}/{{member.*}}/{{param.*}} 填当前行（单遍替换不二次扫描、字段白名单、失败降级为 meta 合成的 fallback 行）。见 F_63
+├── inbound_render.py    # 入站消息/框架事件/团队状态 → <team-inbound>/<team-event>/<team-note>/<team-context> XML 渲染 + `render_clock`：每次输入附带的 `<team-clock now>` 当前时间锚点（`<team-inbound>` 的 time 只写绝对发送时间，见 B_04）（纯函数，喂 LLM；文案由 handler 从 i18n 取；`<team-note>` 嵌在它所修饰的 inbound / event 块内部，不平级）+ `render_team_policy`：外部 CLI 成员的系统提示词包成 `<team-policy tools="<mcp server>">`，首个子元素是 `<team-note kind="tool-namespace">`，一次声明裸工具名归属哪个 MCP server（正文是团队自己的 markdown，不做转义）+ `render_team_policy_inline`：进程内 leader 的同名裸块（无 `tools` 属性 / 命名空间 note），framework 建队时准则经 tracker 以它投进历史（F_122）+ `render_controller_input`：HITT 控制者指令渲染成 `<team-inbound from="controller">`，让 avatar 分得清控制者与团队侧的 `user`（见 interaction/AGENTS.md 运行约束 6）+ `SNAPSHOT_EVENT_KINDS`/`snapshot_kind_of`/`drop_superseded_snapshots`：判定哪些 event 是全量幂等快照、并从一批排队输入里整条剔除被覆盖的那几条（当前只有 task-board）。见 F_46 / F_70 / F_71 / F_72
+├── team_context.py      # TeamContextTracker：判定该告诉这个成员哪些团队状态（自身身份 / 团队元数据 / 成员名册），并把投递进度基线持久化到成员自己的 child AgentSession。两个调用方：TeamPolicyRail（进程内）与 CliRuntimeBase（外部 CLI）。见 F_70。第四个频道 `policy_text`（仅 `bootstrap_mode="framework"` 的 leader，F_122）：rail 构造期渲染好的 `<team-policy>` 块，基线 `policy_hash`（文本 sha256），首次 / 文本变化时投递一次，块序 context → policy → roster。另有 TaskOutcomeTracker（仅调度模式）：把尚未告知的"验收通过"作为 `<team-event kind="task-verified">` 并入成员下一次输入，基线是成员 session state 里已告知的 task_id，不经邮箱、不进 team.context 附件（F_119）；以及同型的 TaskRevisionTracker（仅自主模式）：任务修改告知的唯一来源，把执行者正在做的任务里没看到的修改（`revision > observed_revision`）作为 `<team-event kind="task-revised">` 告知，"看到没有"仍以 DB 的 `observed_revision` 为准（F_129）；`build_task_event_tracker(dispatch_mode)` 按模式二选一。两者共用 `_TaskNoticeTracker`：每个成员一个实例，由 TeamAgent 持有（`PrivateAgentResources.task_event_tracker`，经 `BuildContext.extras` 给每次重建的 rail 借用、构造时显式交给 `TeamHarness`；外部成员绑在 runtime 上），基线是弱引用绑定到一个 session 对象的内存保序集合（换对象即重新读入：运行周期、切 session、重启、checkpoint 恢复都会换对象；写回失败的条目在同一 session id 的下一个对象上补写），`claim(session)` 先认领再送达、送达失败 `release(notice)`、`persist(session)` 写回，`announce(session, send)` 一步完成（只有 `WAKES` 为真的 tracker 能这样单独送出，验收通过不能）；`TASK_UPDATED` 只经 `announce_task_revisions()`（runtime 侧协议 `TaskNoticeAwareRuntime`）触发它
+├── message_template.py  # 框架模板消息的两阶段渲染：发送存意图（消息行 content 空 + meta={template,refs,params}），投递时按收件人语言加载 prompts/<lang>/<key>.md、用 {{task.*}}/{{member.*}}/{{param.*}} 填当前行（单遍替换不二次扫描、字段白名单、失败降级为 meta 合成的 fallback 行）。见 F_63。F_129 新增 `task.revision` 与三个按需计算字段 `change_notes` / `revision_diff` / `subtask_brief`，渲染了 `task.content` 的展开经 `ExpandedMessage.shown_revision` 回报展示的版本，供投递点记为已看到
 ├── tiny_agent.py        # Tiny Agent：随时唤起的极简 NativeHarness（system_prompt + model + 仅结构化输出工具）；run 单轮 / chat 多轮；ephemeral（含 title/summary 预定义）+ team-scoped（TeamAgentSpec.tiny_agents 多实例，TeamInfra 持有）。见 F_45
 ├── paths.py             # 文件系统布局单一真相源
 ├── schema/              # 全部数据模型（Spec / Context / Event / Status / Task）
@@ -66,7 +66,8 @@ agent_teams/
 ├── rails/               # 团队 Rail + manifest 元素声明（team rail / 内置 rail·tool / context handle / team confirm payload）
 ├── security/            # Team 权限安全辅助（permission narrowing 等）
 ├── runtime/             # Runner 进程内 TeamAgent 对象池 + 派发决策 + Run/Interact 并发门禁
-├── organization/        # 进程内跨团队组织、任务池、消息、专家与汇总团队、共享工作空间；见 docs/specs/S_29_team-organization.md
+├── organization/        # 进程内跨团队组织、任务池、消息、专家与汇总团队、共享工作空间；见 .agents/agent-docs/specs/agent_teams/S_29_team-organization.md
+├── experts/             # Team 专家：ExpertCatalog 定位协议（宿主只答"装了哪些包、在哪"）+ AgentGroup 包格式（加载器同步/异步 + 卡片）+ 模板 → Team 成员组装（唯一实现）+ 绑定团视图（宿主组装进 spec 的成员；spec 里没有的团内成员由 `spawn_expert` / swarmflow 按需加载）；leader 的 view_experts / view_expert_groups / spawn_expert 消费它。见 F_125
 ├── interaction/         # 外部交互入口（UserInbox / HumanAgentInbox / @ 路由）
 ├── tools/               # 团队工具（Leader / Teammate / Human Agent 可调用的原子操作）
 ├── messager/            # 消息传输层（inprocess / pyzmq）
@@ -113,18 +114,18 @@ MCP server。Codex 例外：团队工具以裸名注册为顶层 Dynamic Tools�
 ### rails/ — 团队 Rail 注入 + manifest 声明
 
 team rail 全部经 **manifest 声明式装配**（`@harness_element` provider），不再手搓 `new` —— 见
-`docs/features/F_32_declarative-harness-assembly.md`。`AgentConfigurator` 把 team rail 作为
+`.agents/agent-docs/features/agent_teams/F_32_declarative-harness-assembly.md`。`AgentConfigurator` 把 team rail 作为
 `RailSpec` 注入 `build_spec.rails`，live handle 经 `BuildContext.extras` 传给工厂，rail 随
 `spec.build` + `ensure_initialized` 自动挂载 / init（不再有 `_MountedRails` / 手动 set/init /
 customizer 后处理）。
 
 | 文件 | 职责 |
 |---|---|
-| `team_policy_rail.py` | `TeamPolicyRail`：所有进 builder 的团队 section 均静态**且成员间逐字一致**，init 建一次注入 `SystemPromptBuilder`（前缀 KV cache 稳定）。**按角色分两条装配道（F_76）**：非 leader 拿全量静态集（role / HITT 协作契约 [gate `hitt_enabled`] / bridge avatar 自契约 [仅 BRIDGE_AGENT] / workflow / dispatch [gate `dispatch_mode`] / lifecycle / extra + inbound 说明）；**leader 只拿 `team_bootstrap`（身份 + 协作机制选择，gate `swarmflow_enabled`）+ `team_extra`**，其余协同准则改由 `build_team` 的 ToolResult 披露——那才是 dispatch_mode / enable_hitt 等模式变量落定的时刻。团队状态（自身身份 / `team_info` / 成员名册）**不进 builder 也不进 attachment**，由 `TeamContextTracker` 在数据出现或变化的那次调用写进成员的对话历史。另外两件事都是「一次喂给模型多少排队输入」，按队列性质分手段：`on_user_message` 把非 leader 成员一批排队输入里被后来者覆盖的任务看板整条剔除（看板是全量幂等快照，丢旧的不损失信息）；`before_steering_drain` 处理丢不掉的那类——信箱消息每条各说各的，只能少拿，非 leader 每次 drain 限 `steer_batch_size` 条（默认 2），剩下的留在队列里由后续模型调用取走。两处的角色门是同一道：leader 都不参与，它读的是快照之间的差异。见 F_46 / F_50 / F_52 / F_68 / F_70 / F_71 / F_76 / F_78 |
+| `team_policy_rail.py` | `TeamPolicyRail`：所有进 builder 的团队 section 均静态**且成员间逐字一致**，init 建一次注入 `SystemPromptBuilder`（前缀 KV cache 稳定）。**按角色分两条装配道（F_76）**：非 leader 拿全量静态集（role / HITT 协作契约 [gate `hitt_enabled`] / bridge avatar 自契约 [仅 BRIDGE_AGENT] / workflow / dispatch [gate `dispatch_mode`] / lifecycle / extra + inbound 说明）；**leader 只拿 `team_bootstrap`（身份 + 协作机制选择，gate `swarmflow_enabled`）+ `team_extra`**（调度模式绑定了专家团且注入了专家目录时另加 `team_bound_group`，F_125），其余协同准则改由 `build_team` 的 ToolResult 披露——那才是 dispatch_mode / enable_hitt 等模式变量落定的时刻。**`bootstrap_mode="framework"`（F_122）时 leader 起手段换 `team_prebuilt`、准则在构造期渲染后作为 `policy_text` 交给 tracker 随首条输入投递，系统提示词仍只有起手段 + `team_extra`（加上同样条件下的 `team_bound_group`）**。团队状态（自身身份 / `team_info` / 成员名册）**不进 builder 也不进 attachment**，由 `TeamContextTracker` 在数据出现或变化的那次调用写进成员的对话历史。另外两件事都是「一次喂给模型多少排队输入」，按队列性质分手段：`on_user_message` 把非 leader 成员一批排队输入里被后来者覆盖的任务看板整条剔除（看板是全量幂等快照，丢旧的不损失信息）；`before_steering_drain` 处理丢不掉的那类——信箱消息每条各说各的，只能少拿，非 leader 每次 drain 限 `steer_batch_size` 条（默认 2），剩下的留在队列里由后续模型调用取走。两处的角色门是同一道：leader 都不参与，它读的是快照之间的差异。见 F_46 / F_50 / F_52 / F_68 / F_70 / F_71 / F_76 / F_78 |
 | `confirm_payload.py` | `TeamConfirmPayload` + `TeamPermissionConfirmResponse`：team-specific confirmation payload/response models（extend harness base classes with `decided_by` tracking） |
 | `team_permission_rail.py` | `TeamPermissionRail` + `TeamApprovalOrchestrator`：team-mode permission guardrail；继承 `PermissionInterruptRail`，leader-mediated ASK resolution + session-scoped auto-confirm（`_persist_allow_always=False`）。`enable_permissions=True` 时替代 `TeamToolApprovalRail` |
 | `tool_approval_rail.py` | `TeamToolApprovalRail`：teammate 调工具时通过消息向 leader 申请审批的中断 rail（`enable_permissions=False` 时使用） |
-| `team_tool_rail.py` / `team_plan_mode_rail.py` | `TeamToolRail`（协同工具注册）/ `TeamPlanModeRail`（plan mode 提示叠加） |
+| `team_tool_rail.py` / `team_plan_mode_rail.py` | `TeamToolRail`（协同工具注册；注册前对每张卡片 `declare_team_tool_direct`，成员开了渐进式工具暴露时协作工具仍直达，F_123）/ `TeamPlanModeRail`（plan mode 提示叠加） |
 | `team_skill_use_rail.py` | `TeamSkillUseRail(SkillUseRail)` + `create_team_skill_use_rail`：Skill 实体唯一存放于 `paths.global_skills_dir()`，成员/团队各自只有一份 `skills-visibility.json`。**只覆写两个方法**——`_filter_skills`（先按声明重算 allow/deny 再调 `super()`）与 `_build_skills_snapshot_signature`（把合成后的授权本身并进签名，否则授权变了库里没动、提示词不刷新），另加 `get_skills_for_session` 复查（session 基线是持久化状态）。**单 agent 的 `harness/rails/skills/skill_use_rail.py` 一字未改**：team 行为靠继承 + `agent_configurator` 把 `skills=[]`/`enable_skill_discovery=False` 写进 `build_spec` 关掉通用 rail。见 F_79 |
 | `elements.py` | 7 个 team rail 的 `@harness_element` 工厂 + `ConstructionInput`（`core.team.tool`/`core.team.policy`/`core.team.workspace`/`core.team.tool_approval`/`core.team.plan_mode`/`core.team.reliability`/`core.team.skill_use`/`core.team.observability`）。agent span 的 `core.observability` 是 harness 内置，不在这里声明。**没有 `core.team.permission`**——`TeamPermissionRail` 由平台（jiuwenswarm）自己挂，`enable_permissions=True` 时替代 `TeamToolApprovalRail`，agent_teams 下不声明它 |
 | `team_context.py` | `TeamHandleKey` + accessor + `inject_team_handles`：team live handle 经 `BuildContext.extras` 的 key 常量 + 类型化读取。rail 不缓存——需跨重建存活的状态（如 `reliability_components`）作为复用对象注入，由每轮新建的 rail 包装 |
@@ -200,12 +201,12 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 
 ### spawn/ — 成员启动
 
-**注册与拉起是两件事**（细则见 `docs/specs/S_05` 不变量 1）：
+**注册与拉起是两件事**（细则见 `.agents/agent-docs/specs/agent_teams/S_05` 不变量 1）：
 
-- **注册**：四个 `spawn_*` 工具与 `build_team` 的 predefined 成员都只落到 `TeamBackend.spawn_member`——**只写 DB 行（`UNSTARTED`），不启动任何东西**（该方法 docstring 即契约："does NOT start the member"）。
-- **拉起**：只有一条链 —— `TeamAgent.auto_start_member` / `auto_start_all` → `TeamBackend.startup_member` / `startup` → `MemberStatus.UNSTARTED→STARTING` 的 CAS guard（`try_transition_member_status`）→ `_spawn_and_publish` → `_on_teammate_created` → `SpawnManager.spawn_teammate`。
+- **注册**：各 `spawn_*` 工具与 `build_team` 的 predefined 成员都只落到 `TeamBackend.spawn_member`——**只写 DB 行（`UNSTARTED`），不启动任何东西**（该方法 docstring 即契约："does NOT start the member"）。
+- **拉起**：只有一条链 —— `TeamAgent.auto_start_member` / `auto_start_all` → `TeamBackend.startup_member` / `startup` → `MemberStatus.UNSTARTED→STARTING` 的 CAS guard（`try_transition_member_status`）→ `_spawn_and_publish` → `_start_teammate_runtime`（spawn 失败按成员通知 Leader，B_08）→ `_on_teammate_created` → `SpawnManager.spawn_teammate`。
 
-拉起漏斗有五个触发点，全是"活要交给一个还没起来的成员"：leader `send_message` 的 `_auto_start_members`、leader `create_task` 落库后拉起（**仅 autonomous**，F_84）、interact dispatch（`@member` / `@all` / operator 消息）、调度器投递（F_62），外加 leader round-idle 对账兜底（`TeamAgent._reconcile_member_startup`，看板有非终态任务时才动，F_84）。前四个共用入口 `TeamBackend.autostart_unstarted()`——它持有构造期注入的 `on_member_started` 回调、自带 leader 门与回调门，调用方不各自捎带 spawn 回调。CAS 是这条链上唯一的并发闸——**不要在 spawn 工具里顺手把 agent 拉起来**，那会绕过注册与拉起的分离（走 `autostart_unstarted` 不算，它经同一条 CAS 链）。模式由 `TeamAgentSpec.spawn_mode` 决定。
+拉起漏斗有六个触发点，全是"活要交给一个还没起来的成员"：leader `send_message` 的 `_auto_start_members`、leader `create_task` 落库后拉起（**仅 autonomous**，F_84）、interact dispatch（`@member` / `@all` / operator 消息）、调度器投递（F_62）、成员间消息由 leader 的 `MessageHandler._wake_peer_recipients` 代为拉起收件人（单人版入口 `TeamBackend.wake_member`，F_126），外加 leader round-idle 对账兜底（`TeamAgent._reconcile_member_startup`，看板有非终态任务时才动，F_84）。前四个共用入口 `TeamBackend.autostart_unstarted()`——它持有构造期注入的 `on_member_started` 回调、自带 leader 门与回调门，调用方不各自捎带 spawn 回调；它跳过名下没有未结束任务的任务级成员（`options.lifetime` 非空），点名的消息、广播（`include_idle_task_scoped=True`）与调度器交接仍会拉起它们（B_10）。CAS 是这条链上唯一的并发闸——**不要在 spawn 工具里顺手把 agent 拉起来**，那会绕过注册与拉起的分离（走 `autostart_unstarted` 不算，它经同一条 CAS 链）。模式由 `TeamAgentSpec.spawn_mode` 决定。
 
 启动模式：
 - `spawn_mode="process"` → `Runner.spawn_agent` 走子进程（跨平台，默认）。
@@ -234,7 +235,7 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 
 三种交互视角（`GodViewMessage` / `OperatorMessage` / `HumanAgentMessage`）+ `UserInbox` / `HumanAgentInbox` 的实现层，所有 HITT runtime 表面（`enable_hitt` 分层开关、人类成员来源、一致性约束、运行约束）也落在这里。
 
-Bridge Agent 把外部独立 agent（claudecode / codex / openclaw / hermes 等）以"团队成员"形式接入：`bridge_protocol.py` 定义纯文本 `BridgeProtocolAdapter`（connect / relay / close），`BridgeMemberSpec(TeamMemberSpec)` 子类 + `enable_bridge` 是 capability ceiling，dynamic spawn 走 `spawn_bridge_agent` 工具；bridge avatar 本地是完整 teammate，远程做实际工作，框架在 mailbox 路径自动转发原消息给远程并把回复组合进 avatar context（参见 `agent/coordination/handlers/message.py:_bridge_deliverable_for`）。详见 `docs/features/F_07_bridge-agent.md`。
+Bridge Agent 把外部独立 agent（claudecode / codex / openclaw / hermes 等）以"团队成员"形式接入：`bridge_protocol.py` 定义纯文本 `BridgeProtocolAdapter`（connect / relay / close），`BridgeMemberSpec(TeamMemberSpec)` 子类 + `enable_bridge` 是 capability ceiling，dynamic spawn 走 `spawn_bridge_agent` 工具；bridge avatar 本地是完整 teammate，远程做实际工作，框架在 mailbox 路径自动转发原消息给远程并把回复组合进 avatar context（参见 `agent/coordination/handlers/message.py:_bridge_deliverable_for`）。详见 `.agents/agent-docs/features/agent_teams/F_07_bridge-agent.md`。
 
 详见 [`interaction/AGENTS.md`](interaction/AGENTS.md)。
 
@@ -320,7 +321,7 @@ provider session/Turn 协议合并。
 **team 拉起外部 CLI 成员（F_22）**：CLI 启动知识静态预置在
 `TeamAgentSpec.external_cli_agents`（`ExternalCliAgentSpec` 列表：`cli_agent` 种类标识 +
 `command`/`cwd`/`inject_mcp`/`mcp_server_command`/`env`/`ssh_transport`），非空集即外部 CLI 成员的能力上限。
-leader 用 `spawn_external_cli(cli_agent=<name>)` 按名引用，不在 spawn
+leader 用 `spawn_teammate(cli_agent=<name>)` 按名引用（F_127），不在 spawn
 调用里传启动细节。claude / codex 条目可声明 `builtin_models`（订阅等 CLI 自身登录提供的模型与
 effort 目录）：声明后 leader 可在 spawn 时挑内置模型，并用 `set_member_model` 在运行中切换模型 /
 effort（落库到 `options.builtin_model`，经 `HarnessModelControl.set_model` 下一 turn 生效）；
@@ -342,8 +343,8 @@ claude `--append-system-prompt` / codex `-c developer_instructions` / 其余 pre
 stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内成员同路 fan-out。
 详见 [[F_22]] 与 [[F_25_external-cli-hardening-and-gemini]]。
 
-设计文档见 `docs/features/F_21_external-agent-access.md`（接入面 + spawn 接线）与
-`docs/features/F_22_external-cli-spawn-member-and-mcp-injection.md`（external_cli spawn 工具 +
+设计文档见 `.agents/agent-docs/features/agent_teams/F_21_external-agent-access.md`（接入面 + spawn 接线）与
+`.agents/agent-docs/features/agent_teams/F_22_external-cli-spawn-member-and-mcp-injection.md`（external_cli spawn 工具 +
 静态 spec 配置 + MCP 自动注入）。
 
 ### worktree — Git worktree 隔离
@@ -395,15 +396,15 @@ stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内
 
 ## 设计文档归档与双向同步（仅本模块强制）
 
-本模块的设计文档**全部**落在 `docs/` 下，命名与结构规约见 [`docs/AGENTS.md`](docs/AGENTS.md)。
+本模块文档已集中到仓库根 `.agents/agent-docs/{designs,specs,features,bugfix}/agent_teams/`。设计阶段使用 `.agents/skills/jw-design/SKILL.md`，开发记忆规则使用 `.agents/skills/jw-dev/SKILL.md`。新 feature / bugfix 使用 `YYYYMMDD_HHMM` 分钟时间命名，历史文件名保持不变。
 
-把 **`openjiuwen/agent_teams/` 下的代码 + 本目录 `docs/specs/` + `docs/features/` + `docs/bugfix/`
+把 **`openjiuwen/agent_teams/` 下的代码 + 仓库根 `.agents/agent-docs/specs/agent_teams/` + `.agents/agent-docs/features/agent_teams/` + `.agents/agent-docs/bugfix/agent_teams/`
 + 各级 `<subdir>/AGENTS.md`** 当作**一个一致性单元**来维护——`agent_teams` 子系统
 对契约一致性的要求高于仓库其它模块（多角色 + 多进程 + 持久化状态 + 公共 SDK 表面），
 所以本节的强制约束**只限于** `openjiuwen/agent_teams/` 子树，不上推到仓库其它模块。
 
 **前置铁律——文档先是设计的输入，才是提交的产出。** 动手改任何代码设计**之前**，先
-`grep` + 读相关的 `docs/specs/S_NN_*`（现有契约 / 不变量 / 边界）与 `docs/features/F_NN_*`
+`grep` + 读相关的 `.agents/agent-docs/specs/agent_teams/S_NN_*`（现有契约 / 不变量 / 边界）与 `.agents/agent-docs/features/F_YYYYMMDD_HHMM_*`
 （为什么长这样、当初拒绝了哪些方案），拿它们校准方案——spec 说"系统是什么样"、feature 说
 "为什么这么改"，先读才不会撞坏既有契约、也不会重蹈已被拒绝的方案。方案定了**当场**同步改掉
 对应 S / F，让文档和方案一起成形。**先码后档、拖到提交前才补文档是把流程做反了**：那样文档
@@ -412,21 +413,21 @@ stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内
 
 三条强制约束，提交时必查：
 
-1. **每次特性更新必须归档 feature 文档，且 `feat` 改动的特性代码、测试代码、文档拆成三个连续提交**：在 `docs/features/`
-   下新增一份 `F_NN_<slug>.md`，记录决策、拒绝的方案、验证基线、已知遗留。commit message 只写
+1. **每次特性更新必须归档 feature 文档，且 `feat` 改动的特性代码、测试代码、文档拆成三个连续提交**：在 `.agents/agent-docs/features/`
+   下新增一份 `F_YYYYMMDD_HHMM_<slug>.md`，记录决策、拒绝的方案、验证基线、已知遗留。commit message 只写
    what，feature 文档负责写 why / why-not。`feat` 改动落地顺序**固定为三个紧邻的提交**——提交 1 落特性代码
    （`feat(swarm): ...`），提交 2 落本次新增/改动的单测（`test(swarm): ...`），提交 3
-   落本次涉及的全部文档：`docs/features/F_NN_*.md` 新增 + 下面 #2 要求的 `docs/specs/S_NN_*.md`
+   落本次涉及的全部文档：`.agents/agent-docs/features/F_YYYYMMDD_HHMM_*.md` 新增 + 下面 #2 要求的 `.agents/agent-docs/specs/agent_teams/S_NN_*.md`
    修订（`docs(swarm): ...`）。特性代码、测试、文档不再混进同一次 commit——既不让大段文档 diff 淹没
    代码评审，也让测试改动独立可审，还避免文档归档拖延导致设计上下文随时间漂移。
-   **只有 `feat` 拆**：`fix` / `refactor` / `perf` 等其它类型的改动，代码、测试、文档（含 `docs/bugfix/B_NN_*.md`、
-   对已有 `F_NN` 的追补及连带的 spec 修订）合并为**一个**对应 type 的提交——它们是同一条证据链，
+   **只有 `feat` 拆**：`fix` / `refactor` / `perf` 等其它类型的改动，代码、测试、文档（含 `.agents/agent-docs/bugfix/agent_teams/B_YYYYMMDD_HHMM_*.md`、
+   对已有 `F_YYYYMMDD_HHMM` 的追补及连带的 spec 修订）合并为**一个**对应 type 的提交——它们是同一条证据链，
    需要作为整体评审、cherry-pick 和 revert。
 2. **所有模块设计规约变动必须更新 specs 文档**：模块契约、跨子模块的公共协议、不变量、
-   公共 API 形态发生变化时，同步修订对应 `docs/specs/S_NN_<slug>.md`；新规约 = 新 spec 文件。
+   公共 API 形态发生变化时，同步修订对应 `.agents/agent-docs/specs/agent_teams/S_NN_<slug>.md`；新规约 = 新 spec 文件。
    规约变了但 specs 没改，下次读 spec 的人就被误导——这是设计债，不是文档懒。
 3. **双向同步：读到与代码不一致的描述必须当场修文档**。在本模块任何一份
-   `AGENTS.md` / `docs/specs/S_*` / `docs/features/F_*` 里读到的接口名、枚举值、
+   `AGENTS.md` / `.agents/agent-docs/specs/agent_teams/S_*` / `.agents/agent-docs/features/agent_teams/F_*` 里读到的接口名、枚举值、
    truth table 行数、文件路径、不变量等只要与当前代码不符，**不要**把过时表述当作新约束去执行、
    也不要原样转述给用户；先 `grep` 代码、以代码为准刷新文档，在同一次改动里落地。
    `AGENTS.md` 里每条点名了"X 个分支 / Y 路 dispatch / Z 方法"的句子都是契约的一部分。
@@ -438,11 +439,11 @@ stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内
 - spec 头部"最近一次修订日期"字段在每次修订该 spec 时填当天日期（`YYYY-MM-DD`）；feature 文档用
   头部"日期"字段记录归档当天，不设独立修订字段。**不要在元信息里写 commit hash**——避免"提交后
   回填"的来回反复。
-- 子模块自身的本地约定继续放各 `<subdir>/AGENTS.md`；跨子模块的设计规约一律落到 `docs/specs/`，
+- 子模块自身的本地约定继续放各 `<subdir>/AGENTS.md`；跨子模块的设计规约一律落到 `.agents/agent-docs/specs/agent_teams/`，
   不要塞进单一子目录的 AGENTS.md。
 - **`CLAUDE.md` 是只读壳，不要编辑它**：本模块每个子目录的 `CLAUDE.md` 仅含 `@AGENTS.md` 一行，
   编辑 `CLAUDE.md` 的修改不会被保留在任何有效文档里。需要更新文档时，直接编辑 `AGENTS.md`。
-- 拿不准某次改动算 feature-grade（要 `F_NN_*.md`）还是普通修复（不必归档）时，先问用户。
+- 拿不准某次改动算 feature-grade（要 `F_YYYYMMDD_HHMM_*.md`）还是普通修复（不必归档）时，先问用户。
   歧义情况默认**归档**——多一份 markdown 的成本远低于丢失设计上下文。
 
 ## 提交约定
@@ -451,4 +452,6 @@ stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内
 
 footer 用 `Refs: #<issue>` 格式关联 issue。issue 号若无法从当前上下文明确，必须先询问用户，不要臆造或留空。
 
-**只有 `feat` 改动拆提交**：涉及 `docs/features/F_*` / `docs/specs/S_*` 文档更新的 `feat` 改动，特性代码、测试代码、文档拆成三个连续提交（提交 1 特性代码 `feat(swarm)`，提交 2 单测 `test(swarm)`，提交 3 文档 `docs(swarm)`），细则见上文「设计文档归档与双向同步」约束 #1。`fix` / `refactor` 等其它类型一律不拆，代码、测试、文档合并为一个对应 type 的提交。
+**只有 `feat` 改动拆提交**：涉及 `.agents/agent-docs/features/agent_teams/F_*` / `.agents/agent-docs/specs/agent_teams/S_*` 文档更新的 `feat` 改动，特性代码、测试代码、文档拆成三个连续提交（提交 1 特性代码 `feat(swarm)`，提交 2 单测 `test(swarm)`，提交 3 文档 `docs(swarm)`），细则见上文「设计文档归档与双向同步」约束 #1。`fix` / `refactor` 等其它类型一律不拆，代码、测试、文档合并为一个对应 type 的提交。
+
+新 F 文档直接放 `.agents/agent-docs/features/`，模块以 frontmatter modules 标注；历史子目录通过 features/INDEX.md 定位。作者使用 Git author，F/B 声明关联 designs，修改后按根 AGENTS.md 自动同步索引。

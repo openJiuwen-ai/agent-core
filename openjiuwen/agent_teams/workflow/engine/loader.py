@@ -7,7 +7,8 @@ A workflow file is **ordinary, valid Python** in the one SwarmFlow format:
 
 * a top-level ``META = {...}`` *pure-literal* dict (name/description/phases), and
 * ``async def run(args): ...`` as the entrypoint, which imports the primitives it
-  needs (``from swarmflow import agent, parallel, ...``).
+  needs (``from swarmflow import agent, parallel, ...``). The primitives are also
+  pre-bound into the module namespace, so a missing import is not fatal.
 
 The loader:
 
@@ -116,8 +117,14 @@ def _import_module(path: str):
     registered in ``sys.modules`` under that name at facade import time; there
     is no on-disk ``swarmflow`` package. Importing the facade here ensures that
     registration has run before the script's imports execute.
+
+    The script-facing primitives are also pre-bound into the module namespace
+    before its body runs. LLM-authored scripts sometimes call ``phase()`` /
+    ``agent()`` without the import; pre-binding keeps such a script running
+    instead of failing the run with a ``NameError``. An explicit import, or a
+    script-level definition of the same name, simply rebinds it.
     """
-    from . import facade  # noqa: F401  # lazy: triggers _register_aliases, avoids a cycle
+    from . import facade  # lazy: triggers _register_aliases, avoids a cycle
 
     name = "wf_flow__" + re.sub(r"\W", "_", str(Path(path).resolve()))
     sys.modules.pop(name, None)  # ensure a fresh import (re-runs top-level)
@@ -125,6 +132,8 @@ def _import_module(path: str):
     if spec is None or spec.loader is None:
         raise MetaError(f"{path}: cannot import as a module")
     module = importlib.util.module_from_spec(spec)
+    for primitive in facade.SCRIPT_PRIMITIVES:
+        setattr(module, primitive, getattr(facade, primitive))
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module

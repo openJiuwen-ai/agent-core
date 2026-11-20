@@ -109,18 +109,20 @@ async def validate_guard(runtime: Any, guard: DecisionGuard, inputs: Any, sessio
     }:
         from ..playwright_runtime.policy_page_action import READ_PAGE_OPERATIONS
 
-        observing = guard.tool_name in {"browser_probe_interactives", "browser_probe_cards"} or (
-            guard.tool_name == "browser_page_action" and json.loads(guard.arguments).get("op") in READ_PAGE_OPERATIONS
+        operation = json.loads(guard.arguments).get("op")
+        geometry_independent = guard.tool_name in {"browser_probe_interactives", "browser_probe_cards"} or (
+            guard.tool_name == "browser_page_action" and operation in {*READ_PAGE_OPERATIONS, "navigate"}
         )
-        args = json.dumps({"url": guard.url, "guard": guard.node_guard, "observing": observing}, ensure_ascii=True)
+        args = json.dumps({"url": guard.url, "guard": guard.node_guard,
+                           "geometry_independent": geometry_independent}, ensure_ascii=True)
         script = """async (page) => {
           const args = ARGS;
           if (page.url() !== args.url) return {ok:false,mismatch:'url'};
           const current = await page.evaluate(PAGE_STATE);
-          // Readers intentionally refresh the current viewport; document identity
-          // remains mandatory, but asynchronous layout changes are not a stale target.
+          // Readers refresh the viewport; URL navigation does not depend on it.
+          // Document identity and any live link/order checks remain mandatory.
           if (current.document !== args.guard.document) return {ok:false,mismatch:'document'};
-          const ok = args.observing || JSON.stringify(current) === JSON.stringify(args.guard);
+          const ok = args.geometry_independent || JSON.stringify(current) === JSON.stringify(args.guard);
           return ok ? {ok:true} : {ok:false,mismatch:'page_geometry'};
         }""".replace("PAGE_STATE", PAGE_STATE_JS).replace("ARGS", args)
         link = guard.first_result or guard.observed_link

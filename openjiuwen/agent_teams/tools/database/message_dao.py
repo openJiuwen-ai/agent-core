@@ -3,8 +3,9 @@
 
 """Message and message-read-status data access object."""
 
+import asyncio
 import json
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Iterable, List, Optional
 
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -147,12 +148,32 @@ class MessageDao:
                 row.content = self._deref_row(row)
         return rows
 
+    async def _hydrate_row_off_loop(self, row: Optional[TeamMessageBase]) -> Optional[TeamMessageBase]:
+        """``_hydrate_row`` on a worker thread, after the read session closed.
+
+        Dereferencing is synchronous file IO; doing it inside ``read()`` held
+        a pooled reader connection and blocked the event loop that every
+        in-process team member shares. ``to_thread`` copies the context, so
+        the bound session id still resolves the file path.
+        """
+        if row is None or not self._is_placeholder(row.content):
+            return row
+        return await asyncio.to_thread(self._hydrate_row, row)
+
+    async def _hydrate_rows_off_loop(self, rows: Iterable[TeamMessageBase]) -> List[TeamMessageBase]:
+        """``_hydrate_rows`` on a worker thread; see ``_hydrate_row_off_loop``."""
+        rows = list(rows)
+        if not any(self._is_placeholder(row.content) for row in rows):
+            return rows
+        return await asyncio.to_thread(self._hydrate_rows, rows)
+
     async def get_message(self, message_id: str) -> Optional[TeamMessageBase]:
         """Get message information by ID."""
         message_model = _get_message_model()
         async with self._sessions.read() as session:
             result = await session.execute(select(message_model).where(message_model.message_id == message_id))
-            return self._hydrate_row(result.scalar_one_or_none())
+            row = result.scalar_one_or_none()
+        return await self._hydrate_row_off_loop(row)
 
     async def create_message(
         self,
@@ -337,7 +358,7 @@ class MessageDao:
             result = await session.execute(query)
             rows = result.scalars().all()
 
-            return self._hydrate_rows(rows)
+        return await self._hydrate_rows_off_loop(rows)
 
     async def get_unread_group_members(self, team_name: str) -> List[str]:
         """Read unstarted or failed recipients of explicit group mentions."""
@@ -412,12 +433,9 @@ class MessageDao:
             )
             read_status = read_result.scalar_one_or_none()
 
-            if not unread_only:
-                return self._hydrate_rows(list(rows))
-
-            return self._hydrate_rows(
-                [row for row in rows if read_status is None or row.timestamp > read_status.read_at]
-            )
+        if unread_only:
+            rows = [row for row in rows if read_status is None or row.timestamp > read_status.read_at]
+        return await self._hydrate_rows_off_loop(rows)
 
     async def get_team_messages(self, team_name: str, broadcast: Optional[bool] = None) -> List[TeamMessageBase]:
         """Get all messages for a team (without read status)."""
@@ -431,7 +449,7 @@ class MessageDao:
             query = query.order_by(message_model.timestamp)
             result = await session.execute(query)
             rows = result.scalars().all()
-            return self._hydrate_rows(rows)
+        return await self._hydrate_rows_off_loop(rows)
 
     async def has_unread_messages(self, team_name: str, *, include_broadcast: bool = True) -> bool:
         """Return True if any team message is still unread by its intended reader.

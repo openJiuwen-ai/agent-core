@@ -37,7 +37,7 @@ class RefCountedResource(ABC):
         if self._closed:
             raise RuntimeError("Cannot increment ref on closed resource")
         self._ref_count += 1
-        self._last_used = asyncio.get_event_loop().time()
+        self._last_used = time.time()
         return self._ref_count
 
     def decrement_ref(self) -> bool:

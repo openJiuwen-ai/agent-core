@@ -155,3 +155,134 @@ async def test_scheduled_create_task_starts_nobody(db):
 
     assert result.success is True
     on_created.assert_not_awaited()
+
+
+async def _set_status(db: TeamDatabase, member_name: str, *statuses: MemberStatus) -> None:
+    for status in statuses:
+        assert await db.member.update_member_status(member_name, TEAM_NAME, status.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_create_task_rejects_shut_down_assignee(db):
+    """A SHUTDOWN member can never be started again: the task would sit on the board unworked."""
+    backend = _leader_backend(db, AsyncMock(), dispatch_mode="scheduled")
+    await _set_status(db, DEV_1, MemberStatus.STARTING, MemberStatus.READY, MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.SHUTDOWN)
+    tool = ScheduledTaskCreateTool(backend, make_translator("cn"))
+
+    result = await tool.invoke({"tasks": [{"title": "T1", "content": "C1", "assignee": DEV_1}]})
+
+    assert result.success is False
+    assert DEV_1 in result.error and "shut down" in result.error
+    assert await backend.task_manager.open_task_counts_by_assignee() == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_create_task_accepts_dormant_assignee(db):
+    """A DORMANT member stays assignable: the scheduler's start handoff wakes it."""
+    backend = _leader_backend(db, AsyncMock(), dispatch_mode="scheduled")
+    await _set_status(db, DEV_1, MemberStatus.STARTING, MemberStatus.READY, MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.DORMANT)
+    tool = ScheduledTaskCreateTool(backend, make_translator("cn"))
+
+    result = await tool.invoke({"tasks": [{"title": "T1", "content": "C1", "assignee": DEV_1}]})
+
+    assert result.success is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_task_rejects_reassigning_to_shut_down_member(db):
+    """Reassignment goes through the same assignee check as creation."""
+    from openjiuwen.agent_teams.schema.task import TaskGraphSpec
+    from openjiuwen.agent_teams.tools.tool_task import UpdateTaskTool
+
+    backend = _leader_backend(db, AsyncMock(), dispatch_mode="scheduled")
+    graph = await backend.task_manager.add_graph([TaskGraphSpec(title="T1", content="C1", task_id="t1", assignee=DEV_1)])
+    assert graph.ok
+    await _set_status(db, DEV_2, MemberStatus.STARTING, MemberStatus.READY, MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.SHUTDOWN)
+    tool = UpdateTaskTool(backend, make_translator("cn"), dispatch_mode="scheduled")
+
+    result = await tool.invoke({"task_id": "t1", "assignee": DEV_2})
+
+    assert result.success is False
+    assert DEV_2 in result.error
+    assert (await backend.task_manager.get("t1")).assignee == DEV_1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_create_task_rejects_member_settling_into_shutdown(db):
+    """A member still shutting down may end in SHUTDOWN: refuse it until it has settled."""
+    backend = _leader_backend(db, AsyncMock(), dispatch_mode="scheduled")
+    await _set_status(db, DEV_1, MemberStatus.STARTING, MemberStatus.READY, MemberStatus.SHUTDOWN_REQUESTED)
+    tool = ScheduledTaskCreateTool(backend, make_translator("cn"))
+
+    result = await tool.invoke({"tasks": [{"title": "T1", "content": "C1", "assignee": DEV_1}]})
+
+    assert result.success is False
+    assert DEV_1 in result.error and "shutting down" in result.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_create_task_rejects_dormant_lifetime_member_force_shut_down(db):
+    """A force shutdown ends in SHUTDOWN even for a dormant lifetime, so the settling window is refused too."""
+    from sqlalchemy import update
+
+    from openjiuwen.agent_teams.tools.models import TeamMember
+
+    backend = _leader_backend(db, AsyncMock(), dispatch_mode="scheduled")
+    async with db.session_local() as session:
+        await session.execute(
+            update(TeamMember)
+            .where(TeamMember.team_name == TEAM_NAME, TeamMember.member_name == DEV_1)
+            .values(options='{"lifetime": "dormant"}')
+        )
+        await session.commit()
+    await _set_status(db, DEV_1, MemberStatus.STARTING, MemberStatus.READY, MemberStatus.SHUTDOWN_REQUESTED)
+    tool = ScheduledTaskCreateTool(backend, make_translator("cn"))
+
+    result = await tool.invoke({"tasks": [{"title": "T1", "content": "C1", "assignee": DEV_1}]})
+
+    assert result.success is False
+    assert await backend.task_manager.open_task_counts_by_assignee() == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_update_task_rejected_reassignment_leaves_the_edit_unapplied(db):
+    """A combined edit + reassignment to a retired member changes nothing."""
+    from openjiuwen.agent_teams.schema.task import TaskGraphSpec
+    from openjiuwen.agent_teams.tools.tool_task import UpdateTaskTool
+
+    backend = _leader_backend(db, AsyncMock(), dispatch_mode="scheduled")
+    graph = await backend.task_manager.add_graph([TaskGraphSpec(title="T1", content="C1", task_id="t1", assignee=DEV_1)])
+    assert graph.ok
+    await _set_status(db, DEV_2, MemberStatus.STARTING, MemberStatus.READY, MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.SHUTDOWN)
+    tool = UpdateTaskTool(backend, make_translator("cn"), dispatch_mode="scheduled")
+
+    result = await tool.invoke({"task_id": "t1", "title": "T1 edited", "content": "C1 edited", "assignee": DEV_2})
+
+    assert result.success is False
+    task = await backend.task_manager.get("t1")
+    assert (task.title, task.content, task.assignee) == ("T1", "C1", DEV_1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_update_task_can_cancel_a_task_whose_owner_shut_down(db):
+    """Cancelling hands nothing to anyone, so naming the retired owner does not block it."""
+    from openjiuwen.agent_teams.schema.task import TaskGraphSpec
+    from openjiuwen.agent_teams.tools.tool_task import UpdateTaskTool
+
+    backend = _leader_backend(db, AsyncMock(), dispatch_mode="scheduled")
+    graph = await backend.task_manager.add_graph([TaskGraphSpec(title="T1", content="C1", task_id="t1", assignee=DEV_1)])
+    assert graph.ok
+    await _set_status(db, DEV_1, MemberStatus.STARTING, MemberStatus.READY, MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.SHUTDOWN)
+    tool = UpdateTaskTool(backend, make_translator("cn"), dispatch_mode="scheduled")
+
+    result = await tool.invoke({"task_id": "t1", "status": "cancelled", "assignee": DEV_1})
+
+    assert result.success is True
+    assert (await backend.task_manager.get("t1")).status == "cancelled"

@@ -29,6 +29,8 @@ from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import TRAJECTORY_ID
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, attributes_to_map
 from openjiuwen.extensions.observability import semconv
+from openjiuwen.extensions.observability.otlp_codec import ADDRESSED_ATTRIBUTE_KEYS
+from openjiuwen.extensions.observability.sequence_registry import materialize_stated_value
 
 __all__ = ["TrajectorySpanProcessor"]
 
@@ -182,6 +184,25 @@ def _span_kind(span: Any) -> str:
     return f"SPAN_KIND_{name}"
 
 
+def _materialize_evolution_attributes(attrs: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve sequence references in restated attributes for evolution consumption.
+
+    The evolution clean windows are standalone consumers: a span copy they
+    accumulate cannot consult the process-local sequence registry at read
+    time (windows outlive the registry TTL), so references are materialized
+    once at capture.  The input is the raw span attribute mapping; OTLP
+    encoding happens after materialization so the resolved full content --
+    not the reference string -- is what gets encoded.
+    """
+    resolved: dict[str, Any] = {}
+    for key, value in attrs.items():
+        if key in ADDRESSED_ATTRIBUTE_KEYS and isinstance(value, str):
+            resolved[key] = materialize_stated_value(value)
+        else:
+            resolved[key] = value
+    return resolved
+
+
 def _span_to_otlp(span: ReadableSpan) -> tuple[dict[str, Any], tuple[str, str]]:
     """Copy one ended span into the canonical OTLP JSON representation."""
 
@@ -194,7 +215,9 @@ def _span_to_otlp(span: ReadableSpan) -> tuple[dict[str, Any], tuple[str, str]]:
         "spanId": span_id,
         "name": str(getattr(span, "name", "")),
         "kind": _span_kind(span),
-        "attributes": attributes_from_map(getattr(span, "attributes", None) or {}),
+        "attributes": attributes_from_map(
+            _materialize_evolution_attributes(getattr(span, "attributes", None) or {})
+        ),
         "status": _span_status(span),
     }
     if parent_span_id:

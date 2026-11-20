@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import asyncio
 import json
+from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Generic, Optional, TypeVar
@@ -21,6 +22,25 @@ from openjiuwen.core.session.session_controller.scope import (
 from openjiuwen.core.session.session_controller.utils import SessionPaths
 
 T = TypeVar('T')
+
+
+def _link_target_ids(link_data: dict, link_file: Path) -> Optional[tuple[str, str]]:
+    """Resolve the downstream ids stored in a .link file.
+
+    New links persist the ids in the payload because both ids may contain
+    ``_``; the legacy ``{target_agent}_{target_session}.link`` filename is
+    ambiguous and only used for links written before the payload carried ids.
+    """
+    target_agent = link_data.get('target_agent')
+    target_session = link_data.get('target_session')
+    if isinstance(target_agent, str) and isinstance(target_session, str):
+        return target_agent, target_session
+
+    filename = link_file.stem
+    if '_' not in filename:
+        return None
+    target_agent, target_session = filename.split('_', 1)
+    return target_agent, target_session
 
 
 class ChainSession(Generic[T]):
@@ -158,11 +178,9 @@ class ChainSession(Generic[T]):
                                 link_file.unlink()
                                 continue
 
-                            # Parse filename to get target info
-                            # Filename format: {target_agent}_{target_session}.link
-                            filename = link_file.stem
-                            if '_' in filename:
-                                target_agent, target_session = filename.split('_', 1)
+                            target = _link_target_ids(link_data, link_file)
+                            if target is not None:
+                                target_agent, target_session = target
 
                                 # Parse sharing policy
                                 policy_data = link_data.get('permission', {})
@@ -245,11 +263,16 @@ class ChainSession(Generic[T]):
 
                 # Write current downstream relationships
                 for (target_agent, target_session), policy in self._downstream_policies.items():
-                    link_filename = f"{target_agent}_{target_session}.link"
+                    target_key = json.dumps([target_agent, target_session], ensure_ascii=False).encode("utf-8")
+                    link_filename = f"v2-{sha256(target_key).hexdigest()}.link"
                     link_file = downstreams_dir / link_filename
                     current_links.add(link_file)
 
                     link_data = {
+                        # Store authoritative ids in the payload; the digest
+                        # separates ambiguous legacy names and unsafe path characters.
+                        'target_agent': target_agent,
+                        'target_session': target_session,
                         'permission': {
                             'level': policy.permission.value,
                             'field_scopes': (

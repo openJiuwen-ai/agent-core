@@ -11,6 +11,7 @@ import uuid
 from typing import Any, Awaitable, Callable, Mapping, cast
 
 from openjiuwen.core.common.constants.constant import INTERACTION
+from openjiuwen.core.foundation.tool import ClientToolResult, ClientToolStatus
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream.base import OutputSchema
 from openjiuwen.core.single_agent.ability_manager import resolve_tool_result_text
@@ -34,6 +35,8 @@ from openjiuwen.harness_protocol import (
     PROTOCOL_VERSION,
     AbortMode,
     ContentBlock,
+    DynamicToolCallRequest,
+    DynamicToolCallResponse,
     HarnessCapability,
     HarnessCard,
     HarnessContext,
@@ -195,6 +198,9 @@ class DeepAgentHarness(SerializedTurnHarness):
       the call), ``ABORT`` or ``interrupt=True`` stops the turn, and
       ``ALLOW_FOR_SESSION`` with ``provider_data["persist_allow"] is True``
       allows permanently;
+    - ``client_tool`` becomes ``DynamicToolCallRequest`` when the host declared
+      ``DYNAMIC_TOOL_CALL``; otherwise the call ends with a tool error saying
+      the host cannot run client tools;
     - every other kind (``ask_user``, undeclared kinds and kinds of other
       rails) becomes ``UserInputRequest`` and is answered with the host's
       content as is;
@@ -203,9 +209,10 @@ class DeepAgentHarness(SerializedTurnHarness):
       ``interrupt_id`` and ``kind``, and is answered by that id.
 
     Requests carry ``kind``, ``interrupt_id`` and ``tool_call_id`` in
-    ``provider_data``. Every host with an interaction handler is asked,
-    whatever capabilities it declared; without a handler the turn stays
-    paused.
+    ``provider_data``. Approvals and questions go to every host with an
+    interaction handler, whatever capabilities it declared; without a
+    handler the turn stays paused. Client calls are asked last, so a host
+    that stops the turn never discards a client result.
     """
 
     card = HarnessCard(
@@ -217,6 +224,7 @@ class DeepAgentHarness(SerializedTurnHarness):
         optional_host_capabilities=frozenset({
             HostCapability.USER_INPUT,
             HostCapability.TOOL_APPROVAL,
+            HostCapability.DYNAMIC_TOOL_CALL,
         }),
     )
 
@@ -463,13 +471,16 @@ class DeepAgentHarness(SerializedTurnHarness):
     async def _resolve_interrupts(self, turn: PendingTurn, state: _TurnState) -> InteractiveInput | None:
         """Ask the host for every pending interrupt; ``None`` leaves the turn open.
 
-        ``None`` never is an answer (``InteractiveInput`` rejects it).
+        Client calls go last: once the client ran one, the turn must resume
+        with its result, so every interrupt that can stop the turn is asked
+        first. ``None`` never is an answer (``InteractiveInput`` rejects it).
         """
 
         if not self._has_host_interactions():
             return None
         interactive_input = InteractiveInput()
-        for call_id, value in state.pending_interrupts.items():
+        pending = sorted(state.pending_interrupts.items(), key=lambda item: _is_client_call(item[1]))
+        for call_id, value in pending:
             if isinstance(value, ToolCallInterruptRequest):
                 answer = await self._answer_interrupt(turn, call_id, value)
                 if answer is None:
@@ -484,10 +495,12 @@ class DeepAgentHarness(SerializedTurnHarness):
 
     async def _answer_interrupt(self, turn: PendingTurn, call_id: str, request: ToolCallInterruptRequest) -> Any | None:
         kind = interrupt_kind_of(request)
+        if kind == InterruptKind.CLIENT_TOOL:
+            return await self._request_client_tool(turn, call_id, request)
         if kind == InterruptKind.UNDECLARED or not is_approval_kind(kind):
             # An undeclared kind keeps this harness's earlier answer: the host's content as is.
             return await self._request_user_input(turn, call_id, request)
-        if self._host_approves_tools():
+        if self._host_declares(HostCapability.TOOL_APPROVAL):
             return await self._request_approval(turn, call_id, kind, request)
         content = await self._request_user_input(turn, call_id, request, choices=APPROVAL_CHOICES)
         if content is None or isinstance(content, dict):
@@ -495,8 +508,7 @@ class DeepAgentHarness(SerializedTurnHarness):
         # A text-only host answers an approval with a word; anything else, nothing included, rejects.
         return interrupt_answer(kind, text=str(content))
 
-    def _host_approves_tools(self) -> bool:
-        capability = HostCapability.TOOL_APPROVAL
+    def _host_declares(self, capability: HostCapability) -> bool:
         return (
             capability in self.card.optional_host_capabilities
             and capability in cast(HarnessContext, self._context).host_capabilities
@@ -554,6 +566,45 @@ class DeepAgentHarness(SerializedTurnHarness):
                 answer["persist_allow"] = True
             return answer
         return interrupt_answer(kind, approved=False, feedback=response.reason or "Denied by the host.")
+
+    async def _request_client_tool(
+        self, turn: PendingTurn, call_id: str, value: ToolCallInterruptRequest
+    ) -> ClientToolResult:
+        if not self._host_declares(HostCapability.DYNAMIC_TOOL_CALL):
+            return ClientToolResult(
+                status=ClientToolStatus.ERROR,
+                is_error=True,
+                content="This host cannot run client tools (it did not declare DYNAMIC_TOOL_CALL).",
+            )
+        request = DynamicToolCallRequest(
+            request_id=value.interrupt_id,
+            call_id=call_id,
+            tool_name=value.tool_name,
+            arguments=value.arguments,
+            provider_session_id=self._session_id,
+            turn_id=turn.turn_id,
+            provider_data={
+                **_interrupt_provider_data(call_id, value),
+                "client_request": value.client_request,
+            },
+        )
+        response = cast(DynamicToolCallResponse, await self._request_interaction(request))
+        result = json_value_to_builtin(response.result)
+        if response.is_error or response.status is InteractionResponseStatus.FAILED:
+            return ClientToolResult(
+                status=ClientToolStatus.ERROR,
+                is_error=True,
+                content=response.error_message or _result_text(result),
+            )
+        if response.status is not InteractionResponseStatus.COMPLETED:
+            return ClientToolResult(
+                status=ClientToolStatus.CANCELLED,
+                content=f"The host did not run the call ({response.status.value}).",
+            )
+        # Text and content blocks are the result as they are; other JSON is shown as JSON and kept as data.
+        if isinstance(result, (str, list)):
+            return ClientToolResult(content=result)
+        return ClientToolResult(content=_result_text(result), data=result)
 
     def _build_result(
         self,
@@ -684,8 +735,18 @@ def _interrupt_identity(value: Any) -> dict[str, str]:
     return {"interrupt_id": "", "kind": ""}
 
 
+def _is_client_call(value: Any) -> bool:
+    return isinstance(value, ToolCallInterruptRequest) and interrupt_kind_of(value) == InterruptKind.CLIENT_TOOL
+
+
 def _interrupt_provider_data(call_id: str, value: Any) -> dict[str, Any]:
     return {**_interrupt_identity(value), "tool_call_id": call_id, "value": to_json_safe(value)}
+
+
+def _result_text(result: Any) -> str:
+    if isinstance(result, str):
+        return result
+    return json.dumps(result, ensure_ascii=False) if result is not None else ""
 
 
 def _tool_arguments(raw: Any) -> dict[str, Any]:

@@ -79,8 +79,12 @@ class A2AClient:
         request = A2ATransformer.to_a2a_request(inputs)
         session_id = self._resolve_session_id(inputs)
         event_stream = self._send_message(request)
-        async for event in event_stream:
-            yield self._with_session_id(A2ATransformer.from_a2a_response(event), session_id)
+        # Close the underlying SDK stream when the caller stops early; unlike
+        # invoke(), this generator can be abandoned after any chunk and must
+        # release its HTTP/event resources deterministically.
+        async with aclosing(event_stream):
+            async for event in event_stream:
+                yield self._with_session_id(A2ATransformer.from_a2a_response(event), session_id)
 
     async def cancel_task(self, task_id: str, tenant: str | None = None) -> AgentResult:
         request = CancelTaskRequest(id=task_id)

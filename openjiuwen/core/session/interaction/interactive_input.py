@@ -61,7 +61,8 @@ class InteractiveInput(RestoreFieldDefaultsOnUnpickle, BaseModel):
         """Answer one tool-call interrupt by its ``interrupt_id``.
 
         The id is ``InterruptRequest.interrupt_id`` of the paused request.
-        Only the rail that raised that interrupt receives the value.
+        Only the rail (or client tool) that raised that interrupt receives
+        the value.
         """
         if not isinstance(interrupt_id, str) or not interrupt_id:
             raise build_error(

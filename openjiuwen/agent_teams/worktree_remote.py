@@ -28,6 +28,7 @@ from pydantic import BaseModel
 
 from openjiuwen.agent_teams.paths import get_agent_teams_home
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.harness.tools.worktree.backend import GitBackend
 from openjiuwen.harness.tools.worktree.git import (
     _run_git,
     fetch_ref,
@@ -241,6 +242,11 @@ class WorktreeRemoteHandler:
         # this module free of import cycles when WorktreeManager evolves.
         self._manager = manager
         self._cloned_repos: dict[str, str] = {}
+        # This node's clone never advances its local branches; the base must
+        # come from the remote ref fetched per request, not local-first.
+        backend = getattr(manager, "backend", None)
+        if isinstance(backend, GitBackend):
+            backend.remote_base = True
 
     async def handle(self, request: WorktreeRemoteRequest) -> WorktreeRemoteResponse:
         """Dispatch a worktree request to the appropriate handler.

@@ -164,6 +164,8 @@ class LLMCallEvents(EventBase):
             carrying the fully accumulated AssistantMessage
         LLM_ROUTE: Fired when a model-group router selects a final route or
             exhausts all routes. Carries frontend-safe route metadata.
+        LLM_ROUTE_ATTEMPT: Fired each time a model-group router sends a
+            request to a route, success or not, before any response arrives.
         LLM_INPUT: Fired before LLM request with messages/tools input data
         LLM_OUTPUT: Fired after LLM response with response/usage output data
     """
@@ -177,6 +179,7 @@ class LLMCallEvents(EventBase):
     LLM_STREAM_OUTPUT = EventBase.get_event("llm_stream_output")
     LLM_STREAM_COMPLETED = EventBase.get_event("llm_stream_completed")
     LLM_ROUTE = EventBase.get_event("llm_route")
+    LLM_ROUTE_ATTEMPT = EventBase.get_event("llm_route_attempt")
     LLM_INPUT = EventBase.get_event("llm_input")
     LLM_OUTPUT = EventBase.get_event("llm_output")
 

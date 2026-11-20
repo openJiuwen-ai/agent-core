@@ -7,6 +7,7 @@ import asyncio
 
 import pytest
 
+from openjiuwen.agent_teams.agent.scheduling import render as scheduler_render
 from openjiuwen.agent_teams.context import get_session_id, reset_session_id, set_session_id
 from openjiuwen.agent_teams.external import ExternalTeamClient
 from openjiuwen.agent_teams.external import client as client_module
@@ -96,6 +97,30 @@ async def test_inbox_is_oldest_first_across_direct_and_broadcast(team_db, make_d
         # The clock anchor comes first: the messages carry absolute send times only.
         assert text.startswith('<team-clock now="')
         assert text.index("earlier announcement") < text.index("later direct")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_only_a_consuming_inbox_read_records_a_shown_revision(team_db, make_descriptor):
+    await team_db.task.create_task(
+        task_id="t3", team_name="ext_team", title="Do Y", content="v0", status=TaskStatus.PENDING.value
+    )
+    assert await team_db.task.claim_task("t3", "dev-1")
+    await team_db.task.update_task("t3", content="v1")
+    await team_db.message.create_message(
+        "m-rev",
+        "ext_team",
+        "leader",
+        "",
+        to_member_name="dev-1",
+        meta=scheduler_render.meta_task_revised("t3"),
+    )
+
+    async with ExternalTeamClient(make_descriptor(member="dev-1")) as dev:
+        assert "v1" in await dev.read_inbox(mark_read=False)
+        assert (await team_db.task.get_task("t3")).observed_revision == 0
+        assert "v1" in await dev.read_inbox()
+        assert (await team_db.task.get_task("t3")).observed_revision == 1
 
 
 @pytest.mark.asyncio

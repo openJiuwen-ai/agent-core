@@ -88,20 +88,38 @@ class SessionStore:
         self._save()
 
     def list_sessions(self) -> List[Dict[str, Any]]:
-        """Return summaries of all persisted sessions."""
+        """Return summaries of all persisted sessions.
+
+        A crashed write, an older layout or a hand-edited file must not abort
+        the whole listing: the REPL ``/sessions`` command has no handler above
+        this call, so one damaged file used to raise through it.
+        """
         sessions: list[dict[str, Any]] = []
         for f in sorted(self.store_dir.glob("*.json")):
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    continue
+                session_id = data["session_id"]
+                model = data["model"]
+                created_at = data["created_at"]
+                messages = data.get("messages", [])
+                if not (
+                    isinstance(session_id, str)
+                    and isinstance(model, str)
+                    and isinstance(created_at, str)
+                    and isinstance(messages, list)
+                ):
+                    continue
                 sessions.append(
                     {
-                        "id": data["session_id"],
-                        "model": data["model"],
-                        "created_at": data["created_at"],
-                        "turns": len(data.get("messages", [])),
+                        "id": session_id,
+                        "model": model,
+                        "created_at": created_at,
+                        "turns": len(messages),
                     }
                 )
-            except (json.JSONDecodeError, KeyError):
+            except (json.JSONDecodeError, KeyError, OSError, UnicodeDecodeError, TypeError):
                 continue
         return sessions
 

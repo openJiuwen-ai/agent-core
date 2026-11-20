@@ -1,3 +1,7 @@
-# 合并负责人映射（示例）
+# 合并负责人映射
 # 格式：模块路径(以 / 结尾)  负责人(多个用英文逗号分隔，彼此平级，合并任务分别派发)
+# 匹配规则：按最长路径前缀匹配，未命中具体路径的改动归 /*
+openjiuwen/agent_teams/ chengshuo,guoqian
+openjiuwen/agent_evolving/ lideyang
+openjiuwen/harness/ yangzequ,chengshuo
 /*   chengshuo,guoqian,lideyang,yangzequ

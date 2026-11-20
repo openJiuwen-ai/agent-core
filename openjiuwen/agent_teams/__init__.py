@@ -10,6 +10,7 @@ from openjiuwen.agent_teams.constants import (
     RESERVED_MEMBER_NAMES,
     USER_PSEUDO_MEMBER_NAME,
 )
+from openjiuwen.agent_teams.experts import ExpertCatalog, ExpertRef, PackageLocation
 from openjiuwen.agent_teams.external import (
     TEAM_JOIN_ENV,
     ExternalTeamClient,
@@ -71,6 +72,8 @@ from openjiuwen.agent_teams.tiny_agent import (
 __all__ = [
     "DEFAULT_LEADER_MEMBER_NAME",
     "DeepAgentSpec",
+    "ExpertCatalog",
+    "ExpertRef",
     "ExternalTeamClient",
     "ForkContext",
     "HUMAN_AGENT_MEMBER_NAME",
@@ -81,6 +84,7 @@ __all__ = [
     "UnknownHumanAgentError",
     "LeaderSpec",
     "ModelPoolEntry",
+    "PackageLocation",
     "RESERVED_MEMBER_NAMES",
     "StorageSpec",
     "TeamAgentSpec",

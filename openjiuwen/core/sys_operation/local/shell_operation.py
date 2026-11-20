@@ -25,10 +25,15 @@ from openjiuwen.core.sys_operation.result import (
     ExecuteCmdBackgroundData, ExecuteCmdBackgroundResult
 )
 from openjiuwen.core.sys_operation.shell_process_registry import (
+    adopt_shell_process,
+    finish_shell_spawn,
     register_shell_process,
+    reserve_shell_spawn,
     resolve_shell_session_id,
+    terminate_shell_process,
     unregister_shell_process,
 )
+from openjiuwen.core.sys_operation._process_owner import create_process_owner, wrap_posix_command
 
 
 _POWERSHELL_TOKENS = (
@@ -382,15 +387,6 @@ class ShellOperation(BaseShellOperation):
         """
         args, use_shell, _ = self._resolve_execution_plan(command, shell_type)
 
-        # 进程组隔离：创建新 session，后续可用 os.killpg() 清理整棵进程树。
-        # 仅 POSIX 生效；Windows 通过 CREATE_NEW_PROCESS_GROUP 但语义不同，
-        # 此处保持 _kill_process_tree 的 fallback 路径。
-        subprocess_kw: dict[str, Any] = {}
-        if os.name != "nt":
-            _jw_start_new_session = os.getenv("JW_START_NEW_SESSION", "true").strip().lower()
-            if _jw_start_new_session not in ("0", "false", "no", "off"):
-                subprocess_kw["start_new_session"] = True
-
         if background:
             stdout = asyncio.subprocess.DEVNULL
             # Keep stderr readable during early-failure detection. AsyncProcessHandler
@@ -403,26 +399,58 @@ class ShellOperation(BaseShellOperation):
             stderr = asyncio.subprocess.PIPE
             stdin = asyncio.subprocess.DEVNULL
 
-        if use_shell:
-            cmd = self._wrap_command_with_buffering(args) if (stream and not background) else args
-            return await asyncio.create_subprocess_shell(
-                cmd,
-                cwd=str(cwd),
-                env=env,
-                stdin=stdin,
-                stdout=stdout,
-                stderr=stderr,
-                **subprocess_kw,
-            )
-        return await asyncio.create_subprocess_exec(
-            *args,
-            cwd=str(cwd),
-            env=env,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=stdout,
-            stderr=stderr,
-            **subprocess_kw,
-        )
+        ticket = reserve_shell_spawn()
+        owner = None
+        creation = None
+        process = None
+        try:
+            owner = create_process_owner()
+            subprocess_kw = owner.spawn_options() if owner is not None else {}
+            if use_shell:
+                args = self._wrap_command_with_buffering(args) if (stream and not background) else args
+            if owner is not None and os.name != "nt":
+                # Joining a guardian in another session would fail with EPERM.
+                # Detach only the command's tty, then exec in the anchored group.
+                args = wrap_posix_command(["/bin/sh", "-c", args] if use_shell else args)
+                use_shell = False
+            if use_shell:
+                creation = asyncio.create_task(asyncio.create_subprocess_shell(
+                    args, cwd=str(cwd), env=env, stdin=stdin, stdout=stdout, stderr=stderr, **subprocess_kw,
+                ))
+            else:
+                creation = asyncio.create_task(asyncio.create_subprocess_exec(
+                    *args, cwd=str(cwd), env=env, stdin=stdin, stdout=stdout, stderr=stderr, **subprocess_kw,
+                ))
+            # Cancellation must not lose a newly created process before it can
+            # be assigned to its owner (especially a suspended Windows process).
+            process = await asyncio.shield(creation)
+            if owner is not None:
+                owner.attach(process.pid)
+            adopt_shell_process(ticket, process, owner)
+            return process
+        except BaseException:
+            if creation is not None and process is None:
+                while not creation.done():
+                    try:
+                        await asyncio.shield(creation)
+                    except asyncio.CancelledError:
+                        continue  # Complete ownership cleanup even after repeated cancellation.
+                    except Exception:
+                        break  # The original spawn error is re-raised below.
+                if not creation.cancelled() and creation.exception() is None:
+                    process = creation.result()
+            try:
+                if owner is not None:
+                    owner.close()
+            finally:
+                # An unassigned Windows child is suspended, so closing an empty
+                # Job alone cannot stop it after an assignment failure.
+                if process is not None:
+                    terminate_shell_process(process)
+                    await asyncio.wait_for(process.wait(), timeout=5)
+            raise
+        finally:
+            finish_shell_spawn(ticket)
 
     async def execute_cmd(
             self,
@@ -441,6 +469,7 @@ class ShellOperation(BaseShellOperation):
             command: Command to execute.
             cwd: Working directory for command execution (default: current directory).
             timeout: Command execution timeout in seconds (default: 300 seconds).
+                Explicit budgets are not shortened by an additional local shell cap.
             environment: Key-value dict of custom environment variables.
             options: Additional execution configuration options.
             shell_type: Shell to use, one of "auto"/"cmd"/"powershell"/"bash"/"sh" (default: "auto").
@@ -501,9 +530,8 @@ class ShellOperation(BaseShellOperation):
                     data=ExecuteCmdData(command=command, cwd=str(actual_cwd)),
                 )
 
-            # 框架层超时上限，防止 LLM 设置过长 timeout 导致 agent 长时间无响应
-            _max_exec_cmd_timeout = int(os.getenv("JW_EXECUTE_CMD_MAX_TIMEOUT", "600"))
-            timeout = min(timeout or 300, _max_exec_cmd_timeout)
+            # The caller owns the execution budget; do not shorten it here.
+            timeout = timeout or 300
 
             exec_env = OperationUtils.prepare_environment(environment)
             is_tui, tui_warning = self._detect_and_mitigate_tui(command, exec_env)
@@ -525,6 +553,9 @@ class ShellOperation(BaseShellOperation):
             process_handler = OperationUtils.create_handler(process=proc, encoding=encoding, timeout=timeout)
             try:
                 invoke_data = await process_handler.invoke()
+            except BaseException:
+                terminate_shell_process(proc)
+                raise
             finally:
                 _untrack_shell_process(track_sid, proc)
             invoke_exception = getattr(invoke_data, "exception", None)
@@ -578,6 +609,7 @@ class ShellOperation(BaseShellOperation):
             command: Command to execute.
             cwd: Working directory for command execution (default: current directory).
             timeout: Command execution timeout in seconds (default: 300 seconds).
+                Explicit budgets are not shortened by an additional local shell cap.
             environment: Key-value dict of custom environment variables.
             options: Additional execution configuration options.
             shell_type: Shell to use, one of "auto"/"cmd"/"powershell"/"bash"/"sh" (default: "auto").
@@ -648,9 +680,8 @@ class ShellOperation(BaseShellOperation):
                 )
                 return
 
-            # 框架层超时上限，防止 LLM 设置过长 timeout 导致 agent 长时间无响应
-            _max_exec_cmd_timeout = int(os.getenv("JW_EXECUTE_CMD_MAX_TIMEOUT", "600"))
-            timeout = min(timeout or 300, _max_exec_cmd_timeout)
+            # Match execute_cmd: preserve the caller's execution budget.
+            timeout = timeout or 300
 
             exec_env = OperationUtils.prepare_environment(environment)
             is_tui, tui_warning = self._detect_and_mitigate_tui(command, exec_env)
@@ -736,8 +767,9 @@ class ShellOperation(BaseShellOperation):
                 else:
                     return handler(stream_event_data, data_idx)
 
+            events = process_handler.stream()
             try:
-                async for chunk in process_handler.stream():
+                async for chunk in events:
                     modify_data = _stream_event_trans(chunk, chunk_index)
                     if modify_data:
                         yield modify_data
@@ -745,7 +777,12 @@ class ShellOperation(BaseShellOperation):
                     if chunk.type in (StreamEventType.ERROR, StreamEventType.EXIT):
                         return
             finally:
-                _untrack_shell_process(track_sid, process)
+                try:
+                    await events.aclose()
+                finally:
+                    if process.returncode is None:
+                        terminate_shell_process(process)
+                    _untrack_shell_process(track_sid, process)
 
         except Exception as e:
             yield _create_exec_cmd_stream_err(error_msg=f"unexpected error: {str(e)}",
@@ -835,8 +872,15 @@ class ShellOperation(BaseShellOperation):
             track_sid = _track_shell_process(process)
 
             process_handler = OperationUtils.create_handler(process=process)
-            pid, err = await process_handler.background(grace=grace)
+            try:
+                pid, err = await process_handler.background(grace=grace)
+            except BaseException:
+                terminate_shell_process(process)
+                await asyncio.wait_for(process.wait(), timeout=5)
+                _untrack_shell_process(track_sid, process)
+                raise
             if err:
+                terminate_shell_process(process)
                 _untrack_shell_process(track_sid, process)
                 return _create_exec_cmd_background_err(
                     error_msg=f"background command failed: {err}",
@@ -883,8 +927,28 @@ class ShellOperation(BaseShellOperation):
         if not hasattr(self._run_config, 'shell_allowlist') or not self._run_config.shell_allowlist:
             return True
 
-        cmd_prefix = command.split()[0] if command.strip() else ""
-        return any(cmd_prefix == allowed or cmd_prefix.endswith(os.sep + allowed)
+        text = command.strip()
+        if os.name == "nt" and text.startswith("&") and not text.startswith("&&"):
+            text = text[1:].lstrip()
+        try:
+            tokens = shlex.split(text, posix=False)
+        except ValueError:
+            return False
+        if not tokens:
+            return False
+        # Quoted executable tokens must not be concatenated with an unlisted suffix.
+        remainder = text[len(tokens[0]):]
+        if remainder and not remainder[0].isspace():
+            return False
+
+        def normalize(value: str) -> str:
+            if os.name != "nt":
+                return value
+            value = value.replace("\\", "/").casefold()
+            return value[:-4] if value.endswith(".exe") else value
+
+        cmd_prefix = normalize(_strip_matching_quotes(tokens[0]))
+        return any(cmd_prefix == normalize(allowed) or cmd_prefix.endswith("/" + normalize(allowed))
                    for allowed in self._run_config.shell_allowlist)
 
     def _resolve_cwd(self, cwd: Optional[str]) -> pathlib.Path:

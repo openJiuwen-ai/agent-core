@@ -6,7 +6,7 @@ from typing import Union, List, Optional, Dict, Any
 from pydantic import BaseModel
 
 from openjiuwen.core.common.logging import LogEventType, create_log_event
-from openjiuwen.core.common.logging.events import SysOperationEvent
+from openjiuwen.core.common.logging.events import EventStatus, SysOperationEvent
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.foundation.tool.utils.callable_schema_extractor import CallableSchemaExtractor
 from openjiuwen.core.sys_operation.config import LocalWorkConfig, SandboxGatewayConfig
@@ -134,6 +134,13 @@ class BaseOperation:
         an operation that moves a large file body does not pay to serialize it
         into every log sink.
 
+        A start event is emitted before the operation runs, so it has no outcome
+        to report and defaults to ``PENDING`` rather than to ``SUCCESS``. On an
+        end event ``status`` describes the operation, which completed, not the
+        work it wrapped: the command's exit code goes in ``method_result``, and
+        which non-zero codes count as failures is the caller's to decide --
+        ``grep`` finding nothing is not an error.
+
         Args:
             event_type: Type of the system operation event (enum or string)
             method_name: Name of the method/function being logged
@@ -149,6 +156,8 @@ class BaseOperation:
             kwargs["module_id"] = "sys_operation"
         if "module_name" not in kwargs:
             kwargs["module_name"] = "sys_operation"
+        if "status" not in kwargs and event_type == LogEventType.SYS_OP_START:
+            kwargs["status"] = EventStatus.PENDING
         event = create_log_event(
             event_type=event_type,
             operation_name=self.name,

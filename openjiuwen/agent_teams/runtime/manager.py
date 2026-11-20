@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import time
 from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
 from typing import (
     TYPE_CHECKING,
     Optional,
@@ -70,9 +72,14 @@ from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_worktrees
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import raise_error
+from openjiuwen.core.common.exception.errors import BaseError, raise_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.common.run_context import RunContext
+from openjiuwen.core.context_engine.context.cancellation import (
+    CancellationCause,
+    clear_cancellation_cause,
+    mark_cancellation_cause,
+)
 from openjiuwen.core.session.agent_team import (
     Session as AgentTeamSession,
 )
@@ -84,6 +91,7 @@ from openjiuwen.core.session.interaction.interactive_input import InteractiveInp
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+    from openjiuwen.agent_teams.experts.catalog import ExpertCatalog
     from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
     from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 
@@ -105,12 +113,211 @@ class TeamSessionReleaseInfo:
     db_config: DatabaseConfig
 
 
+# A resumed approval round clears sibling interrupt state until it commits
+# again. The click arrives while that round is still running. The wait is
+# outside the interact gate, and a confirmed id mismatch does not enter it.
+_INTERRUPT_RESUME_BUSY_WAIT_SECONDS = 15.0
+_INTERRUPT_RESUME_UNOWNED_WAIT_SECONDS = 15.0
+_INTERRUPT_RESUME_RETRY_DELAY_SECONDS = 0.25
+
+
+def _member_round_in_flight(agent: object) -> bool:
+    """Return whether ``agent`` still has a round that can restore a pending interrupt."""
+    probe = getattr(agent, "has_in_flight_round", None)
+    if not callable(probe):
+        return False
+    try:
+        return bool(probe())
+    except Exception:
+        team_logger.warning("interrupt resume could not read in-flight round state", exc_info=True)
+        return False
+
+
+def _holds_a_different_interrupt(teammate: object) -> bool:
+    """Return whether ``teammate`` is paused on an interrupt this answer did not select.
+
+    Admission already resumes a member that owns the answer, including a stale
+    permission card retargeted onto the only interrupt left. A member that
+    still has some other pending interrupt is not the round that cleared this
+    card.
+    """
+    probe = getattr(teammate, "has_pending_interrupt", None)
+    if not callable(probe):
+        return False
+    try:
+        return bool(probe())
+    except Exception:
+        team_logger.warning("interrupt resume could not read pending interrupt state", exc_info=True)
+        return True
+
+
+def _in_flight_teammate_may_own_answer(leader: "TeamAgent") -> bool:
+    """Return whether a teammate round may still restore a cleared interrupt.
+
+    The leader's own running round is reported as ``interrupt_resume_busy``
+    by ``resume_interrupt``. This probe is only for a teammate whose pending
+    state was cleared while that teammate's round is still running. Another
+    member that is running, or paused on its own card, is not that round.
+    """
+    spawn_manager = getattr(leader, "spawn_manager", None)
+    handles = getattr(spawn_manager, "spawned_handles", {}) or {}
+    for handle in handles.values():
+        teammate = getattr(handle, "agent_ref", None)
+        if teammate is None or teammate is leader or not _member_round_in_flight(teammate):
+            continue
+        if _holds_a_different_interrupt(teammate):
+            continue
+        return True
+    return False
+
+
+def _wait_for_sibling_interrupt(leader: "TeamAgent", result: DeliverResult) -> bool:
+    """Return whether this rejection is the in-flight sibling-approval race.
+
+    A confirmed id mismatch is final. Busy means the member that was asked is
+    still in its resume round. An empty pending list is retried only while a
+    teammate round may write that state back.
+    """
+    if result.reason == "interrupt_resume_busy":
+        return True
+    if result.reason != "interrupt_resume_unavailable":
+        return False
+    return _in_flight_teammate_may_own_answer(leader)
+
+
+async def _admit_interactive_input(
+    leader: "TeamAgent",
+    payload: InteractiveInput,
+    run_context: RunContext | None,
+) -> DeliverResult:
+    """Admit an answer on the leader, then on the in-process teammate that owns it."""
+    result = await leader.resume_interrupt(payload, run_context=run_context)
+    # The leader being busy is its own round, not proof it owns this card.
+    # A teammate can be idle with the permission interrupt while the leader
+    # keeps working. A confirmed mismatch or an empty pending list can also
+    # belong to an in-process teammate.
+    if result.ok or result.reason not in {
+        "unsupported_interactive_input",
+        "interrupt_resume_unavailable",
+        "interrupt_resume_busy",
+    }:
+        return result
+    spawn_manager = getattr(leader, "spawn_manager", None)
+    handles = getattr(spawn_manager, "spawned_handles", {})
+    for handle in list(handles.values()):
+        teammate = getattr(handle, "agent_ref", None)
+        if teammate is None or teammate is leader:
+            continue
+        owns = getattr(teammate, "owns_pending_interrupt_answer", None)
+        if owns is None or not owns(payload):
+            continue
+        try:
+            member_result = await teammate.resume_interrupt(payload, run_context=run_context)
+        except BaseError:
+            team_logger.warning(
+                "teammate interrupt resume failed before admission; keeping the answer unclaimed",
+                exc_info=True,
+            )
+            return DeliverResult.failure("interrupt_resume_unavailable")
+        if member_result.ok or member_result.reason != "unsupported_interactive_input":
+            return member_result
+    return result
+
+
+async def _resume_interactive_input(
+    leader: "TeamAgent",
+    payload: InteractiveInput,
+    run_context: RunContext | None,
+) -> DeliverResult:
+    """Admit an answer on the leader, then on the in-process teammate that owns it.
+
+    A teammate is selected only when its current pending fully matches. The
+    teammate's existing ``resume_interrupt`` still decides the receipt. Handles
+    without an in-process agent keep the leader receipt; those members continue
+    to consume the durable approval mail they already poll.
+
+    Parallel permission cards share one round. Admitting the first answer
+    clears the others until that round commits them again. Retrying that
+    window is :func:`_resume_interactive_input_when_ready`, which waits
+    outside the interact gate.
+    """
+    return await _admit_interactive_input(leader, payload, run_context)
+
+
+async def _resume_interactive_input_when_ready(
+    leader: "TeamAgent",
+    attempt: Callable[[], Awaitable[DeliverResult]],
+) -> DeliverResult:
+    """Retry a sibling-approval race without holding the interact gate.
+
+    ``attempt`` admits one gate ticket, tries once, and releases the ticket
+    before this function sleeps. A closed gate or a confirmed mismatch
+    returns immediately.
+    """
+    busy_deadline: float | None = None
+    unowned_deadline: float | None = None
+    saw_owner_in_flight = False
+    while True:
+        result = await attempt()
+        if result.ok:
+            return result
+        owner_in_flight = (
+            result.reason == "interrupt_resume_unavailable"
+            and _in_flight_teammate_may_own_answer(leader)
+        )
+        if owner_in_flight:
+            # The running round clears sibling interrupts, then may raise the
+            # same call again. Keep the answer until that round is idle or the
+            # deadline passes. A session-level allow often runs the siblings
+            # inside this round, so the old cards never come back.
+            saw_owner_in_flight = True
+            now = time.monotonic()
+            if unowned_deadline is None:
+                unowned_deadline = now + _INTERRUPT_RESUME_UNOWNED_WAIT_SECONDS
+            if now < unowned_deadline:
+                await asyncio.sleep(_INTERRUPT_RESUME_RETRY_DELAY_SECONDS)
+                continue
+            return DeliverResult.failure("interrupt_already_resolved")
+        if saw_owner_in_flight and result.reason == "interrupt_resume_unavailable":
+            # The round that cleared the card has gone idle and did not leave
+            # an interrupt. The approval was consumed by that round.
+            return DeliverResult.failure("interrupt_already_resolved")
+        if not _wait_for_sibling_interrupt(leader, result):
+            return result
+        now = time.monotonic()
+        if busy_deadline is None:
+            busy_deadline = now + _INTERRUPT_RESUME_BUSY_WAIT_SECONDS
+        if now >= busy_deadline:
+            return result
+        await asyncio.sleep(_INTERRUPT_RESUME_RETRY_DELAY_SECONDS)
+
+
 class TeamRuntimeManager:
     """Owns the in-process ``TeamRuntimePool`` and runs the dispatch + side-effect cycle."""
 
     def __init__(self) -> None:
         self._pool: TeamRuntimePool = TeamRuntimePool()
         self._organization_runtime_manager: "OrganizationRuntimeManager | None" = None
+
+    @staticmethod
+    def set_expert_catalog(catalog: "ExpertCatalog | None") -> None:
+        """Inject the host's expert locating protocol (``None`` removes it).
+
+        Leaders assembled afterwards get ``view_experts`` /
+        ``view_expert_groups`` / ``spawn_expert``; without a catalog the three
+        tools are not registered. The catalog is process-scoped (see
+        ``openjiuwen.agent_teams.experts.catalog``).
+        """
+        from openjiuwen.agent_teams.experts.catalog import set_process_expert_catalog
+
+        set_process_expert_catalog(catalog)
+
+    @staticmethod
+    def expert_catalog() -> "ExpertCatalog | None":
+        """The injected expert catalog, or ``None``."""
+        from openjiuwen.agent_teams.experts.catalog import get_process_expert_catalog
+
+        return get_process_expert_catalog()
 
     @property
     def pool(self) -> TeamRuntimePool:
@@ -132,6 +339,8 @@ class TeamRuntimeManager:
         spec: "TeamAgentSpec",
         session: str | AgentTeamSession | None,
         inputs: object = None,
+        *,
+        preserve_conversation_mode: bool = False,
     ) -> TeamRuntimeActivation:
         """Resolve the TeamAgent to run for the target team/session."""
         team_session = TeamRuntimeManager._build_session(session)
@@ -189,7 +398,7 @@ class TeamRuntimeManager:
                 await self.stop_team(team_name=team_name, session_id=target_session_id)
                 pool_entry = None
         requested_mode = self._conversation_mode(inputs)
-        if pool_entry is not None and requested_mode is not None:
+        if pool_entry is not None and requested_mode is not None and not preserve_conversation_mode:
             if getattr(getattr(pool_entry.agent, "team_backend", None), "conversation_mode", "team") != requested_mode:
                 raise ValueError("Team conversation mode cannot change within a session")
         team_in_session, team_in_db, team_db_state = await self._inspect_session(
@@ -315,6 +524,8 @@ class TeamRuntimeManager:
         team_name: str,
         session_id: str,
         inputs: object,
+        on_payload=None,
+        on_activated=None,
     ) -> bool:
         """Run one background leader turn for organization coordination.
 
@@ -334,14 +545,23 @@ class TeamRuntimeManager:
         ran_turn = False
         finalized = False
         try:
-            activation = await self.activate(spec, session_id, inputs)
+            activation = await self.activate(
+                spec,
+                session_id,
+                inputs,
+                preserve_conversation_mode=True,
+            )
             if activation.action.kind in _REJECT_KINDS or activation.agent is None:
                 return False
             ran_turn = True
+            if callable(on_activated):
+                await on_activated()
             stream = activation.agent.stream(inputs, session=activation.session)
             try:
                 async for chunk in stream:
                     payload = getattr(chunk, "payload", None)
+                    if callable(on_payload) and isinstance(payload, dict):
+                        await on_payload(payload)
                     if isinstance(payload, dict) and payload.get("event_type") in {
                         "team.idle",
                         "team.completed",
@@ -501,6 +721,9 @@ class TeamRuntimeManager:
                 session_id,
             )
             return False
+        if entry.state is not RuntimeState.PAUSED:
+            # Idempotent no-op pause must not refresh the mark's TTL window.
+            mark_cancellation_cause(session_id, CancellationCause.PAUSE)
         await entry.agent.pause_coordination()
         entry.state = RuntimeState.PAUSED
         team_logger.info("pause: team {} session {} paused", team_name, session_id)
@@ -557,48 +780,60 @@ class TeamRuntimeManager:
         if entry is None:
             return DeliverResult.failure("not_active")
 
-        if isinstance(payload, InteractiveInput):
-            if entry.agent.has_pending_interrupt():
-                await entry.agent.resume_interrupt(
-                    payload,
-                    run_context=run_context,
+        if not isinstance(payload, InteractiveInput):
+            try:
+                external_event = (
+                    payload
+                    if isinstance(payload, ExternalTeamEvent)
+                    else ExternalTeamEvent.from_wire(payload)
                 )
-                return DeliverResult.success(None)
-            return DeliverResult.failure("unsupported_interactive_input")
+            except ValueError:
+                return DeliverResult.failure("invalid_external_event")
+            if external_event is not None:
+                return await self._route_external_team_event(entry, external_event)
 
-        try:
-            external_event = payload if isinstance(payload, ExternalTeamEvent) else ExternalTeamEvent.from_wire(payload)
-        except ValueError:
-            return DeliverResult.failure("invalid_external_event")
-        if external_event is not None:
-            return await self._route_external_team_event(entry, external_event)
+            try:
+                group_input = GroupChatMessage.from_wire(payload)
+            except ValueError:
+                return DeliverResult.failure("invalid_group_chat")
+            if group_input is not None:
+                payload = group_input
 
-        try:
-            group_input = GroupChatMessage.from_wire(payload)
-        except ValueError:
-            return DeliverResult.failure("invalid_group_chat")
-        if group_input is not None:
-            payload = group_input
+            backend = getattr(entry.agent, "team_backend", None)
+            requested_mode = self._conversation_mode(payload)
+            # An explicit GodViewMessage is a private leader wake (e.g. a scheduled
+            # heartbeat), not a conversation turn, so it does not trip the mode
+            # lock — same as ``deliver_organization_prompt``. Free-form strings
+            # still do: they are user turns in the team conversation mode.
+            if backend is not None and requested_mode is not None and not isinstance(payload, GodViewMessage):
+                if getattr(backend, "conversation_mode", "team") != requested_mode:
+                    return DeliverResult.failure("conversation_mode_mismatch")
 
-        backend = getattr(entry.agent, "team_backend", None)
-        requested_mode = self._conversation_mode(payload)
-        if backend is not None and requested_mode is not None:
-            if getattr(backend, "conversation_mode", "team") != requested_mode:
-                return DeliverResult.failure("conversation_mode_mismatch")
+            if isinstance(payload, str):
+                parsed = parse_interact_str(payload)
+                payloads: list[InteractPayload] = parsed or [GodViewMessage(body=payload)]
+            else:
+                payloads = [payload]
 
-        if isinstance(payload, str):
-            parsed = parse_interact_str(payload)
-            payloads: list[InteractPayload] = parsed or [GodViewMessage(body=payload)]
-        else:
-            payloads = [payload]
+            # A swarmflow human-session reply is addressed by correlation id, not a
+            # roster member — route it straight to the run's reply topic before the
+            # roster-matching dispatch would fold it as an unknown mention. It bypasses
+            # the interact gate (a lightweight publish, not a leader round).
+            reply = self._as_swarmflow_human_reply(payloads)
+            if reply is not None:
+                return await self._route_swarmflow_human_reply(entry, reply[0], reply[1], reply[2])
 
-        # A swarmflow human-session reply is addressed by correlation id, not a
-        # roster member — route it straight to the run's reply topic before the
-        # roster-matching dispatch would fold it as an unknown mention. It bypasses
-        # the interact gate (a lightweight publish, not a leader round).
-        reply = self._as_swarmflow_human_reply(payloads)
-        if reply is not None:
-            return await self._route_swarmflow_human_reply(entry, reply[0], reply[1], reply[2])
+        if isinstance(payload, InteractiveInput):
+            async def _attempt_interactive_input() -> DeliverResult:
+                ticket = await entry.interact_gate.admit()
+                if ticket is None:
+                    return DeliverResult.failure("gate_closed")
+                try:
+                    return await _resume_interactive_input(entry.agent, payload, run_context=run_context)
+                finally:
+                    await entry.interact_gate.consume_done(ticket)
+
+            return await _resume_interactive_input_when_ready(entry.agent, _attempt_interactive_input)
 
         ticket = await entry.interact_gate.admit()
         if ticket is None:
@@ -615,6 +850,37 @@ class TeamRuntimeManager:
                 entry=entry,
                 run_context=run_context,
             )
+        finally:
+            await entry.interact_gate.consume_done(ticket)
+
+    async def deliver_organization_prompt(
+        self,
+        query: str,
+        *,
+        team_name: str,
+        session_id: str,
+    ) -> DeliverResult:
+        """Inject an organization wake into the leader already running this session.
+
+        Organization coordination is not a user conversation-mode change. A
+        group-chat session therefore keeps its current runtime instead of
+        sending a team-mode ``interact`` that the mode lock must reject.
+        """
+
+        text = str(query or "").strip()
+        if not text:
+            return DeliverResult.failure("empty_organization_prompt")
+        entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
+        if entry is None:
+            return DeliverResult.failure("not_active")
+        if entry.state is not RuntimeState.RUNNING:
+            return DeliverResult.failure("not_running")
+        ticket = await entry.interact_gate.admit()
+        if ticket is None:
+            return DeliverResult.failure("gate_closed")
+        try:
+            await entry.agent.deliver_input(text)
+            return DeliverResult.success(None)
         finally:
             await entry.interact_gate.consume_done(ticket)
 
@@ -909,6 +1175,7 @@ class TeamRuntimeManager:
             return False
         # A failed shutdown is still a live, owned runtime. Preserve the entry
         # and propagate the failure so callers can retry instead of orphaning it.
+        mark_cancellation_cause(session_id, CancellationCause.CANCEL)
         token = set_session_id(session_id)
         try:
             if self._organization_runtime_manager is not None:
@@ -1311,13 +1578,28 @@ class TeamRuntimeManager:
         if kind is RunActionKind.RESUME_FROM_PAUSE:
             if pool_entry is None:
                 raise RuntimeError(f"{kind.value} requires an active pool entry")
+            # The pause mark set by ``pause()`` is not consumed when resolved
+            # and only expires via TTL. Drop it here so a post-resume internal
+            # cancellation inside the TTL window is not misreported as user_pause.
+            clear_cancellation_cause(team_session.get_session_id())
             await self._pre_run_with_inputs(team_session, inputs)
+            # Same agent, same session: the conversation carries on, so the
+            # leader is treated as restored like a cold recovery. The policy
+            # rail clears this if the transcript turns out not to hold the
+            # policy (a team the host built without a leader turn).
+            backend = getattr(pool_entry.agent, "team_backend", None)
+            if backend is not None:
+                backend.mark_history_restored()
             pool_entry.state = RuntimeState.RUNNING
             await pool_entry.interact_gate.reset()
             return TeamRuntimeActivation(agent=pool_entry.agent, session=team_session, action=action)
 
         # Cold paths — no pool entry. ``activate`` has already torn down
         # any stale entry from a different session before reaching here.
+        # A fresh runtime must not inherit a stale stop/pause mark left on
+        # this session by the previous team: within the registry TTL it
+        # would relabel the new team's internal failures as user actions.
+        clear_cancellation_cause(session_id)
         if kind is RunActionKind.COLD_RECOVER:
             # Lazy import: TeamAgent's module pulls in heavy deps (rails,
             # prompts) that the rest of manager.py doesn't need at import time.
@@ -1363,6 +1645,11 @@ class TeamRuntimeManager:
         else:
             raise RuntimeError(f"Unhandled RunActionKind: {kind!r}")
 
+        # NEW_TEAM_IN_SESSION already created them via ``resume_for_new_session``;
+        # CREATE / COLD_RECOVER only bind later in ``coordination.start``.
+        if kind in (RunActionKind.CREATE, RunActionKind.COLD_RECOVER):
+            await self._ensure_session_tables(agent, session_id)
+
         await self._pool.add(
             ActiveTeam(
                 team_name=team_name,
@@ -1397,6 +1684,36 @@ class TeamRuntimeManager:
     async def _pre_run_with_inputs(session: AgentTeamSession, inputs: object) -> None:
         """Run ``session.pre_run`` only forwarding ``inputs`` when it's a dict."""
         await session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
+
+    @staticmethod
+    async def _ensure_session_tables(agent: "TeamAgent", session_id: str) -> None:
+        """Create the per-session dynamic tables before the agent enters the pool.
+
+        Pool membership plus the ``team.runtime_ready`` chunk is what lets
+        embedders reach the backend (group roster sync -> ``build_team`` ->
+        ``on_team_built``, history reads). The leader's ``bind_session`` only
+        runs later in ``coordination.start``, so without this the session's
+        ``team_task_*`` / ``team_message_*`` tables do not exist yet at that
+        point. Idempotent: the later bind re-runs ``checkfirst`` creation.
+
+        Raises:
+            BaseError: When the tables cannot be created within the retry budget.
+        """
+        backend = getattr(agent, "team_backend", None)
+        db = getattr(backend, "db", None)
+        if db is None:
+            return
+        token = set_session_id(session_id)
+        try:
+            await db.initialize()
+            tables_ready = await db.create_cur_session_tables()
+        finally:
+            reset_session_id(token)
+        if tables_ready is False:
+            raise_error(
+                StatusCode.AGENT_TEAM_EXECUTION_ERROR,
+                error_msg="team session database initialization failed",
+            )
 
     @staticmethod
     async def _flush_team_manifest(agent: "TeamAgent", session: AgentTeamSession) -> None:

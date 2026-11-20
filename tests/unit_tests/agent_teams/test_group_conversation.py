@@ -273,3 +273,23 @@ async def test_mixed_broadcasts_do_not_skip_a_failed_mention(group):
     assert "please review" in group.host.deliver_input.call_args_list[-2].args[0]
     assert "normal announcement" in group.host.deliver_input.call_args_list[-1].args[0]
     assert await group.db.message.get_broadcast_read_at("group", "alice") == 20
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("language", ["zh", " ZH ", "cn", "en", None])
+async def test_group_context_accepts_restored_language_alias(group, language):
+    """Old checkpoints can retain the host's zh alias in the original blueprint."""
+    group.backend.group_chat_spec.language = language
+    await post(group, "restored mention", ["alice"])
+    await group.handler.on_poll_mailbox(None)
+    group.host.deliver_input.assert_awaited_once()
+    assert "restored mention" in group.host.deliver_input.call_args.args[0]
+
+
+def test_context_notice_makes_reading_history_conditional():
+    from openjiuwen.agent_teams.i18n import STRINGS
+
+    assert "直接回答，不要读文件" in STRINGS["cn"]["conversation.context"]
+    assert "回答任务前" not in STRINGS["cn"]["conversation.context"]
+    assert "without reading the file" in STRINGS["en"]["conversation.context"]
+    assert "Before answering" not in STRINGS["en"]["conversation.context"]

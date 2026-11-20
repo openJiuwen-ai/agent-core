@@ -31,6 +31,14 @@ from openjiuwen.core.sys_operation.result import (
 )
 from openjiuwen.core.sys_operation.result.base_result import build_operation_error_result
 from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
+from openjiuwen.core.sys_operation.local._text_encoding import detect_text_encoding
+
+_AUTO_ENCODING = "auto"
+
+
+def _uses_auto_encoding(encoding: str) -> bool:
+    """Return whether the caller requested automatic text encoding detection."""
+    return str(encoding).strip().lower() == _AUTO_ENCODING
 
 
 class _ListItemsSpec(BaseModel):
@@ -132,6 +140,8 @@ class _ErrorLogParams:
 class FsOperation(BaseFsOperation):
     """File system operation"""
 
+    supports_conditional_write = True
+
     @staticmethod
     def _get_lock_timeout(options: Optional[Dict[str, Any]] = None) -> float:
         """Gets the file lock timeout value from options or uses default.
@@ -223,6 +233,7 @@ class FsOperation(BaseFsOperation):
             line_range: Specific line range to read (start, end) - 1-indexed, inclusive (text mode only).
                   If start <= 0 or end <= 0 or start > end, returns empty content.
             encoding: Character encoding for text mode (default: utf-8).
+                Use "auto" (local backend) to detect BOM, UTF-8, GB18030/GBK and Big5.
             chunk_size: Maximum number of bytes to read at once (default: 0, unlimited)
             options: Extended configuration options (dict, optional).
 
@@ -267,6 +278,10 @@ class FsOperation(BaseFsOperation):
             timeout = self._get_lock_timeout(options)
 
             async with self._maybe_read_lock(file_path, timeout, skip_lock=only_read):
+                if mode == "text" and _uses_auto_encoding(validated_params.encoding):
+                    validated_params.encoding = await asyncio.to_thread(
+                        detect_text_encoding, file_path
+                    )
                 if mode == "bytes":
                     final_content = await self._read_bytes(file_path, validated_params.chunk_size)
                 else:
@@ -319,6 +334,7 @@ class FsOperation(BaseFsOperation):
             line_range: Specific line range to read (start, end) - 1-indexed, inclusive (text mode only).
                   If start <= 0 or end <= 0 or start > end, returns empty content.
             encoding: Character encoding for text mode (default: utf-8).
+                Use "auto" (local backend) to detect BOM, UTF-8, GB18030/GBK and Big5.
             chunk_size: Buffer size for bytes mode reading (default: 8192 bytes).
             options: Extended configuration options (dict, optional).
 
@@ -363,6 +379,10 @@ class FsOperation(BaseFsOperation):
             timeout = self._get_lock_timeout(options)
 
             async with self._maybe_read_lock(file_path, timeout, skip_lock=only_read):
+                if mode == "text" and _uses_auto_encoding(validated_params.encoding):
+                    validated_params.encoding = await asyncio.to_thread(
+                        detect_text_encoding, file_path
+                    )
                 # bytes mode
                 if mode != "text":
                     async for chunk in self._read_bytes_stream(file_path, validated_params.chunk_size):
@@ -425,13 +445,43 @@ class FsOperation(BaseFsOperation):
             method_name=method_name,
             method_params=method_params
         ))
+        options = options or {}
+        expected_hash = options.get("expected_content_sha256")
+        create_if_absent = options.get("create_if_absent", False)
+        if expected_hash is not None and not isinstance(expected_hash, str):
+            return self._create_error_result(
+                "write_file", "expected_content_sha256 must be a string", WriteFileResult,
+                _ErrorLogParams(method_name, method_params, start_time),
+            )
+        if not isinstance(create_if_absent, bool):
+            return self._create_error_result(
+                "write_file", "create_if_absent must be a boolean", WriteFileResult,
+                _ErrorLogParams(method_name, method_params, start_time),
+            )
+        hash_with_create = expected_hash is not None and create_if_absent
+        conditional_with_append = (expected_hash is not None or create_if_absent) and append
+        create_without_create_flag = create_if_absent and not create_if_not_exist
+        if hash_with_create or conditional_with_append or create_without_create_flag:
+            return self._create_error_result(
+                "write_file", "conditional write options are incompatible", WriteFileResult,
+                _ErrorLogParams(method_name, method_params, start_time),
+            )
+
+        def version_conflict() -> WriteFileResult:
+            return WriteFileResult(
+                code=StatusCode.SYS_OPERATION_FILE_VERSION_CONFLICT.code,
+                message=StatusCode.SYS_OPERATION_FILE_VERSION_CONFLICT.errmsg,
+                data=None,
+            )
+
         try:
             file_path = self._resolve_path(path, create_parent=True)
             if file_path.is_dir():
                 return self._create_error_result("write_file", f"Target path is a directory:"
                                                                f" {file_path}", WriteFileResult,
                                                  _ErrorLogParams(method_name, method_params, start_time))
-            if not create_if_not_exist and not file_path.exists():
+            conditional_write_requested = expected_hash is not None or create_if_absent
+            if not create_if_not_exist and not file_path.exists() and not conditional_write_requested:
                 return self._create_error_result("write_file", f"File does not exist: {file_path}",
                                                  WriteFileResult,
                                                  _ErrorLogParams(method_name, method_params, start_time))
@@ -439,23 +489,16 @@ class FsOperation(BaseFsOperation):
             timeout = self._get_lock_timeout(options)
 
             async with self._file_lock(file_path, "write", timeout):
-                expected_hash = options.get("expected_content_sha256") if options else None
+                if create_if_absent and file_path.exists():
+                    return version_conflict()
                 if expected_hash is not None:
                     try:
                         current_bytes = file_path.read_bytes()
                     except FileNotFoundError:
-                        current_bytes = b""
+                        return version_conflict()
                     current_hash = hashlib.sha256(current_bytes).hexdigest()
                     if current_hash != expected_hash:
-                        return self._create_error_result(
-                            "write_file",
-                            (
-                                f"File changed while preparing the write: {file_path}. "
-                                "Re-read the file and retry the edit."
-                            ),
-                            WriteFileResult,
-                            _ErrorLogParams(method_name, method_params, start_time),
-                        )
+                        return version_conflict()
                 if mode == "text":
                     txt = str(content)
                     if prepend_newline:
@@ -466,9 +509,14 @@ class FsOperation(BaseFsOperation):
                 else:
                     data_bytes = content if isinstance(content, (bytes, bytearray)) else bytes(content)
 
-                write_mode = "ab" if append else "wb"
-                async with aiofiles.open(file_path, mode=write_mode) as f:
-                    await f.write(data_bytes)
+                write_mode = "xb" if create_if_absent else "ab" if append else "wb"
+                try:
+                    async with aiofiles.open(file_path, mode=write_mode) as f:
+                        await f.write(data_bytes)
+                except FileExistsError:
+                    if create_if_absent:
+                        return version_conflict()
+                    raise
 
                 self._apply_permissions(file_path, permissions)
 

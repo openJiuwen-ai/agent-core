@@ -37,6 +37,22 @@ class TestConnectorPool:
             assert not stats['closed']
             assert stats['ref_detail']['created_at'] == 100
 
+    @pytest.mark.asyncio
+    async def test_last_used_stays_on_wall_clock_after_increment(self, concrete_pool):
+        """_last_used must stay on the same wall clock as _created_at.
+
+        is_expired() and _evict_oldest_pool() compare/sort _last_used against
+        time.time(). If increment_ref() writes a monotonic clock value instead,
+        a just-used pool is reported as expired and eviction picks the most
+        recently used pool.
+        """
+        with patch('time.time', return_value=1000.0):
+            concrete_pool.set_created_at(1000.0)
+            concrete_pool.increment_ref()
+
+            assert concrete_pool.last_used == 1000.0
+            assert concrete_pool.is_expired() is False
+
 
 @pytest.mark.asyncio
 class TestTcpConnectorPoolIntegration:

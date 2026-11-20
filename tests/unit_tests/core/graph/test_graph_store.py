@@ -157,5 +157,23 @@ def test_memory_checkpoint_saver_basic():
     asyncio.run(_test_delete_checkpoint_by_ns_prefix())
 
 
+def test_graph_state_is_resumable():
+    """可续跑口径由 GraphState.is_resumable 统一:引擎恢复判定、
+    Checkpointer.validate_interactive_resume 与取消分流共用。"""
+    empty = create_state(ns="default", step=0, channel_snapshot={})
+    assert not empty.is_resumable(), "空 channel/pending 的快照不可续跑"
+
+    with_pending_node = create_state(
+        ns="default",
+        step=1,
+        channel_snapshot={},
+        pending_node={"node1": PendingNode(node_name="n1", status="running")},
+    )
+    assert with_pending_node.is_resumable()
+
+    with_channel_values = create_state(ns="default", step=1, channel_snapshot={"ch1": 42})
+    assert with_channel_values.is_resumable()
+
+
 if __name__ == "__main__":
     test_memory_checkpoint_saver_basic()

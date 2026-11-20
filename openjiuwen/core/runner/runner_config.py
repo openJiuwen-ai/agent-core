@@ -1,9 +1,9 @@
 # -*- coding: UTF-8 -*-
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 import uuid
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -37,6 +37,12 @@ class MessageQueueConfig(BaseModel):
 
     type: str = MessageQueueType.PULSAR
     pulsar_config: Optional[PulsarConfig] = None
+    wire_version: Literal[1, 2] = Field(
+        default=1, description="Writer format; enable v2 only after upgrading receivers",
+    )
+    legacy_key_encoding: Literal["literal", "escaped"] = Field(
+        default="literal", description="Explicit key format for unversioned reads and v1 writes",
+    )
 
 
 class DistributedConfig(BaseModel):

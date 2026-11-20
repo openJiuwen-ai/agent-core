@@ -171,5 +171,9 @@ def test_an_in_process_member_reads_the_policy_unwrapped():
         member_name="dev-1",
         language="en",
     )
-    assert "<team-policy" not in prompt
+    # The inbound-tag notice may *mention* ``<team-policy>`` (F_122 documents
+    # it as a block a pre-built team's leader receives); what must not happen
+    # is the prompt itself being wrapped in the element.
+    assert not prompt.lstrip().startswith("<team-policy")
+    assert "<team-policy tools=" not in prompt
     assert "tool-namespace" not in prompt

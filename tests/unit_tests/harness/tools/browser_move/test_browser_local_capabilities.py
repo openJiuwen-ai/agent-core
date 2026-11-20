@@ -128,7 +128,7 @@ async def test_client_wait_keeps_original_diagnostic(stage):
     fallback.stream = stream
     with pytest.raises(TimeoutError, match=f"stage={stage}") as error:
         _ = [chunk async for chunk in policy.stream([])]
-    assert Rail._model_failure_details(error.value)["stage"] == stage
+    assert Rail.model_failure_details(error.value)["stage"] == stage
 
 
 @pytest.mark.parametrize(

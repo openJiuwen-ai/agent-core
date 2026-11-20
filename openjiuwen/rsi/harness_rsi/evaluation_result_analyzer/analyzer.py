@@ -49,6 +49,7 @@ from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
     project_execution_history,
 )
 from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.harness_context import prepare_harness_context
+from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.diagnosis_paths import validate_diagnosis_paths
 from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.runtime_evidence import (
     prepare_runtime_evidence,
     read_execution_context,
@@ -1683,8 +1684,31 @@ def _string_items(value: Any) -> list[str]:
 
 def _make_diagnosis_runtime_dir(runtime_root: Path, case_id: str) -> Path:
     """Create a unique case-scoped diagnosis runtime directory path."""
-    safe_case_id = _safe_path_segment(case_id) or "case"
-    return runtime_root / f"{safe_case_id}-{uuid.uuid4().hex}"
+    return runtime_root / f"d-{uuid.uuid4().hex}"
+
+
+def _allocate_diagnosis_attempt(
+    runtime_root: Path,
+    artifact_root: Path,
+    case_id: str,
+    source_stage: str,
+) -> tuple[Path, Path]:
+    """Reserve an archive without merging with another diagnosis attempt."""
+    for _ in range(10):
+        runtime_dir = _make_diagnosis_runtime_dir(runtime_root, case_id)
+        attempt_dir = artifact_root / "diagnosis_attempts" / runtime_dir.name
+        validate_diagnosis_paths(runtime_dir, attempt_dir, case_id=case_id, source_stage=source_stage)
+        try:
+            attempt_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            continue
+        _write_json(attempt_dir / "attempt.json", {
+            "schema_version": 1,
+            "case_id": case_id,
+            "attempt_id": attempt_dir.name,
+        })
+        return runtime_dir, attempt_dir
+    raise FileExistsError("Could not allocate a unique diagnosis attempt after 10 collisions")
 
 
 def _load_case_result(case: CaseAnalysisInput) -> dict[str, Any]:
@@ -2411,12 +2435,6 @@ def _read_json_if_exists(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _safe_path_segment(value: str) -> str:
-    """Return a conservative path segment for runtime workspace names."""
-    cleaned = [ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in value.strip()]
-    return "".join(cleaned).strip("._")
-
-
 def _remove_path(path: Path) -> None:
     """Remove a file or directory if it exists."""
     if not path.exists():
@@ -2719,18 +2737,21 @@ class DiagnosisAgentStrategy:
         evaluated repository. The raw evaluator case directory is never exposed.
         """
         runtime_root = Path(tempfile.mkdtemp(prefix="ach_analyzer_"))
-        artifact_root = output_dir or Path(tempfile.mkdtemp(prefix="ach_analyzer_artifacts_"))
+        artifact_root = (
+            output_dir.expanduser().resolve()
+            if output_dir is not None else Path(tempfile.mkdtemp(prefix="ach_analyzer_artifacts_"))
+        )
 
         async def _diagnose_one(case: CaseAnalysisInput) -> list[dict[str, Any]]:
-            runtime_dir = _make_diagnosis_runtime_dir(runtime_root, case.case_id)
-            attempt_dir = artifact_root / "diagnosis_attempts" / runtime_dir.name
+            runtime_dir, attempt_dir = _allocate_diagnosis_attempt(
+                runtime_root, artifact_root, case.case_id, source_stage,
+            )
             evidence_archive = attempt_dir / "evidence"
             try:
                 evidence_summary_available = _prepare_diagnosis_evidence(
                     case=case,
                     runtime_dir=runtime_dir,
                 )
-                attempt_dir.mkdir(parents=True, exist_ok=True)
                 evidence_archive.mkdir(exist_ok=True)
                 runtime_evidence_dir = runtime_dir / "runtime_evidence"
                 if runtime_evidence_dir.is_dir():

@@ -316,6 +316,26 @@ class ContextProcessorRail(DeepAgentRail):
                 model_client_config=model_client_config,
             )
 
+        # Browser results already have a bounded source-text projection. Keep that
+        # delivery intact instead of immediately replacing it with a head/tail preview.
+        # Reuse the existing tool/argument protection, scoped to configured browsers.
+        subagents = getattr(getattr(agent, "deep_config", None), "subagents", None) or []
+        browser_results = []
+        for subagent in subagents:
+            card = getattr(subagent, "agent_card", None) or getattr(subagent, "card", None)
+            name = getattr(card, "name", None)
+            if isinstance(name, str) and (
+                name == "browser_agent"
+                or getattr(subagent, "factory_name", None) in {"browser_agent", "browser_runtime"}
+            ):
+                browser_results.append(f"task_tool:{name}")
+        for index, (processor_name, processor_config) in enumerate(all_processors):
+            protected = getattr(processor_config, "protected_tool_names", None)
+            if processor_name == "MessageSummaryOffloader" and isinstance(protected, list) and browser_results:
+                all_processors[index] = (processor_name, processor_config.model_copy(update={
+                    "protected_tool_names": list(dict.fromkeys([*protected, *browser_results])),
+                }))
+
         affinity_config = getattr(config, "kv_cache_affinity_config", None)
         affinity_enabled = bool(
             getattr(affinity_config, "enable_kv_cache_affinity", False)

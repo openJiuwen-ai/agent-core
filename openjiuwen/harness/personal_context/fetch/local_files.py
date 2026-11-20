@@ -7,7 +7,9 @@ import errno
 import hashlib
 import os
 import stat as stat_module
-from collections.abc import AsyncIterator, Mapping
+import threading
+import zipfile
+from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -22,16 +24,23 @@ from openjiuwen.harness.personal_context.fetch.cursor_selection import (
     candidate_in_time_range,
     select_latest_candidates,
 )
+from openjiuwen.harness.personal_context.fetch.local_markdown import (
+    EXTENSIONS as _MARKDOWN_EXTENSIONS,
+    OFFICE_EXTENSIONS,
+    convert_document,
+)
 from openjiuwen.harness.personal_context.fetch.retry import classify_file_error, retry_provider_read
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
-_SUPPORTED_EXTENSIONS = {".md", ".txt", ".json", ".pdf"}
+_SUPPORTED_EXTENSIONS = {".md", ".txt", ".json", ".pdf", ".docx"} | _MARKDOWN_EXTENSIONS
 _SKIPPED_DIRECTORIES = {".git", ".venv", "node_modules", "__pycache__", ".personal_context"}
 _BATCH_SIZE = 20
 _DEFAULT_MAX_ITEMS = 100
 _TEXT_MAX_SIZE = 1 * 1024 * 1024
 _PDF_MAX_SIZE = 20 * 1024 * 1024
+_DOCX_MAX_SIZE = 20 * 1024 * 1024
+_DOCX_MAX_XML_SIZE = 64 * 1024 * 1024
 _RAW_SNAPSHOT_MAX_SIZE = 2 * 1024 * 1024
 _MAX_CONTENT_CHARS = 2_000_000
 _READ_CHUNK_SIZE = 64 * 1024
@@ -118,7 +127,7 @@ class LocalFilesFetchService(ContextFetchService):
                     item_ref = _candidate_item_ref(candidate, root=root)
                     try:
                         materialized = await retry_provider_read(
-                            partial(asyncio.to_thread, _materialize_candidate, candidate),
+                            partial(_materialize_async, candidate),
                             provider="local_files",
                             operation_name="file_read",
                             classify=classify_file_error,
@@ -254,6 +263,8 @@ def _scan_files(root: Path) -> list[dict[str, Any]]:
 
             for filename in sorted(filenames, key=lambda value: (value.casefold(), value)):
                 path = current / filename
+                if filename.startswith("~$"):
+                    continue
                 if path.is_symlink() or path.suffix.casefold() not in _SUPPORTED_EXTENSIONS:
                     continue
                 resolved = path.resolve()
@@ -285,7 +296,14 @@ def _scan_files(root: Path) -> list[dict[str, Any]]:
 
 
 def _max_size(extension: str) -> int:
-    return _PDF_MAX_SIZE if extension.casefold() == ".pdf" else _TEXT_MAX_SIZE
+    normalized = extension.casefold()
+    if normalized == ".pdf":
+        return _PDF_MAX_SIZE
+    if normalized == ".docx":
+        return _DOCX_MAX_SIZE
+    if normalized in OFFICE_EXTENSIONS:
+        return 20 * 1024 * 1024
+    return _TEXT_MAX_SIZE
 
 
 def _read_checked(path: Path, *, extension: str) -> bytes:
@@ -321,14 +339,36 @@ def _read_checked(path: Path, *, extension: str) -> bytes:
         raise _file_error("local file read failed", exc) from None
 
 
-def _materialize_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
+async def _materialize_async(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    if candidate["extension"] not in _MARKDOWN_EXTENSIONS:
+        return await asyncio.to_thread(_materialize_candidate, candidate)
+    cancelled = threading.Event()
+    try:
+        return await asyncio.to_thread(_materialize_candidate, candidate, cancelled=cancelled.is_set)
+    finally:
+        cancelled.set()
+
+
+def _materialize_candidate(
+    candidate: Mapping[str, Any], *, cancelled: Callable[[], bool] = lambda: False,
+) -> dict[str, Any]:
     path = Path(str(candidate["path"]))
     extension = str(candidate["extension"])
     try:
         raw_bytes = _read_checked(path, extension=extension)
         content_revision_id = _revision_id(raw_bytes)
+        conversion_metadata: dict[str, object] = {}
         if extension == ".pdf":
             content, content_truncated = _read_pdf(path)
+        elif extension == ".docx":
+            content, content_truncated = _read_docx(path)
+        elif extension in _MARKDOWN_EXTENSIONS:
+            converted = convert_document(path, extension, max_chars=_MAX_CONTENT_CHARS, cancelled=cancelled)
+            if converted["source_hash"] != content_revision_id:
+                raise ValueError("file changed during document conversion")
+            content = str(converted["content"])
+            content_truncated = bool(converted["content_truncated"])
+            conversion_metadata = dict(converted["conversion_metadata"])
         else:
             content = raw_bytes.decode("utf-8")
             content_truncated = len(content) > _MAX_CONTENT_CHARS
@@ -343,6 +383,7 @@ def _materialize_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
             "content": content,
             "raw_snapshot": raw_bytes if len(raw_bytes) <= _RAW_SNAPSHOT_MAX_SIZE else None,
             "content_truncated": content_truncated,
+            "conversion_metadata": conversion_metadata,
         }
     except asyncio.CancelledError:
         raise
@@ -380,6 +421,64 @@ def _read_pdf(path: Path) -> tuple[str, bool]:
         raise _file_error("local PDF extraction failed", exc) from None
 
 
+def _read_docx(path: Path) -> tuple[str, bool]:
+    """Extract text from an OOXML .docx file (paragraphs and tables in document order)."""
+    try:
+        import docx as python_docx
+        from docx.table import Table as _DocxTable
+        from docx.text.paragraph import Paragraph as _DocxParagraph
+    except ImportError as exc:
+        raise _file_error("python-docx is required for .docx extraction", exc) from None
+    try:
+        with zipfile.ZipFile(str(path)) as archive:
+            xml_size = sum(
+                info.file_size
+                for info in archive.infolist()
+                if info.filename.startswith("word/") and info.filename.endswith(".xml")
+            )
+        if xml_size > _DOCX_MAX_XML_SIZE:
+            raise _file_error(
+                f"docx decompressed XML size {xml_size} exceeds limit {_DOCX_MAX_XML_SIZE}"
+            )
+        document = python_docx.Document(str(path))
+        parts: list[str] = []
+        total = 0
+
+        def _append(text: str) -> bool:
+            nonlocal total
+            if not text:
+                return False
+            if parts:
+                text = "\n" + text
+            remaining = _MAX_CONTENT_CHARS - total
+            if len(text) > remaining:
+                parts.append(text[:remaining])
+                total = _MAX_CONTENT_CHARS
+                return True
+            parts.append(text)
+            total += len(text)
+            return total >= _MAX_CONTENT_CHARS
+
+        for child in document.element.body.iterchildren():
+            tag = child.tag
+            if tag.endswith("}p"):
+                if _append(_DocxParagraph(child, document).text):
+                    return "".join(parts), True
+            elif tag.endswith("}tbl"):
+                table = _DocxTable(child, document)
+                for row in table.rows:
+                    cells = [cell.text.replace("\n", " ").strip() for cell in row.cells]
+                    if _append(" | ".join(cells)):
+                        return "".join(parts), True
+        return "".join(parts), False
+    except asyncio.CancelledError:
+        raise
+    except BaseError:
+        raise
+    except Exception as exc:
+        raise _file_error("local DOCX extraction failed", exc) from None
+
+
 def _revision_id(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
@@ -400,6 +499,7 @@ def _change_item(root: Path, change: Mapping[str, object]) -> RawChangeItem:
         "raw_snapshot_available": change.get("raw_snapshot") is not None,
         "content_truncated": bool(change.get("content_truncated", False)),
     }
+    metadata.update(cast(dict[str, object], change.get("conversion_metadata", {})))
     try:
         raw_snapshot = cast(str | bytes | None, change.get("raw_snapshot"))
         return RawChangeItem(

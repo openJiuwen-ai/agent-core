@@ -26,6 +26,7 @@ from openjiuwen.agent_teams.tools.database.engine import (
 from openjiuwen.agent_teams.tools.member_options import (
     MemberBuiltinModel,
     MemberWorktreeOptions,
+    append_member_served_model,
     promote_member_fallback_model,
     set_member_builtin_model,
     set_member_worktree_options,
@@ -364,6 +365,20 @@ class MemberDao:
             if lifetime:
                 out.append((row.member_name, row.status, lifetime))
         return out
+
+    async def list_shutdown_members(self, team_name: str) -> set[str]:
+        """Project the names of ``SHUTDOWN`` members.
+
+        Feeds the scheduler's stranded-task check on every wake, so it reads
+        only the name — never the serialized card or private prompt.
+        """
+        async with self._sessions.read() as session:
+            stmt = select(TeamMember.member_name).where(
+                TeamMember.team_name == team_name,
+                TeamMember.status == MemberStatus.SHUTDOWN.value,
+            )
+            rows = (await session.execute(stmt)).all()
+        return {row.member_name for row in rows}
 
     async def get_member_lifetime(self, team_name: str, member_name: str) -> str | None:
         """Return one member's retirement policy (``options.lifetime``) or None."""
@@ -786,6 +801,43 @@ class MemberDao:
                 team_logger.error("Member %s not found in team %s", member_name, team_name)
                 return False
             member.options = set_member_builtin_model(member.options, builtin_model)
+            await session.commit()
+            return True
+
+    async def update_member_served_model(
+        self,
+        member_name: str,
+        team_name: str,
+        served_model: str,
+    ) -> bool:
+        """Record that the team's model group routed a member to ``served_model``.
+
+        Appends to the member's served-model history only when the model differs
+        from the latest entry.
+
+        Returns:
+            Whether the member row exists (False lets the caller retry later).
+        """
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                select(TeamMember).where(
+                    TeamMember.member_name == member_name,
+                    TeamMember.team_name == team_name,
+                )
+            )
+            member = result.scalar_one_or_none()
+            if member is None:
+                # The leader routes its first calls before build_team writes its row.
+                team_logger.debug("Member %s not found in team %s", member_name, team_name)
+                return False
+            now = get_current_time()
+            options = append_member_served_model(member.options, served_model, now)
+            if options == member.options:
+                return True
+            member.options = options
+            # The served models are rendered in the leader's roster, so a new one
+            # is a roster mutation: bump the column the roster probe watches.
+            member.updated_at = now
             await session.commit()
             return True
 

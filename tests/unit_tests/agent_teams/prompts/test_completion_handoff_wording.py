@@ -98,6 +98,28 @@ def test_all_done_prompts_discourage_wrap_up_broadcasts(key: str):
 
 
 @pytest.mark.level1
+@pytest.mark.parametrize(
+    "key",
+    ["dispatcher.all_done_persistent", "dispatcher.all_done_temporary", "scheduler.leader_all_done"],
+)
+def test_all_done_prompts_ask_for_remaining_work_before_wrapping_up(key: str):
+    from openjiuwen.agent_teams.i18n import get_language, set_language, t
+
+    previous = get_language()
+    try:
+        set_language("cn")
+        text = t(key, count=1)
+        assert "不代表目标已经达成" in text
+        assert "create_task" in text
+        set_language("en")
+        text = t(key, count=1)
+        assert "does not mean the goal is reached" in text
+        assert "create_task" in text
+    finally:
+        set_language(previous)
+
+
+@pytest.mark.level1
 @pytest.mark.parametrize("language", ["cn", "en"])
 @pytest.mark.parametrize(("desc_key", "param"), [("claim_task", "summary"), ("member_complete_task", "summary")])
 def test_summary_param_asks_for_short_deliverables_inline(language: str, desc_key: str, param: str):

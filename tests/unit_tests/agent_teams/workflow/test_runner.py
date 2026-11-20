@@ -1,9 +1,11 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Tests for swarmflow runner journal/WAL path wiring (``_resolve_journal_path``)."""
+"""Tests for swarmflow runner journal/WAL path wiring (``_resolve_journal_path``)
+and inline-script materialisation (``materialize_swarmflow_script``)."""
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,7 @@ from openjiuwen.agent_teams.workflow.runner import (
     _resolve_journal_path,
     _resolve_legacy_resume,
     _resolve_wal_path,
+    materialize_swarmflow_script,
 )
 from openjiuwen.core.common.exception.errors import BaseError
 
@@ -124,3 +127,76 @@ def test_resolve_legacy_resume_returns_none_without_meta_name(tmp_path):
     script.write_text("META = {}\n", encoding="utf-8")
     paths.configure_openjiuwen_home(tmp_path / "home")
     assert _resolve_legacy_resume(str(script), "demo-team", "sess-1", "wf_abc123") is None
+
+
+# ---------------------------------------------------------------------------
+# inline-script materialisation (per-run file names)
+# ---------------------------------------------------------------------------
+
+_SOURCE_A = "META = {'name': 'myflow'}\nasync def run(args):\n    return 1\n"
+_SOURCE_B = "META = {'name': 'myflow'}\nasync def run(args):\n    return 2\n"
+
+
+def test_materialize_swarmflow_script_writes_per_run_file(tmp_path):
+    """An inline source lands in script-{run_id}.py next to the journal."""
+    paths.configure_openjiuwen_home(tmp_path / "home")
+
+    result = asyncio.run(
+        materialize_swarmflow_script(_SOURCE_A, team_name="t", session_id="s1", run_id="wf_abc123")
+    )
+
+    run_dir = paths.workflow_run_dir("t", "s1", "myflow")
+    assert Path(result) == run_dir / "script-wf_abc123.py"
+    assert Path(result).read_text(encoding="utf-8") == _SOURCE_A
+
+
+def test_materialize_swarmflow_script_same_name_runs_do_not_overwrite(tmp_path):
+    """Two runs sharing META.name write two files; neither clobbers the other."""
+    paths.configure_openjiuwen_home(tmp_path / "home")
+
+    path_a = asyncio.run(
+        materialize_swarmflow_script(_SOURCE_A, team_name="t", session_id="s1", run_id="wf_aaa")
+    )
+    path_b = asyncio.run(
+        materialize_swarmflow_script(_SOURCE_B, team_name="t", session_id="s1", run_id="wf_bbb")
+    )
+
+    assert path_a != path_b
+    assert Path(path_a).read_text(encoding="utf-8") == _SOURCE_A
+    assert Path(path_b).read_text(encoding="utf-8") == _SOURCE_B
+
+
+def test_materialize_swarmflow_script_sanitizes_run_id(tmp_path):
+    """A hostile run_id cannot escape the run directory."""
+    paths.configure_openjiuwen_home(tmp_path / "home")
+
+    result = asyncio.run(
+        materialize_swarmflow_script(
+            _SOURCE_A, team_name="t", session_id="s1", run_id="../../evil"
+        )
+    )
+
+    run_dir = paths.workflow_run_dir("t", "s1", "myflow")
+    assert Path(result).parent == run_dir
+    assert Path(result).is_file()
+
+
+def test_materialize_swarmflow_script_requires_meta_name(tmp_path):
+    """Same contract as the journal resolver: no META.name, no materialisation."""
+    paths.configure_openjiuwen_home(tmp_path / "home")
+
+    with pytest.raises(BaseError):
+        asyncio.run(
+            materialize_swarmflow_script("META = {}\n", team_name="t", session_id="s1", run_id="wf_abc")
+        )
+
+
+def test_materialize_swarmflow_script_defaults_blank_session(tmp_path):
+    paths.configure_openjiuwen_home(tmp_path / "home")
+
+    result = asyncio.run(
+        materialize_swarmflow_script(_SOURCE_A, team_name="t", session_id="", run_id="wf_abc123")
+    )
+
+    expected = paths.workflow_run_dir("t", "default", "myflow") / "script-wf_abc123.py"
+    assert Path(result) == expected

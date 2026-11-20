@@ -3,6 +3,12 @@
 
 from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
 from openjiuwen.core.context_engine.base import ContextWindowChange, ModelContext, ContextStats, ContextWindow
+from openjiuwen.core.context_engine.context.cancellation import (
+    CancellationCause,
+    clear_cancellation_cause,
+    mark_cancellation_cause,
+    resolve_cancellation_cause,
+)
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 
 from openjiuwen.core.context_engine.token.base import TokenCounter, TokenMeasurement
@@ -75,7 +81,11 @@ _CORE_CLASSES = [
     "ContextWindowChange",
     "ModelContext",
     "ContextStats",
-    "ContextEngine"
+    "ContextEngine",
+    "CancellationCause",
+    "clear_cancellation_cause",
+    "mark_cancellation_cause",
+    "resolve_cancellation_cause",
 ]
 
 
