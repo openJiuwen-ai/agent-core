@@ -163,17 +163,27 @@ async def inject_steering(ctx: AgentCallbackContext, message: str) -> None:
 
 
 async def emit_user_notice(ctx: AgentCallbackContext, message: str) -> None:
-    """Emit a user-visible recovery / warning notice on the session stream."""
+    """Emit a user-visible recovery / warning notice on the session stream.
+
+    ``type="system_notice"`` (not ``"llm_output"``): recovery notices are
+    side-channel system information, not assistant content. Emitting them as
+    ``llm_output`` made every downstream consumer render them inside the
+    assistant's answer body (chat.delta → text), polluting the final answer
+    with "⚠️ 检测到思考语义死锁异常..." lines (semantic_deadlock defect).
+    The jiuwenswarm adapter maps ``system_notice`` to a ``chat.system_notice``
+    control event which relay surfaces as a system_info message; unknown-type
+    fallthrough in older adapters drops the frame instead of polluting.
+    """
     session = getattr(ctx, "session", None)
     if session is None:
         return
     try:
         from openjiuwen.core.session.stream import OutputSchema
 
-        notice_text = f"\n\n⚠️ {message}\n\n"
+        notice_text = message.strip()
         await session.write_stream(
             OutputSchema(
-                type="llm_output",
+                type="system_notice",
                 index=-1,
                 payload={"content": notice_text},
             )

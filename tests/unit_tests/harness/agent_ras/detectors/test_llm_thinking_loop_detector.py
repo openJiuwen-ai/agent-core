@@ -892,7 +892,11 @@ class TestOverthinkingProgressExemption:
         assert det._plan_exec_channel("llm_output").detection_latched
 
     @pytest.mark.asyncio
-    async def test_no_exempt_for_deadlock_even_with_progress_flag(self):
+    async def test_deadlock_with_progress_exempted(self):
+        # P1 豁免扩展：判官标 semantic_deadlock 但 has_progress + 首窗 novelty 高
+        # → 判定自相矛盾，按误判豁免（仅观察，不软停）。
+        # fixture 符合扩展后 SKILL.md 契约（overthinking 与 semantic_deadlock 均必填
+        # has_progress，判官如实输出推进观察，即使与死锁判定矛盾）。
         agents = _CaptureAgents(response={
             "abnormal": True,
             "primary_fault": "semantic_deadlock",
@@ -906,8 +910,139 @@ class TestOverthinkingProgressExemption:
         det = LlmThinkingLoopDetector(self._config(), agents=agents)
         det.set_async_recovery_handler(handler)
         await det.observe(_stream_chunk("x" * 200))
+        assert await self._wait_until(
+            lambda: agents.calls and not det.has_eval_in_flight()
+        )
+        await asyncio.sleep(0.05)
+        assert captured == []
+        assert det._plan_exec_channel("llm_output").progress_exempt_count == 1
+
+    @pytest.mark.asyncio
+    async def test_deadlock_with_progress_exempt_disabled(self):
+        # 关闭 semantic_deadlock 豁免开关后，死锁 + 有推进仍按原行为软停。
+        agents = _CaptureAgents(response={
+            "abnormal": True,
+            "primary_fault": "semantic_deadlock",
+            "has_progress": True,
+        })
+        captured: list = []
+
+        async def handler(anomaly, chunk_type):
+            captured.append(anomaly)
+
+        det = LlmThinkingLoopDetector(
+            self._config(semantic_deadlock_progress_exempt=False), agents=agents,
+        )
+        det.set_async_recovery_handler(handler)
+        await det.observe(_stream_chunk("x" * 200))
         assert await self._wait_until(lambda: captured)
         assert captured[0].evidence.get("primary_fault") == "semantic_deadlock"
+
+    @pytest.mark.asyncio
+    async def test_deadlock_low_confidence_observe_only(self):
+        # P0-② 置信度门控：semantic_deadlock 置信度低于阈值 → 仅观察，不软停。
+        agents = _CaptureAgents(response={
+            "abnormal": True,
+            "primary_fault": "semantic_deadlock",
+            "confidence": 0.6,
+        })
+        captured: list = []
+
+        async def handler(anomaly, chunk_type):
+            captured.append(anomaly)
+
+        det = LlmThinkingLoopDetector(self._config(), agents=agents)
+        det.set_async_recovery_handler(handler)
+        await det.observe(_stream_chunk("x" * 200))
+        assert await self._wait_until(
+            lambda: agents.calls and not det.has_eval_in_flight()
+        )
+        await asyncio.sleep(0.05)
+        assert captured == []
+        assert not det._plan_exec_channel("llm_output").detection_latched
+
+    @pytest.mark.asyncio
+    async def test_deadlock_high_confidence_still_latches(self):
+        # 高置信度死锁（真死锁信号）不受门控影响，仍正常触发恢复。
+        # fixture 不带 has_progress —— 同时覆盖旧契约判官（deadlock 不输出该字段）
+        # 的 fail-safe 路径：豁免不生效，由置信度门控兜底。
+        agents = _CaptureAgents(response={
+            "abnormal": True,
+            "primary_fault": "semantic_deadlock",
+            "confidence": 0.95,
+        })
+        captured: list = []
+
+        async def handler(anomaly, chunk_type):
+            captured.append(anomaly)
+
+        det = LlmThinkingLoopDetector(self._config(), agents=agents)
+        det.set_async_recovery_handler(handler)
+        await det.observe(_stream_chunk("x" * 200))
+        assert await self._wait_until(lambda: captured)
+        assert captured[0].evidence.get("primary_fault") == "semantic_deadlock"
+        assert det._plan_exec_channel("llm_output").detection_latched
+
+    @pytest.mark.asyncio
+    async def test_deadlock_confidence_missing_not_gated(self):
+        # 判官未返回 confidence（老版契约）时不门控，保持既有行为。
+        agents = _CaptureAgents(response={
+            "abnormal": True,
+            "primary_fault": "semantic_deadlock",
+        })
+        captured: list = []
+
+        async def handler(anomaly, chunk_type):
+            captured.append(anomaly)
+
+        det = LlmThinkingLoopDetector(self._config(), agents=agents)
+        det.set_async_recovery_handler(handler)
+        await det.observe(_stream_chunk("x" * 200))
+        assert await self._wait_until(lambda: captured)
+        assert captured[0].evidence.get("primary_fault") == "semantic_deadlock"
+
+    @pytest.mark.asyncio
+    async def test_semantic_eval_circuit_breaker(self):
+        # P2 熔断：判官连续失败达阈值后，本 channel 后续 L3 送审被禁用。
+        class _FailingAgents:
+            def __init__(self):
+                self.calls = 0
+
+            async def invoke_skill(self, *, role, skill_name, payload, timeout):
+                self.calls += 1
+                raise RuntimeError("judge gateway 405")
+
+        agents = _FailingAgents()
+        captured: list = []
+
+        async def handler(anomaly, chunk_type):
+            captured.append(anomaly)
+
+        det = LlmThinkingLoopDetector(self._config(), agents=agents)
+        det.set_async_recovery_handler(handler)
+        ch = det._plan_exec_channel("llm_output")
+        await det.observe(_stream_chunk("x" * 200))
+        assert await self._wait_until(
+            lambda: agents.calls >= 1 and not det.has_eval_in_flight()
+        )
+        assert not ch.eval_disabled
+        await det.observe(_stream_chunk("y" * 200))
+        assert await self._wait_until(
+            lambda: agents.calls >= 2 and not det.has_eval_in_flight()
+        )
+        assert not ch.eval_disabled
+        await det.observe(_stream_chunk("z" * 200))
+        assert await self._wait_until(
+            lambda: agents.calls >= 3 and not det.has_eval_in_flight()
+        )
+        assert ch.eval_disabled
+        assert ch.consecutive_eval_failures == 3
+        calls_after_break = agents.calls
+        # 熔断后继续灌入增量：不再发起新的 L3 送审。
+        await det.observe(_stream_chunk("w" * 400))
+        await asyncio.sleep(0.1)
+        assert agents.calls == calls_after_break
+        assert captured == []
 
     @pytest.mark.asyncio
     async def test_exempt_cap_exhausted_then_anomaly(self):

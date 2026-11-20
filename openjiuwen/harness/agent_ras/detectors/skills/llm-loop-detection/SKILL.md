@@ -67,7 +67,7 @@ description: Plan-execution semantic judge for LLM thinking-loop faults (PR#3102
 |------|------|------|------|
 | `abnormal` | boolean | 是 | 是否异常 |
 | `primary_fault` | string | 是 | `none` / `semantic_deadlock` / `text_degradation` / `overthinking` |
-| `has_progress` | boolean | 仅 `primary_fault == "overthinking"` 时必填 | 是否存在可观察的推进证据：引入新信息、覆盖范围扩大、结论逐步收敛、出现阶段性产出。「结论在缓慢前进」→ `true`；「原地重复、无新内容、不前进」→ `false`。其余 `primary_fault` 不输出该字段 |
+| `has_progress` | boolean | `primary_fault` 为 `overthinking` 或 `semantic_deadlock` 时必填 | 是否存在可观察的推进证据：引入新信息、覆盖范围扩大、结论逐步收敛、出现阶段性产出。「结论在缓慢前进」→ `true`；「原地重复、无新内容、不前进」→ `false`。`semantic_deadlock` 判定时必须如实输出推进观察，即使推进信号与死锁判定矛盾（死锁的定义即无推进，标死锁却观察到推进是误判的强信号，下游据此豁免）。其余 `primary_fault` 不输出该字段 |
 | `confidence` | number | 否 | 0.0–1.0 |
 | `rationale` | string | 否 | 简短判定理由 |
 
@@ -103,6 +103,18 @@ description: Plan-execution semantic judge for LLM thinking-loop faults (PR#3102
   "has_progress": false,
   "confidence": 0.8,
   "rationale": "同一批条目换说法反复权衡，结论与覆盖范围均无推进"
+}
+```
+
+示例（判死锁但观察到推进——如实输出矛盾信号）：
+
+```json
+{
+  "abnormal": true,
+  "primary_fault": "semantic_deadlock",
+  "has_progress": true,
+  "confidence": 0.7,
+  "rationale": "疑似原地打转，但偶有新子句与阶段性产出，推进观察与死锁判定矛盾，如实标记"
 }
 ```
 
