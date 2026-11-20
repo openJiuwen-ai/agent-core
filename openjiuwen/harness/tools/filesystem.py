@@ -733,17 +733,26 @@ class ReadFileTool(Tool):
                     inferred_total,
                 )
             else:
-                # offset 此处为 0 基 skip；面向模型的行号 = offset + 1，
-                # 并带总行数上界，降低自纠成本。
+                # offset 此处为 0 基 skip；面向模型的行号 = offset + 1。
+                # 必须区分两种"空"（AI 检视 2026-11-20 P2）：
+                # ① 真越界（content_line_count == 0）：line offset+1 不存在，
+                #    offset 是总行数合法上界，可断言 past-EOF；
+                # ② 空白页（content_line_count > 0，整页皆空白）：line
+                #    offset+1 存在只是为空，不得断言 EOF 或低报总行数，
+                #    否则模型会提前停止分页造成漏读。
+                if content_line_count == 0:
+                    return (
+                        f"Error: The file exists but line {offset + 1} is past its end "
+                        f"(the file has at most {offset} lines). "
+                        "Use a smaller offset or read from the beginning.",
+                        0,
+                        offset,
+                    )
                 return (
-                    f"Error: The file exists but line {offset + 1} is past its end "
-                    f"(the file has at most {offset} lines). "
-                    "Use a smaller offset or read from the beginning.",
+                    f"Warning: line {offset + 1} is blank (this page contains only "
+                    "blank lines). Continue with a larger offset to read later content.",
                     0,
-                    # No content at all: every line before `offset` exists, so the
-                    # offset is a safe upper bound. A blank-lines page keeps its
-                    # exact total (short page) and is otherwise unknown.
-                    offset if content_line_count == 0 else inferred_total,
+                    inferred_total,
                 )
 
         return rendered, content_line_count, inferred_total
