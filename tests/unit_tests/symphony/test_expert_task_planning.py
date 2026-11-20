@@ -102,6 +102,7 @@ async def test_expert_task_plan_preserves_relevant_isolated_expert(mode, tmp_pat
     assert graph["metadata"]["status"] == "ready"
     assert graph["metadata"]["plan_kind"] == "expert_tasks"
     assert set(graph["nodes"]) == {"task-1", "task-2"}
+    assert graph["nodes"]["task-1"]["label"].startswith("first · ")
     assert all(node["metadata"]["expert_id"] == "isolated" for node in graph["nodes"].values())
     assert graph["edges"] == []
 
@@ -120,6 +121,29 @@ async def test_missing_expert_graph_allows_inline_plan(mode, tmp_path, monkeypat
     assert graph["metadata"]["status"] == "ready"
     assert graph["nodes"]["task-1"]["metadata"]["role"]["name"] == "verify"
     assert graph["edges"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("body", "expected_title"), [
+    ("核对 facts.csv 的读数。保留原单位。", "核对 facts.csv 的读数。"),
+    ("Check version 2.1 of facts.csv. Keep the original units.", "Check version 2.1 of facts.csv."),
+    ("Check the readings\n- Keep the original units.", "Check the readings"),
+])
+async def test_compact_draft_projects_title_and_input_gaps(tmp_path, monkeypatch, body, expected_title):
+    task = {
+        "id": "verify", "task": body, "role": {"name": "Verifier", "description": "Check readings."},
+        "external_inputs": ["facts", "units"], "outputs": [_port("review", "text")],
+    }
+    source = PlanningInput(name="facts", kind="file", value="facts.csv")
+    service, model = _service(tmp_path, {"tasks": [task]}, monkeypatch)
+
+    graph = (await service.plan_subagent_graph("Verify the readings", inputs=[source]))["planned_graph"]["graph"]
+
+    assert len(model.planning_requests) == 1
+    assert graph["metadata"]["status"] == "ready"
+    assert graph["metadata"]["missing_inputs"] == [{"name": "units", "kind": "text", "description": ""}]
+    assert graph["nodes"]["task-1"]["label"].startswith(f"{expected_title} · ")
+    assert graph["nodes"]["task-1"]["metadata"]["task"] == body
 
 
 @pytest.mark.asyncio
@@ -369,7 +393,6 @@ async def test_invalid_expert_draft_reports_field_after_one_retry(tmp_path, monk
 @pytest.mark.parametrize("failure", ["expert_in_type", "unknown_expert", "handoff", "schema", "empty"])
 async def test_expert_task_plan_corrects_invalid_draft(failure, tmp_path, monkeypatch, expert_artifacts):
     valid = {
-        "status": "ready",
         "tasks": [_task("research", expert_id="research"), _task("report", expert_id="report")],
         "handoffs": [_handoff("research", "report", "result", "result")],
     }
@@ -506,18 +529,46 @@ async def test_expert_task_plan_preserves_tasks_with_missing_inputs(tmp_path, mo
 
 
 @pytest.mark.asyncio
+async def test_only_external_materials_count_as_input_gaps(tmp_path, monkeypatch):
+    draft = {
+        "tasks": [
+            _task("write", outputs=[_port("article"), _port("notes"), _port("photos")]),
+            {**_task("publish"), "external_inputs": ["article"]},
+            {**_task("review"), "external_inputs": ["article", "copy", "notes", "photos", "price"]},
+        ],
+        "handoffs": [
+            _handoff("write", "review", "article", "copy"),
+            _handoff("write", "review", "notes", "notes"),
+            _handoff("write", "review", "photos", "photos"),
+        ],
+        "missing_inputs": [{"name": "photos", "kind": "file", "description": "Original external photographs"}],
+    }
+    source = PlanningInput(name="notes", kind="text", value="Notes supplied by the user")
+    service, _ = _service(tmp_path, draft, monkeypatch)
+
+    graph = (await service.plan_subagent_graph("Publish and review", inputs=[source]))["planned_graph"]["graph"]
+
+    assert graph["metadata"]["status"] == "ready"
+    assert graph["nodes"]["task-2"]["metadata"]["external_inputs"] == ["article"]
+    assert graph["nodes"]["task-3"]["metadata"]["external_inputs"] == ["notes", "photos", "price"]
+    assert graph["metadata"]["missing_inputs"] == [
+        draft["missing_inputs"][0], {"name": "article", "kind": "text", "description": ""},
+        {"name": "price", "kind": "text", "description": ""},
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("recover", [True, False])
 async def test_empty_expert_draft_with_missing_inputs_gets_one_conditional_attempt(tmp_path, monkeypatch, recover):
-    def draft(request, system_prompt):
+    missing_only = {"status": "needs_input", "missing_inputs": ["facts"]}
+
+    def draft(request, _system_prompt):
         assert request["inputs"] == []
-        assert 'Treat "may consult"' in system_prompt
-        if recover and "The previous draft only reported missing inputs." in system_prompt:
-            return {
-                "status": "ready",
-                "missing_inputs": [{"name": "facts", "kind": "file", "description": "Product fact sheet"}],
-                "tasks": [{**_task("read facts"), "external_inputs": ["facts"]}],
-            }
-        return {"status": "needs_input", "missing_inputs": ["facts"]}
+        if "validation_feedback" in request:
+            assert json.loads(request["validation_feedback"]["previous_output"]) == missing_only
+            if recover:
+                return {"tasks": [{**_task("read facts"), "external_inputs": ["facts"]}]}
+        return missing_only
 
     service, model = _service(tmp_path, draft, monkeypatch)
     graph = (await service.plan_subagent_graph("Plan a launch. You may consult platform rules."))["planned_graph"]["graph"]
