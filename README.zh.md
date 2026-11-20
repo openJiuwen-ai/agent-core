@@ -49,7 +49,7 @@ os.environ.setdefault("API_BASE", "your_api_base")
 os.environ.setdefault("API_KEY", "your_api_key")
 os.environ.setdefault("MODEL_PROVIDER", "your_provider")
 os.environ.setdefault("MODEL_NAME", "your_model_name")
-os.environ.setdefault("LLM_SSL_VERIFY", "false")
+os.environ.setdefault("LLM_SSL_VERIFY", "true")
 
 # 创建大模型配置对象
 model_client_config = ModelClientConfig(
