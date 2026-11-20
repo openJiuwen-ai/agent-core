@@ -50,8 +50,8 @@ mobile GUI 子代理（默认 120）。workswarm 主链路当前未配置窗口�
 
 新增 `ContextMessageBuffer.clear(with_history)` 真正清空底层缓冲（不受可见窗口约束），
 `SessionModelContext.clear_messages` 改用它，并把原 `pop_messages` 内部的
-`invalidate_usage_metadata` / `_mark_message_changed("remove")` 平移到 `clear_messages`，
-保证缓存失效与 revision 语义不变。`pop_back` / 普通 `pop_messages(size)` 未改动。
+`_mark_message_changed("remove")` 平移到 `clear_messages`，
+保证 dev-stable 的 revision 语义不变。`pop_back` / 普通 `pop_messages(size)` 未改动。
 选 `clear()` 而非窗口内打补丁（如循环裁剪）的原因：清空语义与窗口无关，独立方法语义清晰、
 易验证，且对任意 `L`（含 `L > 2M`）行为一致。
 
