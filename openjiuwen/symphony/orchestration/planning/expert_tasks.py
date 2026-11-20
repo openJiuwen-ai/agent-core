@@ -36,9 +36,9 @@ unavailable installed expert. For all other requests return a task graph, even w
 Honor required assignments. For matching work, copy the listed id into expert_id. Use an inline role for other tasks.
 The same expert may be reused and other candidates may be left unused.
 
-Example assignments with a newsletter editor and a video expert available
-Newsletter with optional video references → editor alone.
-Newsletter, video, audio + independent review → (editor ∥ video expert ∥ inline audio writer) → inline reviewer.
+Example assignments with an Asia market analyst and a support expert available
+Asia and Europe market trends → Asia analyst and inline Europe analyst write separate regional briefs in parallel.
+Order delay → inline researcher extracts a timeline with record IDs from years of logs → support expert finds the cause.
 
 Return one JSON object with tasks and optional handoffs, both arrays. Use only these fields in their entries.
 - Each task has id, task, outputs [{name, type}], external_inputs [material names], and either expert_id or

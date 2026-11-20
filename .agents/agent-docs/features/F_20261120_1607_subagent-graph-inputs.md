@@ -5,7 +5,7 @@ type: F
 author: lin-xiaoyu
 author_email: xiaoyu.lin.work@outlook.com
 created: 2026-11-20
-updated: 2026-11-20
+updated: 2026-11-21
 designs: []
 design_note: 用户已明确指定 SDK 方法名、规划状态和宿主对输入的决策职责。
 modules: [openjiuwen/symphony]
@@ -43,3 +43,9 @@ fast 和 beam 仍可从起始专家沿关系图补充候选。发送给模型的
 在空专家名单且缺少停机时段、名单有专家且缺少明确命名的电价表两种情况下，均返回 `ready` 任务图，缺项分别为 `approved_window` 和 `tariff`。强制指定不可用的专家时返回 `no_plan`。以上五个合成案例均调用一次规划模型。
 
 另一次用自然语言写作「已核准的电价 tariff」，没有明确它是资料标识。该次返回 `ready`，缺项名称包含整段「已核准的电价 tariff」。将资料明确命名为 `tariff` 的对照只返回该键。
+
+## 独立调研与订单证据交接
+
+2026-11-21 将分工示例替换为两种场景，各用一行。亚洲和欧洲市场简报各自取材，两位分析员可同时交付。排查订单延误时，临时调研员从多年日志中提取该订单的时间线并保留记录编号，已有客服专家据此诊断。区域调研与订单检索取自 Anthropic 的文章，订单案例的下游诊断在 Symphony 中分给客服专家。[Anthropic 原文](https://claude.com/resources/articles/building-multi-agent-systems-when-and-how-to-use-them)
+
+通过 Fast 入口用 `deepseek-flash` 规划三个合成案例，每例调用一次模型。区域任务返回两个无依赖节点，各自只取本区材料。订单案例提供一份七千条虚构事件的文件引用，返回提取和诊断两个节点，一条边传递含原始记录编号的时间线，原始文件只分给提取节点。只要求亚洲简报、允许参考欧洲资料的对照返回单个亚洲专家节点。规划、编排服务及公共接口定向回归 87 项通过。
