@@ -634,6 +634,8 @@ class Workflow(metaclass=_WorkflowMeta):
                         continue
                     yield frame
             else:
+                # Interaction frames already use the parent workflow's shared
+                # stream writer; the sub-workflow actor queue holds End frames.
                 node_session = NodeSession(sub_workflow_session, self._end_comp_id)
                 outputs = node_session.state().get_outputs(self._end_comp_id)
                 # Normalize the batched end-node output to the streaming frame
@@ -642,7 +644,8 @@ class Workflow(metaclass=_WorkflowMeta):
                     # A streaming End with no inputs yields no frames either.
                     return
                 if isinstance(outputs, dict):
-                    if isinstance(outputs.get("output"), list):
+                    end_abilities = self._internal.config().spec.comp_configs[self._end_comp_id].abilities
+                    if ComponentAbility.COLLECT in end_abilities and isinstance(outputs.get("output"), list):
                         # Batched collect result: deliver per chunk, same as
                         # streaming sub-workflows.
                         for item in outputs["output"]:

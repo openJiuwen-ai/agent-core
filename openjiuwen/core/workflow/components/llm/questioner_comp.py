@@ -488,10 +488,15 @@ class QuestionerDirectReplyHandler:
         return QuestionerUtils.format_questioner_output(output)
 
     def _handle_end_state(self, inputs, session, context):
-        output = QuestionerOutput(**self._state.extracted_key_fields)
+        output = QuestionerOutput(**self._configured_extracted_key_fields())
         output.user_response = self._state.user_response
         output.question = self._state.question
         return output.model_dump(exclude_defaults=True)
+
+    def _configured_extracted_key_fields(self):
+        configured_names = {item.field_name for item in self._config.field_names}
+        return {key: value for key, value in self._state.extracted_key_fields.items()
+                if key in configured_names}
 
     def _is_set_question_content(self):
         return isinstance(self._config.question_content, str) and len(self._config.question_content) > 0
@@ -707,7 +712,7 @@ class QuestionerDirectReplyHandler:
         if is_continue_ask:
             output.key_fields.clear()
         else:
-            output.key_fields.update(self._state.extracted_key_fields)
+            output.key_fields.update(self._configured_extracted_key_fields())
         return is_continue_ask
 
     async def _invoke_llm_and_parse_result(self, chat_history, output):

@@ -3,6 +3,7 @@ from typing import AsyncIterator
 import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError, WorkflowError
+from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.workflow import Input, Output
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import Start
@@ -43,6 +44,17 @@ class EmitComponent(WorkflowComponent):
     async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
         yield {"value": 1}
         yield {"value": 2}
+
+
+class ListEnd(End):
+    async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        return {"output": [1, 2]}
+
+
+class AskUserComponent(WorkflowComponent):
+    async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        await session.interact("Please confirm")
+        return {"value": 1}
 
 
 class BatchConsumerComponent(WorkflowComponent):
@@ -337,6 +349,49 @@ class TestSubWorkflowComp:
 
         assert sub_workflow_comp.frames == [{'output': {'out': 1}}]
         assert chunks == [OutputSchema(type='end node stream', index=0, payload={'output': {'result': 1}})]
+
+    async def test_batch_invoke_list_output_remains_one_frame(self):
+        sub_workflow = Workflow()
+        sub_workflow.set_start_comp("sub_start", Start())
+        sub_workflow.set_end_comp("sub_end", ListEnd())
+        sub_workflow.add_connection("sub_start", "sub_end")
+
+        main_workflow = Workflow()
+        sub_workflow_comp = RecordingSubWorkflowComp(sub_workflow)
+        main_workflow.set_start_comp("start", Start(), inputs_schema={})
+        main_workflow.add_workflow_comp("sub_workflow_comp", sub_workflow_comp, inputs_schema={})
+        main_workflow.set_end_comp("end", End(), response_mode="streaming",
+                                   stream_inputs_schema={"result": "${sub_workflow_comp.output}"})
+        main_workflow.add_connection("start", "sub_workflow_comp")
+        main_workflow.add_stream_connection("sub_workflow_comp", "end")
+
+        chunks = [chunk async for chunk in main_workflow.stream(
+            inputs={}, session=create_workflow_session(), stream_modes=[BaseStreamMode.OUTPUT])]
+
+        assert sub_workflow_comp.frames == [{"output": [1, 2]}]
+        assert chunks == [OutputSchema(type='end node stream', index=0,
+                                       payload={"output": {"result": [1, 2]}})]
+
+    async def test_batch_sub_workflow_interaction_reaches_parent_output_stream(self):
+        sub_workflow = Workflow()
+        sub_workflow.set_start_comp("sub_start", Start())
+        sub_workflow.add_workflow_comp("ask", AskUserComponent(), inputs_schema={})
+        sub_workflow.set_end_comp("sub_end", End(), inputs_schema={"value": "${ask.value}"})
+        sub_workflow.add_connection("sub_start", "ask")
+        sub_workflow.add_connection("ask", "sub_end")
+
+        main_workflow = Workflow()
+        main_workflow.set_start_comp("start", Start(), inputs_schema={})
+        main_workflow.add_workflow_comp("sub", SubWorkflowComponent(sub_workflow), inputs_schema={})
+        main_workflow.set_end_comp("end", End(), response_mode="streaming",
+                                   stream_inputs_schema={"value": "${sub.output.value}"})
+        main_workflow.add_connection("start", "sub")
+        main_workflow.add_stream_connection("sub", "end")
+
+        chunks = [chunk async for chunk in main_workflow.stream(
+            inputs={}, session=create_workflow_session(), stream_modes=[BaseStreamMode.OUTPUT])]
+        assert len([chunk for chunk in chunks if isinstance(chunk, OutputSchema)
+                    and chunk.type == INTERACTION]) == 1
 
     async def test_workflow_with_batch_sub_workflow_no_output_on_stream_edge(self):
         """Regression test: batch fallback yields no frame when the sub workflow

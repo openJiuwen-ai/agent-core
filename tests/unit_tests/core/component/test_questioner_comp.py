@@ -332,6 +332,28 @@ class TestQuestionComp:
         handler.state(QuestionerState(extracted_key_fields={"location": "杭州", "date": "明天"}))
         assert handler._need_extract_fields() is False
 
+    @staticmethod
+    def test_restored_state_does_not_expose_unconfigured_fields():
+        from openjiuwen.core.workflow.components.llm.questioner_comp import (
+            OutputCache, QuestionerDirectReplyHandler, QuestionerState,
+        )
+
+        handler = QuestionerDirectReplyHandler()
+        handler.config(QuestionerConfig(
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
+            question_content="",
+            extract_fields_from_response=True,
+            field_names=[FieldInfo(field_name="location", description="地点", required=True)],
+            with_chat_history=False,
+        ))
+        handler.state(QuestionerState(extracted_key_fields={"location": "杭州", "unexpected": "secret"}))
+
+        assert handler._handle_end_state(None, None, None) == {"location": "杭州"}
+        output = OutputCache()
+        assert handler._check_if_continue_ask(output) is False
+        assert output.key_fields == {"location": "杭州"}
+
     @patch("openjiuwen.core.workflow.components.llm.questioner_comp."
            "QuestionerDirectReplyHandler._invoke_llm_for_extraction")
     @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
