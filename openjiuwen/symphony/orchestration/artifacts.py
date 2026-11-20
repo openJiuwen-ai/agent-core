@@ -61,6 +61,7 @@ class GraphArtifactStore:
             generated_at=str(payload.get("generated_at") or "") or None,
             schema_version=str(payload.get("schema_version") or "") or None,
             building=building,
+            build_id=str(payload.get("build_id", "")),
         )
 
     def read(self, version: str | None = None) -> dict[str, Any]:

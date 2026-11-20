@@ -9,6 +9,7 @@ This module implements Agent Team which manages team members, tasks, and message
 import asyncio
 import json
 import shutil
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -21,6 +22,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.fork import ForkContext
     from openjiuwen.agent_teams.models.allocator import Allocation
     from openjiuwen.agent_teams.organization.message_service import OrgMessageService
     from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
@@ -104,6 +106,9 @@ class CapabilityOverrides:
     enable_task_verification: bool | None = None
 
 
+_MAX_RECENT_HOST_DELIVERIES = 1024
+
+
 class TeamBackend:
     """Agent Team Manager
 
@@ -139,6 +144,7 @@ class TeamBackend:
         enable_member_messaging: bool = False,
         max_subtask_depth: int = 0,
         enable_fork: bool = False,
+        enable_member_goal: bool = False,
         evolution_enabled: bool = True,
         member_workspace_prefix: bool = True,
         external_cli_agents: list[ExternalCliAgentSpec] | None = None,
@@ -370,6 +376,9 @@ class TeamBackend:
         # Holds raw callables (not wrapped) so the dispatcher can decide
         # async vs sync invocation at call time.
         self._human_agent_inbound_callbacks: dict[str, Any] = {}
+        self._host_managed_inbound_callbacks: dict[str, Any] = {}
+        self._host_deliveries_in_flight: set[tuple[str, str, str]] = set()
+        self._recent_host_deliveries: dict[tuple[str, str, str], None] = {}
         # Bridge-agent registry. ``_bridge_member_specs`` indexes the
         # ``BridgeMemberSpec`` rows by member_name so the coordination
         # message handler can read ``mailbox_inject_mode`` /
@@ -420,10 +429,13 @@ class TeamBackend:
 
         # Fork / checkpoint support. ``_enable_fork`` is the capability gate:
         # the tool factory reads it to decide whether ``checkpoint`` is wired
-        # and whether ``spawn_teammate`` exposes the fork properties at all,
+        # and whether the spawn tools expose fork properties at all,
         # so everything below stays dormant when fork is off.
         self._enable_fork: bool = enable_fork
+        # Capability gate for the per-member goal switch on ``spawn_teammate``.
+        self._enable_member_goal: bool = enable_member_goal
         self._pending_forks: dict[str, dict] = {}  # member_name → {fork, since, source}
+        self._expert_fork_capture: Callable[[str], "ForkContext"] | None = None
         self._checkpoints: dict[str, dict] = {}  # name → {count, description, created_by}
         self._snapshot_length: Callable[[], int] | None = None
         self._store_checkpoint_fn: Callable[..., dict | None] | None = None
@@ -506,12 +518,34 @@ class TeamBackend:
         """Whether context inheritance (fork) is open for this team.
 
         Straight from ``TeamAgentSpec.enable_fork`` — no ``build_team``
-        override, unlike ``hitt_enabled`` / ``bridge_enabled``. Single gate
-        signal for all three fork surfaces: the ``checkpoint`` tool, the
-        fork properties on ``spawn_teammate``'s schema, and the fork section
-        of its description.
+        override, unlike ``hitt_enabled`` / ``bridge_enabled``. Gates the
+        checkpoint tools and the fork properties and prose on spawn tools.
         """
         return self._enable_fork
+
+    def member_goal_enabled(self) -> bool:
+        """Whether the team runs its members in goal mode.
+
+        Straight from ``TeamAgentSpec.member_goal`` being set. Gates the
+        ``goal`` property on ``spawn_teammate``: with member goal mode off
+        there is nothing for a per-member switch to switch.
+        """
+        return self._enable_member_goal
+
+    def set_expert_fork_capture(self, capture: Callable[[str], "ForkContext"]) -> None:
+        """Wire the in-process leader's member context capture callback."""
+        self._expert_fork_capture = capture
+
+    def expert_fork_enabled(self) -> bool:
+        """Return whether this backend can capture context for a new expert."""
+        return self.fork_enabled() and self._expert_fork_capture is not None
+
+    def capture_expert_fork(self, source: str) -> "ForkContext":
+        """Capture the source context or raise when the source cannot be forked."""
+        capture = self._expert_fork_capture
+        if not self.fork_enabled() or capture is None:
+            raise ValueError("Expert fork requires enable_fork=True and in-process member spawning")
+        return capture(source)
 
     def member_messaging_enabled(self) -> bool:
         """Whether scheduled-dispatch members may message each other directly.
@@ -604,17 +638,22 @@ class TeamBackend:
     def mark_fork_on_spawn(
         self,
         member: str,
-        fork_value,
+        fork_value: bool | str,
         *,
         fork_source: str | None = None,
         fork_mode: str = "before",
+        snapshot: "ForkContext | None" = None,
     ) -> None:
+        """Queue fork intent, optionally with a context captured at registration."""
         self._pending_forks[member] = {
             "fork": fork_value,
             "since": None,
             "source": fork_source,
             "fork_mode": fork_mode,
         }
+        if snapshot is not None:
+            self._pending_forks[member]["snapshot"] = snapshot
+            self._pending_forks[member]["session_id"] = get_session_id()
         team_logger.debug(
             "[fork] mark_fork_on_spawn: member=%s fork=%s source=%s fork_mode=%s team_name=%s pending_keys=%s",
             member,
@@ -625,12 +664,17 @@ class TeamBackend:
             list(self._pending_forks.keys()),
         )
 
+    def pending_fork_on_spawn(self, member: str) -> dict | None:
+        """Read the fork state without losing it if startup fails and retries."""
+        return self._pending_forks.get(member)
+
     def consume_fork_on_spawn(self, member: str) -> dict | None:
+        """Remove and return a member's pending fork state."""
         result = self._pending_forks.pop(member, None)
         team_logger.debug(
-            "[fork] consume_fork_on_spawn: member=%s result=%s remaining_pending=%s team_name=%s",
+            "[fork] consume_fork_on_spawn: member=%s found=%s remaining_pending=%s team_name=%s",
             member,
-            result,
+            result is not None,
             list(self._pending_forks.keys()),
             self.team_name,
         )
@@ -817,6 +861,7 @@ class TeamBackend:
         permissions_override: Optional[dict[str, str]] = None,
         lifetime: str | None = None,
         agent_template: Optional["MemberAgentTemplate"] = None,
+        goal: Optional[bool] = None,
     ) -> MemberOpResult:
         """Create a team member record in the database.
 
@@ -895,6 +940,7 @@ class TeamBackend:
             permissions_override=permissions_override,
             lifetime=lifetime,
             agent_template=agent_template,
+            goal=goal,
         )
 
         # Resolve the latest identity from the evolvable md before writing the
@@ -1276,6 +1322,14 @@ class TeamBackend:
         auto_confirm: bool = False,
     ) -> bool:
         """Approve or reject one interrupted teammate tool call."""
+        if not isinstance(tool_call_id, str) or not tool_call_id.strip() or not isinstance(approved, bool):
+            return False
+        if feedback is None:
+            feedback = ""
+        if auto_confirm is None:
+            auto_confirm = False
+        if not isinstance(feedback, str) or not isinstance(auto_confirm, bool):
+            return False
         member_data = await self.db.member.get_member(member_name, self.team_name)
         if member_data is None:
             team_logger.error(f"Member {member_name} not found in team {self.team_name}")
@@ -1293,11 +1347,14 @@ class TeamBackend:
                 "auto_confirm": auto_confirm,
             }
         )
-        await self.message_manager.send_message(
+        message_id = await self.message_manager.send_message(
             content=approval_payload,
             to_member_name=member_name,
             protocol="json",
         )
+        if not message_id:
+            team_logger.error("Failed to persist tool approval for {} / {}", member_name, tool_call_id)
+            return False
 
         try:
             await self.messager.publish(
@@ -1428,7 +1485,7 @@ class TeamBackend:
         # still publish the shutdown event so rosters and observers refresh.
         # No shutdown notice message: the member is removed from the
         # reachable set the moment the status flips.
-        if await self.is_passive_human(member_name):
+        if member_data.role == TeamRole.HOST_MANAGED.value or await self.is_passive_human(member_name):
             from openjiuwen.agent_teams.schema.status import (
                 MEMBER_TRANSITIONS,
                 is_valid_transition,
@@ -1444,6 +1501,7 @@ class TeamBackend:
             if not success:
                 return MemberOpResult.fail(f"Database rejected status update for member {member_name}")
 
+            self._host_managed_inbound_callbacks.pop(member_name, None)
             await self._publish_member_shutdown(member_name, force, MemberStatus.SHUTDOWN)
             team_logger.info(f"Passive human member {member_name} shut down directly (no runtime to notify)")
             return MemberOpResult.success()
@@ -1638,6 +1696,7 @@ class TeamBackend:
 
         # Delete team from database
         await self.db.team.delete_team(self.team_name)
+        self._pending_forks.clear()
 
         # Notify the hosting TeamAgent as soon as the DB row is gone so
         # the checkpoint mirrors the durable source of truth before any
@@ -2301,6 +2360,15 @@ class TeamBackend:
         # the effective verification flag is persisted alongside.
         team_name = self.team_name
         leader_member_name = self.member_name
+        host_members = [member for member in self.predefined_members if member.role_type == TeamRole.HOST_MANAGED]
+        if host_members:
+            name_counts = Counter(member.member_name for member in self.predefined_members)
+            for member in host_members:
+                error = self._host_managed_identity_error(member.member_name, member.display_name)
+                if error:
+                    raise ValueError(error)
+                if member.member_name == leader_member_name or name_counts[member.member_name] > 1:
+                    raise ValueError(f"Duplicate predefined member name: {member.member_name}")
         success = await self.db.team.create_team(
             team_name=team_name,
             display_name=display_name,
@@ -2312,6 +2380,20 @@ class TeamBackend:
 
         if not success:
             raise RuntimeError(f"Failed to create team {team_name}")
+
+        # Register hosts before writing the leader or publishing any member events.
+        try:
+            for member in host_members:
+                result = await self._register_host_managed_member(member.member_name, member.display_name, member.desc)
+                if not result.ok:
+                    raise ValueError(result.reason)
+        except (Exception, asyncio.CancelledError):
+            try:
+                await self.db.team.delete_team(team_name)
+            except Exception:
+                team_logger.error("Failed to roll back team %s after host registration failed",
+                                  team_name, exc_info=True)
+            raise
 
         # Write the team-level identity files (team_card.md, team_prompt.md)
         # now that the team row exists — their values come from this row's
@@ -2347,10 +2429,9 @@ class TeamBackend:
         for member_spec in self.predefined_members:
             if member_spec.role_type == TeamRole.HUMAN_AGENT:
                 continue
-            # Passive humans register as READY below (no runtime to start);
-            # the generic UNSTARTED path would feed them to the startup
-            # sweep, which must never spawn a runtime for them.
-            if member_spec.role_type == TeamRole.PASSIVE_HUMAN:
+            # Host-managed and passive human members register as READY
+            # through their own paths and have no runtime to start.
+            if member_spec.role_type in (TeamRole.HOST_MANAGED, TeamRole.PASSIVE_HUMAN):
                 continue
             if isinstance(member_spec, BridgeMemberSpec) and not effective_enable_bridge:
                 skipped_bridge_specs.append(member_spec)
@@ -2386,6 +2467,7 @@ class TeamBackend:
                 allocation=allocation,
                 role=member_spec.role_type,
                 cli_agent=cli_agent,
+                goal=member_spec.goal,
             )
         if skipped_bridge_specs:
             team_logger.warning(
@@ -2440,6 +2522,9 @@ class TeamBackend:
                 await self._on_team_built()
             except Exception as e:
                 team_logger.error(f"on_team_built callback failed for team {team_name}: {e}")
+
+        for member in host_members:
+            await self._publish_host_managed_registration(member.member_name)
 
         # Publish team created event
         session_id = get_session_id()
@@ -2531,6 +2616,96 @@ class TeamBackend:
                 result.reason,
             )
         return result
+
+    async def spawn_host_managed_member(
+        self, *, member_name: str, display_name: str, desc: str = "",
+    ) -> MemberOpResult:
+        """Register an externally executed AI member without creating a runtime."""
+        error = self._host_managed_identity_error(member_name, display_name)
+        if error:
+            return MemberOpResult.fail(error)
+        result = await self._register_host_managed_member(member_name, display_name, desc)
+        if result.ok:
+            await self._publish_host_managed_registration(member_name)
+        return result
+
+    def _host_managed_identity_error(self, member_name: str, display_name: str) -> str | None:
+        from openjiuwen.agent_teams.tools.tool_permissions import _MEMBER_NAME_PATTERN
+        from openjiuwen.agent_teams.constants import RESERVED_MEMBER_NAMES
+
+        if not isinstance(member_name, str) or not _MEMBER_NAME_PATTERN.fullmatch(member_name):
+            return "Invalid host-managed member name"
+        if member_name in RESERVED_MEMBER_NAMES or member_name == self.leader_member_name:
+            return "Reserved host-managed member name"
+        if not isinstance(display_name, str) or not display_name.strip():
+            return "A host-managed member needs a display name"
+        return None
+
+    async def _register_host_managed_member(
+        self, member_name: str, display_name: str, desc: str,
+    ) -> MemberOpResult:
+        return await self.spawn_member(
+            member_name=member_name, display_name=display_name,
+            agent_card=AgentCard(id=f"{self.team_name}_{member_name}", name=display_name, description=desc),
+            desc=desc, status=MemberStatus.READY, execution_status=ExecutionStatus.IDLE,
+            mode=MemberMode.BUILD_MODE, role=TeamRole.HOST_MANAGED,
+        )
+
+    async def _publish_host_managed_registration(self, member_name: str) -> None:
+        try:
+            await self.messager.publish(
+                topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
+                message=EventMessage.from_event(MemberSpawnedEvent(
+                    team_name=self.team_name, member_name=member_name,
+                )),
+            )
+        except Exception:
+            team_logger.error("Failed to publish host-managed registration", exc_info=True)
+
+    async def register_host_managed_inbound(self, member_name: str, callback: Any) -> None:
+        """Attach or clear the host receiver for one registered AI identity."""
+        member = await self.db.member.get_member(member_name, self.team_name)
+        if member is None or member.role != TeamRole.HOST_MANAGED.value:
+            raise KeyError(f"Not a host-managed member: {member_name}")
+        if callback is None:
+            self._host_managed_inbound_callbacks.pop(member_name, None)
+        elif callable(callback):
+            self._host_managed_inbound_callbacks[member_name] = callback
+        else:
+            raise TypeError("The host receiver must be callable")
+
+    async def notify_host_managed_inbound(self, message: Any) -> None:
+        """Notify mentioned hosts of a persisted public message; hosts own durable acceptance."""
+        import inspect
+
+        session_id = getattr(message, "session_id", None) or get_session_id()
+        message_id = getattr(message, "message_id", None)
+        for name in message.mentions:
+            callback = self._host_managed_inbound_callbacks.get(name)
+            if callback is None or name == message.sender:
+                continue
+            key = (session_id, message_id, name) if message_id else None
+            if key is not None:
+                if key in self._host_deliveries_in_flight or key in self._recent_host_deliveries:
+                    continue
+                self._host_deliveries_in_flight.add(key)
+            try:
+                if inspect.iscoroutinefunction(callback):
+                    await callback(message)
+                else:
+                    result = await asyncio.to_thread(callback, message)
+                    if inspect.isawaitable(result):
+                        await result
+            except Exception:
+                team_logger.error("Host-managed delivery failed; host must retry", exc_info=True)
+            else:
+                if key is not None:
+                    self._recent_host_deliveries[key] = None
+                    if len(self._recent_host_deliveries) > _MAX_RECENT_HOST_DELIVERIES:
+                        self._recent_host_deliveries.pop(next(iter(self._recent_host_deliveries)))
+            finally:
+                if key is not None:
+                    self._host_deliveries_in_flight.discard(key)
 
     async def spawn_passive_human(
         self,
@@ -2725,6 +2900,7 @@ class TeamBackend:
             return False
         # An external-CLI member also left its CLI kind mapping behind.
         self._external_cli_specs.pop(member_name, None)
+        self._pending_forks.pop(member_name, None)
         if self._spec_evolution_enabled and self.workspace_cache is not None:
             from openjiuwen.agent_teams.team_workspace.binder import MemberWorkspaceBinder
 
@@ -2820,18 +2996,33 @@ class TeamBackend:
     def mark_history_restored(self) -> None:
         """Record that this run restored a conversation containing the policy.
 
-        Called on the cold-recovery path (``TeamAgent.recover_from_session``),
-        which continues the *same* session: the child agent session shares the
+        Called on both paths that continue the *same* session: cold recovery
+        (``TeamAgent.recover_from_session``) and resume from pause
+        (``TeamRuntimeManager``). The child agent session shares the
         team session id, so the leader's history comes back with the original
         ``build_team`` result -- and therefore the collaboration policy -- still
         in it. See :meth:`rejects_rebuild`.
         """
         self._history_restored = True
 
+    def history_restored(self) -> bool:
+        """Whether this run continues an earlier conversation of the same session."""
+        return self._history_restored
+
+    def clear_history_restored(self) -> None:
+        """Record that the restored conversation does not hold the policy after all.
+
+        A team the host materialized through ``build_team`` on the backend
+        (rather than the tool) can be resumed or recovered before its leader
+        ever ran a turn. That history carries no policy, so the tool must stay callable:
+        it is the only way the leader can receive it.
+        """
+        self._history_restored = False
+
     async def rejects_rebuild(self) -> bool:
         """Whether ``build_team`` must refuse to run on this team.
 
-        A cold recovery already holds the policy in its restored history, and
+        A continued session already holds the policy in its history, and
         that result is never compacted away, so calling ``build_team`` again
         buys nothing and costs a round -- and a leader that does it is usually
         confused about whether its team exists, which the refusal corrects.

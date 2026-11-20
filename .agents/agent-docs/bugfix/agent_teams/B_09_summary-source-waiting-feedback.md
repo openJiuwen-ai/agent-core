@@ -1,3 +1,16 @@
+---
+title: Summary 来源待验收时误提示 Owner 结束回合等待
+author: null
+author_note: 历史作者待确认；缺少原 owner 和可靠创建署名
+id: B_09_summary-source-waiting-feedback
+type: B
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+---
+
 # Summary 来源待验收时误提示 Owner 结束回合等待
 
 ## 元信息

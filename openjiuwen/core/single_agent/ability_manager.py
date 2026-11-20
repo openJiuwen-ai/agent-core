@@ -9,6 +9,7 @@ import inspect
 import json
 import os
 import traceback
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import List, Any, Union, Optional, Tuple, Dict, Iterable, Callable, Set
 
@@ -16,6 +17,7 @@ import anyio
 import jsonschema
 from pydantic import BaseModel
 
+from openjiuwen.core.sys_operation.execution_environment import ExecutionEnvironment
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import AgentError
 from openjiuwen.core.common.logging import logger
@@ -263,6 +265,7 @@ class AbilityManager:
     _FILE_PATH_TOOL_NAMES = frozenset({"read_file", "write_file", "edit_file"})
 
     def __init__(self, owner_id: Optional[str] = None):
+        self.execution_environment_resolver: Callable[[], Awaitable[ExecutionEnvironment]] | None = None
         self._tools: Dict[str, ToolCard] = {}
         self._workflows: Dict[str, WorkflowCard] = {}
         self._agents: Dict[str, AgentCard] = {}
@@ -1081,6 +1084,27 @@ class AbilityManager:
         abilities.extend(self._mcp_servers.values())
         return abilities
 
+    def registered_mcp_tool_cards(self) -> list[tuple[McpServerConfig, ToolCard]]:
+        """Return locally registered MCP tools permitted for this agent, without a server refresh."""
+        from openjiuwen.core.runner import Runner
+
+        cards = []
+        for server in self._mcp_servers.values():
+            if not server.server_id:
+                continue
+            prefix = f"{server.server_id}.{server.server_name}."
+            allowed = self._mcp_tool_allowlists.get(server.server_id)
+            for tool_id in Runner.resource_mgr.get_mcp_tool_ids(server.server_id):
+                if not tool_id.startswith(prefix):
+                    continue
+                name = tool_id.removeprefix(prefix)
+                if allowed is not None and name not in allowed:
+                    continue
+                card = self._tools.get(mcp_model_tool_name(server.server_name, name))
+                if card is not None and card.id == tool_id:
+                    cards.append((server, card))
+        return cards
+
     @staticmethod
     def _prioritize_paid_search(
             tool_items: List[Tuple[str, ToolCard]]
@@ -1713,6 +1737,23 @@ class AbilityManager:
         return result, ToolMessage(content=str(result), tool_call_id=tool_call.id)
 
     async def _execute_single_tool_call(
+        self,
+        tool_call: ToolCall,
+        session: Session,
+        tag=None,
+        callback_context: AgentCallbackContext | None = None,
+    ) -> Tuple[Any, ToolMessage]:
+        """Execute with the owning agent's environment, never the caller's."""
+        from openjiuwen.core.sys_operation.execution_environment import execution_environment_scope
+
+        resolver = self.execution_environment_resolver
+        environment = await resolver() if resolver is not None else ExecutionEnvironment()
+        with execution_environment_scope(environment):
+            return await self._execute_single_tool_call_bound(
+                tool_call, session, tag, callback_context,
+            )
+
+    async def _execute_single_tool_call_bound(
             self,
             tool_call: ToolCall,
             session: Session,

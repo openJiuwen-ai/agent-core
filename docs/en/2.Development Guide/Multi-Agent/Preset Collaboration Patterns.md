@@ -128,7 +128,7 @@ Research Director
     └── Statistics Expert
 ```
 
-**Full Code**: [hierarchical_tools_research_team.py](../../examples/multi_agent/builtin_teams/hierarchical_tools_research_team.py)
+**Full Code**: [hierarchical_tools_research_team.py](../../../../examples/multi_agent/builtin_teams/hierarchical_tools_research_team.py)
 
 **Core Code Snippet**:
 
@@ -176,7 +176,7 @@ result = await team.invoke({
 
 **Scenario**: Same as Example 1, but implemented using the MessageBus pattern.
 
-**Full Code**: [hierarchical_msgbus_research_team.py](../../examples/multi_agent/builtin_teams/hierarchical_msgbus_research_team.py)
+**Full Code**: [hierarchical_msgbus_research_team.py](../../../../examples/multi_agent/builtin_teams/hierarchical_msgbus_research_team.py)
 
 **Core Code Snippet**:
 
@@ -320,7 +320,7 @@ Triage Agent
    ↔ (Technical Support and Billing Support can hand off to each other)
 ```
 
-**Full Code**: [handoff_customer_service.py](../../examples/multi_agent/builtin_teams/handoff_customer_service.py)
+**Full Code**: [handoff_customer_service.py](../../../../examples/multi_agent/builtin_teams/handoff_customer_service.py)
 
 **Core Code Snippet**:
 

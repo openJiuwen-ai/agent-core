@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/goal/`（5 文件） |
-| 最近一次修订日期 | 2026-08-23 |
+| 最近一次修订日期 | 2026-11-12 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -101,7 +101,7 @@ class GoalManager:
     async def apply_assessment(self, ...) -> None
 
 class GoalEvaluator:
-    def evaluate(...) -> GoalAssessment
+    def assess(...) -> GoalAssessment
 
 class SessionGoalStore:
     def load(self) -> Optional[GoalRecord]
@@ -131,7 +131,7 @@ class GoalStopConfig:
 |---|---|---|---|
 | `goal_id` / `session_id` | set 时 | — | 主键对 |
 | `objective` | set 时 | — | 目标文本 |
-| `status` | set 时 `ACTIVE` | pause/complete/blocked | 五态见上 |
+| `status` | set 时 `ACTIVE` | pause/complete/blocked | 四态见上 |
 | `revision` | set / resume 时递增 | — | 目标修订 |
 | `attempt_count` | `begin_attempt` | clear | 受 max_attempts |
 | `token_usage` | `accumulate_usage` | clear | TokenUsage 四字段 |
@@ -146,6 +146,23 @@ class GoalStopConfig:
 | `CONTINUE` | 保持 `ACTIVE`，推进 attempt |
 | `BLOCKED` | 置 `BLOCKED`，`stop_reason` 记录阻塞原因 |
 
+## 第二个宿主：NativeHarness
+
+`GoalManager` 不再只由 `DeepAgent.start()` 构造。`agent_teams.harness.NativeHarness` 在
+`enable_goal(stop_config, ready=None)` 被调用过的前提下，于自己的 `start()` 里构造一个
+`GoalManager`（同样以 `SessionGoalStore` 落在它的 session 上）并绑定到 `TaskCompletionRail`。
+不变量 1（状态独占）对两个宿主同样成立。差别只在调度：NativeHarness 没有输出租约，
+`has_output_stream` 恒真；目标被替换或清除时不取消在跑的 goal round（其评估因记录不再匹配而
+自然作废）。调度细节见 agent_teams `S_18`。
+
+本包新增两个面向宿主的入口：
+
+- `TaskCompletionRail.set_goal_manager(goal_manager, *, stop_config=None)`：给出 `stop_config` 时替换
+  评估器，宿主因此可以使用自己的停止策略而不是默认的 HYBRID。
+- `TaskCompletionRail.assess_completion_claim(ctx, evidence) -> GoalAssessment | None`：按当前策略评估
+  一次"目标已完成"的声明，**不写** `GoalRecord`。没有 ACTIVE goal、或需要 transcript 评估而评估器
+  不可用时返回 None（不是否决，由调用方决定）。
+
 ## 与其它 spec 的关系
 
 - goal work 经 `EventManager.push_goal` / `RoundWorkItem.goal` —— `S_02`；goal 事件
@@ -154,3 +171,15 @@ class GoalStopConfig:
 - goal 工具（`SubmitGoalReportTool` / `GetCurrentGoalTool`）—— `S_05`。
 - `GoalRecord` 是 pydantic 序列化模型（`model_dump_json` 快照路径由 core / 模型规约锚定）；token
   budget 语义与 `S_05` 的 `ModelUsageRecord` 共享字段命名。
+
+
+## Goal 评估的观测边界
+
+9. Goal 执行轮沿用执行 Agent 身份，采集层从可信运行态标记 goal id 与 attempt number；不是新成员。
+10. 独立 transcript 评估的模型调用使用 openjiuwen.request.purpose=goal_assessment，携带
+    openjiuwen.goal.id / attempt.number / assessment.id / strategy。物理 request id 仍唯一；观测元数据不传给模型供应商。
+11. 评估输入与输出只属于其 inference，不推进执行 Agent 的 context.window.commit，
+    不贡献执行消息重建或执行上下文的 lineage。原始 span、usage 和失败原因完整保留。
+12. task-local 观测 scope 在成功、异常、取消和兼容重试后均恢复外层上下文；评估不改变 GoalManager 的唯一状态权威。
+
+实施与验证：[F_20261112_1120_goal-assessment-isolation](../../features/F_20261112_1120_goal-assessment-isolation.md)。

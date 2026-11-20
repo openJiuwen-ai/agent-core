@@ -755,6 +755,11 @@ def is_compaction_span(span: Mapping[str, Any]) -> bool:
     return span_attributes(span).get(semconv.OJ_REQUEST_PURPOSE) == "compaction"
 
 
+def is_goal_assessment_span(span: Mapping[str, Any]) -> bool:
+    """Whether a request independently judges a goal instead of executing it."""
+    return span_attributes(span).get(semconv.OJ_REQUEST_PURPOSE) == "goal_assessment"
+
+
 def read_llm_exchange(span: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Read detached LLM messages from the standard GenAI attributes."""
 
@@ -908,6 +913,7 @@ __all__ = [
     "decode_otlp_value",
     "encode_otlp_value",
     "is_compaction_span",
+    "is_goal_assessment_span",
     "iter_spans",
     "merge_payloads",
     "merge_spans",

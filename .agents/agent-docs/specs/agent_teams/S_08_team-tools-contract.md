@@ -37,7 +37,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-10-28 |
+| 最近一次修订日期 | 2026-11-10 |
 | 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md、F_113_external-harness-builtin-model-selection.md、F_118_task-scoped-member-lifetime.md、F_119_scheduled-completion-handoff-via-note.md、F_120_autonomous-completion-summary-and-note.md、F_123_team-tools-direct-under-progressive-exposure.md、F_125_team-expert-catalog-and-spawn.md、F_20261022_2319_inline-member-worktree-isolation.md、F_128_scheduled-member-subtasks.md、F_129_task-revision-and-staleness.md |
 
 ## 范围 / 边界
@@ -212,6 +212,13 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     `timefmt.format_time_context` 渲染为「绝对本地时间 + 相对差」，给 LLM
     任务停留时长的时间感（`render_for_llm` 签名不可加参，内部取 `get_current_time()`，
     用 `updated_at is not None` 守卫 `exclude_none` 剔除的情况）。
+    两级输出也都点名任务的负责人：list 档写 `assignee=<成员名>`，get 档写 `Assignee: <成员名>`，
+    任务**未结束**（状态不在 `TASK_TERMINAL_STATUSES`）且负责人仍在名册时再跟上
+    `[<MemberStatus 值>]`（`assignee=dev-1[busy]`）。成员名即 `send_message` 的收件人；成员状态
+    让读者分清"有人在做"与"负责人已停 / 已出错"，后者才需要介入。状态在读取时由一次名册投影
+    （`member.get_member_roster`）取得，不随任务行持久化；已结束的任务只留成员名——那时的
+    负责人是历史，挂上他此刻的状态会被读成一个不存在的问题。`action=in_review` 不带成员状态
+    （验证者要看的是交付物，不是作者的运行状态）。见 `F_20261110_1912_view-task-names-the-assignee-and-its-status`。
 15. **Card / Config 分层**：`ToolCard` 只承载可序列化的 `id` / `name` /
     `description` / `input_params`；`teammate_mode` / `model_config_allocator` /
     `agent_team` 这类运行时句柄属于工具实例的私有字段，禁止下沉
@@ -799,6 +806,26 @@ all_tools = {
 没有"动态注册表"。`exclude_tools` 是减法，不是注入口；想新增能力请走
 上面四步，不要走 `kwargs`、不要 monkey-patch、不要在 `TeamToolRail`
 追加除 workspace 之外的工具（workspace 有明确的子系统归属）。
+
+## Goal 模式下的任务工具
+
+团队配置 `TeamAgentSpec.member_goal` 后，本地运行的 teammate 的任务工具受 `TeamGoalRail` 约束
+（工具本身的 schema、`invoke` 与返回文本不变），见 `F_20261110_1922_team-goal-mode`：
+
+- `claim_task(status="claimed")` 成功后，被认领的任务成为该成员的 goal。失败的认领不立项。
+- `claim_task(status="completed")` 与 `member_complete_task` 在目标任务正是成员的 ACTIVE goal 时，先经
+  评估再执行。评估不通过：工具不执行、任务保持 `in_progress`，模型收到的工具结果是拒绝文案
+  （证据 + 剩余工作）；评估通过或评估器给不出结论：工具照常执行，成功后 goal 关闭。
+- `strategy="agent_report"` 下评估即采信成员的提交，等价于没有闸。
+- 提交时任务是本人名下的 `in_progress` 任务但还没有 goal（未经认领而开工：调度器 `start_task`、计划批准，
+  且在同一轮内做完），闸先为它立项再评估——本人名下进行中任务的提交一律过闸。
+- 提交的任务不是本人名下的进行中任务、或其 goal 已被评估为完成时不评估。
+- 经 MCP 调用同一批工具的外部 CLI 成员没有这条 rail，行为不变。
+
+`spawn_teammate` 多一个属性级门控的可选布尔参数 `goal`（gate `TeamBackend.member_goal_enabled()`，
+即 `member_goal` 已配置）：省略为跟随团队默认（开），`false` 让该成员不进 goal 模式，值写入
+`TeamMember.options.goal`。门控关闭时该属性不在 schema 中，传入即在建成员行之前报错；与 `cli_agent`
+同时传入也报错。
 
 ## 与其它 spec 的关系
 
