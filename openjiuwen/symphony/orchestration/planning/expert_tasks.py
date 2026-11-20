@@ -39,6 +39,7 @@ The same expert may be reused and other candidates may be left unused.
 Example assignments with an Asia market analyst and a support expert available
 Asia and Europe market trends → Asia analyst and inline Europe analyst write separate regional briefs in parallel.
 Order delay → inline researcher extracts a timeline with record IDs from years of logs → support expert finds the cause.
+If the growth gap needs an independent check, both briefs → auditor recomputes it from both sources on a common basis.
 
 Return one JSON object with tasks and optional handoffs, both arrays. Use only these fields in their entries.
 - Each task has id, task, outputs [{name, type}], external_inputs [material names], and either expert_id or
