@@ -70,6 +70,36 @@ def _problem_input(problem: ProblemSummary) -> dict:
                           for loc in problem.locations]}
 
 
+def _segment_input(segment: Any, nodes: list[TrajectoryNode]) -> dict:
+    return {"agent_id": segment.agent_id, "turn_id": segment.turn_id, "segment_id": segment.segment_id,
+            "primary": [json.loads(node_text(n)) for n in nodes]}
+
+
+def _segment_batches(turns: list, primary: dict, limits: SummaryLimits) -> list[list[tuple]]:
+    """Group adjacent single-segment turns within the node and item budgets."""
+    groups, batch = [], []
+    node_count = 0
+    for turn in turns:
+        for segment in turn.segments:
+            nodes = primary[segment.segment_id]
+            payload = _segment_input(segment, nodes)
+            entry = (segment, nodes, payload)
+            short = (limits.segment_batch_size > 1 and len(turn.segments) == 1
+                     and len(nodes) <= limits.target_nodes)
+            if batch and (not short or len(batch) >= limits.segment_batch_size
+                          or node_count + len(nodes) > limits.target_nodes):
+                groups.append(batch)
+                batch, node_count = [], 0
+            if short:
+                batch.append(entry)
+                node_count += len(nodes)
+            else:
+                groups.append([entry])
+    if batch:
+        groups.append(batch)
+    return groups
+
+
 def _context_overflow(error: Exception) -> bool:
     text = str(error).lower()
     markers = (
@@ -124,14 +154,16 @@ class _Runner:
             item["segment_id"] = segment_id
         self.tree.warnings.append(item)
 
-    async def call(self, purpose: str, payload: Any, properties: dict, required: list[str], validate: Any) -> tuple:
+    async def call(self, purpose: str, payload: Any, properties: dict, required: list[str], validate: Any,
+                   *, retries: int | None = None) -> tuple:
         stage = purpose.split(":", 1)[0]
         prompts = summary_prompts(self.language, stage)
         tool = {"type": "function", "function": {"name": "report_summary", "description": prompts["report"],
                 "parameters": {"type": "object", "properties": properties, "required": required}}}
         feedback, shortened = "", False
+        retries = self.limits.retries if retries is None else retries
         async with self.semaphore:
-            for attempt in range(self.limits.retries + 1):
+            for attempt in range(retries + 1):
                 started, error = time.time_ns(), None
                 response = None
                 try:
@@ -157,13 +189,13 @@ class _Runner:
                     if _finish_reason(response):
                         error += f" (finish_reason={_finish_reason(response)})"
                     feedback = prompts["retry"].format(error=error)
-                    if _context_overflow(exc) and attempt < self.limits.retries:
+                    if _context_overflow(exc) and attempt < retries:
                         payload, cut = _shorten(payload)
                         shortened = shortened or cut
                         if cut:
                             self.warn("input_truncated", purpose + ": provider context limit; original nodes retained")
                             feedback += prompts["shortened"]
-                    if attempt == self.limits.retries:
+                    if attempt == retries:
                         raise
                 finally:
                     emit_single_llm_event(self.sink, stage="trajectory_summary", model=self.model_name,
@@ -246,8 +278,12 @@ class _Runner:
                 state = p.get("state", "unknown")
                 if state not in _STATES:
                     raise ValueError(f"invalid problem state: {repr(state)[:80]}")
-                recovery = self._leaf_ids(p.get("resolution_node_ids", []), allowed, aliases,
-                                          "resolution_node_ids", state == "resolved")
+                try:
+                    recovery = self._leaf_ids(p.get("resolution_node_ids", []), allowed, aliases,
+                                              "resolution_node_ids", state == "resolved")
+                except ValueError as exc:
+                    state, recovery = "unknown", []
+                    self.warn("problem_recovery_unconfirmed", f"candidate {index}: {exc}", segment.segment_id)
                 if any(old.kind == kind and old.node_ids == ids for old in result):
                     continue
                 result.append(ProblemRecord(f"{segment.segment_id}:p{len(result)}", segment.turn_id,
@@ -336,7 +372,8 @@ class _Runner:
         result.extend(p for p in children if not set(p.source_problem_ids) <= used)
         return result
 
-    async def segment(self, segment: Any, nodes: list[TrajectoryNode], context: str) -> None:
+    async def segment(self, segment: Any, nodes: list[TrajectoryNode], context: str,
+                      payload: dict | None = None) -> None:
         allowed = {n.node_id for n in nodes}
 
         def validate(report: Any) -> tuple:
@@ -346,13 +383,64 @@ class _Runner:
         try:
             (segment.narrative, segment.problems), cut = await self.call(
                 "segment: summarize primary nodes and material issues",
-                {"agent_id": segment.agent_id, "turn_id": segment.turn_id, "segment_id": segment.segment_id,
-                 "reference": context, "primary": [json.loads(node_text(n)) for n in nodes]},
+                {**(payload if payload is not None else _segment_input(segment, nodes)), "reference": context},
                 {"narrative": _TEXT, "problems": {"type": "array", "items": _LEAF}},
                 ["narrative", "problems"], validate)
             segment.status = "degraded" if cut else "completed"
         except Exception as exc:
             self.warn("segment_failed", str(exc) or type(exc).__name__, segment.segment_id)
+
+    async def segment_batch(self, entries: list[tuple], context: str) -> None:
+        if len(entries) == 1:
+            segment, nodes, payload = entries[0]
+            await self.segment(segment, nodes, context, payload)
+            return
+        expected = {segment.segment_id for segment, _, _ in entries}
+        item_schema = {"type": "object", "properties": {
+            "segment_id": {"type": "string", "enum": sorted(expected)},
+            "narrative": _TEXT, "problems": {"type": "array", "items": _LEAF},
+        }, "required": ["segment_id", "narrative", "problems"]}
+
+        def validate(report: Any) -> list:
+            if not isinstance(report, dict) or not isinstance(report.get("results"), list):
+                raise ValueError("missing segment batch results")
+            return report["results"]
+
+        reports = []
+        try:
+            reports, _ = await self.call(
+                "segment_batch: summarize independent short-turn segments",
+                {"reference": context, "segments": [payload for _, _, payload in entries]},
+                {"results": {"type": "array", "items": item_schema,
+                             "minItems": len(entries), "maxItems": len(entries)}}, ["results"], validate,
+                retries=0)
+        except Exception as exc:
+            logger.info("[trajectory_summary] batch request fallback segments=%s reason=%s",
+                        sorted(expected), str(exc)[:200])
+        by_id, duplicates = {}, set()
+        for report in reports:
+            segment_id = report.get("segment_id") if isinstance(report, dict) else None
+            if not isinstance(segment_id, str) or segment_id not in expected:
+                continue
+            if segment_id in by_id:
+                duplicates.add(segment_id)
+            by_id[segment_id] = report
+        pending = []
+        for segment, nodes, payload in entries:
+            try:
+                report = by_id.get(segment.segment_id)
+                if report is None or segment.segment_id in duplicates:
+                    raise ValueError("missing or duplicate segment result")
+                text = self.narrative(report)
+                if not isinstance(report.get("problems"), list):
+                    raise ValueError("missing segment problems")
+                problems = self.leaf_problems(report["problems"], segment, {n.node_id for n in nodes})
+                segment.narrative, segment.problems, segment.status = text, problems, "completed"
+            except ValueError as exc:
+                logger.info("[trajectory_summary] batch item fallback segment=%s reason=%s",
+                            segment.segment_id, str(exc))
+                pending.append(self.segment(segment, nodes, context, payload))
+        await _parallel(pending)
 
     async def merge(self, items: list[dict], purpose: str, problems: list[ProblemSummary],
                     allowed: set[str], inputs: list | None = None, scope_id: str = "root") -> _MergeResult:
@@ -410,9 +498,9 @@ async def summarize_trajectory(
                                "start_node_id": first, "end_node_id": last,
                                "start_ts_ns": times[0], "end_ts_ns": times[1]})
 
-    async def summarize_turn(turn: Any) -> None:
+    async def summarize_turn(turn: Any, segment_jobs: dict) -> None:
         # A turn depends only on its own segments; unrelated branches may still be running.
-        await _parallel([runner.segment(s, primary[s.segment_id], background) for s in turn.segments])
+        await asyncio.gather(*(segment_jobs[s.segment_id] for s in turn.segments))
         children = [item(f"Segment {i + 1}", s.narrative, s.status, s.start_node_id, s.end_node_id,
                          (s.start_ts_ns, s.end_ts_ns)) for i, s in enumerate(turn.segments)]
         problems = [runner.leaf_summary(p) for s in turn.segments for p in s.problems]
@@ -422,7 +510,17 @@ async def summarize_trajectory(
         turn.narrative, turn.status, turn.problems = merged.narrative, merged.status, merged.problems
 
     async def summarize_agent(agent_id: str, turns: list) -> tuple:
-        await _parallel([summarize_turn(t) for t in turns])
+        batches = _segment_batches(turns, primary, limits)
+        tasks = [asyncio.create_task(runner.segment_batch(batch, background)) for batch in batches]
+        segment_jobs = {segment.segment_id: task for batch, task in zip(batches, tasks)
+                        for segment, _, _ in batch}
+        try:
+            await _parallel([summarize_turn(t, segment_jobs) for t in turns])
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         children = [item(f"Turn {t.turn_number if t.turn_number is not None else i + 1}", t.narrative, t.status,
                          t.start_node_id, t.end_node_id, (t.start_ts_ns, t.end_ts_ns)) for i, t in enumerate(turns)]
         problems = [p for t in turns for p in t.problems]
@@ -445,6 +543,4 @@ async def summarize_trajectory(
     tree.trajectory_summary, tree.status = merged.narrative, merged.status
     tree.problems = [replace(p, problem_id=f"problem:{i}") for i, p in enumerate(merged.problems)]
     tree.display_summary = merged.display_summary
-    if tree.status == "completed" and tree.warnings:
-        tree.status = "degraded"
     return tree
