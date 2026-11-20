@@ -23,7 +23,9 @@ from openjiuwen.harness.factory import (
     create_deep_agent,
     resolve_deep_agent_parts,
 )
+from openjiuwen.harness.rails import SubagentRail
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
+from openjiuwen.harness.schema.config import SubAgentConfig
 
 
 @dataclass
@@ -62,6 +64,26 @@ def _event_agent(bus: _RecordingBus, tools: list[LocalFunction]):
         enable_tool_resilience_rail=False,
         rails=[],
     )
+
+
+def test_event_mode_mounts_subagent_rail_for_event_configs() -> None:
+    config = SubAgentConfig(
+        agent_card=AgentCard(id="event-subagent", name="event-subagent", description="test"),
+        system_prompt="event subagent prompt",
+    )
+    agent = create_deep_agent(
+        model=None,
+        card=AgentCard(id="event-parent", name="event-parent", description="test"),
+        subagents=[config],
+        subagent_registration_mode="event",
+        enable_sys_operation=False,
+        enable_security_rail=False,
+        enable_model_anomaly_detection_rail=False,
+        enable_tool_resilience_rail=False,
+        rails=[],
+    )
+
+    assert agent.find_pending_rails_by_type(SubagentRail)
 
 
 @pytest.mark.asyncio

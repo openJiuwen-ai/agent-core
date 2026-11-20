@@ -490,7 +490,7 @@ def resolve_deep_agent_parts(
         ),
         (TaskPlanningRail, enable_task_planning, _make_task_planning_rail),
         (SkillUseRail, bool(skills) or config.enable_skill_discovery, _make_skill_rail),
-        (SubagentRail, bool(effective_subagents),
+        (SubagentRail, bool(effective_subagents or event_subagent_configs),
          lambda: SubagentRail(
              enable_async_subagent=enable_async_subagent,
              enable_subagent_runtime=enable_subagent_runtime,

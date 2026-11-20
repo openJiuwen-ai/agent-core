@@ -147,8 +147,8 @@ def _snapshot_subagent_config(config: "SubAgentConfig") -> "SubAgentConfig":
     return replace_dataclass(
         config,
         agent_card=config.agent_card.model_copy(deep=True),
-        tools=list(config.tools),
-        mcps=list(config.mcps),
+        tools=None if config.tools is None else list(config.tools),
+        mcps=None if config.mcps is None else list(config.mcps),
         rails=None if config.rails is None else list(config.rails),
         skills=None if config.skills is None else list(config.skills),
         factory_kwargs=_copy_mutable(config.factory_kwargs),

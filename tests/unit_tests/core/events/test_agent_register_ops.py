@@ -25,6 +25,7 @@ from openjiuwen.core.events.builtins.event_types.agent_register import (
     AgentRegisterOutput,
     AgentRegisterTriggerContext,
     AgentRegisterValue,
+    prepare_agent_register_input,
 )
 from openjiuwen.core.events.builtins.event_types.agent_register import (
     match_pattern_func as match_agent_register_pattern,
@@ -345,6 +346,24 @@ async def test_agent_register_snapshots_config_mutable_containers() -> None:
         assert registered.agent_card.description == "snapshot"
     finally:
         get_agent_runtime().unbind(session_id, agent)
+
+
+def test_agent_register_snapshot_accepts_optional_tool_and_mcp_collections() -> None:
+    config = SubAgentConfig(
+        agent_card=AgentCard(id="optional-collections", name="optional-collections", description="optional"),
+        system_prompt="optional collections prompt",
+        tools=None,  # type: ignore[arg-type]
+        mcps=None,  # type: ignore[arg-type]
+    )
+
+    prepared = prepare_agent_register_input(
+        AgentRegisterInput.from_subagent_config(config),
+    )
+
+    assert prepared.subagent_config is not config
+    assert prepared.subagent_config is not None
+    assert prepared.subagent_config.tools is None
+    assert prepared.subagent_config.mcps is None
 
 
 def test_agent_register_matcher_ignores_nonempty_patterns_without_raising() -> None:
