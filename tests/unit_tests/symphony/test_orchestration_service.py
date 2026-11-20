@@ -182,8 +182,14 @@ async def test_skill_planners_use_named_inputs_without_changing_the_task(monkeyp
     empty = await service.plan(query, candidate_ids=["summarize"], mode=mode)
     supplied = await service.plan(query, candidate_ids=["summarize"], mode=mode, inputs=[source])
 
-    assert empty["planned_graph"]["graph"]["metadata"]["missing_inputs"] == ["source"]
-    assert empty["planned_graph"]["graph"]["metadata"]["status"] == "needs_input"
+    graph = empty["planned_graph"]["graph"]
+    assert graph["metadata"]["status"] == "ready"
+    assert graph["metadata"]["missing_inputs"] == ["source"]
+    assert graph["nodes"]["summarize"]["metadata"]["missing_inputs"] == ["source"]
+    assert graph["nodes"]["summarize"]["metadata"]["inputs"] == [
+        {"name": "source", "type": "text"},
+    ]
+    assert "missing_inputs" not in supplied["planned_graph"]["graph"]["nodes"]["summarize"]["metadata"]
     assert supplied["planned_graph"]["graph"]["metadata"]["status"] == "ready"
     assert requests[-1]["query"] == query
     assert requests[-1]["inputs"] == [source]
@@ -628,8 +634,13 @@ async def test_mixed_capability_types_survive_plan_projection(tmp_path: Path, mo
     assert set(result) == {"planned_graph"}
     graph = result["planned_graph"]["graph"]
     assert graph["nodes"] == {
-        "extract": {"label": "extract", "metadata": {"type": "skill"}},
-        "summarize": {"label": "summarize", "metadata": {"type": "agent"}},
+        "extract": {
+            "label": "extract", "metadata": {"type": "skill", "outputs": [{"name": "text", "type": "text"}]},
+        },
+        "summarize": {
+            "label": "summarize",
+            "metadata": {"type": "agent", "inputs": [{"name": "text", "type": "text", "required": True}]},
+        },
     }
     assert graph["edges"] == [
         {"source": "extract", "target": "summarize", "relation": "can_feed"},
@@ -884,8 +895,13 @@ async def test_planned_graph_is_minimal_and_never_falls_back_to_static_edges(tmp
             "directed": True,
             "metadata": {"status": "ready"},
             "nodes": {
-                "extract": {"label": "extract", "metadata": {"type": "skill"}},
-                "summarize": {"label": "summarize", "metadata": {"type": "skill"}},
+                "extract": {
+                    "label": "extract", "metadata": {"type": "skill", "outputs": [{"name": "text", "type": "text"}]},
+                },
+                "summarize": {
+                    "label": "summarize",
+                    "metadata": {"type": "skill", "inputs": [{"name": "text", "type": "text", "required": True}]},
+                },
             },
             "edges": [],
         }
@@ -898,11 +914,11 @@ async def test_planned_graph_is_minimal_and_never_falls_back_to_static_edges(tmp
     [
         ("ready", "", [], {"status": "ready"}),
         (
-            "needs_input",
+            "ready",
             "A source document is required.",
             [{"name": "source_document", "reason": "required"}],
             {
-                "status": "needs_input",
+                "status": "ready",
                 "reason": "A source document is required.",
                 "missing_inputs": ["source_document"],
             },
@@ -934,7 +950,7 @@ async def test_planned_graph_covers_all_public_statuses(
                 {
                     "status": status,
                     "reason": reason,
-                    "steps": [],
+                    "steps": [{"skill_id": "extract"}] if status == "ready" else [],
                     "missing_inputs": missing_inputs,
                     "can_feed_edges": [],
                 }
@@ -945,7 +961,7 @@ async def test_planned_graph_covers_all_public_statuses(
 
     graph = planned_graph["graph"]
     assert graph["metadata"] == expected_metadata
-    assert graph["nodes"] == {}
+    assert list(graph["nodes"]) == (["extract"] if status == "ready" else [])
     assert graph["edges"] == []
 
 

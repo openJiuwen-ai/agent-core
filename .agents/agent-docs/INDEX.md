@@ -40,6 +40,7 @@ generated: true
 | [harness/tools/browser_move/decision](#module-harness-tools-browser_move-decision) |
 | [harness/tools/subagent](#module-harness-tools-subagent) |
 | [harness_providers](#module-harness_providers) |
+| [symphony](#module-symphony) |
 | [未分类](#module-unclassified) |
 
 <a id="module-agent_evolving"></a>
@@ -580,6 +581,15 @@ generated: true
 |---|---|---|---|---|
 | [D-20261110-1839-leader-external-harness](designs/active/D-20261110-1839-leader-external-harness/design.md) | D | Leader 三方 Harness 插拔设计方案 | alan_cheng | — |
 | [F_20261104_1638_drop-llm-span-cost-attrs](features/F_20261104_1638_drop-llm-span-cost-attrs.md) | F | LLM span 去掉 usage cost 属性（openjiuwen.gen_ai.usage.*_cost） | weixin_39960157 | 无独立 D：纯删减类变更（去掉一处已定属性的发射），无方案级取舍需要独立设计；键的引入背景与命名迁移见 |
+
+<a id="module-symphony"></a>
+
+## symphony
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261120_1607_subagent-graph-inputs](features/F_20261120_1607_subagent-graph-inputs.md) | F | 子智能体编排接口改名与 DAG 缺项提示 | lin-xiaoyu | 无独立 D：用户已明确指定 SDK 方法名、规划状态和宿主对输入的决策职责。 |
+| [S_02_orchestration-plans](specs/symphony/S_02_orchestration-plans.md) | S | Symphony 规划结果与宿主输入处理 | lin-xiaoyu | — |
 
 <a id="module-unclassified"></a>
 

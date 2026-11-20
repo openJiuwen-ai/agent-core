@@ -422,7 +422,7 @@ class OrchestrationService:
         await _emit(callback, "plan_completed", plan_id=result["plan_id"])
         return public_result
 
-    async def plan_expert_tasks(
+    async def plan_subagent_graph(
         self,
         query: str,
         candidate_ids: Sequence[str] | None = None,

@@ -9,7 +9,7 @@ from graphlib import CycleError, TopologicalSorter
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.symphony.config import OrchestrationConfig
@@ -105,7 +105,7 @@ its constraints are covered by the responsible node.
 """
 
 _Text = Annotated[str, Field(min_length=1)]
-_PlanStatus = Literal["ready", "needs_input", "no_plan"]
+_PlanStatus = Literal["ready", "no_plan"]
 _TYPES = DataTypeVocabulary.default()
 _REPAIR_OUTPUT_LIMIT = 16_000
 
@@ -171,6 +171,12 @@ class _Draft(_DraftModel):
     missing_inputs: list[_MissingInput | _Text] = Field(default_factory=list)
     tasks: list[_Task] = Field(default_factory=list)
     handoffs: list[_Handoff] = Field(default_factory=list)
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _normalize_model_status(cls, value: Any) -> Any:
+        # Older model drafts can still contain a usable conditional graph.
+        return "ready" if value == "needs_input" else value
 
 
 async def build_expert_task_plan(
@@ -249,7 +255,7 @@ async def build_expert_task_plan(
                     break
                 if not draft.tasks:
                     reason = "The model did not produce a valid conditional task graph."
-                    if draft.status == "needs_input" or draft.missing_inputs:
+                    if draft.missing_inputs:
                         correction = (
                             "\nThe previous draft only reported missing inputs. Return a conditional task graph "
                             "for the original request, with all input gaps recorded as advisory metadata."

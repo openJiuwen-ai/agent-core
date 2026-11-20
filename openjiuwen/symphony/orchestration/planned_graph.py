@@ -16,8 +16,9 @@ def build_planned_graph(
     """Project the selected internal plan into one minimal JGF v2 graph."""
 
     primary_plan = select_primary_plan(planning_result)
-    status = _plan_status(primary_plan, planning_result)
-    metadata: dict[str, Any] = {"status": status}
+    nodes = _planned_nodes(primary_plan, artifacts)
+    status = _plan_text(primary_plan, planning_result, "status").lower()
+    metadata: dict[str, Any] = {"status": "ready" if nodes and status == "ready" else "no_plan"}
     if layer == "expert":
         metadata["capability_type"] = layer
     reason = _plan_text(primary_plan, planning_result, "reason")
@@ -27,7 +28,6 @@ def build_planned_graph(
     if missing_inputs:
         metadata["missing_inputs"] = missing_inputs
 
-    nodes = _planned_nodes(primary_plan, artifacts)
     edges = _planned_edges(primary_plan, nodes)
     return {
         "graph": {
@@ -53,11 +53,6 @@ def select_primary_plan(planning_result: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _plan_status(primary_plan: dict[str, Any], planning_result: dict[str, Any]) -> str:
-    status = _plan_text(primary_plan, planning_result, "status").lower()
-    return status if status in {"ready", "needs_input", "no_plan"} else "no_plan"
-
-
 def _plan_text(primary_plan: dict[str, Any], planning_result: dict[str, Any], key: str) -> str:
     value = primary_plan.get(key)
     if value in (None, ""):
@@ -78,12 +73,20 @@ def _planned_nodes(primary_plan: dict[str, Any], artifacts: GraphArtifacts) -> d
         capability = artifacts.skill_by_id.get(capability_id)
         if capability is None:
             raise ValueError(f"Planned graph references unknown capability: {capability_id!r}.")
-        nodes[capability_id] = {
-            "label": str(capability.get("name") or capability_id),
-            "metadata": {
-                "type": str(capability.get("type") or capability.get("capability_type") or "skill"),
-            },
+        metadata: dict[str, Any] = {
+            "type": str(capability.get("type") or capability.get("capability_type") or "skill"),
         }
+        for key in ("inputs", "outputs"):
+            ports = capability.get(key)
+            if ports:
+                metadata[key] = [
+                    {field: port[field] for field in ("name", "type", "required") if field in port}
+                    for port in ports
+                ]
+        missing = _missing_input_names(step.get("missing_inputs"))
+        if missing:
+            metadata["missing_inputs"] = missing
+        nodes[capability_id] = {"label": str(capability.get("name") or capability_id), "metadata": metadata}
     return nodes
 
 
