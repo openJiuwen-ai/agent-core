@@ -3531,6 +3531,8 @@ class ReActAgent(BaseAgent):
             }
             if result.get("soft_stop_recovery_exhausted"):
                 payload["soft_stop_recovery_exhausted"] = True
+            if result.get("error_origin_class"):
+                payload["error_origin_class"] = result["error_origin_class"]
             await session.write_stream(OutputSchema(
                 type="answer",
                 index=0,
@@ -3618,7 +3620,13 @@ class ReActAgent(BaseAgent):
                 abort_persisted = await self._persist_context_after_abort(
                     session, "[Request failed with unexpected error]"
                 )
-                error_result = {"output": str(e), "result_type": "error"}
+                # str(e) flattens the exception chain; error_origin_class keeps a
+                # structured origin so hosts can classify the failure stage.
+                error_result = {
+                    "output": str(e),
+                    "result_type": "error",
+                    "error_origin_class": f"{type(e).__module__}.{type(e).__qualname__}",
+                }
                 await self._write_invoke_result_to_stream(
                     error_result, session
                 )
