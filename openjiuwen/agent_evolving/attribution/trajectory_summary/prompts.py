@@ -33,7 +33,10 @@ _TEXTS = {
             "Submit the summary once using report_summary. "
             "Include nonempty narrative, display_summary and problems."
         ),
-        "batch_report": "Submit one report_summary call containing results; each item needs segment_id, nonempty narrative and problems.",
+        "batch_report": (
+            "Submit one report_summary call containing results; "
+            "each item needs segment_id, nonempty narrative and problems."
+        ),
         "sources": (
             "Copy complete leaf source_problem_ids from supplied issues; never use node IDs or invent sources. "
             "Omit unsupported new issues."
@@ -50,7 +53,10 @@ _TEXTS = {
             "Previous response failed: {error}. Return exactly one report_summary "
             "with nonempty narrative, display_summary, problems and valid evidence."
         ),
-        "batch_retry": "Previous response failed: {error}. Return one report_summary with results for every input segment_id.",
+        "batch_retry": (
+            "Previous response failed: {error}. "
+            "Return one report_summary with results for every input segment_id."
+        ),
         "shortened": (
             " Some long fields were shortened after a provider context rejection; "
             "disclose missing detail and do not invent facts."

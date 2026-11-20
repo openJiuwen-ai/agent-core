@@ -295,7 +295,7 @@ async def test_invalid_leaf_reports_keep_summary_and_identify_candidate_without_
             return reply(report)
     model = InvalidLeaf()
     tree = await summarize_trajectory(model=model, nodes_by_agent={"A": [node(0)]})
-    assert len(model.calls) == 2 and tree.status == "completed"
+    assert len(model.calls) == 2 and tree.status == "degraded"
     assert tree.turns["A"][0].segments[0].narrative and tree.problems == []
     assert len(tree.warnings) == 1
     assert tree.warnings[0]["message"].startswith("candidate 0: " + reason)
@@ -310,21 +310,24 @@ def test_numeric_reference_does_not_choose_between_ambiguous_local_ids():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("recovery", [[], None, "A:0", ["B:0"]])
-async def test_missing_recovery_preserves_problem_as_unknown_without_retry(recovery):
+@pytest.mark.parametrize("state, expected_state", [("resolved", "unknown"), ("unresolved", "unresolved"),
+                                                   ("unknown", "unknown")])
+async def test_invalid_recovery_keeps_problem_without_retry(recovery, state, expected_state):
     class RecoveryModel(Model):
         async def invoke(self, messages, tools, **kwargs):
             response = await super().invoke(messages, tools, **kwargs)
             report = json.loads(response["tool_calls"][0]["function"]["arguments"])
             if "primary" in self.calls[-1][0]["input"]:
                 report["problems"] = [{"kind": "tool_error", "summary": "Material issue",
-                    "node_ids": ["A:0"], "state": "resolved", "resolution_node_ids": recovery}]
+                    "node_ids": ["A:0"], "state": state, "resolution_node_ids": recovery}]
             return reply(report)
     model = RecoveryModel()
     tree = await summarize_trajectory(model=model, nodes_by_agent={"A": [node(0)]})
     assert tree.status == "completed" and len(model.calls) == 2
-    assert tree.problems[0].state == "unknown" and tree.problems[0].resolution_node_ids == []
+    assert tree.problems[0].state == expected_state and tree.problems[0].resolution_node_ids == []
     assert tree.problems[0].locations[0].node_ids == ["A:0"]
-    assert tree.warnings[0]["code"] == "problem_recovery_unconfirmed"
+    expected_warnings = ["problem_recovery_unconfirmed"] if recovery != [] or state == "resolved" else []
+    assert [warning["code"] for warning in tree.warnings] == expected_warnings
 
 
 @pytest.mark.asyncio
@@ -590,8 +593,20 @@ async def test_readable_summary_failure_does_not_discard_technical_result():
             report.pop("display_summary")
             return reply(report)
     tree = await summarize_trajectory(model=NoDisplay(), nodes_by_agent={"A": [node(0)]})
-    assert tree.trajectory_summary and not tree.display_summary
+    assert tree.status == "degraded" and tree.trajectory_summary and not tree.display_summary
     assert any(w["code"] == "display_summary_missing" for w in tree.warnings)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nodes, warning_code", [
+    ([node(0, turn="")], "turn_identity_fallback"),
+    ([node(0), replace(node(1), turn_number=2)], "turn_number_conflict"),
+])
+async def test_turn_structure_warning_degrades_tree_without_discarding_summary(nodes, warning_code):
+    tree = await summarize_trajectory(model=Model(), nodes_by_agent={"A": nodes})
+    assert tree.status == "degraded"
+    assert tree.trajectory_summary and tree.display_summary
+    assert [warning["code"] for warning in tree.warnings] == [warning_code]
 
 
 @pytest.mark.asyncio
@@ -825,6 +840,7 @@ async def test_batch_problem_evidence_cannot_cross_segment_boundaries():
         "A": [node(0, turn="t0"), node(1, turn="t1")]})
     assert all(not t.segments[0].problems for t in tree.turns["A"])
     assert all(t.segments[0].status == "completed" for t in tree.turns["A"])
+    assert tree.status == "degraded"
     assert len(tree.warnings) == 1 and tree.warnings[0]["code"] == "problem_rejected"
 
 

@@ -86,8 +86,9 @@ def _segment_batches(turns: list, primary: dict, limits: SummaryLimits) -> list[
             entry = (segment, nodes, payload)
             short = (limits.segment_batch_size > 1 and len(turn.segments) == 1
                      and len(nodes) <= limits.target_nodes)
-            if batch and (not short or len(batch) >= limits.segment_batch_size
-                          or node_count + len(nodes) > limits.target_nodes):
+            exceeds_budget = (len(batch) >= limits.segment_batch_size
+                              or node_count + len(nodes) > limits.target_nodes)
+            if batch and (not short or exceeds_budget):
                 groups.append(batch)
                 batch, node_count = [], 0
             if short:
@@ -282,7 +283,9 @@ class _Runner:
                     recovery = self._leaf_ids(p.get("resolution_node_ids", []), allowed, aliases,
                                               "resolution_node_ids", state == "resolved")
                 except ValueError as exc:
-                    state, recovery = "unknown", []
+                    recovery = []
+                    if state == "resolved":
+                        state = "unknown"
                     self.warn("problem_recovery_unconfirmed", f"candidate {index}: {exc}", segment.segment_id)
                 if any(old.kind == kind and old.node_ids == ids for old in result):
                     continue
@@ -543,4 +546,7 @@ async def summarize_trajectory(
     tree.trajectory_summary, tree.status = merged.narrative, merged.status
     tree.problems = [replace(p, problem_id=f"problem:{i}") for i, p in enumerate(merged.problems)]
     tree.display_summary = merged.display_summary
+    incomplete_codes = {"display_summary_missing", "turn_identity_fallback", "turn_number_conflict", "problem_rejected"}
+    if tree.status == "completed" and any(w.get("code") in incomplete_codes for w in tree.warnings):
+        tree.status = "degraded"
     return tree
