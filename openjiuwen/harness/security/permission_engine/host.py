@@ -67,6 +67,7 @@ class PermissionEvaluationRequest:
     ctx: Any
     tool_call: Any
     result: PermissionResult
+    engine: Any = None
 
 
 PermissionEvaluatedHook = Callable[

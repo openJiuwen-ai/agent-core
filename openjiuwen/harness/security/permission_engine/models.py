@@ -30,12 +30,32 @@ class PermissionLevel(str, Enum):
     UNDETERMINED = "undetermined"
 
 
+@dataclass(frozen=True)
+class PermissionMatch:
+    """A rule actually matched during evaluation, or a resource default.
+
+    ``source`` is a policy source id, never inferred from a display message.
+    Defaults have no source and ``is_default=True``. The trace is descriptive;
+    only PermissionResult.permission authorizes an operation.
+    """
+
+    category: str
+    target: str
+    permission: PermissionLevel
+    rule_id: str
+    source: str | None = None
+    operation: str | None = None
+    is_default: bool = False
+
+
 @dataclass
 class PermissionResult:
     permission: PermissionLevel
     matched_rule: str | None = None
     reason: str | None = None
     external_paths: list[str] | None = None
+    matches: tuple[PermissionMatch, ...] = ()
+    targets: tuple[PermissionMatch, ...] = ()
 
     @property
     def is_allowed(self) -> bool:

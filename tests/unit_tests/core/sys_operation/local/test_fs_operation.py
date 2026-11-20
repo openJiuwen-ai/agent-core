@@ -72,6 +72,47 @@ async def sys_op_fixture(work_dir):
 
 
 @pytest.mark.asyncio
+async def test_operation_observer_denies_write_before_parent_creation(sys_op, work_dir):
+    from openjiuwen.core.sys_operation.local.operation_observer import bind_operation_observer
+
+    target = Path(work_dir) / "not-created" / "blocked.txt"
+    observed = []
+
+    async def deny(name, arguments):
+        observed.append((name, arguments))
+        return False
+
+    with bind_operation_observer(deny):
+        result = await sys_op.fs().write_file(path=str(target), content="must not be written")
+    assert result.code != StatusCode.SUCCESS.code
+    assert observed == [("file_write", str(target))]
+    assert not target.parent.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["upload_file", "download_file", "upload_file_stream", "download_file_stream"])
+async def test_operation_observer_blocks_transfer_without_creating_destination(sys_op, work_dir, method):
+    from openjiuwen.core.sys_operation.local.operation_observer import bind_operation_observer
+
+    source, target = Path(work_dir) / "source.txt", Path(work_dir) / "new" / "target.txt"
+    source.write_text("retained", encoding="utf-8")
+    observed = []
+
+    async def observe(name, arguments):
+        observed.append((name, arguments))
+        return name == "file_read"
+
+    arguments = {"local_path": str(source), "target_path": str(target)} if method.startswith("upload") else {
+        "source_path": str(source), "local_path": str(target)}
+    with bind_operation_observer(observe):
+        operation = getattr(sys_op.fs(), method)(**arguments)
+        results = [part async for part in operation] if method.endswith("stream") else [await operation]
+    assert all(result.code != StatusCode.SUCCESS.code for result in results)
+    assert observed == [("file_read", str(source)), ("file_write", str(target))]
+    assert source.read_text(encoding="utf-8") == "retained" and not target.parent.exists()
+
+
+@pytest.mark.asyncio
 async def test_fs_read_write(sys_op, work_dir):
     """Test combined read and write operations."""
     # 1. Basic Write & Read

@@ -19,6 +19,7 @@ from openjiuwen.harness.security.permission_engine.core import (
 from openjiuwen.harness.security.permission_engine.host import ToolPermissionHost
 from openjiuwen.harness.security.permission_engine.models import (
     PermissionLevel,
+    PermissionMatch,
     PermissionResult,
     PermissionsSection,
 )
@@ -50,6 +51,7 @@ __all__ = [
     "SOURCE_USER_GROUP",
     "PermissionEngine",
     "PermissionLevel",
+    "PermissionMatch",
     "PermissionResult",
     "PermissionsSection",
     "ToolPermissionHost",

@@ -11,6 +11,7 @@ from typing import Any, Mapping
 from urllib.parse import urlparse
 
 from openjiuwen.harness.security.permission_engine.models import PermissionLevel, PermissionResult
+from openjiuwen.harness.security.permission_engine.match_trace import record_match, record_target
 from openjiuwen.harness.security.permission_engine.toolguard.pattern_matchers import match_wildcard
 
 logger = logging.getLogger(__name__)
@@ -148,6 +149,12 @@ class NetGuardChecker:
 
     def check_url(self, url: str | None) -> PermissionResult | None:
         """Return ASK/DENY or ``None`` (allowed); callers handle ASK before tools."""
+        result = self._check_url(url)
+        if url:
+            record_target("domain", url, result.permission if result is not None else PermissionLevel.ALLOW)
+        return result
+
+    def _check_url(self, url: str | None) -> PermissionResult | None:
         if not self._enabled:
             return None
         hits: list[tuple[str, str]] = []
@@ -155,6 +162,8 @@ class NetGuardChecker:
             for pattern, action in self._urls.items():
                 if match_net_pattern(pattern, url):
                     hits.append((pattern, action))
+                    record_match("domain", url, PermissionLevel(action), pattern,
+                                 self._url_layers.get(pattern) if self._composed else None)
         if hits:
             if any(action == "deny" for _pattern, action in hits):
                 pattern = next(p for p, action in hits if action == "deny")
@@ -184,6 +193,7 @@ class NetGuardChecker:
                 return PermissionResult(PermissionLevel.ASK, f"net_guard:url:{pattern}",
                                         f"net_guard requires approval: {pattern}")
             return None
+        record_match("domain", url or "", PermissionLevel(self._defaults), "net_guard:defaults", is_default=True)
         if self._defaults in {"deny", "ask"}:
             return PermissionResult(
                 permission=PermissionLevel(self._defaults),

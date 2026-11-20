@@ -5,10 +5,13 @@
 from __future__ import annotations
 
 import time
+import json
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import requests
+
+from openjiuwen.core.sys_operation.local.operation_observer import before_operation_sync
 
 from openjiuwen.harness.security.outbound.limits import cap_timeout, enforce_request_size
 from openjiuwen.harness.security.outbound.policy import (
@@ -94,6 +97,11 @@ def request(
                 if remaining <= 0:
                     raise requests.exceptions.Timeout("outbound total timeout exceeded")
                 kwargs["timeout"] = cap_timeout(kwargs.get("timeout"), remaining)
+            data = json.dumps(kwargs["json"], ensure_ascii=False) if "json" in kwargs else kwargs.get("data", "")
+            if isinstance(data, bytes):
+                data = data[:8192].decode("utf-8", errors="replace")
+            before_operation_sync("network_send", {"url": current_url, "data": data if isinstance(data, str) else ""})
+            before_operation_sync("network_fetch", current_url)
             resp = sess.request(current_method, current_url, allow_redirects=False, **kwargs)
             if not resp.is_redirect:
                 return resp

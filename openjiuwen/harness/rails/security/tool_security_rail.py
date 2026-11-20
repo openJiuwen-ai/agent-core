@@ -615,7 +615,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         if hook is not None:
             try:
                 # The observer cannot mutate the effective local result in place.
-                external = await hook(PermissionEvaluationRequest(ctx, tool_call, deepcopy(result)))
+                external = await hook(PermissionEvaluationRequest(ctx, tool_call, deepcopy(result), self._engine))
             except Exception:
                 logger.warning("[PermissionEngine] permission.evaluation_hook.failed", exc_info=True)
         if result.permission != PermissionLevel.UNDETERMINED:

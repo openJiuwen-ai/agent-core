@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.harness.security.permission_engine.models import PermissionLevel
+from openjiuwen.harness.security.permission_engine.match_trace import record_match
 from openjiuwen.harness.security.permission_engine.policy_sources import (
     SOURCE_BUILTIN,
     SOURCE_BUILTIN_GROUP,
@@ -315,6 +316,8 @@ def _collect_param_rule_hits(
             )
             continue
         dec = _parse_level(action)
+        source = rule.get("layer") or (SOURCE_USER if label_ns == "rules" else label_ns)
+        record_match("tool", tool_name, dec, rule.get("id") or pattern, source)
         hits.append((dec, f"{label_ns}[{rule.get('id') or '?'}]"))
     return hits
 
@@ -381,6 +384,7 @@ def _collect_approval_override_hits(
         rid = rule.get("id", "")
         label = f"approval_overrides[{rid}]" if rid else "approval_overrides[?]"
         hits.append(label)
+        record_match("tool", tool_name, PermissionLevel.ALLOW, rid or pattern, SOURCE_USER)
     return hits
 
 
@@ -792,6 +796,12 @@ def evaluate_tiered_policy(
         approval_overrides = []
 
     bl, bl_rule = _baseline_level(tools_cfg, tool_name)
+    if bl is not None:
+        layers = composition.get("tool_layers", {}) if composed else {}
+        owners = [source for source in source_order if tool_name in layers.get(source, {})]
+        source = next((source for source in owners if layers[source][tool_name] == "deny"),
+                      owners[0] if owners else None)
+        record_match("tool", tool_name, bl, bl_rule or tool_name, source)
     if bl == PermissionLevel.DENY:
         return PermissionLevel.DENY, bl_rule or f"{_MR}:tools.deny"
 

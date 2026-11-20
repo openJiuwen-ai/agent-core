@@ -43,8 +43,10 @@ from openjiuwen.harness.security.permission_engine.fileguard.sensitive_paths imp
     merge_package_sensitive_paths,
 )
 from openjiuwen.harness.security.permission_engine.host import ToolPermissionHost
+from openjiuwen.harness.security.permission_engine.match_trace import record_match, traced_permission
 from openjiuwen.harness.security.permission_engine.models import (
     PermissionLevel,
+    PermissionMatch,
     PermissionResult,
     PermissionsSection,
 )
@@ -435,6 +437,41 @@ class PermissionEngine:
 
     # ---------- 权限检查 ----------
 
+    def resolve_tool_targets(self, tool_name: str, arguments: dict[str, Any]) -> tuple[PermissionMatch, ...]:
+        """Return targets from :meth:`inspect_tool_resources`, without authorizing a tool."""
+        return self.inspect_tool_resources(tool_name, arguments).targets
+
+    def inspect_tool_resources(self, tool_name: str, arguments: dict[str, Any]) -> PermissionResult:
+        """Resolve structured API resources using this effective policy snapshot.
+
+        Shell targets are intentionally absent. This is descriptive: callers
+        must still enforce the complete check_permission result for the tool.
+        """
+        from openjiuwen.core.sys_operation.cwd import get_cwd
+        from openjiuwen.harness.security.permission_engine.fileguard.path_extract import extract_accesses_native
+        from openjiuwen.harness.security.permission_engine.netguard.net_guard import extract_fetch_url
+        from openjiuwen.harness.security.permission_engine.toolguard.tool_categories import (
+            is_shell_tool, shell_tools_from_config,
+        )
+
+        if is_shell_tool(tool_name, shell_tools_from_config(self.config)):
+            return PermissionResult(PermissionLevel.UNDETERMINED)
+        targets, matches = [], []
+        for path, action, _source in extract_accesses_native(
+                tool_name, arguments, self._workspace_root or Path(get_cwd()), self.config):
+            verdict = self.check_file_accesses([(path, "write" if action == "delete" else action)])
+            targets.append(PermissionMatch("file", str(path), verdict.permission, "", operation=action))
+            matches.extend(verdict.matches)
+        # Only designated URL parameters are used; never scan arbitrary text.
+        url = extract_fetch_url(arguments)
+        if url:
+            verdict = self.check_network_access(url)
+            targets.append(PermissionMatch("domain", url, verdict.permission, ""))
+            matches.extend(verdict.matches)
+        return PermissionResult(PermissionLevel.UNDETERMINED, targets=tuple(dict.fromkeys(targets)),
+                                matches=tuple(dict.fromkeys(matches)))
+
+    @traced_permission
     def check_file_accesses(self, accesses: list[tuple[Path, FileGuardAction]]) -> PermissionResult:
         """Check authenticated runtime resources, without tool-level approvals.
 
@@ -455,11 +492,13 @@ class PermissionEngine:
                 return result
         return protected or PermissionResult(permission=PermissionLevel.ALLOW)
 
+    @traced_permission
     def check_network_access(self, resource: str) -> PermissionResult:
         """Evaluate a concrete URL, DNS name or endpoint with the existing NetGuard."""
         result = self._net_guard.check_url(resource) if self.permission_checks_enabled and self._net_guard else None
         return result or PermissionResult(permission=PermissionLevel.ALLOW)
 
+    @traced_permission
     async def check_permission(
         self,
         tool_name: str,
@@ -702,6 +741,7 @@ class PermissionEngine:
                                    allow_semantic=del_result is None):
                 permission = PermissionLevel.ALLOW
                 matched_rule = "operation_grant"
+                record_match("tool", tool_name, permission, matched_rule, SOURCE_USER)
             elif del_result is None:
                 from openjiuwen.harness.security.permission_engine.approve.operation_grants import (
                     has_shared_file_operation,
@@ -710,6 +750,7 @@ class PermissionEngine:
                 if has_shared_file_operation(self.config, tool_name, tool_args, self._workspace_root):
                     permission = PermissionLevel.ALLOW
                     matched_rule = "file_resource_grant"
+                    record_match("tool", tool_name, permission, matched_rule, SOURCE_USER)
 
         # Control-plane ASK is one-time consent, independent of remembered grants.
         if identity_control_result is not None and (
