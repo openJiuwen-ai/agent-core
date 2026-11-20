@@ -18,10 +18,12 @@ class _TaskModel:
         self.request = None
         self.planning_prompts = []
         self.planning_requests = []
+        self.judge_requests = []
 
     async def invoke(self, messages, **kwargs):
         request = json.loads(messages[-1]["content"])
         if "candidates" in request:
+            self.judge_requests.append(request)
             return SimpleNamespace(content=json.dumps({
                 "judgements": [
                     {"candidate_id": item["candidate_id"], "score": 0.95}
@@ -172,40 +174,37 @@ async def test_expert_task_plan_derives_type_from_assignment(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("evidence_format", ["mapping", "fields"])
-async def test_expert_task_plan_exposes_published_handoff_hints(tmp_path, monkeypatch, expert_artifacts, evidence_format):
-    support = expert_artifacts.graph["edges"][0]["evidence"]["supporting_fields"]
-    if evidence_format == "mapping":
-        support["port_mappings"][0:0] = [
-            {"source_output": f"other_{index}", "target_input": f"other_{index}"}
-            for index in range(5)
-        ]
-    else:
-        support.clear()
-        support.update(source_outputs=[{"name": "evidence", "type": "csv"}], target_inputs=["evidence: csv"])
+@pytest.mark.parametrize("mode", ["fast", "beam"])
+async def test_expert_task_plan_uses_task_outputs_with_catalog_candidates(mode, tmp_path, monkeypatch, expert_artifacts):
+    notes = _port("interview_notes", "markdown")
+    collect = _task("collect", expert_id="research", outputs=[notes])
+    collect["external_inputs"] = ["transcript"]
     draft = {
-        "status": "ready",
-        "tasks": [
-            _task("research", expert_id="research", outputs=[_port()]),
-            _task("report", expert_id="report", inputs=[_port()]),
-        ],
-        "handoffs": [_handoff("research", "report")],
+        "tasks": [collect, _task("write", expert_id="report", outputs=[_port("brief", "markdown")])],
+        "handoffs": [{"source": "collect", "target": "write", "source_output": "interview_notes"}],
     }
     service, model = _service(tmp_path, draft, monkeypatch, expert_artifacts)
+    transcript = PlanningInput(name="transcript", kind="file", value="interview.txt")
 
-    graph = (await service.plan_subagent_graph("Research and report"))["planned_graph"]["graph"]
+    result = await service.plan_subagent_graph(
+        "Write a Markdown brief from the interview.", ["research"], mode=mode, inputs=[transcript],
+    )
 
-    assert model.request["published_expert_handoffs"] == [{
-        "source_id": "research",
-        "target_id": "report",
-        "port_mappings": support.get("port_mappings", []),
-        "source_outputs": support.get("source_outputs", []),
-        "target_inputs": support.get("target_inputs", []),
-    }]
+    assert {expert["id"] for expert in model.request["experts"]} == {"research", "report"}
+    assert all(set(expert) == {"id", "name", "description"} for expert in model.request["experts"])
+    assert "published_expert_handoffs" not in model.request
+    assert model.request["inputs"] == [{"name": "transcript", "kind": "file", "value": "interview.txt"}]
+    assert bool(model.judge_requests) == (mode == "beam")
+    assert "csv" not in json.dumps([*model.judge_requests, model.request])
+
+    graph = result["planned_graph"]["graph"]
     assert graph["metadata"]["status"] == "ready"
+    assert graph["metadata"]["missing_inputs"] == []
+    assert graph["nodes"]["task-1"]["metadata"]["outputs"] == [notes]
+    assert graph["nodes"]["task-2"]["metadata"]["inputs"] == [notes]
     assert graph["edges"] == [{
         "source": "task-1", "target": "task-2", "relation": "can_feed",
-        "source_output": "evidence", "target_input": "evidence",
+        "source_output": "interview_notes", "target_input": "interview_notes",
     }]
 
 

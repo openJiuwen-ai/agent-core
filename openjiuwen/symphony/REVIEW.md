@@ -11,7 +11,7 @@ AI 先比较基线与候选版本，按本次改动选择适用条目，从实�
 - 检查**索引与图产物发布**时，核对产物是否绑定规范化来源集合及发布版本，全量和增量发布前是否复核来源快照，以及失败或取消后能否继续读取上次成功发布的产物。
   [索引发布回归](../../tests/unit_tests/symphony/test_discovery_index_lifecycle.py)、[混合集合与图发布回归](../../tests/unit_tests/symphony/test_mixed_taxonomy.py)
 - 检查**发现与编排**时，核对 Skill 和专家是否按类型分层并遵守会话可见范围和禁用条件。确认专家任务图无环，交接边引用本轮声明的源产物和 Core 生成的接收端口。
-  已发布的专家端口与交接边仅供规划参考。内联角色之间的交接按旧草稿显式声明的接收类型校验。
+  核对候选专家仅以标识、名称和描述进入编排提示词，任务产物和交接由本轮请求决定。内联角色之间的交接按旧草稿显式声明的接收类型校验。
   [发现回归](../../tests/unit_tests/symphony/test_discovery_index_lifecycle.py)、[专家任务图回归](../../tests/unit_tests/symphony/test_expert_task_planning.py)
 - 检查**观测与 Flow**时，核对 `orchestration.plan.dynamic_graph_enabled` 是否独立控制 Skill 规划读取已有动态观测。
   确认编排和经验开关共同控制新观测写入与 Runtime Flow，禁用时直接写入和 Flow 执行在创建存储前被拒绝。涉及 `aclose()` 时，检查在途任务和文件写入能否在关闭完成前收尾。
