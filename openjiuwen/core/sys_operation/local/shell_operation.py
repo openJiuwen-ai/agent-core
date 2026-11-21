@@ -14,6 +14,7 @@ from typing import Optional, Dict, Any, AsyncIterator, Callable, List, Literal, 
 import pathlib
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import LogEventType, sys_operation_logger
+from openjiuwen.core.sys_operation.local.process_launcher import create_process
 from openjiuwen.core.sys_operation.local.utils import OperationUtils, StreamEvent, StreamEventType
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.sys_operation.result.base_result import build_operation_error_result
@@ -535,7 +536,8 @@ class ShellOperation(BaseShellOperation):
 
         if use_shell:
             cmd = self._wrap_command_with_buffering(args) if (stream and not background) else args
-            process = await asyncio.create_subprocess_shell(
+            process = await create_process(
+                asyncio.create_subprocess_shell,
                 cmd,
                 cwd=str(cwd),
                 env=env,
@@ -545,7 +547,8 @@ class ShellOperation(BaseShellOperation):
                 **subprocess_kw,
             )
             return process, resolved_shell
-        process = await asyncio.create_subprocess_exec(
+        process = await create_process(
+            asyncio.create_subprocess_exec,
             *args,
             cwd=str(cwd),
             env=env,

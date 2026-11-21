@@ -905,6 +905,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 feedback=user_input.feedback,
                 auto_confirm=user_input.auto_confirm,
                 persist_allow=user_input.persist_allow,
+                authorization_mode=user_input.authorization_mode,
+                authorization_scope=user_input.authorization_scope,
             )
         if isinstance(user_input, dict):
             try:
@@ -916,6 +918,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 feedback=payload.feedback,
                 auto_confirm=payload.auto_confirm,
                 persist_allow=payload.persist_allow,
+                authorization_mode=payload.authorization_mode,
+                authorization_scope=payload.authorization_scope,
             )
         if isinstance(user_input, str):
             try:
