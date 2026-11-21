@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Tests for ConversationSignalDetector."""
 
+import json
 from typing import List
 from unittest.mock import AsyncMock, MagicMock
 
@@ -604,6 +605,49 @@ class TestTtseFromConvHelpers:
         assert "failed" in bash_hit.lower()
         assert is_tool_execution_failure("FACT: 上次失败要改用 cl /utf-8", "ttse_consult") is None
         assert is_tool_execution_failure("file content", "read_file") is None
+
+    def test_is_tool_execution_failure_skips_successful_skill_load(self) -> None:
+        from openjiuwen.agent_evolving.signal.from_conv import is_tool_execution_failure
+
+        loaded = (
+            "success=True data={'skill_directory': '/skills/xlsx', 'skill_content': "
+            "'---\\nname: xlsx\\n---\\n## Troubleshooting\\nIf recalculation failed, check the error log.'} error=None"
+        )
+        assert is_tool_execution_failure(loaded, "skill_tool") is None
+        missing = "success=False data=None error=\"skill 'xlsx' not found\""
+        assert is_tool_execution_failure(missing, "skill_tool") is not None
+
+    def test_is_tool_execution_failure_trusts_shell_exit_code(self) -> None:
+        from openjiuwen.agent_evolving.signal.from_conv import is_tool_execution_failure
+
+        def shell(stdout: str, stderr: str, exit_code: int) -> str:
+            return f"Command: run.sh\nStdout: {stdout}\n\nStderr: {stderr}\nExit Code: {exit_code}"
+
+        assert is_tool_execution_failure(shell("0 errors, 0 failed", "(empty)", 0), "bash") is None
+        failed = is_tool_execution_failure(shell("", "Traceback (most recent call last):", 1), "bash")
+        assert failed is not None and "Traceback" in failed
+        # ``python x.py | sort`` exits 0 even when x.py crashed
+        crashed_stdout = "Traceback (most recent call last):\nKeyError: 'id'"
+        piped = is_tool_execution_failure(shell(crashed_stdout, "(empty)", 0), "bash")
+        assert piped is not None and "Traceback" in piped
+
+    def test_clean_command_mentioning_errors_is_a_script_artifact(self) -> None:
+        command = "python3 validate.py --report /workspace/out.xlsx"
+        signals = ConversationSignalDetector().detect(
+            [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "tc_1", "name": "bash", "arguments": json.dumps({"command": command})}],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "tc_1",
+                    "content": f"Command: {command}\nStdout: 0 formula errors\n\nStderr: (empty)\nExit Code: 0",
+                },
+            ]
+        )
+        assert [s.signal_type for s in signals] == ["script_artifact"]
 
     def test_detect_tool_error_signals_resolves_tool_name_from_call_id(self) -> None:
         from openjiuwen.agent_evolving.signal.from_conv import detect_tool_error_signals
