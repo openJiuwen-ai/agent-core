@@ -150,7 +150,7 @@ class _FailingFastPlanLLM(_PlanLLM):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["fast", "beam"])
-@pytest.mark.parametrize("entrypoint", ["default", "skill", "plan_skill_graph"])
+@pytest.mark.parametrize("entrypoint", ["skill", "plan_skill_graph"])
 async def test_skill_planners_use_named_inputs_without_changing_the_task(monkeypatch, tmp_path, mode, entrypoint):
     requests = []
     skills = [{
@@ -405,7 +405,7 @@ async def test_dynamic_overlay_respects_config(
     await service.build()
     overlay = {"edges": {"extract->summarize:can_feed": {"runtime_weight": 2}}}
 
-    result = await service.plan("query", dynamic_overlay=overlay)
+    result = await service.plan("query", type="skill", dynamic_overlay=overlay)
 
     assert captured == [overlay if enabled else {}]
     assert result == {
@@ -444,7 +444,7 @@ async def test_dynamic_graph_enabled_reports_config_without_overlay(
     )
     await service.build()
 
-    result = await service.plan("query")
+    result = await service.plan("query", type="skill")
 
     assert set(result) == {"planned_graph"}
     assert result["planned_graph"]["graph"]["metadata"] == {"status": "no_plan"}
@@ -480,7 +480,7 @@ async def test_beam_planner_receives_same_dynamic_overlay_as_fast(
     await service.build()
     overlay = {"edges": {"edge-1": {"runtime_weight": 1.2}}}
 
-    await service.plan("query", dynamic_overlay=overlay, mode="beam")
+    await service.plan("query", type="skill", dynamic_overlay=overlay, mode="beam")
 
     assert captured == [overlay]
 
@@ -511,7 +511,10 @@ async def test_graph_engine_plan_pins_merged_snapshot(tmp_path: Path, entrypoint
     await runtime.orchestration.build()
 
     snapshot = runtime.orchestration.get_snapshot()
-    result = await getattr(runtime.orchestration, entrypoint)("query", merged_revision=snapshot.merged_revision)
+    if entrypoint == "plan":
+        result = await runtime.orchestration.plan("query", type="skill", merged_revision=snapshot.merged_revision)
+    else:
+        result = await runtime.orchestration.plan_skill_graph("query", merged_revision=snapshot.merged_revision)
 
     graph_snapshot = result["planned_graph"]["graph_snapshot"]
     assert graph_snapshot["static_revision"] == snapshot.static_revision
@@ -530,7 +533,7 @@ async def test_graph_engine_does_not_materialize_observation_snapshot_when_disab
     )
     await runtime.orchestration.build()
 
-    result = await runtime.orchestration.plan("query")
+    result = await runtime.orchestration.plan("query", type="skill")
 
     assert "graph_snapshot" not in result["planned_graph"]
     assert not (tmp_path / "runtime" / "graph" / "evolution").exists()
@@ -554,7 +557,7 @@ async def test_graph_engine_falls_back_to_static_graph_when_current_observation_
         raise OSError("observation store unavailable")
 
     monkeypatch.setattr(runtime.orchestration._observation_service, "get_snapshot", fail_snapshot)
-    result = await runtime.orchestration.plan("query")
+    result = await runtime.orchestration.plan("query", type="skill")
 
     assert "graph_snapshot" not in result["planned_graph"]
     await runtime.aclose()
@@ -570,7 +573,7 @@ async def test_graph_engine_does_not_fallback_when_a_pinned_revision_is_missing(
     await runtime.orchestration.build()
 
     with pytest.raises(FileNotFoundError, match="Unknown Symphony merged revision"):
-        await runtime.orchestration.plan("query", merged_revision="merged-missing")
+        await runtime.orchestration.plan("query", type="skill", merged_revision="merged-missing")
     await runtime.aclose()
 
 
@@ -633,7 +636,7 @@ async def test_mixed_capability_types_survive_plan_projection(tmp_path: Path, mo
     )
     await service.build()
 
-    result = await service.plan("skill:query must stay", candidate_ids=["extract"])
+    result = await service.plan("skill:query must stay", type="skill", candidate_ids=["extract"])
 
     assert set(result) == {"planned_graph"}
     graph = result["planned_graph"]["graph"]
@@ -735,7 +738,7 @@ async def test_public_service_contracts_accept_planned_call_shapes(tmp_path: Pat
     graph = service.read()
     plan = await service.plan(
         "summarize text",
-        ["extract", "summarize"],
+        ["extract", "summarize"], type="skill",
         language="en",
         progress=progress_events.append,
     )
@@ -1006,7 +1009,7 @@ async def test_service_rejects_fast_planner_failure_instead_of_projecting_no_pla
     await service.build()
 
     with pytest.raises(ValueError, match="Fast planner selected unknown skill IDs"):
-        await service.plan("extract and summarize")
+        await service.plan("extract and summarize", type="skill")
 
 
 @pytest.mark.asyncio

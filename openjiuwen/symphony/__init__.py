@@ -63,8 +63,10 @@ from openjiuwen.symphony.orchestration import (
     OrchestrationPlan,
     OrchestrationProgress,
     OrchestrationService,
+    PlanningContext,
     PlanningInput,
     PrepareArtifactHook,
+    RoutingCapability,
 )
 from openjiuwen.symphony.orchestration.artifacts import GraphArtifactStore
 from openjiuwen.symphony.runtime import EvolutionSubmitResult, SymphonyRuntime
@@ -94,6 +96,8 @@ CapabilityOutput = ArtifactSpec
 _LAZY_MODULES = frozenset({"agent", "discovery", "flow", "retrieval", "shared"})
 
 __all__ = [
+    "PlanningContext",
+    "RoutingCapability",
     "FINGERPRINT_ARTIFACT_FILENAME",
     "FINGERPRINT_SCHEMA_VERSION",
     "GRAPH_EVOLUTION_INPUT_SCHEMA",

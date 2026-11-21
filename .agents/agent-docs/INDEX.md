@@ -14,6 +14,8 @@ generated: true
 
 | 模块 |
 |---|
+| [/Users/xiaoyulin/Documents/Huawei/code/jiuwenswarm/jiuwenswarm/agents/harness/common/rails/symphony](#module-Users-xiaoyulin-Documents-Huawei-code-jiuwenswarm-jiuwenswarm-agents-harness-common-rails-symphony) |
+| [/Users/xiaoyulin/Documents/Huawei/code/jiuwenswarm/jiuwenswarm/runtime/symphony](#module-Users-xiaoyulin-Documents-Huawei-code-jiuwenswarm-jiuwenswarm-runtime-symphony) |
 | [agent_evolving](#module-agent_evolving) |
 | [agent_evolving/trajectory](#module-agent_evolving-trajectory) |
 | [agent_evolving/ttse](#module-agent_evolving-ttse) |
@@ -42,6 +44,22 @@ generated: true
 | [harness_providers](#module-harness_providers) |
 | [symphony](#module-symphony) |
 | [未分类](#module-unclassified) |
+
+<a id="module-Users-xiaoyulin-Documents-Huawei-code-jiuwenswarm-jiuwenswarm-agents-harness-common-rails-symphony"></a>
+
+## /Users/xiaoyulin/Documents/Huawei/code/jiuwenswarm/jiuwenswarm/agents/harness/common/rails/symphony
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [D-20261121-1216-symphony-tier-routing](designs/active/D-20261121-1216-symphony-tier-routing/design.md) | D | Core 内部 T0–T4 分级规划与宿主自动接入 | lin-xiaoyu | — |
+
+<a id="module-Users-xiaoyulin-Documents-Huawei-code-jiuwenswarm-jiuwenswarm-runtime-symphony"></a>
+
+## /Users/xiaoyulin/Documents/Huawei/code/jiuwenswarm/jiuwenswarm/runtime/symphony
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [D-20261121-1216-symphony-tier-routing](designs/active/D-20261121-1216-symphony-tier-routing/design.md) | D | Core 内部 T0–T4 分级规划与宿主自动接入 | lin-xiaoyu | — |
 
 <a id="module-agent_evolving"></a>
 
@@ -588,8 +606,10 @@ generated: true
 
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
+| [D-20261121-1216-symphony-tier-routing](designs/active/D-20261121-1216-symphony-tier-routing/design.md) | D | Core 内部 T0–T4 分级规划与宿主自动接入 | lin-xiaoyu | — |
 | [F_20261120_1607_subagent-graph-inputs](features/F_20261120_1607_subagent-graph-inputs.md) | F | 子智能体编排接口改名与 DAG 缺项提示 | lin-xiaoyu | 无独立 D：用户已明确指定 SDK 方法名、规划状态和宿主对输入的决策职责。 |
 | [F_20261121_1035_symphony-unified-planning](features/F_20261121_1035_symphony-unified-planning.md) | F | Symphony 统一规划入口 | lin-xiaoyu | 无独立 D：依据 2026-11-21 当前会话明确确认的统一规划入口方案实施，没有单独创建 D 文档。 |
+| [F_20261121_1216_symphony-tier-routing](features/F_20261121_1216_symphony-tier-routing.md) | F | Core 内部自动分级规划 | lin-xiaoyu | [D-20261121-1216-symphony-tier-routing](designs/active/D-20261121-1216-symphony-tier-routing/design.md) |
 | [S_02_orchestration-plans](specs/symphony/S_02_orchestration-plans.md) | S | Symphony 规划结果与宿主输入处理 | lin-xiaoyu | — |
 
 <a id="module-unclassified"></a>

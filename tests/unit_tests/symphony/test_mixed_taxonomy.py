@@ -145,7 +145,7 @@ async def test_shared_graph_projects_layers_and_reuses_expert_fingerprints(hando
                 "source_output": "evidence_table", "target_input": "evidence_table",
             }]
 
-        plan = (await runtime.orchestration.plan("use ledger", ["ledger"]))["planned_graph"]["graph"]
+        plan = (await runtime.orchestration.plan("use ledger", ["ledger"], type="skill"))["planned_graph"]["graph"]
         assert plan["nodes"]["ledger"]["metadata"]["type"] == "skill"
 
         model.expert_no_plan = True

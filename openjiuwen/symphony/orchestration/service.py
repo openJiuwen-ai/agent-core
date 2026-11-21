@@ -78,6 +78,9 @@ from openjiuwen.symphony.orchestration.mutations import (
 from openjiuwen.symphony.orchestration.planning.beam import BidirectionalBeamPlanner
 from openjiuwen.symphony.orchestration.planning.expert_tasks import build_expert_task_plan
 from openjiuwen.symphony.orchestration.planning.fast import FastOneShotPlanner
+from openjiuwen.symphony.orchestration.routing import (
+    ExecutionRoute, PlanningContext, RoutingUpgradeRequired, inventory_context, route_task,
+)
 from openjiuwen.symphony.shared.fingerprint import (
     Fingerprint, FingerprintArtifactStore, FingerprintService, coerce_fingerprint,
 )
@@ -331,7 +334,7 @@ class OrchestrationService:
         candidate_ids: Sequence[str] | None = None,
         *,
         # Keep the published planning keyword used by SDK callers.
-        type: Literal["skill", "expert"] = "skill",  # pylint: disable=redefined-builtin
+        type: Literal["auto", "skill", "expert"] = "auto",  # pylint: disable=redefined-builtin
         expert_manifest_paths: Sequence[Path] | None = None,
         language: str = "cn",
         progress: ProgressCallback | None = None,
@@ -343,11 +346,24 @@ class OrchestrationService:
         progress_callback: ProgressCallback | None = None,
         mode: str | None = None,
         inputs: Sequence[PlanningInput | Mapping[str, Any]] = (),
+        context: PlanningContext | Mapping[str, Any] | None = None,
+        _prepare_context: Callable[[ExecutionRoute], Awaitable[dict[str, Any]]] | None = None,
     ) -> OrchestrationPlan:
         """Dispatch Skill workflows and expert task graphs through one public entrypoint."""
-        if type not in {"skill", "expert"}:
+        if type not in {"auto", "skill", "expert"}:
             raise ValueError(f"Unsupported orchestration type: {type}")
         callback = _resolve_progress_callback(progress, progress_callback)
+        if type == "auto":
+            graph_options = (dynamic_overlay, graph_revision, graph_snapshot, task_cluster_id)
+            if any(value is not None for value in graph_options):
+                raise ValueError("Explicit Skill graph options require type=skill.")
+            return await self._plan_automatic(
+                query, context=context, inputs=inputs, language=resolve_orchestration_language(language),
+                mode=mode, progress=callback,
+                expert_manifest_paths=expert_manifest_paths, disabled_capability_ids=disabled_capability_ids,
+                prepare_context=_prepare_context,
+                candidate_ids=candidate_ids,
+            )
         if type == "expert":
             skill_graph_context = (dynamic_overlay, graph_revision, graph_snapshot, task_cluster_id)
             if disabled_capability_ids or any(value is not None for value in skill_graph_context):
@@ -375,6 +391,104 @@ class OrchestrationService:
             inputs=inputs,
         )
 
+    async def _plan_automatic(
+        self, query: str, *, context: PlanningContext | Mapping[str, Any] | None,
+        inputs: Sequence[PlanningInput | Mapping[str, Any]], language: str, mode: str | None,
+        progress: ProgressCallback | None, expert_manifest_paths: Sequence[Path] | None,
+        disabled_capability_ids: Sequence[str] | None,
+        prepare_context: Callable[[ExecutionRoute], Awaitable[dict[str, Any]]] | None,
+        candidate_ids: Sequence[str] | None,
+    ) -> OrchestrationPlan:
+        if not query.strip():
+            raise ValueError("query is required")
+        if mode is not None and mode not in {"fast", "beam"}:
+            raise ValueError(f"Unsupported orchestration mode: {mode}")
+        planning_inputs = PlanningInput.validate_many(inputs)
+        view = (await inventory_context(self.capability_provider, self.expert_inventory)
+                if context is None else PlanningContext.model_validate(context))
+        disabled = set(disabled_capability_ids or ())
+        view = view.model_copy(update={"skills": [item for item in view.skills if item.id not in disabled]})
+        if expert_manifest_paths is not None:
+            visible_experts = set()
+            if self.expert_inventory is not None:
+                paths = {Path(path).resolve() for path in expert_manifest_paths}
+                scan = await asyncio.to_thread(self.expert_inventory.experts, allow_partial=True, manifest_paths=paths)
+                visible_experts = {item.capability_id for item in scan.capabilities}
+            view = view.model_copy(update={"experts": [item for item in view.experts if item.id in visible_experts]})
+        graph_inputs = planning_inputs
+        if any((view.facts, view.constraints, view.required_skill_ids, view.required_expert_ids)):
+            names = {item.name for item in planning_inputs}
+            name = "symphony_routing_context"
+            while name in names:
+                name = f"_{name}"
+            graph_inputs = (*planning_inputs, PlanningInput(name=name, kind="text", value=json.dumps({
+                "facts": view.facts, "constraints": view.constraints,
+                "required_skill_ids": view.required_skill_ids, "required_expert_ids": view.required_expert_ids,
+            }, ensure_ascii=False)))
+        feedback = ""
+        for attempt in range(2 - view.reconsiderations):
+            await _emit(progress, "route_started", request_id=view.request_id)
+            route = await route_task(
+                query, model=self.model, context=view, inputs=planning_inputs,
+                observer=self.model_response_observer, feedback=feedback,
+                candidate_ids=candidate_ids,
+                language=language,
+            )
+            await _emit(progress, "route_completed", execution_route=route.model_dump())
+            if not route.requires_planning:
+                return OrchestrationPlan({"execution_route": {
+                    **route.model_dump(), "reconsiderations": view.reconsiderations + attempt,
+                }})
+            options = await prepare_context(route) if prepare_context is not None else {}
+            try:
+                if route.execution_mode == "skill_graph":
+                    planned = await self.plan_skill_graph(
+                        query, route.skill_ids, language=language, mode=mode, progress=progress,
+                        inputs=graph_inputs, disabled_capability_ids=disabled_capability_ids,
+                        visible_capability_ids=[item.id for item in view.skills],
+                        dynamic_overlay=options.get("dynamic_overlay"), graph_revision=options.get("graph_revision"),
+                        graph_snapshot=options.get("graph_snapshot"), task_cluster_id=options.get("task_cluster_id"),
+                    )
+                else:
+                    planned = await self.plan_subagent_graph(
+                        query, route.expert_ids or None, language=language, mode=mode, progress=progress,
+                        inputs=graph_inputs, expert_manifest_paths=expert_manifest_paths,
+                        visible_capability_ids=[item.id for item in view.experts],
+                        max_tasks=1 if route.tier == "T3" else None,
+                    )
+            except RoutingUpgradeRequired as exc:
+                if attempt or view.reconsiderations:
+                    raise ValueError("Routing could not resolve the required execution tier") from exc
+                feedback = str(exc)
+                await _emit(progress, "route_reconsidered", reason=feedback)
+                continue
+            summary = route.model_dump()
+            summary["reconsiderations"] = view.reconsiderations + attempt
+            graph = planned["planned_graph"]["graph"]
+            if graph["metadata"]["status"] == "no_plan" and not attempt and not view.reconsiderations:
+                feedback = graph["metadata"].get("reason") or "The selected capabilities did not produce a viable plan"
+                await _emit(progress, "route_reconsidered", reason=feedback)
+                continue
+            if graph["metadata"]["status"] == "ready":
+                expert_ids = {node["metadata"].get("expert_id") for node in graph["nodes"].values()}
+                if not set(view.required_expert_ids).issubset(expert_ids):
+                    raise ValueError("Planned graph omits a required installed expert")
+                if route.execution_mode == "skill_graph" and not set(view.required_skill_ids).issubset(graph["nodes"]):
+                    raise ValueError("Planned graph omits a required Skill")
+                if route.execution_mode == "skill_graph":
+                    summary["skill_ids"] = list(graph["nodes"])
+            if graph["metadata"]["status"] == "ready" and len(graph["nodes"]) == 1:
+                summary["initial_tier"] = route.tier
+                summary["tier"] = "T1" if route.execution_mode == "skill_graph" else "T3"
+                if summary["tier"] == "T1":
+                    summary.update(execution_mode="single_skill", requires_planning=False)
+                    summary["skill_ids"] = list(graph["nodes"])
+            return OrchestrationPlan({
+                **planned, "execution_route": summary,
+                "planning_inputs": [item.model_dump(exclude_none=True) for item in graph_inputs],
+            })
+        raise ValueError("Symphony routing did not produce an executable strategy")
+
     async def plan_skill_graph(
         self,
         query: str,
@@ -390,6 +504,7 @@ class OrchestrationService:
         progress_callback: ProgressCallback | None = None,
         mode: str | None = None,
         inputs: Sequence[PlanningInput | Mapping[str, Any]] = (),
+        visible_capability_ids: Sequence[str] | None = None,
     ) -> OrchestrationPlan:
         """Plan a Skill workflow using the published Skill graph."""
         callback = _resolve_progress_callback(progress, progress_callback)
@@ -401,6 +516,7 @@ class OrchestrationService:
         artifacts = filter_disabled_graph_artifacts(
             artifacts,
             disabled_capability_ids,
+            visible_capability_ids=visible_capability_ids,
         )
         planning_mode = mode or self.config.plan.mode
         if planning_mode not in {"fast", "beam"}:
@@ -471,6 +587,8 @@ class OrchestrationService:
         progress: ProgressCallback | None = None,
         mode: str | None = None,
         inputs: Sequence[PlanningInput | Mapping[str, Any]] = (),
+        visible_capability_ids: Sequence[str] | None = None,
+        max_tasks: int | None = None,
     ) -> OrchestrationPlan:
         """Plan task instances for visible installed experts and inline roles."""
         if not query.strip():
@@ -483,6 +601,8 @@ class OrchestrationService:
         planning_inputs = PlanningInput.validate_many(inputs)
         await _emit(progress, "plan_started", query=query)
         artifacts = await asyncio.to_thread(self._load_expert_task_artifacts, expert_manifest_paths)
+        if visible_capability_ids is not None:
+            artifacts = filter_disabled_graph_artifacts(artifacts, None, visible_capability_ids=visible_capability_ids)
         planned_graph = await build_expert_task_plan(
             query,
             artifacts,
@@ -493,6 +613,7 @@ class OrchestrationService:
             candidate_ids=candidate_ids,
             model_response_observer=self.model_response_observer,
             inputs=planning_inputs,
+            max_tasks=max_tasks,
         )
         await _emit(progress, "plan_completed", plan_id=planned_graph["graph"]["id"])
         return OrchestrationPlan({"planned_graph": planned_graph})

@@ -192,7 +192,7 @@ async def test_no_model_discovery_and_fallback_build_with_real_directory(tmp_pat
     with pytest.raises(ValueError, match="requires a model"):
         await runtime.orchestration.build()
     with pytest.raises(ValueError, match="requires a model"):
-        await runtime.orchestration.plan("invoice")
+        await runtime.orchestration.plan("invoice", type="skill")
     await runtime.aclose()
 
 
@@ -478,7 +478,7 @@ async def test_experience_distills_on_third_success_and_planning_can_read_after_
     reader = SymphonyRuntime(GraphModel(), config)
     try:
         assert not reader.flow.enabled
-        planned = (await reader.orchestration.plan("invoice", candidate_ids=[])).to_dict()["planned_graph"]
+        planned = (await reader.orchestration.plan("invoice", type="skill", candidate_ids=[])).to_dict()["planned_graph"]
         assert planned["graph_snapshot"]["observation_revision"] == learned["observation_revision"]
     finally:
         await reader.aclose()
@@ -493,7 +493,7 @@ async def test_empty_or_unknown_candidate_set_never_expands_to_inventory(tmp_pat
     runtime = SymphonyRuntime(model, make_config(tmp_path, orchestration={"plan": {"mode": mode}}))
     await runtime.orchestration.build()
     calls_before = model.calls
-    result = (await runtime.orchestration.plan("invoice", candidate_ids=candidates)).to_dict()["planned_graph"]["graph"]
+    result = (await runtime.orchestration.plan("invoice", type="skill", candidate_ids=candidates)).to_dict()["planned_graph"]["graph"]
     assert result["metadata"]["status"] == "no_plan"
     assert result["nodes"] == {} and result["edges"] == []
     assert model.calls == calls_before
@@ -652,7 +652,7 @@ async def test_cancelled_close_waiter_still_drains_nested_graph_operation_and_fl
     flow._worker_task = asyncio.create_task(release_flow.wait())
 
     async def prepare(_path):
-        await runtime.orchestration.plan("invoice", candidate_ids=[])
+        await runtime.orchestration.plan("invoice", type="skill", candidate_ids=[])
         entered.set()
         await asyncio.Event().wait()
 

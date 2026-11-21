@@ -1,6 +1,21 @@
 """Compose a directory-backed Symphony Runtime with a host-owned native Model."""
 
-from openjiuwen.symphony import SymphonyConfig, SymphonyRuntime
+from openjiuwen.symphony import PlanningContext, SymphonyConfig, SymphonyRuntime
+
+
+async def plan_task(model, config: SymphonyConfig, query: str, context: PlanningContext):
+    """Let Core choose T0-T4; prepare a Skill graph only if that route requires it."""
+    runtime = SymphonyRuntime(model, config)
+    try:
+        async def prepare_skill_graph():
+            status = runtime.orchestration.status()
+            if not status.exists or not status.fresh:
+                await runtime.orchestration.build()
+
+        result = await runtime.orchestration.plan(query, context=context, prepare_skill_graph=prepare_skill_graph)
+        return {"execution_route": result["execution_route"], "planned_graph": result.get("planned_graph")}
+    finally:
+        await runtime.aclose()
 
 
 async def build_and_plan(model, capability_root: str, artifact_root: str, query: str):
