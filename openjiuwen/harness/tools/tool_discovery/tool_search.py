@@ -98,7 +98,9 @@ class ToolSearchTool(Tool):
         if not data["results"]:
             return f'No tools matched "{data["query"]}".'
         sections = [
-            f"## {item['name']}\n{item['description']}\n"
+            f"## {item['name']}\n{item['name']} is already loaded: call it by name, not through tool_call."
+            if item.get("loaded")
+            else f"## {item['name']}\n{item['description']}\n"
             f"Parameters: {json.dumps(item['parameters'], ensure_ascii=False)}"
             for item in data["results"]
         ]
