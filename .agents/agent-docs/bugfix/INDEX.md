@@ -19,6 +19,7 @@ generated: true
 | [core/context_engine](#module-core-context_engine) |
 | [core/controller](#module-core-controller) |
 | [core/foundation/llm](#module-core-foundation-llm) |
+| [core/runner](#module-core-runner) |
 | [core/runner/drunner/dmessage_queue](#module-core-runner-drunner-dmessage_queue) |
 | [core/session](#module-core-session) |
 | [core/session/tracer](#module-core-session-tracer) |
@@ -90,6 +91,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261105_1628_llm-usage-model-name-response-first](core_runtime/B_20261105_1628_llm-usage-model-name-response-first.md) | B | LLM usage.model_name 改为响应体 model 优先 | yidaaichixia | 无独立 D：语义纠错类修复；依据 GenAI 语义约定对 gen_ai.response.model 的定义（生成响应的模型名）与同文件 response_model 既有响应体优先取法，无独立方案取舍需要设计文档。 |
+
+<a id="module-core-runner"></a>
+
+## core/runner
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261029_2019_runner-root-task-group-cross-loop-reuse](B_20261029_2019_runner-root-task-group-cross-loop-reuse.md) | B | Runner 根任务组跨事件循环复用陈旧 owner，stop 抛 attached to a different loop | spacewing | 无独立 D：无前置设计文档，修复源自 Runner 单例跨事件循环缺陷的渐进修复 PR !2323 |
 
 <a id="module-core-runner-drunner-dmessage_queue"></a>
 
