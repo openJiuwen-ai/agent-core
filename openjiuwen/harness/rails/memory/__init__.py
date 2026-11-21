@@ -4,6 +4,7 @@
 from openjiuwen.harness.rails.memory.coding_memory_rail import CodingMemoryRail
 from openjiuwen.harness.rails.memory.external_memory_rail import ExternalMemoryRail
 from openjiuwen.harness.rails.memory.jiuwen_memory_coding_rail import JiuwenMemoryCodingRail
+from openjiuwen.harness.rails.memory.jiuwen_team_memory_rail import JiuwenTeamMemoryRail
 from openjiuwen.harness.rails.memory.jiuwen_memory_rail import JiuwenMemoryRail
 from openjiuwen.harness.rails.memory.memory_rail import MemoryRail
 
@@ -12,5 +13,6 @@ __all__ = [
     "ExternalMemoryRail",
     "JiuwenMemoryRail",
     "JiuwenMemoryCodingRail",
+    "JiuwenTeamMemoryRail",
     "MemoryRail",
 ]

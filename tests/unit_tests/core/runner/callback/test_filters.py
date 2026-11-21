@@ -7,6 +7,7 @@ Tests for callback framework filters.
 
 import asyncio
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +22,7 @@ from openjiuwen.core.runner.callback import (
     RateLimitFilter,
     ValidationFilter,
 )
+from openjiuwen.core.runner.callback import filters as callback_filters
 
 
 @pytest.mark.asyncio
@@ -204,8 +206,10 @@ async def test_circuit_breaker_filter_timeout_allows_retry():
 
 
 @pytest.mark.asyncio
-async def test_circuit_breaker_filter_different_callbacks_tracked_separately():
+async def test_circuit_breaker_filter_different_callbacks_tracked_separately(monkeypatch):
     """Test circuit state is tracked per callback."""
+    # Keep callback isolation independent of CI scheduling delays.
+    monkeypatch.setattr(callback_filters, "time", SimpleNamespace(time=lambda: 1000.0))
     filter_obj = CircuitBreakerFilter(failure_threshold=2, timeout=1.0)
 
     async def callback1():

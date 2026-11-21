@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/rails/` |
-| 最近一次修订日期 | 2026-11-18 |
+| 最近一次修订日期 | 2026-11-21 |
 | 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_21_cua-desktop-subagent.md`、`F_22_cli-jiuwen-memory-rail-mount-and-switch.md` |
 
 ## 范围 / 边界
@@ -183,7 +183,7 @@ author_email: yangzequ1@huawei.com
 AgentModeRail, AskUserPayload, AskUserRail, BaseInterruptRail, BaseSecurityRail,
 CodingMemoryRail, ConfirmInterruptRail, ContextEvolutionRail, DeepAgentRail,
 EvolutionRail, EvolutionInterruptRail, ExternalMemoryRail, HeartbeatRail,
-JiuwenMemoryRail, JiuwenMemoryCodingRail, ModelAnomalyDetectionRail, LspRail, McpRail, MemoryRail, MemberSkillEvolutionRail,
+JiuwenMemoryRail, JiuwenMemoryCodingRail, JiuwenTeamMemoryRail, ModelAnomalyDetectionRail, LspRail, McpRail, MemoryRail, MemberSkillEvolutionRail,
 MultimodalContextSummarizerRail, ARCHIVED_SCREEN_PLACEHOLDER,
 PermissionInterruptRail, ProgressiveToolRail, SafetyPromptRail, SecurityAllow,
 SecurityCheckContext, SecurityDecision, SecurityInterrupt, SecurityReject, SecurityRail,
@@ -284,3 +284,15 @@ class BaseSecurityRail(AgentRail):
 `JiuwenMemoryCodingRail.init` 跳过没有有效名称的工具 schema；工具注册或静态提示词装配异常时，撤回该 owner 的部分注册，Agent 主流程继续运行。卸载单项工具、静态提示词或动态上下文失败，不中断其余清理及最后一个 owner 的排空写入、关闭 Provider。
 
 `JiuwenMemoryRail` 提供静态辅助入口 `resolve_user_text_for_memory`、`is_background_run`、`build_memory_context_block`、`extract_assistant_output`、`unwrap_jiuwenswarm_envelope`，供同层记忆 Rail 共享上下文解析；保留原带下划线名称兼容既有调用，解析与返回语义不变。
+
+## Team 文档记忆
+
+JiuwenTeamMemoryRail 从 openjiuwen.harness.rails 导出，沿用 Coding Rail 的身份参数，增加可选 content_allowed(text)->bool。宿主 Provider 除既有 MemoryProvider 方法外实现 async add_team_memories(items)->int，items 为 label/content，标签限 decision/lesson/member/context。
+
+每位回答者独立实例。正常非空回合执行普通 sync_turn 和专用条目抽取，独立处理失败；无回答者模型不提取团队结论。模型只提交 confirmed=true 的条目，不直接写文件。conclude_round(material, model=...) 供 Leader 会话释放前收口；drain/aclose 包含在途收口任务。Core 不决定项目、团队键或共享 Runtime。
+
+团队抽取调用 LLM 前检查 Provider 的 add_team_memories 是否可调用；缺失或不可调用时跳过团队抽取，每个 Rail 仅告警一次，普通 sync_turn 保持可用。不向通用 MemoryProvider 添加默认空写入实现。
+
+Leader 收口材料使用 TeamAgentSpec.memory.timezone_offset_hours 渲染消息时间，与旧记忆 Manager 是否启用无关；未提供记忆配置时沿用 TeamMemoryConfig 默认值（UTC+8）。数据库中的原始时间戳不变。
+
+成员回合内两条抽取任务并发执行，共用 Coding Rail 的 130 秒外层上限；普通异常互不取消，超时会取消仍未完成的任务，已完成的写入不撤销。成员回合与团队收口均保留抽取，允许产生重复结论；Swarm 宿主选择 Jiuwen 时关闭旧 TeamMemoryManager。
