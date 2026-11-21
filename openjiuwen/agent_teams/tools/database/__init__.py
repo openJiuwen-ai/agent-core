@@ -106,9 +106,12 @@ class TeamDatabase:
         self.session_local: Optional[async_sessionmaker] = None
         self.read_engine: Optional[AsyncEngine] = None
         self.read_session_local: Optional[async_sessionmaker] = None
-        # One DbSessions (one process-wide write lock) shared by every DAO;
-        # bind-time session-table DDL also runs through it so DDL serialises
-        # with DAO writes instead of bypassing the lock (engine.begin()).
+        # One DbSessions shared by every DAO. On SQLite its process-wide write
+        # lock serialises every write (and bind-time session-table DDL runs
+        # through it so DDL serialises with DAO writes instead of bypassing
+        # the lock via engine.begin()). On PostgreSQL / MySQL the write lock
+        # is skipped (the DB is the write arbiter) and a separate ``ddl_lock``
+        # serialises DDL with itself; see DbSessions.__init__.
         self._sessions: Optional[DbSessions] = None
         self._initialized = False
         # Set by close(); a closed database is never reopened (see close()).
@@ -166,14 +169,22 @@ class TeamDatabase:
 
     async def _wire_up(self, engines: SqlEngines) -> None:
         """Create the shared ``DbSessions`` and DAOs on freshly built engines."""
-        # One DbSessions (one write lock) shared by every DAO: SQLite's
-        # write lock is database-wide, so all DAO tables must serialise
-        # writes through the same lock. Reads go to the reader factory
-        # (a separate pool for file-backed SQLite) — see DbSessions.
-        sessions = DbSessions(engines.write_session_local, engines.read_session_local)
-        # Bind-time session-table DDL runs under the same write lock: the
-        # engine-level variant (``engine.begin()``) bypassed it and could
-        # hold both write-pool connections during concurrent binds.
+        # One DbSessions shared by every DAO: SQLite's write lock is
+        # database-wide, so all DAO tables serialise writes through the same
+        # process-level lock. Reads go to the reader factory (a separate pool
+        # for file-backed SQLite) — see DbSessions. For PostgreSQL / MySQL
+        # the process-level write lock is skipped (native write concurrency);
+        # DDL helpers additionally take the DbSessions ``ddl_lock`` so DDL
+        # serialises with itself on all backends — see DbSessions.__init__.
+        sessions = DbSessions(
+            engines.write_session_local,
+            engines.read_session_local,
+            db_type=self.config.db_type,
+        )
+        # Bind-time session-table DDL runs under the same write lock **and**
+        # the DDL lock: the engine-level variant (``engine.begin()``) bypassed
+        # both and could hold both write-pool connections during concurrent
+        # binds.
         if get_session_id():
             await _create_cur_session_tables(sessions)
         # message/task ``content`` spills to session files (DB keeps the

@@ -771,13 +771,25 @@ class MemberDao:
         isolation: Optional[str] = None,
         worktree_path: Optional[str] = None,
     ) -> bool:
-        """Update worktree isolation metadata for a member."""
+        """Update worktree isolation metadata for a member.
+
+        Uses ``SELECT ... FOR UPDATE`` (``with_for_update()``) so two
+        concurrent updates to the same member's ``options`` JSON serialise
+        on the row lock: one caller's read-modify-write of ``options``
+        commits before the other's read, so the second caller sees the
+        first's changes instead of clobbering them (lost update). On SQLite
+        the dialect strips ``FOR UPDATE`` (the process-level write lock is
+        the serialiser); on PostgreSQL / MySQL the row lock is the
+        serialiser.
+        """
         async with self._sessions.write() as session:
             result = await session.execute(
-                select(TeamMember).where(
+                select(TeamMember)
+                .where(
                     TeamMember.member_name == member_name,
                     TeamMember.team_name == team_name,
                 )
+                .with_for_update()
             )
             member = result.scalar_one_or_none()
             if not member:

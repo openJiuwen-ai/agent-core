@@ -19,7 +19,7 @@ import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1298,7 +1298,18 @@ class TaskDao:
             return task
 
     async def update_task_status(self, task_id: str, status: str) -> bool:
-        """Update task status."""
+        """Update task status.
+
+        Uses a conditional ``UPDATE ... WHERE task_id = ? AND status = ?``
+        (CAS): the row is only moved if its current status matches the one
+        we read, so a concurrent writer that flipped the status between our
+        read and write causes ``rowcount == 0`` and we return ``False``
+        instead of clobbering it (lost update). The transition validity is
+        checked in Python first so an illegal transition still returns
+        ``False`` without touching the row. ``is_valid_transition`` is a
+        pure function over the status enum, so it is safe to run on the
+        read-back status before the CAS.
+        """
         team_task_model = _get_task_model()
         task_dependency_model = _get_task_dependency_model()
         async with self._sessions.write() as session:
@@ -1322,8 +1333,24 @@ class TaskDao:
                 return False
 
             now = get_current_time()
-            task.status = status
-            task.updated_at = now
+            # CAS: only move the row if its status is still what we read.
+            # A concurrent writer that flipped it between the SELECT above
+            # and this UPDATE yields rowcount == 0 — treat as a lost race
+            # rather than clobbering the new state.
+            cas_result = await session.execute(
+                update(team_task_model)
+                .where(
+                    team_task_model.task_id == task_id,
+                    team_task_model.status == task.status,
+                )
+                .values(status=status, updated_at=now)
+            )
+            if cas_result.rowcount == 0:
+                team_logger.warning(
+                    "Task %s status changed concurrently; CAS update skipped",
+                    task_id,
+                )
+                return False
 
             if status == TaskStatus.COMPLETED.value:
                 team_logger.info("Task %s completed at %s", task_id, now)
@@ -1646,16 +1673,24 @@ class TaskDao:
             return [row[0] for row in result.all()]
 
     async def delete_task(self, task_id: str) -> bool:
-        """Delete a task."""
+        """Delete a task.
+
+        Uses a single conditional ``DELETE ... WHERE task_id = ?`` and checks
+        ``rowcount`` rather than a SELECT-then-``session.delete`` read-modify-
+        write: the conditional DELETE is atomic at the row level on every
+        backend, so a concurrent caller that already deleted (or moved) the
+        row yields ``rowcount == 0`` and we return ``False`` instead of
+        re-reading a stale row and re-issuing a delete.
+        """
         team_task_model = _get_task_model()
         async with self._sessions.write() as session:
-            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
-            task = result.scalar_one_or_none()
-            if not task:
+            result = await session.execute(
+                delete(team_task_model).where(team_task_model.task_id == task_id)
+            )
+            deleted = (result.rowcount or 0) == 1
+            if not deleted:
                 team_logger.debug("Task %s not found for deletion", task_id)
                 return False
-
-            await session.delete(task)
             await session.commit()
             team_logger.info("Task %s deleted", task_id)
             return True
