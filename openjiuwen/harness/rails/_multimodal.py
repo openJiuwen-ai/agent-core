@@ -35,16 +35,22 @@ def _resolve_image_multimodal(
     if explicit_value is not None:
         return explicit_value
 
-    configured_value = getattr(deep_config, "enable_read_image_multimodal", None)
-    if isinstance(configured_value, bool):
-        return configured_value
-
     model = getattr(deep_config, "model", None)
 
-    # Per-model declaration takes priority over the probe cache.
+    # Per-model declaration takes priority over the global react config: it is
+    # the more specific statement about *this* model. A ``supports_vision=False``
+    # entry must win over a blanket ``enable_read_image_multimodal=True``
+    # (which would otherwise send image bytes to a model that cannot accept
+    # them and fail the request), and vice versa. This also matches the
+    # ``interface_deep._native_image_input_status`` resolution order so the
+    # server-side notice and the actual image injection never disagree.
     vision = _model_supports_vision(model)
     if vision is not None:
         return vision
+
+    configured_value = getattr(deep_config, "enable_read_image_multimodal", None)
+    if isinstance(configured_value, bool):
+        return configured_value
 
     return get_cached_image_support(model) is True
 
@@ -58,8 +64,8 @@ def should_enable_read_image_multimodal(
     Resolution priority (highest first):
 
     1. *explicit_value* (caller-provided override).
-    2. ``DeepAgentConfig.enable_read_image_multimodal`` (global react config).
-    3. ``ModelClientConfig.supports_vision`` (per-model declaration).
+    2. ``ModelClientConfig.supports_vision`` (per-model declaration).
+    3. ``DeepAgentConfig.enable_read_image_multimodal`` (global react config).
     4. Probe cache (runtime detection).
 
     Dedicated vision tools are intentionally irrelevant: native input and
