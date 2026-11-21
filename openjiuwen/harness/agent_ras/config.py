@@ -103,6 +103,33 @@ class LlmThinkingLoopConfig(BaseModel):
             "applies; 0 = unlimited"
         ),
     )
+    # semantic_deadlock 防误判（semantic_deadlock 缺陷，2026-11）：
+    # ① 置信度门控——判官置信度不足的死锁判定降级为仅观察（不软停、不恢复）；
+    # ② 推进豁免——判官标死锁但程序化证据显示有推进（has_progress + novelty
+    #    双门控）时同样豁免，与 overthinking 豁免共享计数与上限约束。
+    semantic_deadlock_min_confidence: float = Field(
+        default=0.8, ge=0.0, le=1.0,
+        description=(
+            "Min L3 judge confidence for a semantic_deadlock verdict to "
+            "trigger recovery; below this the verdict is observe-only. "
+            "Verdicts without a parseable confidence value are not gated."
+        ),
+    )
+    semantic_deadlock_progress_exempt: bool = Field(
+        default=True,
+        description=(
+            "Exempt semantic_deadlock verdicts that show progress evidence "
+            "(shares the overthinking exemption caps/counters)"
+        ),
+    )
+    semantic_eval_max_consecutive_failures: int = Field(
+        default=3, ge=0,
+        description=(
+            "Circuit breaker: consecutive L3 judge invocation failures after "
+            "which further semantic evals are disabled for the channel "
+            "(L1/L2 local detection remains active); 0 = never break"
+        ),
+    )
 
 
 class DetectorsConfig(BaseModel):

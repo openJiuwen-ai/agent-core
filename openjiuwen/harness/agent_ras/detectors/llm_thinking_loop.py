@@ -357,6 +357,11 @@ class _PlanExecutionChannel:
     # overthinking 推进豁免状态（随 channel 生命周期，即每模型调用重置）
     seen_clause_keys: frozenset[str] = frozenset()
     progress_exempt_count: int = 0
+    # L3 判官连续失败熔断（P2 观测性）：判官不可达时快速失败会以增量节奏
+    # 反复重试（曾观测到一次任务内 13 次在途调用），烧钱且无告警。连续失败
+    # 达阈值后熔断本 channel 的后续 L3 送审，仅保留 L1/L2 本地检测。
+    consecutive_eval_failures: int = 0
+    eval_disabled: bool = False
 
 
 @dataclass
@@ -712,7 +717,7 @@ class LlmThinkingLoopDetector:
         chunk_type: str,
         member: str,
     ) -> Optional[Anomaly]:
-        if not self._config.semantic_content_enabled or ch.eval_in_flight:
+        if not self._config.semantic_content_enabled or ch.eval_in_flight or ch.eval_disabled:
             return None
 
         incremental_len = len(ch.buffer) - ch.last_evaluated_pos
@@ -788,6 +793,7 @@ class LlmThinkingLoopDetector:
                 timeout=float(SKILL_TIMEOUT_SECONDS),
             )
             invoke_ms = int((time.monotonic() - t1) * 1000)
+            ch.consecutive_eval_failures = 0
             if isinstance(result, dict):
                 skill_result = result
             abnormal = self._parse_skill_abnormal(skill_result)
@@ -834,12 +840,28 @@ class LlmThinkingLoopDetector:
                     )
         except Exception as exc:
             total_ms = int((time.monotonic() - t0) * 1000)
+            ch.consecutive_eval_failures += 1
+            max_failures = self._config.semantic_eval_max_consecutive_failures
+            if 0 < max_failures <= ch.consecutive_eval_failures:
+                ch.eval_disabled = True
+                logger.error(
+                    "[LlmThinkingLoopDetector] L3 semantic eval CIRCUIT BREAKER OPEN "
+                    "member=%s consecutive_failures=%d/%d "
+                    "chunk_type=%s total_chars=%d — further L3 evals disabled for "
+                    "this channel (L1/L2 local detection remains active)",
+                    member,
+                    ch.consecutive_eval_failures,
+                    max_failures,
+                    chunk_type,
+                    ch.total_length,
+                )
             logger.warning(
                 "[LlmThinkingLoopDetector] semantic evaluation failed "
-                "member=%s error_type=%s total_ms=%d",
+                "member=%s error_type=%s total_ms=%d consecutive_failures=%d",
                 member,
                 type(exc).__name__,
                 total_ms,
+                ch.consecutive_eval_failures,
                 exc_info=True,
             )
             abnormal = False
@@ -868,18 +890,54 @@ class LlmThinkingLoopDetector:
 
         primary_fault = str(skill_result.get("primary_fault") or "semantic_deadlock")
 
-        # overthinking 推进豁免：有推进证据且未超上限 → 仅观察，不软停
-        if primary_fault == "overthinking" and self._exempt_overthinking_progress(
-            ch, skill_result, novelty,
+        # semantic_deadlock 置信度门控（P0）：判官置信度不足的死锁判定降级为
+        # 仅观察。历史误判事件中「长但有推进的思考」被误标死锁时置信度仅
+        # 0.6-0.7；不门控时这些低把握判定会直接进入恢复链（软停 + 通知污染）。
+        # 置信度缺失/不可解析时不门控（保持既有行为，避免拦截老版判官）。
+        raw_confidence = skill_result.get("confidence")
+        try:
+            verdict_confidence = float(raw_confidence)
+        except (TypeError, ValueError):
+            verdict_confidence = None
+        if (
+            primary_fault == "semantic_deadlock"
+            and verdict_confidence is not None
+            and verdict_confidence < self._config.semantic_deadlock_min_confidence
+        ):
+            ch.eval_in_flight = False
+            ch.last_evaluated_pos = trigger_buffer_len
+            ch.last_evaluated_at = time.monotonic()
+            logger.warning(
+                "[LlmThinkingLoopDetector] L3 semantic_deadlock BELOW confidence "
+                "gate, observe-only member=%s chunk_type=%s confidence=%.2f "
+                "min_confidence=%.2f total_chars=%d novelty=%.2f has_progress=%s "
+                "rationale=%s",
+                member,
+                chunk_type,
+                verdict_confidence,
+                self._config.semantic_deadlock_min_confidence,
+                ch.total_length,
+                novelty,
+                skill_result.get("has_progress"),
+                str(skill_result.get("rationale") or "")[:200],
+            )
+            return
+
+        # 推进豁免（overthinking + semantic_deadlock）：有推进证据且未超上限
+        # → 仅观察，不软停。对 semantic_deadlock 而言，判官标死锁但程序化证据
+        # （has_progress + novelty 双门控）显示有推进，即为误判的强信号。
+        if primary_fault in ("overthinking", "semantic_deadlock") and self._exempt_progress(
+            ch, skill_result, novelty, fault=primary_fault,
         ):
             ch.progress_exempt_count += 1
             ch.eval_in_flight = False
             ch.last_evaluated_pos = trigger_buffer_len
             ch.last_evaluated_at = time.monotonic()
             logger.warning(
-                "[LlmThinkingLoopDetector] L3 overthinking EXEMPTED (progress) "
+                "[LlmThinkingLoopDetector] L3 %s EXEMPTED (progress) "
                 "member=%s chunk_type=%s exempt=%d/%d "
                 "total_chars=%d novelty=%.2f has_progress=%s confidence=%s",
+                primary_fault,
                 member,
                 chunk_type,
                 ch.progress_exempt_count,
@@ -945,19 +1003,30 @@ class LlmThinkingLoopDetector:
             )
             ch.eval_in_flight = False
 
-    def _exempt_overthinking_progress(
+    def _exempt_progress(
         self,
         ch: _PlanExecutionChannel,
         skill_result: dict[str, Any],
         novelty: float,
+        *,
+        fault: str = "overthinking",
     ) -> bool:
-        """判断 overthinking 判定是否可按「有推进」豁免软停。
+        """判断 overthinking / semantic_deadlock 判定是否可按「有推进」豁免软停。
 
-        双重门控：评审技能显式 ``has_progress`` + 窗口子句新颖度程序化证据；
-        并受连续豁免次数与累计字符上限约束（防伪推进/无界发散）。
+        双重门控：评审技能显式 ``has_progress``（SKILL.md 契约——overthinking 与
+        semantic_deadlock 均必填，判官须如实输出推进观察，即使与死锁判定矛盾）
+        + 窗口子句新颖度程序化证据；并受连续豁免次数与累计字符上限约束
+        （防伪推进/无界发散）。
+        对 semantic_deadlock：判官标死锁但程序化证据显示有推进，说明判定
+        自相矛盾（死锁的定义即无推进），按误判豁免。
+        fail-safe：老版判官对 deadlock 不输出 has_progress（旧契约）时本方法
+        返回 False 不豁免，由置信度门控兜底。
         """
         cfg = self._config
-        if not cfg.overthinking_progress_exempt:
+        if fault == "semantic_deadlock":
+            if not cfg.semantic_deadlock_progress_exempt:
+                return False
+        elif not cfg.overthinking_progress_exempt:
             return False
         if cfg.overthinking_progress_exempt_max <= 0:
             return False
