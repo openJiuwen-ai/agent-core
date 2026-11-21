@@ -123,9 +123,9 @@ _LEGACY_READ_FILE_PARAMS: Dict[str, Dict[str, str]] = {
 READ_FILE_PARAMS: Dict[str, Dict[str, str]] = {
     "file_path": {"cn": "要读取的文件绝对路径", "en": "The absolute path to the file to read"},
     "offset": {
-        "cn": "开始读取的行号。仅当文件太大、无法一次读取，或已知道要读取的位置时提供。",
+        "cn": "开始读取的行号（默认 1，即从第 1 行开始）。仅当文件太大、无法一次读取，或已知道要读取的位置时提供。",
         "en": (
-            "The line number to start reading from. "
+            "The line number to start reading from (default 1, i.e. the first line). "
             "Only provide if the file is too large to read at once or you already know the needed location."
         ),
     },
