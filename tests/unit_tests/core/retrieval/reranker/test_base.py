@@ -5,6 +5,7 @@ Reranker model abstract base class test cases
 
 import pytest
 
+from openjiuwen.core.foundation.store.base_reranker import RerankerConfig
 from openjiuwen.core.retrieval.common.document import Document
 from openjiuwen.core.retrieval.reranker.base import Reranker
 
@@ -151,3 +152,27 @@ class TestReranker:
         docs = ["doc1"]
         result = model.rerank_sync(query, docs, instruct="Custom instruction")
         assert "doc1" in result
+
+
+class TestRerankerConfigPopulation:
+    """issue #2434: alias 不能让按字段名传值被静默丢弃"""
+
+    @staticmethod
+    def test_field_name_is_accepted():
+        config = RerankerConfig(model_name="bge-reranker", api_base="http://localhost:8000")
+        assert config.model_name == "bge-reranker"
+
+    @staticmethod
+    def test_alias_is_still_accepted():
+        config = RerankerConfig(model="bge-reranker", api_base="http://localhost:8000")
+        assert config.model_name == "bge-reranker"
+
+    @staticmethod
+    def test_model_name_reaches_the_request_payload():
+        """配置值要真的流到请求体里，不能只是个摆设"""
+        from openjiuwen.core.retrieval.reranker.standard_reranker import StandardReranker
+
+        config = RerankerConfig(model_name="bge-reranker", api_base="http://localhost:8000")
+        reranker = StandardReranker(config)
+        params = reranker._request_params(query="q", instruct=False)
+        assert params["model"] == "bge-reranker"

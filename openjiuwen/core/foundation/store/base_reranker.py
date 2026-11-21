@@ -10,11 +10,16 @@ from abc import ABC, abstractmethod
 from typing import Any
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RerankerConfig(BaseModel):
     """Reranker model configuration"""
+
+    # `model_name` carries an alias so configs written for the wire format
+    # ("model") round-trip. Without this, passing `model_name=` is accepted by
+    # pydantic and silently dropped, leaving the name empty.
+    model_config = ConfigDict(populate_by_name=True)
 
     api_key: str = Field(default="")
     api_base: str = Field(min_length=1)
