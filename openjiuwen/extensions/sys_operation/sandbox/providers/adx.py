@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import posixpath
@@ -322,6 +323,22 @@ class AdxHttpError(RuntimeError):
         self.status = status
 
 
+def _local_rootfs(extra: dict[str, Any]) -> dict[str, str] | None:
+    rootfs = extra.get("rootfs")
+    if isinstance(rootfs, str) and rootfs.lstrip().startswith("{"):
+        rootfs = json.loads(rootfs)
+    if not isinstance(rootfs, dict) or rootfs.get("type") != "local":
+        return None
+    path = rootfs.get("path")
+    if not isinstance(path, str) or not path.startswith("/"):
+        raise ValueError("ADX Local rootfs requires an absolute node path")
+    if any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in path) or any(
+        part in (".", "..") for part in path.split("/")
+    ):
+        raise ValueError("ADX Local rootfs cannot contain traversal or control characters")
+    return {"type": "local", "path": path}
+
+
 def _normalize_rootfs(extra: dict[str, Any]) -> str:
     """Build the rootfs JSON for the ADX create request.
 
@@ -372,13 +389,9 @@ def _adx_create_body(extra: dict[str, Any], executor: str) -> dict[str, Any]:
     """Build the native create fields while accepting legacy rootfs configuration."""
     rootfs = _normalize_rootfs(extra)
     rootfs_fields = json.loads(rootfs) if rootfs.lstrip().startswith("{") else {}
-    template = extra.get("rootfs_template")
-    if template:
-        if extra.get("image") or extra.get("rootfs"):
-            raise ValueError("rootfs_template conflicts with image or rootfs")
-        rootfs = {"type": "template", "name": template}
+    local_rootfs = _local_rootfs(extra)
     body: dict[str, Any] = {
-        "rootfs": rootfs,
+        "rootfs": local_rootfs if local_rootfs is not None else rootfs,
         "runtime": extra.get("runtime") or rootfs_fields.get("runtime") or _normalize_executor(executor),
         "cpu": int(extra.get("cpu", DEFAULT_DOCKER_CPU)),
         "memory": int(extra.get("memory", DEFAULT_DOCKER_MEMORY)),
@@ -648,10 +661,14 @@ class _AdxProviderMixin:
 
     def _shared_scope_key(self) -> str:
         isolation_key = getattr(self.endpoint, "isolation_key", None)
-        return build_adx_shared_scope_key(
+        key = build_adx_shared_scope_key(
             self._base_url(),
             isolation_key if isinstance(isolation_key, str) else None,
         )
+        rootfs = _local_rootfs(self._launcher_extra_params())
+        if rootfs is not None:
+            key += "|rootfs=" + hashlib.sha256(rootfs["path"].encode()).hexdigest()
+        return key
 
     @classmethod
     def _lifecycle_lock_for(cls, shared_key: str) -> threading.RLock:
@@ -782,17 +799,10 @@ class _AdxProviderMixin:
         raise RuntimeError("adx sandbox recreate exhausted without an error")
 
     @classmethod
-    def pop_cached_instance(cls, shared_key: str) -> Optional[Tuple[str, str, Dict[str, str]]]:
-        with cls._lifecycle_lock_for(shared_key):
-            with cls._shared_lock:
-                return cls._shared_instances.pop(shared_key, None)
-
-    @classmethod
-    def clear_shared_for_base_url(cls, base_url: str) -> List[Tuple[str, str, Dict[str, str]]]:
-        prefix = f"{str(base_url).rstrip('/')}|"
-        normalized = str(base_url).rstrip("/")
+    def clear_shared_for_scope(cls, scope: str, *, suffix_prefix: str = "|") -> List[Tuple[str, str, Dict[str, str]]]:
+        prefix = scope + suffix_prefix
         with cls._shared_lock:
-            keys = [k for k in cls._shared_instances if k == normalized or k.startswith(prefix)]
+            keys = [k for k in cls._shared_instances if k == scope or k.startswith(prefix)]
         removed: List[Tuple[str, str, Dict[str, str]]] = []
         for key in sorted(keys):
             with cls._lifecycle_lock_for(key):
@@ -982,11 +992,9 @@ async def delete_adx_sandbox(
     """Delete cached ADX environments on sysoperation teardown."""
     entries: List[Tuple[str, str, Dict[str, str]]] = []
     if shared_key:
-        popped = _AdxProviderMixin.pop_cached_instance(shared_key)
-        if popped is not None:
-            entries.append((shared_key, popped[0], popped[2]))
+        entries.extend(_AdxProviderMixin.clear_shared_for_scope(shared_key, suffix_prefix="|rootfs="))
     elif base_url:
-        entries.extend(_AdxProviderMixin.clear_shared_for_base_url(base_url))
+        entries.extend(_AdxProviderMixin.clear_shared_for_scope(base_url.rstrip("/")))
 
     deleted: list[str] = []
     for key, environment_id, headers in entries:

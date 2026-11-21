@@ -90,7 +90,7 @@ class PreDeployLauncherConfig(SandboxLauncherConfig)
 * **on_stop**(Literal["delete", "pause", "keep"], 可选)：沙箱停止时的行为策略。默认值：`"delete"`。
 * **idle_ttl_seconds**(int, 可选)：空闲超时时间（秒）。默认值：`None`。
 
-通过 ADX Ingress 访问时，在 `SandboxGatewayConfig.auth_headers` 中提供 `Authorization: Bearer …`。在 `extra_params` 中通过 `runtime` 指定运行时，如 `"runsc"`，并提供 `image` 或已注册的 `rootfs_template`。`mounts` 和 `network` 支持 ADX 创建请求格式。文件上传、下载和字节流使用 ADX 原生二进制接口。单文件传输不复制源文件权限。追加时在 `file.write` 请求中传入 `append=true`。原子条件写入暂不支持。
+通过 ADX Ingress 访问时，在 `SandboxGatewayConfig.auth_headers` 中提供 `Authorization: Bearer …`。在 `extra_params` 中通过 `runtime` 指定运行时，如 `"runsc"`，并提供 `image` 或已准备好的节点本地 `rootfs`，例如 `{"type": "local", "path": "/objects/tool/rootfs"}`。本地路径须为执行节点可访问的绝对路径。`mounts` 和 `network` 支持 ADX 创建请求格式。文件上传、下载和字节流使用 ADX 原生二进制接口。单文件传输不复制源文件权限。追加时在 `file.write` 请求中传入 `append=true`。原子条件写入暂不支持。
 
 **样例**：
 

@@ -243,7 +243,7 @@ def test_adx_http_request_and_response_contract():
 
     native = _adx_create_body({
         "runtime": "runsc",
-        "rootfs_template": "tool-runtime",
+        "rootfs": {"type": "local", "path": "/objects/tool/rootfs"},
         "cpu_limit": 2000,
         "mem_limit": 2048,
         "user": 1001,
@@ -253,7 +253,7 @@ def test_adx_http_request_and_response_contract():
         "env": {"MODE": "test"},
     }, "supervisor")
     assert native["runtime"] == "runsc"
-    assert native["rootfs"] == {"type": "template", "name": "tool-runtime"}
+    assert native["rootfs"] == {"type": "local", "path": "/objects/tool/rootfs"}
     assert native["cpu_limit"] == 2000 and native["mem_limit"] == 2048
     assert (native["user"], native["group"]) == ("1001", "1002")
     assert native["mounts"][0]["host_path"] == "/shared/workspace"

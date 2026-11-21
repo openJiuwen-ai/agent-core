@@ -202,7 +202,7 @@ async def test_sys_operation_uses_the_adx_http_provider(monkeypatch, sandbox_typ
         body = await request.json()
         if sandbox_type == "adx-environment":
             assert body["runtime"] == "runsc"
-            assert body["rootfs"] == {"type": "template", "name": "tool-runtime"}
+            assert body["rootfs"] == {"type": "local", "path": "/objects/tool/rootfs"}
             assert body["network"] == {"blockNetwork": True}
             assert body["restartPolicy"] == {"maxAttempts": 2}
             assert body["createTimeoutSeconds"] == 60
@@ -290,7 +290,7 @@ async def test_sys_operation_uses_the_adx_http_provider(monkeypatch, sandbox_typ
             monkeypatch.setenv("TEST_ADX_PROVIDER_TOKEN", "local-test")
             extra.clear()
             extra.update(
-                runtime="runsc", rootfs_template="tool-runtime", network={"blockNetwork": True},
+                runtime="runsc", rootfs={"type": "local", "path": "/objects/tool/rootfs"}, network={"blockNetwork": True},
                 restart_policy={"maxAttempts": 2}, create_timeout=60, schedule_timeout=20,
                 token_env="TEST_ADX_PROVIDER_TOKEN",
             )
@@ -363,3 +363,31 @@ async def test_sys_operation_uses_the_adx_http_provider(monkeypatch, sandbox_typ
             await runner.cleanup()
     assert requests.count("create") == 1
     assert requests[-1] == "delete"
+
+
+@pytest.mark.parametrize("path", ["relative", "/objects/../rootfs", "/objects/abc\n"])
+def test_reject_invalid_local_rootfs_path(path):
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx import _adx_create_body
+
+    with pytest.raises(ValueError, match="Local rootfs"):
+        _adx_create_body({"rootfs": {"type": "local", "path": path}}, "supervisor")
+
+
+@pytest.mark.asyncio
+async def test_local_rootfs_variants_are_cleaned_by_the_original_scope(monkeypatch):
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    base = "https://example.test"
+    scope = adx.build_adx_shared_scope_key(base, "alice")
+    first, second, unrelated = (scope + "|rootfs=first", scope + "|rootfs=second", base + "|alice-extra")
+    instances = {first: ("one", "runsc", {}), second: ("two", "runsc", {}), unrelated: ("other", "runsc", {})}
+    monkeypatch.setattr(adx._AdxProviderMixin, "_shared_instances", instances)
+    deleted = []
+
+    def delete(base_url, environment_id, headers):
+        deleted.append((base_url, environment_id))
+
+    monkeypatch.setattr(adx, "_delete_environment", delete)
+    assert await adx.delete_adx_sandbox(shared_key=scope) == [first, second]
+    assert deleted == [(base, "one"), (base, "two")]
+    assert set(instances) == {unrelated}
