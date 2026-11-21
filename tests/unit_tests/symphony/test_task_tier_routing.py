@@ -17,7 +17,7 @@ _LABELLED_CASES = json.loads((Path(__file__).parent / "fixtures" / "task_tier_ca
 
 def _context(**changes):
     return PlanningContext.model_validate({
-        "request_id": "request-a", "facts": "Confirmed facts already in this conversation.",
+        "request_id": "request-a",
         "skills": [{"id": "read"}, {"id": "write"}],
         "tools": [{"id": "search"}, {"id": "read_file"}],
         "experts": [{"id": "reviewer"}], **changes,
@@ -29,10 +29,12 @@ class _Model:
         self.route = route
         self.task_count = task_count
         self.requests = []
+        self.system_prompts = []
 
     async def invoke(self, messages, **kwargs):
         data = json.loads(messages[-1]["content"])
         self.requests.append(data)
+        self.system_prompts.append(messages[0]["content"])
         if data.get("operation") == "task_routing":
             response = self.route(data) if callable(self.route) else self.route
         elif "experts" in data:
@@ -70,12 +72,20 @@ async def test_auto_routes_without_building_or_planning(tmp_path, route, strateg
     service = _service(tmp_path, model)
     planner = service if target == "service" else SymphonyGraphEngine(service, unavailable_reason="No Skill graph")
     events = []
-    result = await planner.plan("Complete the task", context=_context(), progress=events.append)
+    candidates = [identifier
+                  for kind in ("skill", "expert", "tool")
+                  for identifier in route.get(f"{kind}_ids", [])]
+    result = await planner.plan("Complete the task", candidates, context=_context(), progress=events.append)
     assert result["execution_route"]["strategy"] == strategy
     assert "planned_graph" not in result
     assert len(model.requests) == 1
     assert not (tmp_path / "graph").exists()
     assert [item.event for item in events] == ["route_started", "route_completed"]
+    supplied = model.requests[0]["context"]
+    assert {item["id"]
+            for kind in ("skills", "experts", "tools")
+            for item in supplied[kind]} == set(candidates)
+    assert set(supplied) == {"skills", "experts", "tools", "context_complete"}
 
 
 @pytest.mark.asyncio
@@ -126,7 +136,10 @@ async def test_skill_workflow_prepares_graph_after_routing_and_filters_visibilit
         assert len(model.requests) == 1
         prepared.append(True)
 
-    result = await engine.plan("Read then write", context=_context(), prepare_skill_graph=prepare)
+    result = await engine.plan(
+        "Read then write", ["read", "write"],
+        context=_context(skills=[{"id": key} for key in ["read", "write", "hidden"]]), prepare_skill_graph=prepare,
+    )
     assert prepared == [True]
     assert result["execution_route"]["strategy"] == "capability_workflow"
     assert {item["id"] for item in model.requests[-1]["skills"]} == {"read", "write"}
@@ -142,10 +155,20 @@ async def test_skill_workflow_prepares_graph_after_routing_and_filters_visibilit
 ])
 async def test_invalid_decisions_get_one_repair_then_fail(tmp_path, invalid, context):
     model = _Model(invalid)
+    view = _context(**context)
+    candidates = None
+    if invalid.get("skill_ids"):
+        view = _context(skills=[{"id": "read"}, {"id": "hidden"}])
+        candidates = ["read"]
     with pytest.raises(ValueError, match="invalid decision"):
-        await _service(tmp_path, model).plan("Task", context=_context(**context))
+        await _service(tmp_path, model).plan("Task", candidates, context=view)
     assert len(model.requests) == 2
     assert "validation_feedback" in model.requests[-1]
+    if not view.allow_experts:
+        assert "single_expert" not in model.system_prompts[0]
+        assert "multi_expert" not in model.system_prompts[0]
+        assert "allow_experts" not in model.requests[0]["context"]
+        assert "experts" not in model.requests[0]["context"]
 
 
 @pytest.mark.asyncio
@@ -187,7 +210,8 @@ async def test_labelled_route_decisions_obey_execution_contract(case):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider_kind", ["sequence", "protocol"])
 async def test_default_sdk_inventory_supports_dicts_and_capability_provider(tmp_path, provider_kind):
-    rows = [{"id": "read", "type": "skill", "name": "Read"}]
+    rows = [{"id": "read", "type": "skill", "name": "Read"},
+            {"id": "other", "type": "skill", "name": "Other"}]
     queried = []
 
     async def capabilities():
@@ -199,7 +223,8 @@ async def test_default_sdk_inventory_supports_dicts_and_capability_provider(tmp_
     service.capability_provider = rows if provider_kind == "sequence" else SimpleNamespace(capabilities=capabilities)
     result = await service.plan("Read the material", candidate_ids=["read"])
     assert result["execution_route"]["skill_ids"] == ["read"]
-    assert model.requests[0]["candidate_ids"] == ["read"]
+    assert [item["id"] for item in model.requests[0]["context"]["skills"]] == ["read"]
+    assert "candidate_ids" not in model.requests[0]
     assert bool(queried) == (provider_kind == "protocol")
 
 
@@ -209,7 +234,7 @@ async def test_unavailable_inventory_entry_is_never_routed_directly(tmp_path):
     service = _service(tmp_path, model)
     service.capability_provider = [{"id": "read", "type": "skill", "available": False}]
     with pytest.raises(ValueError, match="invalid decision"):
-        await service.plan("Read")
+        await service.plan("Read", candidate_ids=["read"])
     assert model.requests[0]["context"]["skills"] == []
 
 
@@ -249,17 +274,17 @@ async def test_required_expert_is_checked_on_the_final_graph(tmp_path, monkeypat
     artifacts = GraphArtifacts(tmp_path, {}, [{"id": "reviewer", "name": "Reviewer"}], {"edges": []}, {})
     monkeypatch.setattr(service, "_load_expert_task_artifacts", lambda _: artifacts)
     with pytest.raises(ValueError, match="required installed expert"):
-        await service.plan("Verify", context=_context(required_expert_ids=["reviewer"],
-                                                      constraints=["Use the installed reviewer"]))
+        await service.plan("Verify", context=_context(required_expert_ids=["reviewer"]))
     supplied = model.requests[-1]["inputs"]
-    assert any("Use the installed reviewer" in item["value"] for item in supplied)
+    assert supplied == [{"name": "required_capabilities", "kind": "text", "value": json.dumps({
+        "required_skill_ids": [], "required_expert_ids": ["reviewer"],
+    })}]
 
 
 @pytest.mark.asyncio
 async def test_router_context_and_input_previews_are_bounded(tmp_path):
     model = _Model({"strategy": "direct_answer", "reason": "Self-contained question"})
     await _service(tmp_path, model).plan("What is two plus two?", context=_context(
-        facts="a" * 50000, constraints=["b" * 50000],
         skills=[{"id": f"skill-{index}", "description": "c" * 5000} for index in range(100)],
     ), inputs=[{"name": "large" * 1000, "description": "e" * 100000,
                 "kind": "text", "value": "d" * 100000}])
@@ -286,10 +311,11 @@ async def test_no_plan_reconsiders_once_and_can_use_inline_expert(tmp_path, monk
         return {"planned_graph": {"graph": {"nodes": {}, "metadata": {"status": "no_plan"}}}}
 
     monkeypatch.setattr(service, "plan_skill_graph", skill_plan)
-    result = await service.plan("Complete the task", context=_context())
+    result = await service.plan("Complete the task", ["read", "write"], context=_context())
     assert result["execution_route"]["strategy"] == "single_expert"
     assert result["execution_route"]["reconsiderations"] == 1
     assert len(model.requests) == 3
+    assert model.requests[0]["context"]["experts"] == model.requests[1]["context"]["experts"] == []
     assert prepared == [True]
 
 
@@ -321,14 +347,14 @@ async def test_skill_downgrade_reports_actual_id_and_preserves_full_named_inputs
 
     monkeypatch.setattr(service, "plan_skill_graph", skill_plan)
     material = {"name": "evidence", "kind": "text", "value": "original" * 1000}
-    result = await service.plan("Read the evidence", context=_context(constraints=["Keep the source"]), inputs=[material])
+    result = await service.plan("Read the evidence", context=_context(), inputs=[material])
     route = result["execution_route"]
     assert route["strategy"] == "single_capability"
     assert route["initial_strategy"] == "capability_workflow"
     assert route["skill_ids"] == ["read"]
     assert captured[0].value == material["value"]
-    assert result["planning_inputs"][0]["value"] == material["value"]
-    assert "Keep the source" in result["planning_inputs"][1]["value"]
+    assert len(captured) == 1
+    assert result["planning_inputs"] == [material]
 
 
 @pytest.mark.asyncio

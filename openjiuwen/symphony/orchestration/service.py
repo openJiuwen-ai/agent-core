@@ -415,14 +415,25 @@ class OrchestrationService:
                 scan = await asyncio.to_thread(self.expert_inventory.experts, allow_partial=True, manifest_paths=paths)
                 visible_experts = {item.capability_id for item in scan.capabilities}
             view = view.model_copy(update={"experts": [item for item in view.experts if item.id in visible_experts]})
+        if not view.allow_experts:
+            view = view.model_copy(update={"experts": []})
+        if candidate_ids is not None:
+            candidates = set(candidate_ids)
+            view = view.model_copy(update={
+                kind: [item for item in getattr(view, kind) if item.id in candidates]
+                for kind in ("skills", "experts", "tools")
+            })
+        for kind in ("skill", "expert"):
+            required = set(getattr(view, f"required_{kind}_ids"))
+            if not required.issubset(item.id for item in getattr(view, f"{kind}s")):
+                raise ValueError(f"A required {kind} is unavailable among the eligible candidates")
         graph_inputs = planning_inputs
-        if any((view.facts, view.constraints, view.required_skill_ids, view.required_expert_ids)):
+        if view.required_skill_ids or view.required_expert_ids:
             names = {item.name for item in planning_inputs}
-            name = "symphony_routing_context"
+            name = "required_capabilities"
             while name in names:
                 name = f"_{name}"
             graph_inputs = (*planning_inputs, PlanningInput(name=name, kind="text", value=json.dumps({
-                "facts": view.facts, "constraints": view.constraints,
                 "required_skill_ids": view.required_skill_ids, "required_expert_ids": view.required_expert_ids,
             }, ensure_ascii=False)))
         feedback = ""
@@ -431,7 +442,6 @@ class OrchestrationService:
             route = await route_task(
                 query, model=self.model, context=view, inputs=planning_inputs,
                 observer=self.model_response_observer, feedback=feedback,
-                candidate_ids=candidate_ids,
                 language=language,
             )
             await _emit(progress, "route_completed", execution_route=route.model_dump())

@@ -3,7 +3,10 @@
 from openjiuwen.symphony import PlanningContext, SymphonyConfig, SymphonyRuntime
 
 
-async def plan_task(model, config: SymphonyConfig, query: str, context: PlanningContext):
+async def plan_task(
+    model, config: SymphonyConfig, query: str, context: PlanningContext | None = None, *,
+    candidate_ids: list[str] | None = None, inputs: list[dict[str, str]] | None = None,
+):
     """Select an execution strategy and prepare a Skill graph only when needed."""
     runtime = SymphonyRuntime(model, config)
     try:
@@ -12,7 +15,9 @@ async def plan_task(model, config: SymphonyConfig, query: str, context: Planning
             if not status.exists or not status.fresh:
                 await runtime.orchestration.build()
 
-        result = await runtime.orchestration.plan(query, context=context, prepare_skill_graph=prepare_skill_graph)
+        result = await runtime.orchestration.plan(
+            query, candidate_ids, context=context, inputs=inputs or (), prepare_skill_graph=prepare_skill_graph,
+        )
         return {"execution_route": result["execution_route"], "planned_graph": result.get("planned_graph")}
     finally:
         await runtime.aclose()
