@@ -192,10 +192,11 @@ async def test_a_streamed_call_is_checked_before_the_provider_stream():
     assert llm.call_count == 0
     answers = [chunk.payload for chunk in chunks if getattr(chunk, "type", None) == "answer"]
     # FEAT-127: the terminal frame carries an additive termination_reason; a rail
-    # result outside the answer/interrupt categories takes the generic fallback.
+    # result outside the answer/interrupt categories takes the model-leg fallback
+    # (Java parity: terminationReasonForResult(..., MODEL_ERROR)).
     assert [{k: v for k, v in a.items() if k != "termination_reason"} for a in answers] == [FINISH], \
         "the stream ends with the check's result"
-    assert answers[0]["termination_reason"] == "error"
+    assert answers[0]["termination_reason"] == "model_error"
 
 
 @pytest.mark.asyncio

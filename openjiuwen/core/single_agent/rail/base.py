@@ -584,8 +584,8 @@ def reason_for_result(result: Any, fallback: AgentTerminationReason) -> AgentTer
         return AgentTerminationReason.TEXT_TERMINATION
     if rtype in ("interrupt", "external_tool_call_required"):
         return AgentTerminationReason.TOOL_INTERRUPT
-    if rtype == "cancelled":
-        return AgentTerminationReason.CANCELLED
+    # Java's terminationReasonForResult has exactly these two mappings; a
+    # "cancelled" declaration travels the forceFinish channel (force_finish_reason).
     return fallback
 
 

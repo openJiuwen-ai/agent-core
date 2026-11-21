@@ -444,6 +444,17 @@ def test_workflow_interrupt_dict_carries_reason() -> None:
     assert result["termination_reason"] == "tool_interrupt"
 
 
+@pytest.mark.asyncio
+async def test_non_assistant_model_result_falls_back_to_model_error() -> None:
+    """Java parity: a dict the model leg returns maps by result_type, fallback model_error."""
+    agent, session, model, _ = _agent()
+    model.invoke = AsyncMock(return_value={"output": "rail supplied"})
+    with patch.object(agent, "_get_llm", return_value=model):
+        result = await agent.invoke({"query": "hi"}, session=session)
+    assert result["output"] == "rail supplied"
+    assert result["termination_reason"] == "model_error"
+
+
 # ---------------------------------------------------------------- nesting and concurrency
 
 @pytest.mark.asyncio

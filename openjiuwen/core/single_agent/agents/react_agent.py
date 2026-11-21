@@ -3415,8 +3415,11 @@ class ReActAgent(BaseAgent):
 
                         if not isinstance(ai_message, AssistantMessage):
                             invoke_inputs.result = ai_message if isinstance(ai_message, dict) else {}
+                            # Java parity (DP-5): the non-AssistantMessage branch maps by
+                            # result_type with MODEL_ERROR as its fallback
+                            # (agent-core-java ReActAgent#terminationReasonForResult call site).
                             record_termination_reason(
-                                reason_for_result(invoke_inputs.result, AgentTerminationReason.ERROR)
+                                reason_for_result(invoke_inputs.result, AgentTerminationReason.MODEL_ERROR)
                             )
                             break
 
