@@ -3673,7 +3673,9 @@ class ReActAgent(BaseAgent):
             if finish is not None:
                 return finish.result
             if isinstance(answer, dict):
-                ctx.finish(reason_for_result(answer, AgentTerminationReason.MAX_ITERATIONS))
+                # The run still ended by exhausting its iterations; a rail that
+                # force-finished already recorded its own reason first.
+                ctx.finish(AgentTerminationReason.MAX_ITERATIONS)
                 return answer
             if ctx.consume_model_continue_request() or ctx.has_pending_steering():
                 result["finalization_error"] = "Finalization requires further model work or pending user input"

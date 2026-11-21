@@ -150,6 +150,18 @@ async def test_before_event_failure_closes_the_scope() -> None:
     assert termination_reason_of(excinfo.value) is AgentTerminationReason.ERROR
 
 
+@pytest.mark.asyncio
+async def test_lifecycle_inherits_a_reason_published_on_the_exception() -> None:
+    """A nested run's published reason must survive the outer scope's fallback."""
+    ctx = _ctx()
+    exc = RuntimeError("boom")
+    attach_termination_reason(exc, AgentTerminationReason.MODEL_ERROR)
+    with pytest.raises(RuntimeError):
+        async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
+            raise exc
+    assert ctx.termination_reason is AgentTerminationReason.MODEL_ERROR
+
+
 def test_scope_restores_the_callers_reason() -> None:
     """A nested invoke shares the caller's task, so its record must be scoped."""
     reset_termination_reason()
@@ -348,6 +360,30 @@ async def test_force_finish_during_finalization_wins_over_max_iterations() -> No
         result = await agent.invoke({"query": "hi"}, session=session)
     assert result["output"] == "intercepted"
     assert result["termination_reason"] == "force_finish"
+
+
+@pytest.mark.asyncio
+async def test_finalization_answer_dict_still_records_max_iterations() -> None:
+    """J-09: an answer produced by exhaustion finalization keeps max_iterations."""
+    agent, session, model, _ = _agent(max_iterations=1, on_max="final_answer")
+    model.invoke = AsyncMock(side_effect=[
+        create_tool_call_response("lookup", "{}", tool_call_id="c1"),
+    ])
+    agent.ability_manager.list_tool_info = AsyncMock(return_value=[])
+    agent.ability_manager.execute = AsyncMock(return_value=[])
+
+    async def dict_answer(*args, **kwargs):  # noqa: ANN002, ANN003
+        if dict_answer.calls == 0:
+            dict_answer.calls += 1
+            return create_tool_call_response("lookup", "{}", tool_call_id="c1")
+        return {"output": "final from rail", "result_type": "answer"}
+
+    dict_answer.calls = 0
+    model.invoke = AsyncMock(side_effect=dict_answer)
+    with patch.object(agent, "_get_llm", return_value=model):
+        result = await agent.invoke({"query": "hi"}, session=session)
+    assert result["output"] == "final from rail"
+    assert result["termination_reason"] == "max_iterations"
 
 
 @pytest.mark.asyncio

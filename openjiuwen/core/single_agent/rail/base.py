@@ -985,7 +985,12 @@ class AgentCallbackContext:
     def _publish_invoke_reason(self, in_flight: Optional[BaseException]) -> None:
         """Close-of-run publication: classify, remember, and mark the exception."""
         if current_termination_reason() is None and in_flight is not None:
-            if isinstance(in_flight, (asyncio.CancelledError, GeneratorExit)):
+            # A nested run publishes its reason on its exception before this
+            # scope closes; inherit it instead of relabelling as a plain error.
+            inherited = termination_reason_of(in_flight)
+            if inherited is not None:
+                record_termination_reason(inherited)
+            elif isinstance(in_flight, (asyncio.CancelledError, GeneratorExit)):
                 record_termination_reason(AgentTerminationReason.CANCELLED)
             else:
                 record_termination_reason(AgentTerminationReason.ERROR)
