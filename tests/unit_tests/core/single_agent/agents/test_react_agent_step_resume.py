@@ -182,3 +182,27 @@ async def test_run_that_never_starts_does_not_close_steps(monkeypatch):
         await agent.invoke({"query": ""}, session=session)
 
     assert not any(isinstance(e, tuple) and e[0] == "end" for e in recorder.events)
+
+
+@pytest.mark.asyncio
+async def test_resume_with_different_query_keeps_original_question_once(monkeypatch):
+    """The resumed context already holds the original question; it must not repeat."""
+    from openjiuwen.core.foundation.llm.schema.message import UserMessage
+
+    llm = MockLLMModel()
+    llm.set_responses([create_text_response("ok")])
+    agent, session, _ = await _run(
+        monkeypatch, card_id="step-diffq", llm=llm, query="继续",
+        begin=lambda: StepResume(iteration=0, query="原问题"),
+    )
+    session.update_state({
+        "context": {"default_context_id": {"messages": [UserMessage(content="原问题")], "offload_messages": {}}}
+    })
+
+    await agent.invoke({"query": "继续"}, session=session)
+
+    first_call = llm.call_history[0]
+    assert sum(
+        1 for m in first_call if _role(m) == "user" and _content(m) == "原问题"
+    ) == 1
+    assert any(_role(m) == "user" and _content(m) == "继续" for m in first_call)

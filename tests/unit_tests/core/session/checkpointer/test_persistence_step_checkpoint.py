@@ -313,3 +313,25 @@ async def test_release_session_only_clears_its_own_step_records(tmp_path):
         assert sorted(remaining) == ["axb:agent-step:agent-1:" + "0" * 20]
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_session_exists_does_not_match_like_wildcards(tmp_path):
+    """``_`` in a session id is a LIKE wildcard; existence must still be exact."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from openjiuwen.core.foundation.store import DbBasedKVStore
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'kv.db'}")
+    kv = DbBasedKVStore(engine)
+    try:
+        cp = PersistenceCheckpointer(kv)
+        session = make_session("axb", "agent-1")
+        set_msgs(session, ["q"])
+        cp.begin_agent_steps(session)
+        await cp.save_agent_step(session, 0, query="q")
+
+        assert await cp.session_exists("a_b") is False
+        assert await cp.session_exists("axb") is True
+    finally:
+        await engine.dispose()

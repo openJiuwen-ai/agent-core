@@ -826,12 +826,19 @@ class PersistenceCheckpointer(Checkpointer):
                 saved = await self._agent_storage.save(session)
                 if saved:
                     await self._step_storage.clear(session.session_id(), session.agent_id())
-                session_logger.info(
-                    "Agent steps cleared after completion",
-                    event_type=LogEventType.CHECKPOINT_CLEAR,
-                    **log_base,
-                    metadata={"reason": "step_cleanup", "storage_type": "persistence"},
-                )
+                    session_logger.info(
+                        "Agent steps cleared after completion",
+                        event_type=LogEventType.CHECKPOINT_CLEAR,
+                        **log_base,
+                        metadata={"reason": "step_cleanup", "storage_type": "persistence"},
+                    )
+                else:
+                    session_logger.warning(
+                        "Agent step records kept: completion state was not saved",
+                        event_type=LogEventType.CHECKPOINT_ERROR,
+                        **log_base,
+                        metadata={"reason": "step_cleanup_skipped", "storage_type": "persistence"},
+                    )
                 return
         await self._agent_storage.save(session)
 
@@ -957,10 +964,12 @@ class PersistenceCheckpointer(Checkpointer):
         if self._kv_store is None:
             return False
 
-        # Check if any keys exist with the session_id prefix
+        # Check if any keys exist with the session_id prefix. The prefix is
+        # compiled into a LIKE pattern by the KV store, so filter exactly:
+        # ``_`` / ``%`` in a session id would otherwise match other sessions.
         prefix = f"{session_id}:"
         keys = await self._kv_store.get_by_prefix(prefix)
-        return len(keys) > 0
+        return any(key.startswith(prefix) for key in keys)
 
     async def release(self, session_id: str, agent_id: Optional[str] = None):
         """
