@@ -126,6 +126,6 @@ async def test_non_empty_answer_is_returned_without_retry() -> None:
     with patch.object(agent, "_get_llm", return_value=model):
         result = await agent.invoke({"query": "hi"}, session=session)
 
-    assert result == {"output": "Done.", "result_type": "answer"}
+    assert result == {"output": "Done.", "result_type": "answer", "termination_reason": "text_termination"}
     assert model.invoke.await_count == 1
     assert not _notices(messages)
