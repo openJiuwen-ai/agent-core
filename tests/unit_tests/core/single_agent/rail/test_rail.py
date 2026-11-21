@@ -445,7 +445,8 @@ class TestRailExceptionRetry(
         with patch.object(agent, "_get_llm", return_value=mock_llm):
             result = await agent.invoke({"query": "finish on provider failure"})
 
-        assert result == expected
+        # FEAT-127: termination_reason is an additive key
+        assert {k: v for k, v in result.items() if k != "termination_reason"} == expected
 
     async def test_on_tool_exception_can_request_retry(
         self,
@@ -1050,7 +1051,8 @@ class TestForceFinish(
         ):
             result = await agent.invoke({"query": "test"})
 
-        assert result == expected
+        # FEAT-127: termination_reason is an additive key
+        assert {k: v for k, v in result.items() if k != "termination_reason"} == expected
         # LLM should NOT have been called
         assert mock_llm.call_count == 0
 
@@ -1079,7 +1081,8 @@ class TestForceFinish(
         ):
             result = await agent.invoke({"query": "test"})
 
-        assert result == expected
+        # FEAT-127: termination_reason is an additive key
+        assert {k: v for k, v in result.items() if k != "termination_reason"} == expected
         assert not tool_executed["called"]
 
     async def test_after_tool_call_force_finish(self):
@@ -1103,7 +1106,8 @@ class TestForceFinish(
         ):
             result = await agent.invoke({"query": "test"})
 
-        assert result == expected
+        # FEAT-127: termination_reason is an additive key
+        assert {k: v for k, v in result.items() if k != "termination_reason"} == expected
         # Only one LLM call (the one that returned tool_calls)
         assert mock_llm.call_count == 1
 
@@ -1128,7 +1132,8 @@ class TestForceFinish(
         ):
             result = await agent.invoke({"query": "test"})
 
-        assert result == expected
+        # FEAT-127: termination_reason is an additive key
+        assert {k: v for k, v in result.items() if k != "termination_reason"} == expected
         # Only one LLM call (the one that returned tool_calls)
         assert mock_llm.call_count == 1
 

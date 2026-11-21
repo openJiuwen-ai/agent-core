@@ -20,7 +20,7 @@ from abc import ABC
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from functools import wraps
 from typing import (
     TYPE_CHECKING,
@@ -460,6 +460,135 @@ class ForceFinishRequest:
     result: Dict[str, Any]
 
 
+class AgentTerminationReason(StrEnum):
+    """How one invoke ended (FEAT-127; semantics aligned with Java).
+
+    Serialized value == member name in lowercase snake case. The first value,
+    ``max_iterations``, is the pre-existing string carried by the
+    iteration-limit result dict; the rest are new.
+    """
+
+    TEXT_TERMINATION = "text_termination"   # model produced a final answer
+    MAX_ITERATIONS = "max_iterations"       # iteration budget exhausted
+    FORCE_FINISH = "force_finish"           # a rail requested immediate finish
+    TOOL_INTERRUPT = "tool_interrupt"       # paused waiting for external input
+    MODEL_ERROR = "model_error"             # model call failed / no usable answer
+    ERROR = "error"                         # any other exception finished the run
+    CANCELLED = "cancelled"                 # the caller cancelled this run
+
+
+#: Request-scoped carrier (FEAT-127 design 4.1.2). ``AgentCallbackContext`` is a
+#: local object of ``_inner_invoke``; the terminal-frame writer, the public
+#: wrapper ``write_invoke_result_to_stream`` (called by harness/deep_agent.py
+#: after invoke returns on the same task) and the cancel path must read the
+#: record without an instance reference. Context variables propagate along the
+#: coroutine task, matching the framework's usage-attribution idiom.
+_termination_reason_var: contextvars.ContextVar[Optional[AgentTerminationReason]] = contextvars.ContextVar(
+    "agent_termination_reason", default=None
+)
+_last_terminal_result_var: contextvars.ContextVar[Optional[Any]] = contextvars.ContextVar(
+    "agent_last_terminal_result", default=None
+)
+
+
+def reset_termination_reason() -> Optional[AgentTerminationReason]:
+    """Start-of-loop reset (Java ``initializeLoop`` equivalent).
+
+    Returns the value the caller's scope had, for
+    :func:`restore_termination_scope`: an invoke awaited inside a tool of
+    another agent runs on the caller's task and therefore on the caller's
+    context; without the restore the nested run's reason would leak into the
+    outer run. Value semantics (not a ``Token``) because an async generator
+    resumes in the *caller's* context, so a scope can legitimately close in a
+    different context than it opened — a token reset would raise there.
+    """
+    previous = _termination_reason_var.get(None)
+    _termination_reason_var.set(None)
+    return previous
+
+
+def restore_termination_scope(previous: Optional[AgentTerminationReason]) -> None:
+    """Give the caller's scope back what :func:`reset_termination_reason` saved."""
+    _termination_reason_var.set(previous)
+
+
+#: Attribute used to carry a run's reason out of a raising invoke: the stream
+#: terminal-frame lanes catch the exception after the scope was restored.
+_EXC_REASON_ATTR = "_openjiuwen_termination_reason"
+
+
+def attach_termination_reason(exc: BaseException, reason: AgentTerminationReason) -> None:
+    """Publish ``reason`` on a raising exception for the terminal-frame lanes."""
+    try:
+        setattr(exc, _EXC_REASON_ATTR, reason)
+    except AttributeError:  # exceptions with __slots__ / C-level types
+        pass
+
+
+def termination_reason_of(exc: Optional[BaseException]) -> Optional[AgentTerminationReason]:
+    """The reason published by :func:`attach_termination_reason`, if any."""
+    return getattr(exc, _EXC_REASON_ATTR, None)
+
+
+def record_termination_reason(reason: AgentTerminationReason) -> bool:
+    """Record the reason once per run; later calls are ignored.
+
+    Returns True when this call set the value (first wins).
+    """
+    if _termination_reason_var.get(None) is not None:
+        return False
+    _termination_reason_var.set(reason)
+    return True
+
+
+def current_termination_reason() -> Optional[AgentTerminationReason]:
+    """The reason recorded for the current run, or None before it is known."""
+    return _termination_reason_var.get(None)
+
+
+def claim_terminal_frame(result: Any) -> bool:
+    """Claim the single ``answer``-class terminal frame for one run result.
+
+    The claim is bound to the result object, not to a flag: a run result is
+    written at most once (a second write of the *same* dict is dropped), while
+    a later run in the same task — it has its own result object — still gets
+    its frame. A flag would leak across sequential runs on a workflow session,
+    which shares the caller's task.
+    """
+    if _last_terminal_result_var.get(None) is result:
+        return False
+    _last_terminal_result_var.set(result)
+    return True
+
+
+def force_finish_reason(result: Dict[str, Any]) -> AgentTerminationReason:
+    """Disambiguation for the forceFinish channel (design 2.3.2 "取消声明").
+
+    A rail declares a cancellation by carrying ``result_type == "cancelled"``
+    in its own result; every other forceFinish delivery records FORCE_FINISH.
+    The value is a declaration the rail writes, never inferred by the framework.
+    """
+    if isinstance(result, dict) and result.get("result_type") == AgentTerminationReason.CANCELLED:
+        return AgentTerminationReason.CANCELLED
+    return AgentTerminationReason.FORCE_FINISH
+
+
+def reason_for_result(result: Any, fallback: AgentTerminationReason) -> AgentTerminationReason:
+    """Category → reason mapping for rail-supplied results (Java
+    ``terminationReasonForResult`` equivalent). Used only as a fallback when a
+    branch returns a dict the framework produced no record for; it never
+    overrides a recorded reason.
+    """
+    rtype = result.get("result_type") if isinstance(result, dict) else None
+    if rtype == "answer":
+        return AgentTerminationReason.TEXT_TERMINATION
+    if rtype in ("interrupt", "external_tool_call_required"):
+        return AgentTerminationReason.TOOL_INTERRUPT
+    if rtype == "cancelled":
+        return AgentTerminationReason.CANCELLED
+    return fallback
+
+
 #: Union type for all typed event inputs
 EventInputs = Union[
     InvokeInputs,
@@ -587,6 +716,10 @@ class AgentCallbackContext:
         default=False, init=False, repr=False
     )
     _context_rebuild_requested: bool = field(default=False, init=False, repr=False)
+    _termination_snapshot: Optional[AgentTerminationReason] = field(
+        default=None, init=False, repr=False
+    )
+    _run_scope_depth: int = field(default=0, init=False, repr=False)
     _steering_queue: Optional[asyncio.Queue] = field(
         default=None, init=False, repr=False
     )
@@ -657,10 +790,44 @@ class AgentCallbackContext:
         self._force_finish_request = ForceFinishRequest(result=result)
 
     def consume_force_finish(self) -> Optional[ForceFinishRequest]:
-        """Read and clear a pending force-finish request."""
+        """Read and clear a pending force-finish request.
+
+        Consumption is terminal by construction (every consumer returns the
+        carried result), so consuming records the termination reason here —
+        one place covers all forceFinish sites (design 4.1.1: "凡消费即记录").
+        A rail declares cancellation by carrying ``result_type == "cancelled"``.
+        """
         request = self._force_finish_request
         self._force_finish_request = None
+        if request is not None:
+            record_termination_reason(force_finish_reason(request.result))
         return request
+
+    def finish(self, reason: AgentTerminationReason) -> None:
+        """Record how this run ended (FEAT-127).
+
+        Must be called (by exactly one terminal branch) before AFTER_INVOKE
+        fires; the reason is then carried by the terminal frame and by the
+        result dict. Duplicate calls keep the first value.
+        """
+        if not record_termination_reason(reason):
+            logger.debug(
+                "termination_reason already recorded as %s; ignoring %s",
+                current_termination_reason(), reason,
+            )
+
+    @property
+    def termination_reason(self) -> Optional[AgentTerminationReason]:
+        """The reason of this run.
+
+        Live while the run's lifecycle is open; after it closes the value this
+        context published is returned (the request scope itself is restored).
+        """
+        if self._run_scope_depth:
+            current = current_termination_reason()
+            if current is not None:
+                return current
+        return self._termination_snapshot
 
     def request_model_continue(self) -> None:
         """Require one more ReAct model iteration after a text response.
@@ -815,6 +982,17 @@ class AgentCallbackContext:
         """Return the bound steering queue, or None."""
         return self._steering_queue
 
+    def _publish_invoke_reason(self, in_flight: Optional[BaseException]) -> None:
+        """Close-of-run publication: classify, remember, and mark the exception."""
+        if current_termination_reason() is None and in_flight is not None:
+            if isinstance(in_flight, (asyncio.CancelledError, GeneratorExit)):
+                record_termination_reason(AgentTerminationReason.CANCELLED)
+            else:
+                record_termination_reason(AgentTerminationReason.ERROR)
+        self._termination_snapshot = current_termination_reason()
+        if in_flight is not None and self._termination_snapshot is not None:
+            attach_termination_reason(in_flight, self._termination_snapshot)
+
     @asynccontextmanager
     async def lifecycle(
         self,
@@ -832,8 +1010,26 @@ class AgentCallbackContext:
             before: Event to fire on entry
             after: Event to fire on exit (always)
         """
+        is_invoke_scope = before is AgentCallbackEvent.BEFORE_INVOKE and after is AgentCallbackEvent.AFTER_INVOKE
+        # FEAT-127: an invoke is one request scope. Opening it here covers every
+        # agent that drives this lifecycle (ReActAgent, DeepAgent, agent teams),
+        # and the restore hands the caller's scope back — a nested agent awaited
+        # inside a tool runs on the caller's task and would otherwise leak.
+        scope_previous = reset_termination_reason() if is_invoke_scope else None
+        if is_invoke_scope:
+            self._run_scope_depth += 1
         saved_inputs = self.inputs
-        await self.fire(before)
+        try:
+            await self.fire(before)
+        except BaseException as entry_exc:
+            # FEAT-127: the scope opened above must close even when the BEFORE
+            # event itself fails (a guardrail can abort the invoke there); the
+            # after event is not fired in that case, matching the old shape.
+            if is_invoke_scope:
+                self._publish_invoke_reason(entry_exc)
+                self._run_scope_depth -= 1
+                restore_termination_scope(scope_previous)
+            raise
         exc_to_raise = None
         try:
             yield self
@@ -843,6 +1039,15 @@ class AgentCallbackContext:
             raise
         finally:
             self.inputs = saved_inputs
+            # FEAT-127 fallback classification (design 4.1.1): a terminal branch
+            # should have recorded already; when none did, the in-flight exception
+            # decides. CancelledError / GeneratorExit inherit BaseException, so
+            # ``except Exception`` above never captured them — read them directly.
+            # A run that ended without an exception and without a record is not
+            # classified here: agents other than ReActAgent record no reason of
+            # their own, and their frame writer derives it from the result.
+            if is_invoke_scope:
+                self._publish_invoke_reason(sys.exc_info()[1])
             try:
                 await self.fire(after)
             except Exception as callback_exc:
@@ -855,6 +1060,10 @@ class AgentCallbackContext:
                     )
                 else:
                     raise
+            finally:
+                if is_invoke_scope:
+                    self._run_scope_depth -= 1
+                    restore_termination_scope(scope_previous)
 
 
 # ================================================================

@@ -191,7 +191,11 @@ async def test_a_streamed_call_is_checked_before_the_provider_stream():
         chunks = [chunk async for chunk in agent.stream({"query": "hello"})]
     assert llm.call_count == 0
     answers = [chunk.payload for chunk in chunks if getattr(chunk, "type", None) == "answer"]
-    assert answers == [FINISH], "the stream ends with the check's result"
+    # FEAT-127: the terminal frame carries an additive termination_reason; a rail
+    # result outside the answer/interrupt categories takes the generic fallback.
+    assert [{k: v for k, v in a.items() if k != "termination_reason"} for a in answers] == [FINISH], \
+        "the stream ends with the check's result"
+    assert answers[0]["termination_reason"] == "error"
 
 
 @pytest.mark.asyncio
