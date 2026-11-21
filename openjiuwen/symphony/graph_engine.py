@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -23,6 +24,8 @@ from openjiuwen.symphony.orchestration import (
 )
 from openjiuwen.symphony.observation import GraphEvolutionInput, GraphSnapshot, ObservationReceipt
 from openjiuwen.symphony.observation.service import GraphObservationService
+
+from openjiuwen.symphony.orchestration.routing import PlanningContext
 
 ProgressCallback = Callable[[OrchestrationProgress], Any]
 LOGGER = logging.getLogger(__name__)
@@ -253,8 +256,7 @@ class SymphonyGraphEngine:
         query: str,
         candidate_ids: Sequence[str] | None = None,
         *,
-        # Keep the published planning keyword used by SDK callers.
-        type: Literal["skill", "expert"] = "skill",  # pylint: disable=redefined-builtin
+        type: Literal["auto", "skill", "expert"] = "auto",  # pylint: disable=redefined-builtin
         expert_manifest_paths: Sequence[Path] | None = None,
         language: str = "cn",
         progress: ProgressCallback | None = None,
@@ -265,29 +267,29 @@ class SymphonyGraphEngine:
         progress_callback: ProgressCallback | None = None,
         mode: str | None = None,
         inputs: Sequence[PlanningInput | Mapping[str, Any]] = (),
+        context: PlanningContext | Mapping[str, Any] | None = None,
+        prepare_skill_graph: Callable[[], Any] | None = None,
     ) -> OrchestrationPlan:
-        """Prepare runtime context and dispatch planning by the explicit capability type."""
-        if type not in {"skill", "expert"}:
+        """Route automatically, or prepare context for an explicitly selected planner."""
+        if type not in {"auto", "skill", "expert"}:
             raise ValueError(f"Unsupported orchestration type: {type}")
-        if type == "expert" and (graph_scope_id is not None or merged_revision is not None):
-            raise ValueError("Skill graph revisions cannot be used with type=expert.")
+        if type != "skill" and (graph_scope_id is not None or merged_revision is not None):
+            raise ValueError("Skill graph revisions require type=skill.")
+        if type != "skill" and task_cluster_id is not None:
+            raise ValueError("Skill graph options require type=skill.")
         with self._track_operation():
-            self._check(require_graph=type == "skill")
-            snapshot = None
-            if type == "skill" and self._orchestration_service.config.plan.dynamic_graph_enabled:
-                try:
-                    snapshot = await asyncio.to_thread(
-                        self._observations.get_snapshot,
-                        graph_scope_id or self._scope_id,
-                        merged_revision,
-                    )
-                except Exception as exc:
-                    if merged_revision is not None:
-                        raise
-                    LOGGER.warning(
-                        "Symphony observation snapshot is unavailable; planning with the current static graph.",
-                        exc_info=exc,
-                    )
+            self._check(require_graph=False)
+
+            async def prepare_context(route: Any) -> dict[str, Any]:
+                if route.execution_mode != "skill_graph":
+                    return {}
+                return await self._skill_plan_context(
+                    graph_scope_id, merged_revision, task_cluster_id, prepare_skill_graph,
+                )
+
+            options = (await self._skill_plan_context(
+                graph_scope_id, merged_revision, task_cluster_id, prepare_skill_graph,
+            )) if type == "skill" else {}
             return await self._orchestration_service.plan(
                 query,
                 candidate_ids,
@@ -296,14 +298,38 @@ class SymphonyGraphEngine:
                 language=language,
                 progress=progress,
                 disabled_capability_ids=disabled_capability_ids,
-                dynamic_overlay=snapshot.overlay if snapshot is not None else None,
-                graph_revision=snapshot.static_revision if snapshot is not None else None,
-                graph_snapshot=snapshot.model_dump(exclude={"overlay"}) if snapshot is not None else None,
-                task_cluster_id=task_cluster_id,
                 progress_callback=progress_callback,
                 mode=mode,
                 inputs=inputs,
+                context=context,
+                _prepare_context=prepare_context,
+                dynamic_overlay=options.get("dynamic_overlay"), graph_revision=options.get("graph_revision"),
+                graph_snapshot=options.get("graph_snapshot"), task_cluster_id=options.get("task_cluster_id"),
             )
+
+    async def _skill_plan_context(
+        self, scope: str | None, revision: str | None, cluster: str | None, prepare: Callable[[], Any] | None,
+    ) -> dict[str, Any]:
+        if prepare is not None:
+            result = prepare()
+            if inspect.isawaitable(result):
+                await result
+        self._check()
+        options = {"task_cluster_id": cluster}
+        if not self._orchestration_service.config.plan.dynamic_graph_enabled:
+            return options
+        try:
+            snapshot = await asyncio.to_thread(self._observations.get_snapshot, scope or self._scope_id, revision)
+        except Exception as exc:
+            if revision is not None:
+                raise
+            LOGGER.warning("Symphony observation snapshot unavailable; using the static graph.", exc_info=exc)
+            return options
+        options.update(
+            dynamic_overlay=snapshot.overlay, graph_revision=snapshot.static_revision,
+            graph_snapshot=snapshot.model_dump(exclude={"overlay"}),
+        )
+        return options
 
     async def plan_skill_graph(
         self,

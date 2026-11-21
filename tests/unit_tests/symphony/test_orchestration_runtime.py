@@ -181,6 +181,7 @@ async def test_graph_engine_build_and_plan_fast_or_beam(tmp_path: Path, mode: st
     built = await graph_engine.build(progress_callback=events.append)
     result = await graph_engine.plan(
         "extract and summarize",
+        type="skill",
         candidate_ids=["extract"],
         progress_callback=events.append,
         language="en",
@@ -224,7 +225,7 @@ async def test_fast_planner_requests_minimal_reasoning_and_disables_thinking(tmp
     )
     await service.build()
 
-    await service.plan("extract and summarize", language="en")
+    await service.plan("extract and summarize", type="skill", language="en")
 
     planning_call = next(
         call

@@ -69,4 +69,4 @@ async def test_build_and_plan_require_model_but_status_does_not(tmp_path: Path) 
     with pytest.raises(ValueError, match="requires a model"):
         await service.build()
     with pytest.raises(ValueError, match="requires a model"):
-        await service.plan("compose a capability graph")
+        await service.plan("compose a capability graph", type="skill")

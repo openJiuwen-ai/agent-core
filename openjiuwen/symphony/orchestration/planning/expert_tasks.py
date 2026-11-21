@@ -20,6 +20,7 @@ from openjiuwen.symphony.orchestration.language import planner_language_instruct
 from openjiuwen.symphony.orchestration.model import ModelResponseObserver, invoke_json, model_usage_context
 from openjiuwen.symphony.orchestration.planning.beam import BEAM_DEFAULT_MAX_SKILLS, BidirectionalBeamPlanner
 from openjiuwen.symphony.orchestration.planning.fast import FastOneShotPlanner
+from openjiuwen.symphony.orchestration.routing import RoutingUpgradeRequired
 from openjiuwen.symphony.orchestration.planning.utils import CAN_FEED, normalize_known_skill_ids, skill_payload
 from openjiuwen.symphony.retrieval.search.runtime.lexical import LexicalDocument, LexicalIndex
 from openjiuwen.symphony.shared.fingerprint.normalization import DataTypeVocabulary, normalize_io_name
@@ -141,6 +142,7 @@ async def build_expert_task_plan(
     candidate_ids: Sequence[str] | None,
     model_response_observer: ModelResponseObserver | None,
     inputs: Sequence[PlanningInput] = (),
+    max_tasks: int | None = None,
 ) -> dict[str, Any]:
     """Generate and validate a task graph using the visible expert projection."""
     known = artifacts.skill_by_id
@@ -155,6 +157,8 @@ async def build_expert_task_plan(
         "query": query,
         "inputs": [item.model_dump(exclude_none=True) for item in inputs],
     }
+    if max_tasks is not None:
+        prompt["max_tasks"] = max_tasks
     system_prompt = f"{_SYSTEM_PROMPT}\n{planner_language_instruction(language)}"
     user_content = json.dumps(prompt, ensure_ascii=False)
     with model_usage_context("orchestration", "expert_task_planning"):
@@ -174,6 +178,10 @@ async def build_expert_task_plan(
                 field = ".".join(map(str, error["loc"])) or "draft"
                 reason = f"Invalid expert task plan at {field} ({error['msg']})."
             else:
+                if max_tasks is not None and len(draft.tasks) > max_tasks:
+                    raise RoutingUpgradeRequired(
+                        "The task requires more delegated nodes than the selected tier permits"
+                    )
                 if draft.status == "no_plan" and not draft.missing_inputs:
                     draft = _Draft(status="no_plan", reason=draft.reason or "No viable expert task plan was found.")
                     break

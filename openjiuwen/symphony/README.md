@@ -87,11 +87,16 @@ async def plan_invoice(model):
         await runtime.aclose()
 ```
 
-- `plan(query, type="skill", candidate_ids=...)` 是统一规划入口。调用方显式选择 `skill` 或 `expert`，省略时默认 `skill`；Core 据此选择规划实现，不增加模型分类调用。`type="expert"` 返回专家任务图，替代早期版本返回专家能力链的行为。
+- `plan(query, type="auto", context=...)` 是统一规划入口，默认值为 `auto`。Core 使用当前注入模型选择足以完成任务的最低层级：T0 直接回答、T1 单个 Skill 或现有工具、T2 多 Skill 或主智能体工具流程、T3 单专家、T4 多专家。路由是 `plan()` 内部步骤，宿主不单独调用路由函数。
+- 自动结果始终包含 `execution_route`（`tier`、`execution_mode`、选定的能力 ID、`reason`、`requires_planning`），`planned_graph` 可选。T0、T1 和含工具的 T2 不要求图；纯 Skill 的 T2 使用技能规划，T3/T4 返回 `plan_kind=expert_tasks`。工具只作为宿主上下文，不参与 Symphony 工具检索或建图。T3/T4 支持纯内联角色。
+- `context` 接受 `PlanningContext` 或等价字典，提供已知 `facts`、可见 `skills/experts/tools` 摘要、`constraints`、`allow_experts`、`work_mode` 及指定能力 ID。省略上下文时从配置目录获取 Skill/专家清单。宿主负责摘要的实时可见性与权限，Core 在模型前过滤禁用 Skill 和专家 manifest 范围。摘要和输入仅作有界预览，完整具名输入继续交给规划与执行。
+- 自动路由一般增加一次模型调用；无效 JSON/决定最多修复一次，规划不可行最多重新判级一次。`execution_route.reconsiderations` 记录已消耗次数；宿主在同一请求重判时传 `context.reconsiderations=1`，共享一次重判预算。取消和模型异常向调用方传播。
+- `SymphonyGraphEngine.plan(..., prepare_skill_graph=callback)` 只在自动选择纯 Skill 的 T2 后请求宿主准备图，再检查技能图并读取动态图快照。T0/T1/T3/T4 不检查技能图。固定图修订或 `task_cluster_id` 要显式使用 `type="skill"`。
+- 显式 `plan(type="skill"|"expert")` 直接选择规划实现，不调用路由模型。`type="expert"` 返回专家任务图，替代早期版本返回专家能力链的行为。迁移原先省略类型的技能图调用时，请补上 `type="skill"`，或者改为消费自动结果的可选图。
 - `plan_skill_graph(query, candidate_ids=...)` 与 `plan(type="skill")` 使用相同的技能规划实现。`candidate_ids=None` 表示使用当前可见候选，传入 ID 列表可指定起始候选。列表为空或所有 ID 均无效时，返回 `no_plan`。动态图、指定修订与禁用技能过滤沿用技能规划契约。
 - `plan_subagent_graph(query, candidate_ids=...)` 与 `plan(type="expert")` 生成相同的子智能体任务图。规划模型通过 `expert_id` 引用已安装专家，或通过含 `name`、`description` 的 `role` 定义内联角色，二者只能选一个。Core 据此生成节点的 `metadata.type`（`expert` 或 `inline`）。未知专家 ID 会触发校验错误。没有技能图、已发布的专家图或可用专家时，也可以生成纯内联计划。`expert_manifest_paths` 限定可用专家；候选为空或均不可用时仍可使用内联角色。
 - 两个专用入口不接收 `type`。统一入口拒绝未知类型；专家规划不接受技能图修订、动态覆盖与禁用技能等专属参数。`SymphonyGraphEngine` 和直接使用的 `OrchestrationService` 遵循相同的类型分流语义。
-- 三个入口均支持通过 `orchestration.plan.mode` 选择 `fast` 或 `beam`，并通过 `result["planned_graph"]["graph"]` 返回图。节点和依赖分别位于 `nodes` 和 `edges`。专家任务图的交接边引用本轮任务的 `source_output` 和 `target_input`。
+- 三个入口均支持通过 `orchestration.plan.mode` 选择 `fast` 或 `beam`。显式技能/专家规划通过 `result["planned_graph"]["graph"]` 返回图；自动结果先检查 `execution_route` 和可选图。节点和依赖分别位于 `nodes` 和 `edges`。专家任务图的交接边引用本轮任务的 `source_output` 和 `target_input`。
 - 可选的 `inputs` 接收一组 `PlanningInput` 或等价字典。每项的 `name` 唯一，`kind` 为 `text` 或 `file`，`value` 为已知文本或宿主已校验的文件引用，`description` 可注明用途。直接使用 SDK 时，由宿主负责解析文件引用。
 
 Skill 和子智能体编排均以 `graph.metadata.status=ready` 返回有效任务图，无法形成计划时返回 `no_plan`。宿主可结合已掌握的资料、图中的交接关系和 `graph.metadata.missing_inputs` 判断哪些节点可以执行。Skill 节点的 `metadata.inputs` 和 `outputs` 描述已声明的端口，`metadata.missing_inputs` 标记规划时发现的节点缺项。子智能体节点用 `metadata.external_inputs` 引用所需资料名。Core 会将已引用但未提供的资料汇总到图级 `missing_inputs`，模型也可以补充缺项的类型和用途。节点自身入边已经提供的产物由交接传递，只有单独声明的同名外部资料才计入外部输入。
