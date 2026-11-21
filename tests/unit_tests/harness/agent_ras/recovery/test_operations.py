@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.harness.agent_ras.recovery.operations import emit_user_notice
+from openjiuwen.harness.agent_ras.recovery.operations import emit_user_notice, terminate
 
 
 class TestEmitUserNotice:
@@ -39,3 +39,27 @@ class TestEmitUserNotice:
         ctx = MagicMock(session=session)
 
         await emit_user_notice(ctx, "hello")
+
+
+class TestTerminate:
+    @pytest.mark.asyncio
+    async def test_force_finish_payload_keeps_terminate_reason(self) -> None:
+        ctx = MagicMock()
+        ctx.request_force_finish = MagicMock()
+
+        await terminate(ctx, "Repeat tool call detected: web_flash", write_error_stream=False)
+
+        ctx.request_force_finish.assert_called_once_with(
+            {
+                "output": "Repeat tool call detected: web_flash",
+                "message": "Repeat tool call detected: web_flash",
+                "result_type": "error",
+            }
+        )
+
+    @pytest.mark.asyncio
+    async def test_swallows_force_finish_errors(self) -> None:
+        ctx = MagicMock()
+        ctx.request_force_finish = MagicMock(side_effect=RuntimeError("already finished"))
+
+        await terminate(ctx, "reason", write_error_stream=False)
