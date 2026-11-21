@@ -116,6 +116,21 @@ class PackageManager:
                     found.append(version_dir.resolve())
         return found
 
+    def require_managed_root(self, root: Path) -> Path:
+        """Return one canonical managed version root, rejecting redirected paths."""
+        absolute = Path(os.path.abspath(root.expanduser()))
+        resolved = absolute.resolve()
+        redirected = os.path.normcase(str(absolute)) != os.path.normcase(str(resolved))
+        outside_store = not resolved.is_relative_to(self.store)
+        wrong_depth = resolved.parent.parent != self.store
+        if redirected or outside_store or wrong_depth:
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_SOURCE_INVALID,
+                reason="startup root must be a managed package version directory",
+            )
+        _assert_no_symlinks(resolved)
+        return resolved
+
     def open_source(self, source: Path) -> OpenedSource:
         """Open a package directory or a zip.
 
@@ -206,14 +221,15 @@ class PackageManager:
             ) from exc
         return target
 
-    def normalize_legacy_enable(self) -> None:
+    def normalize_legacy_enable(self, roots: Sequence[Path] | None = None) -> None:
         """Add the default enable field to valid managed copies that lack it.
 
         Callers that coordinate multiple processes hold the install-report
         discovery lock while invoking this maintenance operation.
         """
-        for root in self.list_installed():
+        for root in self.list_installed() if roots is None else roots:
             try:
+                root = self.require_managed_root(root)
                 manifest = load_manifest(root, require_domain=self.require_domain)
                 self.validate_manifest(manifest, match_domain=False)
                 if manifest.package_id != root.parent.name or manifest.version != root.name:

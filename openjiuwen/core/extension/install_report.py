@@ -14,7 +14,7 @@ import re
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -349,15 +349,27 @@ class PackageInstallReport:
         return {"domain": manifest.domain, "process_id": None, "active_version": None, "requires": {},
                 "status": "pending", "reason": None, "pending": cls._pending(manifest, "install")}
 
-    async def prepare_startup(self, package_manager: PackageManager) -> StartupInstallPlan:
+    async def prepare_startup(
+        self,
+        package_manager: PackageManager,
+        roots: Sequence[Path] | None = None,
+    ) -> StartupInstallPlan:
         from openjiuwen.core.extension.selection import RejectedPackage, build_startup_plan
 
         def prepare(data: dict[str, Any]) -> Any:
             self._require_owner(data)
-            package_manager.normalize_legacy_enable()
-            manifests = []
+            requested = tuple(package_manager.list_installed() if roots is None else roots)
+            discovered = []
             errors = []
-            for root in package_manager.list_installed():
+            for root in requested:
+                try:
+                    discovered.append(package_manager.require_managed_root(root))
+                except ExtensionFailure as exc:
+                    errors.append(RejectedPackage(root.parent.name, exc.as_error()))
+            discovered = tuple(discovered)
+            package_manager.normalize_legacy_enable(discovered)
+            manifests = []
+            for root in discovered:
                 try:
                     manifest = load_manifest(root, require_domain=package_manager.require_domain)
                     package_manager.validate_manifest(manifest, match_domain=False)

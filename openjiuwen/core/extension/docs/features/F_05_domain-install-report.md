@@ -15,7 +15,7 @@
 
 ```text
 open_install_dir：绑定目录、报告、域 → 原子登记进程并持有运行锁
-load_installed：全目录发现 → 选版、检查依赖及环 → 发布完整计划 → 筛本域队列
+load_installed：全目录发现或读取宿主启动快照 → 选版、检查依赖及环 → 发布完整计划 → 筛本域队列
 逐包加载：登记操作 → 等依赖 → 复核 → 复制、准备并发布 → 提交报告
 ```
 
@@ -30,7 +30,9 @@ async def open_install_dir(
     poll_interval: float = 0.5, dependency_timeout: float = 300.0, lock_timeout: float = 5.0,
 ) -> None: ...
 
-async def load_installed(self) -> tuple[ActivationReport, ...]: ...
+async def load_installed(
+    self, roots: Sequence[Path | str] | None = None,
+) -> tuple[ActivationReport, ...]: ...
 async def begin_shutdown(self) -> None: ...
 async def close(self) -> None: ...
 ```
