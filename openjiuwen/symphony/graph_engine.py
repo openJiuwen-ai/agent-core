@@ -281,7 +281,7 @@ class SymphonyGraphEngine:
             self._check(require_graph=False)
 
             async def prepare_context(route: Any) -> dict[str, Any]:
-                if route.execution_mode != "skill_graph":
+                if route.strategy != "capability_workflow" or route.tool_ids:
                     return {}
                 return await self._skill_plan_context(
                     graph_scope_id, merged_revision, task_cluster_id, prepare_skill_graph,

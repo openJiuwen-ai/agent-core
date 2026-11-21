@@ -4,7 +4,7 @@ from openjiuwen.symphony import PlanningContext, SymphonyConfig, SymphonyRuntime
 
 
 async def plan_task(model, config: SymphonyConfig, query: str, context: PlanningContext):
-    """Let Core choose T0-T4; prepare a Skill graph only if that route requires it."""
+    """Select an execution strategy and prepare a Skill graph only when needed."""
     runtime = SymphonyRuntime(model, config)
     try:
         async def prepare_skill_graph():

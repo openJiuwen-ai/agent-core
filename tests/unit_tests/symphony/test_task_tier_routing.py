@@ -33,7 +33,7 @@ class _Model:
     async def invoke(self, messages, **kwargs):
         data = json.loads(messages[-1]["content"])
         self.requests.append(data)
-        if data.get("operation") == "task_tier_routing":
+        if data.get("operation") == "task_routing":
             response = self.route(data) if callable(self.route) else self.route
         elif "experts" in data:
             count = self.task_count if self.task_count is not None else data.get("max_tasks", 2)
@@ -54,22 +54,24 @@ def _service(tmp_path, model):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("route, mode", [
-    ({"tier": "T0", "reason": "Known facts suffice"}, "direct"),
-    ({"tier": "T1", "reason": "One Skill", "skill_ids": ["read"]}, "single_skill"),
-    ({"tier": "T1", "reason": "One tool", "tool_ids": ["search"]}, "single_tool"),
-    ({"tier": "T2", "reason": "Host tools", "tool_ids": ["search", "read_file"]}, "host_workflow"),
-    ({"tier": "T2", "reason": "Mixed host workflow", "tool_ids": ["search"], "skill_ids": ["write"]},
-     "host_workflow"),
+@pytest.mark.parametrize("route, strategy", [
+    ({"strategy": "direct_answer", "reason": "Known facts suffice"}, "direct_answer"),
+    ({"strategy": "single_capability", "reason": "One Skill", "skill_ids": ["read"]}, "single_capability"),
+    ({"strategy": "single_capability", "reason": "One tool", "tool_ids": ["search"]}, "single_capability"),
+    ({"strategy": "capability_workflow", "reason": "Host tools", "tool_ids": ["search", "read_file"]},
+     "capability_workflow"),
+    ({"strategy": "capability_workflow", "reason": "Mixed host workflow",
+      "tool_ids": ["search"], "skill_ids": ["write"]},
+     "capability_workflow"),
 ])
 @pytest.mark.parametrize("target", ["service", "engine"])
-async def test_auto_routes_without_building_or_planning(tmp_path, route, mode, target):
+async def test_auto_routes_without_building_or_planning(tmp_path, route, strategy, target):
     model = _Model(route)
     service = _service(tmp_path, model)
     planner = service if target == "service" else SymphonyGraphEngine(service, unavailable_reason="No Skill graph")
     events = []
     result = await planner.plan("Complete the task", context=_context(), progress=events.append)
-    assert result["execution_route"]["execution_mode"] == mode
+    assert result["execution_route"]["strategy"] == strategy
     assert "planned_graph" not in result
     assert len(model.requests) == 1
     assert not (tmp_path / "graph").exists()
@@ -77,13 +79,13 @@ async def test_auto_routes_without_building_or_planning(tmp_path, route, mode, t
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tier, count", [("T3", 1), ("T4", 2)])
+@pytest.mark.parametrize("strategy, count", [("single_expert", 1), ("multi_expert", 2)])
 @pytest.mark.parametrize("mode", ["fast", "beam"])
-async def test_expert_tiers_need_no_skill_graph_and_limit_workers(tmp_path, tier, count, mode):
-    model = _Model({"tier": tier, "reason": "Independent specialist verification"})
+async def test_expert_strategies_need_no_skill_graph_and_limit_workers(tmp_path, strategy, count, mode):
+    model = _Model({"strategy": strategy, "reason": "Independent specialist verification"})
     engine = SymphonyGraphEngine(_service(tmp_path, model), unavailable_reason="No Skill graph")
     result = await engine.plan("Verify the evidence", context=_context(), mode=mode)
-    assert result["execution_route"]["tier"] == tier
+    assert result["execution_route"]["strategy"] == strategy
     graph = result["planned_graph"]["graph"]
     assert graph["metadata"]["plan_kind"] == "expert_tasks"
     assert len(graph["nodes"]) == count
@@ -92,21 +94,24 @@ async def test_expert_tiers_need_no_skill_graph_and_limit_workers(tmp_path, tier
 
 
 @pytest.mark.asyncio
-async def test_t3_task_overflow_reclassifies_to_t4_only_once(tmp_path):
+async def test_single_expert_overflow_reconsiders_multi_expert_only_once(tmp_path):
     def decide(payload):
-        return {"tier": "T4" if payload.get("planning_feedback") else "T3", "reason": "Independent verification"}
+        return {
+            "strategy": "multi_expert" if payload.get("planning_feedback") else "single_expert",
+            "reason": "Independent verification",
+        }
 
     model = _Model(decide, task_count=2)
     result = await _service(tmp_path, model).plan("Verify independently", context=_context())
-    assert result["execution_route"]["tier"] == "T4"
+    assert result["execution_route"]["strategy"] == "multi_expert"
     assert result["execution_route"]["reconsiderations"] == 1
     assert len(result["planned_graph"]["graph"]["nodes"]) == 2
     assert len(model.requests) == 4
 
 
 @pytest.mark.asyncio
-async def test_skill_tier_prepares_graph_after_routing_and_filters_visibility(tmp_path, monkeypatch):
-    model = _Model({"tier": "T2", "reason": "Two Skills", "skill_ids": ["read", "write"]})
+async def test_skill_workflow_prepares_graph_after_routing_and_filters_visibility(tmp_path, monkeypatch):
+    model = _Model({"strategy": "capability_workflow", "reason": "Two Skills", "skill_ids": ["read", "write"]})
     service = _service(tmp_path, model)
     engine = SymphonyGraphEngine(service)
     artifacts = GraphArtifacts(tmp_path, {}, [
@@ -123,16 +128,17 @@ async def test_skill_tier_prepares_graph_after_routing_and_filters_visibility(tm
 
     result = await engine.plan("Read then write", context=_context(), prepare_skill_graph=prepare)
     assert prepared == [True]
-    assert result["execution_route"]["tier"] == "T2"
+    assert result["execution_route"]["strategy"] == "capability_workflow"
     assert {item["id"] for item in model.requests[-1]["skills"]} == {"read", "write"}
     assert set(result["planned_graph"]["graph"]["nodes"]) == {"read", "write"}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invalid, context", [
-    ({"tier": "T1", "reason": "Unknown Skill", "skill_ids": ["hidden"]}, {}),
-    ({"tier": "T4", "reason": "Delegation despite restriction"}, {"allow_experts": False}),
-    ({"tier": "T0", "reason": "Must not silently drop a required expert"}, {"required_expert_ids": ["reviewer"]}),
+    ({"strategy": "single_capability", "reason": "Unknown Skill", "skill_ids": ["hidden"]}, {}),
+    ({"strategy": "multi_expert", "reason": "Delegation despite restriction"}, {"allow_experts": False}),
+    ({"strategy": "direct_answer", "reason": "Must not silently drop a required expert"},
+     {"required_expert_ids": ["reviewer"]}),
 ])
 async def test_invalid_decisions_get_one_repair_then_fail(tmp_path, invalid, context):
     model = _Model(invalid)
@@ -169,13 +175,12 @@ def test_route_is_not_an_exported_host_entrypoint(tmp_path):
 async def test_labelled_route_decisions_obey_execution_contract(case):
     # Replay curated labels to test host contracts; this is not a model-accuracy evaluation.
     expected = case["expected"]
-    draft = {key: value for key, value in expected.items() if key != "execution_mode"}
+    draft = {key: value for key, value in expected.items() if key != "requires_planning"}
     draft["reason"] = case["rationale"]
     model = _Model(draft)
     result = await route_task(case["query"], model=model, context=_context(), inputs=[])
-    assert result.tier == expected["tier"]
-    assert result.execution_mode == expected["execution_mode"]
-    assert result.requires_planning == (expected["execution_mode"] in {"skill_graph", "expert_tasks"})
+    assert result.strategy == expected["strategy"]
+    assert result.requires_planning == expected["requires_planning"]
     assert model.requests[0]["query"] == case["query"]
 
 
@@ -189,7 +194,7 @@ async def test_default_sdk_inventory_supports_dicts_and_capability_provider(tmp_
         queried.append(True)
         return rows
 
-    model = _Model({"tier": "T1", "reason": "One Skill", "skill_ids": ["read"]})
+    model = _Model({"strategy": "single_capability", "reason": "One Skill", "skill_ids": ["read"]})
     service = _service(tmp_path, model)
     service.capability_provider = rows if provider_kind == "sequence" else SimpleNamespace(capabilities=capabilities)
     result = await service.plan("Read the material", candidate_ids=["read"])
@@ -200,7 +205,7 @@ async def test_default_sdk_inventory_supports_dicts_and_capability_provider(tmp_
 
 @pytest.mark.asyncio
 async def test_unavailable_inventory_entry_is_never_routed_directly(tmp_path):
-    model = _Model({"tier": "T1", "reason": "Unavailable", "skill_ids": ["read"]})
+    model = _Model({"strategy": "single_capability", "reason": "Unavailable", "skill_ids": ["read"]})
     service = _service(tmp_path, model)
     service.capability_provider = [{"id": "read", "type": "skill", "available": False}]
     with pytest.raises(ValueError, match="invalid decision"):
@@ -210,7 +215,7 @@ async def test_unavailable_inventory_entry_is_never_routed_directly(tmp_path):
 
 @pytest.mark.asyncio
 async def test_manifest_restriction_applies_before_router_model(tmp_path):
-    model = _Model({"tier": "T0", "reason": "Known facts"})
+    model = _Model({"strategy": "direct_answer", "reason": "Known facts"})
     service = _service(tmp_path, model)
     service.expert_inventory = SimpleNamespace(experts=lambda **kwargs: SimpleNamespace(capabilities=[]))
     await service.plan("Answer", context=_context(), expert_manifest_paths=[])
@@ -221,7 +226,7 @@ async def test_manifest_restriction_applies_before_router_model(tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("option", ["dynamic_overlay", "graph_revision", "graph_snapshot", "task_cluster_id"])
 async def test_auto_rejects_explicit_graph_options_without_model_call(tmp_path, option):
-    model = _Model({"tier": "T0", "reason": "Known facts"})
+    model = _Model({"strategy": "direct_answer", "reason": "Known facts"})
     with pytest.raises(ValueError, match="require type=skill"):
         await _service(tmp_path, model).plan("Task", **{option: {}})
     assert model.requests == []
@@ -238,7 +243,7 @@ async def test_engine_preserves_expert_cluster_rejection(tmp_path, kind):
 
 @pytest.mark.asyncio
 async def test_required_expert_is_checked_on_the_final_graph(tmp_path, monkeypatch):
-    model = _Model({"tier": "T3", "reason": "Required expert", "expert_ids": ["reviewer"]})
+    model = _Model({"strategy": "single_expert", "reason": "Required expert", "expert_ids": ["reviewer"]})
     service = _service(tmp_path, model)
     # The planner sees the required expert but incorrectly returns an inline task.
     artifacts = GraphArtifacts(tmp_path, {}, [{"id": "reviewer", "name": "Reviewer"}], {"edges": []}, {})
@@ -252,7 +257,7 @@ async def test_required_expert_is_checked_on_the_final_graph(tmp_path, monkeypat
 
 @pytest.mark.asyncio
 async def test_router_context_and_input_previews_are_bounded(tmp_path):
-    model = _Model({"tier": "T0", "reason": "Self-contained question"})
+    model = _Model({"strategy": "direct_answer", "reason": "Self-contained question"})
     await _service(tmp_path, model).plan("What is two plus two?", context=_context(
         facts="a" * 50000, constraints=["b" * 50000],
         skills=[{"id": f"skill-{index}", "description": "c" * 5000} for index in range(100)],
@@ -268,9 +273,9 @@ async def test_router_context_and_input_previews_are_bounded(tmp_path):
 @pytest.mark.asyncio
 async def test_no_plan_reconsiders_once_and_can_use_inline_expert(tmp_path, monkeypatch):
     def decide(payload):
-        return ({"tier": "T3", "reason": "Skills cannot cover the specialist assignment"}
+        return ({"strategy": "single_expert", "reason": "Skills cannot cover the specialist assignment"}
                 if payload.get("planning_feedback") else
-                {"tier": "T2", "reason": "Try two Skills", "skill_ids": ["read", "write"]})
+                {"strategy": "capability_workflow", "reason": "Try two Skills", "skill_ids": ["read", "write"]})
 
     model = _Model(decide)
     service = _service(tmp_path, model)
@@ -282,7 +287,7 @@ async def test_no_plan_reconsiders_once_and_can_use_inline_expert(tmp_path, monk
 
     monkeypatch.setattr(service, "plan_skill_graph", skill_plan)
     result = await service.plan("Complete the task", context=_context())
-    assert result["execution_route"]["tier"] == "T3"
+    assert result["execution_route"]["strategy"] == "single_expert"
     assert result["execution_route"]["reconsiderations"] == 1
     assert len(model.requests) == 3
     assert prepared == [True]
@@ -290,7 +295,7 @@ async def test_no_plan_reconsiders_once_and_can_use_inline_expert(tmp_path, monk
 
 @pytest.mark.asyncio
 async def test_exhausted_request_budget_does_not_route_a_third_time(tmp_path, monkeypatch):
-    model = _Model({"tier": "T2", "reason": "Two Skills", "skill_ids": ["read", "write"]})
+    model = _Model({"strategy": "capability_workflow", "reason": "Two Skills", "skill_ids": ["read", "write"]})
     service = _service(tmp_path, model)
 
     async def no_plan(*args, **kwargs):
@@ -305,7 +310,7 @@ async def test_exhausted_request_budget_does_not_route_a_third_time(tmp_path, mo
 
 @pytest.mark.asyncio
 async def test_skill_downgrade_reports_actual_id_and_preserves_full_named_inputs(tmp_path, monkeypatch):
-    model = _Model({"tier": "T2", "reason": "Two Skills", "skill_ids": ["read", "write"]})
+    model = _Model({"strategy": "capability_workflow", "reason": "Two Skills", "skill_ids": ["read", "write"]})
     service = _service(tmp_path, model)
     captured = []
 
@@ -318,8 +323,8 @@ async def test_skill_downgrade_reports_actual_id_and_preserves_full_named_inputs
     material = {"name": "evidence", "kind": "text", "value": "original" * 1000}
     result = await service.plan("Read the evidence", context=_context(constraints=["Keep the source"]), inputs=[material])
     route = result["execution_route"]
-    assert route["tier"] == "T1"
-    assert route["initial_tier"] == "T2"
+    assert route["strategy"] == "single_capability"
+    assert route["initial_strategy"] == "capability_workflow"
     assert route["skill_ids"] == ["read"]
     assert captured[0].value == material["value"]
     assert result["planning_inputs"][0]["value"] == material["value"]
@@ -328,7 +333,7 @@ async def test_skill_downgrade_reports_actual_id_and_preserves_full_named_inputs
 
 @pytest.mark.asyncio
 async def test_ready_skill_route_includes_nodes_added_by_graph_expansion(tmp_path, monkeypatch):
-    model = _Model({"tier": "T2", "reason": "Two seed Skills", "skill_ids": ["read", "write"]})
+    model = _Model({"strategy": "capability_workflow", "reason": "Two seed Skills", "skill_ids": ["read", "write"]})
     service = _service(tmp_path, model)
 
     async def expanded_plan(*args, **kwargs):

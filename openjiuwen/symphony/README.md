@@ -87,11 +87,12 @@ async def plan_invoice(model):
         await runtime.aclose()
 ```
 
-- `plan(query, type="auto", context=...)` 是统一规划入口，默认值为 `auto`。Core 使用当前注入模型选择足以完成任务的最低层级：T0 直接回答、T1 单个 Skill 或现有工具、T2 多 Skill 或主智能体工具流程、T3 单专家、T4 多专家。路由是 `plan()` 内部步骤，宿主不单独调用路由函数。
-- 自动结果始终包含 `execution_route`（`tier`、`execution_mode`、选定的能力 ID、`reason`、`requires_planning`），`planned_graph` 可选。T0、T1 和含工具的 T2 不要求图；纯 Skill 的 T2 使用技能规划，T3/T4 返回 `plan_kind=expert_tasks`。工具只作为宿主上下文，不参与 Symphony 工具检索或建图。T3/T4 支持纯内联角色。
+- `plan(query, type="auto", context=...)` 是统一规划入口，默认值为 `auto`。使用当前注入模型选择足以完成任务的简单策略：直接回答、单项能力、多项能力协作、单专家或多专家。路由是 `plan()` 内部步骤，宿主不单独调用路由函数。`auto` 表示调用时自动选择策略，不会在宿主每条新任务开始时提前调用规划。
+- 自动结果始终包含 `execution_route`（`strategy`、选定的能力 ID、`reason`、`requires_planning`），`planned_graph` 可选。策略依次为 `direct_answer`、`single_capability`、`capability_workflow`、`single_expert`、`multi_expert`。单项能力由 `skill_ids` 或 `tool_ids` 指明；不含工具的多 Skill 工作流生成技能图，专家策略返回 `plan_kind=expert_tasks`，支持纯内联角色。直接回答、单项能力和含工具的工作流不要求图。工具只作为宿主上下文，不参与 Symphony 工具检索或建图。
+- 迁移自动结果的消费者时，改读 `execution_route.strategy`；原 `tier`、`execution_mode` 和 `initial_tier` 已移除。单节点计划按实际执行归一为单项能力或单专家，`initial_strategy` 记录归一前的策略。统一入口、显式类型及两类图的接口保持不变。
 - `context` 接受 `PlanningContext` 或等价字典，提供已知 `facts`、可见 `skills/experts/tools` 摘要、`constraints`、`allow_experts`、`work_mode` 及指定能力 ID。省略上下文时从配置目录获取 Skill/专家清单。宿主负责摘要的实时可见性与权限，Core 在模型前过滤禁用 Skill 和专家 manifest 范围。摘要和输入仅作有界预览，完整具名输入继续交给规划与执行。
-- 自动路由一般增加一次模型调用；无效 JSON/决定最多修复一次，规划不可行最多重新判级一次。`execution_route.reconsiderations` 记录已消耗次数；宿主在同一请求重判时传 `context.reconsiderations=1`，共享一次重判预算。取消和模型异常向调用方传播。
-- `SymphonyGraphEngine.plan(..., prepare_skill_graph=callback)` 只在自动选择纯 Skill 的 T2 后请求宿主准备图，再检查技能图并读取动态图快照。T0/T1/T3/T4 不检查技能图。固定图修订或 `task_cluster_id` 要显式使用 `type="skill"`。
+- 自动路由一般增加一次模型调用；无效 JSON/决定最多修复一次，规划不可行最多重新判级一次。`execution_route.reconsiderations` 记录已消耗次数，`context.reconsiderations=1` 保留为已消耗预算的兼容输入；Swarm 按需调用时不管理该预算。取消和模型异常向调用方传播。
+- `SymphonyGraphEngine.plan(..., prepare_skill_graph=callback)` 在自动选择不含工具的多 Skill 工作流，或显式 `type="skill"` 时请求宿主准备图，再检查技能图并读取动态图快照。其他自动策略不检查技能图。固定图修订或 `task_cluster_id` 要显式使用 `type="skill"`。
 - 显式 `plan(type="skill"|"expert")` 直接选择规划实现，不调用路由模型。`type="expert"` 返回专家任务图，替代早期版本返回专家能力链的行为。迁移原先省略类型的技能图调用时，请补上 `type="skill"`，或者改为消费自动结果的可选图。
 - `plan_skill_graph(query, candidate_ids=...)` 与 `plan(type="skill")` 使用相同的技能规划实现。`candidate_ids=None` 表示使用当前可见候选，传入 ID 列表可指定起始候选。列表为空或所有 ID 均无效时，返回 `no_plan`。动态图、指定修订与禁用技能过滤沿用技能规划契约。
 - `plan_subagent_graph(query, candidate_ids=...)` 与 `plan(type="expert")` 生成相同的子智能体任务图。规划模型通过 `expert_id` 引用已安装专家，或通过含 `name`、`description` 的 `role` 定义内联角色，二者只能选一个。Core 据此生成节点的 `metadata.type`（`expert` 或 `inline`）。未知专家 ID 会触发校验错误。没有技能图、已发布的专家图或可用专家时，也可以生成纯内联计划。`expert_manifest_paths` 限定可用专家；候选为空或均不可用时仍可使用内联角色。

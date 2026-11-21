@@ -440,8 +440,9 @@ class OrchestrationService:
                     **route.model_dump(), "reconsiderations": view.reconsiderations + attempt,
                 }})
             options = await prepare_context(route) if prepare_context is not None else {}
+            skill_workflow = route.strategy == "capability_workflow"
             try:
-                if route.execution_mode == "skill_graph":
+                if skill_workflow:
                     planned = await self.plan_skill_graph(
                         query, route.skill_ids, language=language, mode=mode, progress=progress,
                         inputs=graph_inputs, disabled_capability_ids=disabled_capability_ids,
@@ -454,11 +455,11 @@ class OrchestrationService:
                         query, route.expert_ids or None, language=language, mode=mode, progress=progress,
                         inputs=graph_inputs, expert_manifest_paths=expert_manifest_paths,
                         visible_capability_ids=[item.id for item in view.experts],
-                        max_tasks=1 if route.tier == "T3" else None,
+                        max_tasks=1 if route.strategy == "single_expert" else None,
                     )
             except RoutingUpgradeRequired as exc:
                 if attempt or view.reconsiderations:
-                    raise ValueError("Routing could not resolve the required execution tier") from exc
+                    raise ValueError("Routing could not resolve an executable strategy") from exc
                 feedback = str(exc)
                 await _emit(progress, "route_reconsidered", reason=feedback)
                 continue
@@ -473,15 +474,15 @@ class OrchestrationService:
                 expert_ids = {node["metadata"].get("expert_id") for node in graph["nodes"].values()}
                 if not set(view.required_expert_ids).issubset(expert_ids):
                     raise ValueError("Planned graph omits a required installed expert")
-                if route.execution_mode == "skill_graph" and not set(view.required_skill_ids).issubset(graph["nodes"]):
+                if skill_workflow and not set(view.required_skill_ids).issubset(graph["nodes"]):
                     raise ValueError("Planned graph omits a required Skill")
-                if route.execution_mode == "skill_graph":
+                if skill_workflow:
                     summary["skill_ids"] = list(graph["nodes"])
             if graph["metadata"]["status"] == "ready" and len(graph["nodes"]) == 1:
-                summary["initial_tier"] = route.tier
-                summary["tier"] = "T1" if route.execution_mode == "skill_graph" else "T3"
-                if summary["tier"] == "T1":
-                    summary.update(execution_mode="single_skill", requires_planning=False)
+                summary["initial_strategy"] = route.strategy
+                summary["strategy"] = "single_capability" if skill_workflow else "single_expert"
+                if skill_workflow:
+                    summary["requires_planning"] = False
                     summary["skill_ids"] = list(graph["nodes"])
             return OrchestrationPlan({
                 **planned, "execution_route": summary,
