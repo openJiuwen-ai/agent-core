@@ -37,6 +37,7 @@ Parse an Excel, CSV, or TSV file into row and column Documents.
 
 * Supported file extensions: `.xlsx`, `.XLSX`, `.csv`, `.CSV`, `.tsv`, `.TSV`
 * First row of each sheet is treated as header; each row yields a row doc, each column yields a column doc
+* Empty or whitespace-only headers use `Column N` (one-based column number), preserving the corresponding cell values in row documents as well as column documents
 * metadata includes `sheet_name`, `source_type` ("row" or "column"), etc.
 
 ### supports
