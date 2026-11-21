@@ -492,9 +492,15 @@ class TaskPlanningRail(DeepAgentRail):
         content = getattr(result.data, "content", None)
         exists = getattr(result.data, "exists", None)
         if not isinstance(exists, bool):
-            exists = content is not None
+            # No snapshot metadata: some backends report a missing file as an
+            # empty successful read. Never record "exists with empty content"
+            # on that basis — rolling it back would blank a real todo.json.
+            exists = bool(await self._todo_file_exists(tool, path)) and bool(content)
         ctx.session.update_state({
-            STEP_TODO_SNAPSHOT_KEY: {"exists": exists, "content": content or ""}
+            STEP_TODO_SNAPSHOT_KEY: {
+                "exists": exists,
+                "content": (content or "") if exists else "",
+            }
         })
 
     @staticmethod

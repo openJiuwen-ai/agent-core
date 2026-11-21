@@ -155,3 +155,47 @@ async def test_after_react_iteration_reads_existing_file_when_backend_ignores_op
     await rail.after_react_iteration(ctx)
 
     assert session.get_state(STEP_TODO_SNAPSHOT_KEY) == {"exists": True, "content": '{"todos": [2]}'}
+
+
+class _DataWithoutExists:
+    def __init__(self, content):
+        self.content = content
+
+
+class _MetadataLessFs:
+    """Successful read with no snapshot metadata, even for a missing file."""
+
+    def __init__(self, real_fs, content):
+        self._real = real_fs
+        self._content = content
+
+    async def read_file(self, path, *, mode="text", **kwargs):
+        return SimpleNamespace(code=0, message="ok", data=_DataWithoutExists(self._content))
+
+    async def list_files(self, path, **kwargs):
+        return await self._real.list_files(path, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_empty_content_without_metadata_does_not_claim_file_exists(env):
+    """A backend reporting "" for a missing file must not be snapshotted as existing."""
+    rail, session, ctx, todo_path = env
+    todo_path.parent.mkdir(parents=True)
+    tool = rail.tools[0]
+    tool.fs = _MetadataLessFs(tool.fs, "")
+
+    await rail.after_react_iteration(ctx)
+
+    assert session.get_state(STEP_TODO_SNAPSHOT_KEY) == {"exists": False, "content": ""}
+
+
+@pytest.mark.asyncio
+async def test_content_without_metadata_uses_probe_for_existence(env):
+    rail, session, ctx, todo_path = env
+    _todo_file(todo_path).write_text("REAL", encoding="utf-8")
+    tool = rail.tools[0]
+    tool.fs = _MetadataLessFs(tool.fs, "REAL")
+
+    await rail.after_react_iteration(ctx)
+
+    assert session.get_state(STEP_TODO_SNAPSHOT_KEY) == {"exists": True, "content": "REAL"}

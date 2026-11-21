@@ -3498,6 +3498,7 @@ class ReActAgent(BaseAgent):
             abort_persisted = await self._persist_context_after_abort(
                 session, "[Request cancelled by user]", cleanup=False,
                 commit_session=not need_cleanup and self._session_supports_agent_lifecycle(session),
+                close_steps=steps_started,
             )
             raise  # Re-raise to propagate cancellation signal
         except Exception as exc:
@@ -3508,6 +3509,7 @@ class ReActAgent(BaseAgent):
                 abort_persisted = await self._persist_context_after_abort(
                     session, "[Request failed with unexpected error]",
                     commit_session=not need_cleanup and self._session_supports_agent_lifecycle(session),
+                    close_steps=steps_started,
                 )
             raise
         finally:
@@ -3755,7 +3757,7 @@ class ReActAgent(BaseAgent):
 
     async def _persist_context_after_abort(
             self, session: Session, marker: str, *, cleanup: bool = True,
-            commit_session: bool = False,
+            commit_session: bool = False, close_steps: bool = False,
     ) -> bool:
         """Checkpoint the safe prefix after cancellation or a model failure."""
         if cleanup:
@@ -3780,6 +3782,11 @@ class ReActAgent(BaseAgent):
             logger.warning("Failed to save context after abort", exc_info=True)
             return False
         if commit_session:
+            # Close the run first: post_agent_execute writes the full state only
+            # once the agent is idle, so committing while the track is active
+            # would drop the cleaned prefix this method just saved.
+            if close_steps:
+                await self._end_agent_steps(session, interrupted=False)
             try:
                 result = session.commit()
                 if inspect.isawaitable(result):

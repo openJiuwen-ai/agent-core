@@ -206,3 +206,33 @@ async def test_resume_with_different_query_keeps_original_question_once(monkeypa
         1 for m in first_call if _role(m) == "user" and _content(m) == "原问题"
     ) == 1
     assert any(_role(m) == "user" and _content(m) == "继续" for m in first_call)
+
+
+@pytest.mark.asyncio
+async def test_abort_closes_steps_before_committing_the_cleanup(monkeypatch):
+    """The abort cleanup must be committed after the steps are closed.
+
+    ``post_agent_execute`` only writes the full state once the agent is idle;
+    committing while the track is still active silently skips it.
+    """
+    llm = MockLLMModel()
+    llm.set_responses([create_tool_call_response("add", '{"a": 1, "b": 2}')])
+    agent, session, recorder = await _run(monkeypatch, card_id="step-abort", llm=llm)
+
+    async def commit():
+        recorder.events.append("commit")
+
+    session.commit = commit
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("model down")
+
+    monkeypatch.setattr(agent, "_execute_tool_call", _boom)
+
+    with pytest.raises(RuntimeError):
+        await agent.invoke({"query": "1+2?"}, session=session)
+
+    ends = [i for i, e in enumerate(recorder.events) if isinstance(e, tuple) and e[0] == "end"]
+    commits = [i for i, e in enumerate(recorder.events) if e == "commit"]
+    assert ends and commits
+    assert ends[0] < commits[0]
