@@ -17,7 +17,17 @@ async def build_and_plan(model, capability_root: str, artifact_root: str, query:
         await runtime.orchestration.build()
         runtime.retrieval.bind_search(session_scope="example", pin_index_revision=True)
         candidates = await runtime.retrieval.search(query=query, type="skill")
-        plan = await runtime.orchestration.plan(query)
+        plan = await runtime.orchestration.plan(query, type="skill")
         return {"candidates": str(candidates), "planned_graph": plan.to_dict()["planned_graph"]}
+    finally:
+        await runtime.aclose()
+
+
+async def plan_expert_tasks(model, config: SymphonyConfig, query: str):
+    """Plan expert assignments and inline roles without requiring a built Skill graph."""
+    runtime = SymphonyRuntime(model, config)
+    try:
+        plan = await runtime.orchestration.plan(query, type="expert")
+        return plan.to_dict()["planned_graph"]
     finally:
         await runtime.aclose()

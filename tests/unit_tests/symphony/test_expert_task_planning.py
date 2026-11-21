@@ -89,15 +89,78 @@ def _service(tmp_path, draft, monkeypatch, artifacts=None):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["service", "engine"])
+async def test_unified_plan_rejects_unknown_type_before_planning(tmp_path, monkeypatch, target):
+    service, model = _service(tmp_path, {"tasks": [_task("verify")]}, monkeypatch)
+    planner = service if target == "service" else SymphonyGraphEngine(service, unavailable_reason="No Skill graph")
+
+    with pytest.raises(ValueError, match="Unsupported orchestration type: mcp"):
+        await planner.plan("Verify the evidence", type="mcp")
+
+    assert model.planning_requests == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target, options", [
+    ("service", {"graph_revision": "old-expert-layer"}),
+    ("service", {"disabled_capability_ids": ["research"]}),
+    ("engine", {"merged_revision": "old-expert-layer"}),
+])
+async def test_expert_plan_rejects_skill_graph_options(tmp_path, monkeypatch, target, options):
+    service, model = _service(tmp_path, {"tasks": [_task("verify")]}, monkeypatch)
+    planner = service if target == "service" else SymphonyGraphEngine(service)
+
+    with pytest.raises(ValueError, match="Skill graph"):
+        await planner.plan("Verify the evidence", type="expert", **options)
+
+    assert model.planning_requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capability_type", ["skill", "expert"])
+@pytest.mark.parametrize("state", ["closed", "disabled"])
+async def test_unified_plan_checks_runtime_lifecycle(tmp_path, monkeypatch, capability_type, state):
+    service, model = _service(tmp_path, {"tasks": [_task("verify")]}, monkeypatch)
+    engine = SymphonyGraphEngine(service)
+    if state == "closed":
+        await engine.aclose()
+    else:
+        service.config = service.config.model_copy(update={"enabled": False})
+
+    with pytest.raises(RuntimeError, match=state):
+        await engine.plan("Verify the evidence", type=capability_type)
+
+    assert model.planning_requests == []
+    assert not engine._operations
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["service", "engine"])
+async def test_unified_expert_plan_accepts_progress_callback_alias(tmp_path, monkeypatch, target):
+    service, _ = _service(tmp_path, {"tasks": [_task("verify")]}, monkeypatch)
+    planner = service if target == "service" else SymphonyGraphEngine(service)
+    events = []
+
+    await planner.plan("Verify the evidence", type="expert", progress_callback=events.append)
+
+    assert [event.event for event in events] == ["plan_started", "plan_completed"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["fast", "beam"])
-async def test_expert_task_plan_preserves_relevant_isolated_expert(mode, tmp_path, monkeypatch, expert_artifacts):
+@pytest.mark.parametrize("entrypoint", ["plan", "plan_subagent_graph"])
+async def test_expert_task_plan_preserves_relevant_isolated_expert(
+    mode, tmp_path, monkeypatch, expert_artifacts, entrypoint,
+):
     draft = {
         "status": "ready",
         "tasks": [_task("first", expert_id="isolated"), _task("second", expert_id="isolated")],
     }
     service, model = _service(tmp_path, draft, monkeypatch, expert_artifacts)
 
-    result = await service.plan_subagent_graph("Verify citations independently", mode=mode)
+    options = {"type": "expert"} if entrypoint == "plan" else {}
+    result = await getattr(service, entrypoint)("Verify citations independently", mode=mode, **options)
     graph = result["planned_graph"]["graph"]
 
     assert "isolated" in {expert["id"] for expert in model.request["experts"]}
@@ -111,11 +174,16 @@ async def test_expert_task_plan_preserves_relevant_isolated_expert(mode, tmp_pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["fast", "beam"])
-async def test_missing_expert_graph_allows_inline_plan(mode, tmp_path, monkeypatch):
+@pytest.mark.parametrize("entrypoint", ["plan", "plan_subagent_graph"])
+async def test_missing_expert_graph_allows_inline_plan(mode, tmp_path, monkeypatch, entrypoint):
     service, model = _service(tmp_path, {"status": "ready", "tasks": [_task("verify")]}, monkeypatch)
 
     engine = SymphonyGraphEngine(service, unavailable_reason="Static graph sources are unavailable.")
-    result = await engine.plan_subagent_graph("Check the evidence", candidate_ids=["removed"], mode=mode)
+    options = {"type": "expert"} if entrypoint == "plan" else {}
+    events = []
+    result = await getattr(engine, entrypoint)(
+        "Check the evidence", candidate_ids=["removed"], mode=mode, progress=events.append, **options,
+    )
     graph = result["planned_graph"]["graph"]
 
     assert model.request["experts"] == []
@@ -123,6 +191,10 @@ async def test_missing_expert_graph_allows_inline_plan(mode, tmp_path, monkeypat
     assert graph["metadata"]["status"] == "ready"
     assert graph["nodes"]["task-1"]["metadata"]["role"]["name"] == "verify"
     assert graph["edges"] == []
+    assert [event.event for event in events] == ["plan_started", "plan_completed"]
+    assert engine._observation_service is None
+    assert len(model.planning_prompts) == 1
+    assert not engine._operations
 
 
 @pytest.mark.asyncio
@@ -433,10 +505,12 @@ async def test_expert_task_plan_corrects_invalid_draft(failure, tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_expert_task_plan_keeps_explicit_no_plan_without_retry(tmp_path, monkeypatch):
+@pytest.mark.parametrize("entrypoint", ["plan", "plan_subagent_graph"])
+async def test_expert_task_plan_keeps_explicit_no_plan_without_retry(tmp_path, monkeypatch, entrypoint):
     service, model = _service(tmp_path, {"status": "no_plan", "reason": "Required expert is unavailable."}, monkeypatch)
 
-    graph = (await service.plan_subagent_graph("Use the required expert"))["planned_graph"]["graph"]
+    options = {"type": "expert"} if entrypoint == "plan" else {}
+    graph = (await getattr(service, entrypoint)("Use the required expert", **options))["planned_graph"]["graph"]
 
     assert graph["metadata"]["status"] == "no_plan"
     assert graph["metadata"]["reason"] == "Required expert is unavailable."
@@ -446,17 +520,23 @@ async def test_expert_task_plan_keeps_explicit_no_plan_without_retry(tmp_path, m
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error", [TimeoutError, asyncio.CancelledError])
-async def test_expert_task_plan_does_not_retry_model_failure(tmp_path, monkeypatch, error):
+@pytest.mark.parametrize("entrypoint", ["plan", "plan_subagent_graph"])
+@pytest.mark.parametrize("target", ["service", "engine"])
+async def test_expert_task_plan_does_not_retry_model_failure(tmp_path, monkeypatch, error, entrypoint, target):
     def draft(request, system_prompt):
         raise error("model interrupted")
 
     service, model = _service(tmp_path, draft, monkeypatch)
     expected_error = asyncio.CancelledError if error is asyncio.CancelledError else RuntimeError
+    planner = service if target == "service" else SymphonyGraphEngine(service)
+    options = {"type": "expert"} if entrypoint == "plan" else {}
 
     with pytest.raises(expected_error, match="model interrupted"):
-        await service.plan_subagent_graph("Research the evidence")
+        await getattr(planner, entrypoint)("Research the evidence", **options)
 
     assert len(model.planning_prompts) == 1
+    if target == "engine":
+        assert not planner._operations
 
 
 @pytest.mark.asyncio
@@ -504,7 +584,8 @@ async def test_expert_task_plan_accepts_unpublished_expert_handoff(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_expert_task_plan_preserves_tasks_with_missing_inputs(tmp_path, monkeypatch):
+@pytest.mark.parametrize("entrypoint", ["plan", "plan_subagent_graph"])
+async def test_expert_task_plan_preserves_tasks_with_missing_inputs(tmp_path, monkeypatch, entrypoint):
     source = PlanningInput(name="facts", kind="file", value="attachment/facts.md", description="Approved facts")
     service, _ = _service(
         tmp_path,
@@ -517,7 +598,10 @@ async def test_expert_task_plan_preserves_tasks_with_missing_inputs(tmp_path, mo
     )
 
     engine = SymphonyGraphEngine(service)
-    graph = (await engine.plan_subagent_graph("Verify the evidence", inputs=[source]))["planned_graph"]["graph"]
+    options = {"type": "expert"} if entrypoint == "plan" else {}
+    graph = (await getattr(engine, entrypoint)("Verify the evidence", inputs=[source], **options))[
+        "planned_graph"
+    ]["graph"]
 
     assert graph["metadata"]["status"] == "ready"
     assert graph["metadata"]["missing_inputs"] == [

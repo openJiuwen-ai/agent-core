@@ -344,24 +344,63 @@ class OrchestrationService:
         mode: str | None = None,
         inputs: Sequence[PlanningInput | Mapping[str, Any]] = (),
     ) -> OrchestrationPlan:
-        callback = _resolve_progress_callback(progress, progress_callback)
+        """Dispatch Skill workflows and expert task graphs through one public entrypoint."""
         if type not in {"skill", "expert"}:
             raise ValueError(f"Unsupported orchestration type: {type}")
+        callback = _resolve_progress_callback(progress, progress_callback)
+        if type == "expert":
+            skill_graph_context = (dynamic_overlay, graph_revision, graph_snapshot, task_cluster_id)
+            if disabled_capability_ids or any(value is not None for value in skill_graph_context):
+                raise ValueError("Skill graph options cannot be used with type=expert.")
+            return await self.plan_subagent_graph(
+                query,
+                candidate_ids,
+                expert_manifest_paths=expert_manifest_paths,
+                language=language,
+                progress=callback,
+                mode=mode,
+                inputs=inputs,
+            )
+        return await self.plan_skill_graph(
+            query,
+            candidate_ids,
+            language=language,
+            progress=callback,
+            disabled_capability_ids=disabled_capability_ids,
+            dynamic_overlay=dynamic_overlay,
+            graph_revision=graph_revision,
+            graph_snapshot=graph_snapshot,
+            task_cluster_id=task_cluster_id,
+            mode=mode,
+            inputs=inputs,
+        )
+
+    async def plan_skill_graph(
+        self,
+        query: str,
+        candidate_ids: Sequence[str] | None = None,
+        *,
+        language: str = "cn",
+        progress: ProgressCallback | None = None,
+        disabled_capability_ids: Sequence[str] | None = None,
+        dynamic_overlay: dict[str, Any] | None = None,
+        graph_revision: str | None = None,
+        graph_snapshot: dict[str, Any] | None = None,
+        task_cluster_id: str | None = None,
+        progress_callback: ProgressCallback | None = None,
+        mode: str | None = None,
+        inputs: Sequence[PlanningInput | Mapping[str, Any]] = (),
+    ) -> OrchestrationPlan:
+        """Plan a Skill workflow using the published Skill graph."""
+        callback = _resolve_progress_callback(progress, progress_callback)
         if self.model is None:
             raise ValueError("Symphony planning requires a model.")
         planning_inputs = PlanningInput.validate_many(inputs)
         await _emit(callback, "plan_started", query=query)
-        if type == "expert" and self.expert_inventory is None:
-            artifacts = GraphArtifacts(self.graph_artifact_root, {}, [], {}, {})
-        else:
-            artifacts = load_graph_artifacts(self.graph_artifact_root, graph_revision, kind=type)
-        visible_ids = None
-        if type == "expert" and self.expert_inventory is not None:
-            visible_ids = await asyncio.to_thread(self._visible_expert_ids, artifacts, expert_manifest_paths)
+        artifacts = load_graph_artifacts(self.graph_artifact_root, graph_revision, kind="skill")
         artifacts = filter_disabled_graph_artifacts(
             artifacts,
             disabled_capability_ids,
-            visible_capability_ids=visible_ids,
         )
         planning_mode = mode or self.config.plan.mode
         if planning_mode not in {"fast", "beam"}:
@@ -369,16 +408,16 @@ class OrchestrationService:
         normalized_language = resolve_orchestration_language(language)
         selected, _summary = _input_candidate_summary(candidate_ids, artifacts.skills)
         empty_shortlist = candidate_ids is not None and not selected
-        if empty_shortlist or (type == "expert" and not artifacts.skills):
+        if empty_shortlist:
             plan_id = str(uuid4())
             planned_graph = build_planned_graph(
-                {"plan_id": plan_id, "status": "no_plan", "plans": []}, artifacts, layer=type,
+                {"plan_id": plan_id, "status": "no_plan", "plans": []}, artifacts, layer="skill",
             )
             if graph_snapshot is not None:
                 planned_graph["graph_snapshot"] = dict(graph_snapshot)
             await _emit(callback, "plan_completed", plan_id=plan_id)
             return OrchestrationPlan({"planned_graph": planned_graph})
-        effective_overlay = dynamic_overlay if type == "skill" and self.config.plan.dynamic_graph_enabled else {}
+        effective_overlay = dynamic_overlay if self.config.plan.dynamic_graph_enabled else {}
         planner: Any
         if planning_mode == "beam":
             planner = BidirectionalBeamPlanner(
@@ -393,7 +432,7 @@ class OrchestrationService:
                 language=normalized_language,
                 dynamic_overlay=effective_overlay,
                 task_cluster_id=task_cluster_id,
-                layer=type,
+                layer="skill",
                 inputs=planning_inputs,
             )
         else:
@@ -407,7 +446,7 @@ class OrchestrationService:
                 language=normalized_language,
                 dynamic_overlay=effective_overlay,
                 task_cluster_id=task_cluster_id,
-                layer=type,
+                layer="skill",
                 inputs=planning_inputs,
             )
         result = await planner.plan(query)
@@ -415,7 +454,7 @@ class OrchestrationService:
             detail = str(result.get("detail") or "Symphony planner failed to produce a valid plan.").strip()
             raise ValueError(f"Symphony planning failed: {detail}")
         result["plan_id"] = str(uuid4())
-        planned_graph = build_planned_graph(result, artifacts, layer=type)
+        planned_graph = build_planned_graph(result, artifacts, layer="skill")
         if graph_snapshot is not None:
             planned_graph["graph_snapshot"] = dict(graph_snapshot)
         public_result = OrchestrationPlan({"planned_graph": planned_graph})
