@@ -160,9 +160,9 @@ class ChainSession(Generic[T]):
 
                     # Load data container
                     if 'data' in state_data:
-                        self.data_container = await self.data_container.load(self.agent_id, self.session_id,
-                                                                             state_data['data']
-                                                                             )
+                        self.data_container = await type(self.data_container).load(
+                            self.agent_id, self.session_id, state_data['data']
+                        )
 
                 # Load downstream relationships
                 downstreams_dir = SessionPaths.downstreams_dir(self._session_dir)
@@ -248,10 +248,11 @@ class ChainSession(Generic[T]):
                 }
 
                 # Write session data
+                state_payload = json.dumps(state_data, indent=2, ensure_ascii=False)
                 state_file = SessionPaths.state_file(self._session_dir)
                 self._session_dir.mkdir(parents=True, exist_ok=True)
                 with open(state_file, 'w', encoding='utf-8') as f:
-                    json.dump(state_data, f, indent=2, ensure_ascii=False)
+                    f.write(state_payload)
 
                 # Process downstream relationships
                 downstreams_dir = SessionPaths.downstreams_dir(self._session_dir)

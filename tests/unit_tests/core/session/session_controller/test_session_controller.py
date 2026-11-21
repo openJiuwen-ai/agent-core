@@ -235,6 +235,89 @@ class TestSessionControllerLoad:
         assert main_scope in ctrl2.meta_map
 
 
+def _attach_agent_session(chain_session):
+    from openjiuwen.core.session.agent import create_agent_session
+    from openjiuwen.core.single_agent import AgentCard
+
+    chain_session.data_container.session = create_agent_session(
+        session_id=chain_session.session_id,
+        card=AgentCard(id=chain_session.agent_id),
+    )
+
+
+class TestSessionControllerRestore:
+    @pytest.mark.asyncio
+    async def test_load_restores_session_state(self, controller, main_scope, base_path):
+        # A new controller restores meta, downstreams and data from disk
+        _, session = await controller.create_if_not_exists(main_scope, "session-1")
+        _attach_agent_session(session)
+        assert await session.update_data({"topic": "restore"}) is True
+        session.add_downstream("agent2", "session-2")
+        await controller.flush()
+
+        ctrl2 = SessionController(agent_id="agent1", base_path=base_path)
+        assert await ctrl2.load() is True
+        restored = ctrl2.session_cache["session-1"]
+
+        assert restored.version == 2
+        assert restored.is_active is True
+        assert restored.has_downstream("agent2", "session-2")
+        assert restored.data_container.session.get_state("topic") == "restore"
+
+    @pytest.mark.asyncio
+    async def test_flush_after_load_keeps_version(self, controller, main_scope, base_path):
+        # A restored session keeps counting versions and saving its data
+        _, session = await controller.create_if_not_exists(main_scope, "session-1")
+        _attach_agent_session(session)
+        await session.update_data({"topic": "restore"})
+        await session.update_data({"topic": "again"})
+        await controller.flush()
+
+        ctrl2 = SessionController(agent_id="agent1", base_path=base_path)
+        assert await ctrl2.load() is True
+        assert "session-1" in ctrl2.session_cache
+        await ctrl2.session_cache["session-1"].update_data({"topic": "after-restore"})
+        await ctrl2.flush()
+
+        state_file = base_path / "agent1" / "sessions" / "session-1" / "state.data"
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        assert state["meta"]["version"] == 4
+        assert state["data"] == {"topic": "after-restore"}
+
+    @pytest.mark.asyncio
+    async def test_corrupt_session_does_not_block_the_rest_of_the_scope(
+            self, controller, main_scope, base_path
+    ):
+        # A session whose state.data cannot be read is skipped; the others still load
+        await controller.create_if_not_exists(main_scope, "session-1")
+        controller.meta_map[main_scope].deactivate_all_sessions()
+        controller.session_cache["session-1"].is_active = False
+        await controller.create_if_not_exists(main_scope, "session-2")
+        await controller.flush()
+        (base_path / "agent1" / "sessions" / "session-2" / "state.data").write_text("{", encoding="utf-8")
+
+        ctrl2 = SessionController(agent_id="agent1", base_path=base_path)
+        assert await ctrl2.load(load_active_only=False) is True
+
+        assert "session-1" in ctrl2.session_cache
+        assert "session-2" not in ctrl2.session_cache
+        assert await ctrl2.get_scope_active_session(main_scope) is None
+
+    @pytest.mark.asyncio
+    async def test_unserializable_data_leaves_saved_state_intact(self, controller, main_scope, base_path):
+        # A value that cannot be written as JSON fails the flush without corrupting state.data
+        _, session = await controller.create_if_not_exists(main_scope, "session-1")
+        _attach_agent_session(session)
+        await session.update_data({"topic": "saved"})
+        assert await session.flush() is True
+
+        await session.update_data({"topic": object()})
+        assert await session.flush() is False
+
+        state_file = base_path / "agent1" / "sessions" / "session-1" / "state.data"
+        assert json.loads(state_file.read_text(encoding="utf-8"))["data"] == {"topic": "saved"}
+
+
 class TestSessionControllerRemove:
     @pytest.mark.asyncio
     async def test_remove_session(self, controller, main_scope, base_path):
