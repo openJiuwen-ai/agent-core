@@ -1291,6 +1291,83 @@ async def test_plan_mode_submit_approve_and_complete(db, message_bus, tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_plan_mode_submit_plan_starts_preassigned_pending_task(db, message_bus, tmp_path):
+    """A pre-assigned PENDING task can enter the plan gate via submit_plan."""
+    await db.team.create_team(team_name="plan_team", display_name="Plan Team", leader_member_name="leader")
+    await db.member.create_member(
+        member_name="member1",
+        team_name="plan_team",
+        display_name="member1",
+        agent_card=AgentCard().model_dump_json(),
+        status="BUSY",
+        mode=MemberMode.PLAN_MODE.value,
+    )
+    manager = TeamTaskManager(
+        team_name="plan_team",
+        member_name="member1",
+        db=db,
+        messager=message_bus,
+        plans_dir=tmp_path / "plans",
+        team_plan_id="plan_1",
+    )
+    created = await manager.add_graph(
+        [TaskGraphSpec(title="Plan task", content="Do work", task_id="preassigned", assignee="member1")]
+    )
+    assert created.ok
+    task = await manager.get("preassigned")
+    assert task.status == TaskStatus.PENDING.value
+    assert task.assignee == "member1"
+
+    plan_path = tmp_path / "member_plan.md"
+    plan_path.write_text("1. inspect\n2. implement\n", encoding="utf-8")
+    result = await manager.submit_plan("preassigned", plan_path=str(plan_path))
+
+    assert result["success"] is True
+    assert result["status"] == TaskStatus.PLANNING.value
+    updated = await manager.get("preassigned")
+    assert updated.status == TaskStatus.PLANNING.value
+    assert updated.assignee == "member1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_plan_mode_submit_plan_claims_unassigned_pending_task(db, message_bus, tmp_path):
+    """An unassigned PENDING task is still claimed by the first plan submission."""
+    await db.team.create_team(team_name="plan_team", display_name="Plan Team", leader_member_name="leader")
+    await db.member.create_member(
+        member_name="member1",
+        team_name="plan_team",
+        display_name="member1",
+        agent_card=AgentCard().model_dump_json(),
+        status="BUSY",
+        mode=MemberMode.PLAN_MODE.value,
+    )
+    manager = TeamTaskManager(
+        team_name="plan_team",
+        member_name="member1",
+        db=db,
+        messager=message_bus,
+        plans_dir=tmp_path / "plans",
+        team_plan_id="plan_1",
+    )
+    task = await manager.add(title="Plan task", content="Do work")
+    assert task.ok
+    assert task.status == TaskStatus.PENDING.value
+    assert task.assignee is None
+
+    plan_path = tmp_path / "member_plan.md"
+    plan_path.write_text("1. inspect\n2. implement\n", encoding="utf-8")
+    result = await manager.submit_plan(task.task_id, plan_path=str(plan_path))
+
+    assert result["success"] is True
+    assert result["status"] == TaskStatus.PLANNING.value
+    updated = await manager.get(task.task_id)
+    assert updated.status == TaskStatus.PLANNING.value
+    assert updated.assignee == "member1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_in_progress_task_rejects_new_dependency(db, message_bus, tmp_path):
     """An IN_PROGRESS task is being executed, so it cannot gain a new prerequisite."""
     await db.team.create_team(team_name="dep_team", display_name="DT", leader_member_name="leader")
