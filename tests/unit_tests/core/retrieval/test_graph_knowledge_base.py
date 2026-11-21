@@ -333,3 +333,24 @@ class TestGraphKnowledgeBase:
         mock_graph_retriever.close.assert_called_once()
         mock_chunk_retriever.close.assert_called_once()
         mock_triple_retriever.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_retrieve_with_graph_forwards_filters_to_store(
+        self,
+        mock_config,
+        mock_vector_store,
+        mock_embed_model,
+    ):
+        """issue #2431: use_graph 时 RetrievalConfig.filters 必须真的落到存储层"""
+        mock_vector_store.search = AsyncMock(return_value=[])
+
+        kb = GraphKnowledgeBase(
+            config=mock_config,
+            vector_store=mock_vector_store,
+            embed_model=mock_embed_model,
+        )
+        config = RetrievalConfig(use_graph=True, top_k=5, filters={"tenant": "a"})
+
+        await kb.retrieve("test query", config=config)
+
+        assert mock_vector_store.search.await_args.kwargs["filters"] == {"tenant": "a"}

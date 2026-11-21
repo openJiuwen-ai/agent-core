@@ -10,6 +10,7 @@ from typing import List, Literal, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.foundation.store.query import QueryExpr
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.retriever.base import Retriever
@@ -44,6 +45,7 @@ class HybridRetriever(Retriever):
         top_k: int = 5,
         score_threshold: Optional[float] = None,
         mode: Literal["vector", "sparse", "hybrid"] = "hybrid",
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs,
     ) -> List[RetrievalResult]:
         """
@@ -78,7 +80,7 @@ class HybridRetriever(Retriever):
                 query_vector=query_vector,
                 top_k=top_k,
                 alpha=alpha,
-                filters=None,
+                filters=filters,
             )
         elif mode == "vector":
             # Pure vector retrieval
@@ -92,20 +94,20 @@ class HybridRetriever(Retriever):
             search_results = await self.vector_store.search(
                 query_vector=query_vector,
                 top_k=top_k,
-                filters=None,
+                filters=filters,
             )
             if not search_results:
                 search_results = await self.vector_store.sparse_search(
                     query_text=query,
                     top_k=top_k,
-                    filters=None,
+                    filters=filters,
                 )
         elif mode == "sparse":
             # Pure sparse retrieval
             search_results = await self.vector_store.sparse_search(
                 query_text=query,
                 top_k=top_k,
-                filters=None,
+                filters=filters,
             )
         else:
             raise build_error(StatusCode.RETRIEVAL_RETRIEVER_MODE_NOT_SUPPORT, error_msg=f"Unsupported mode: {mode}")
@@ -148,6 +150,7 @@ class HybridRetriever(Retriever):
         query: str,
         top_k: int = 5,
         mode: Literal["vector", "sparse", "hybrid"] = "hybrid",
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs,
     ) -> List[SearchResult]:
         """
@@ -175,7 +178,7 @@ class HybridRetriever(Retriever):
                 query_vector=query_vector,
                 top_k=top_k,
                 alpha=alpha,
-                filters=None,
+                filters=filters,
             )
         elif mode == "vector":
             # Pure vector retrieval
@@ -189,20 +192,20 @@ class HybridRetriever(Retriever):
             search_results = await self.vector_store.search(
                 query_vector=query_vector,
                 top_k=top_k,
-                filters=None,
+                filters=filters,
             )
             if not search_results:
                 search_results = await self.vector_store.sparse_search(
                     query_text=query,
                     top_k=top_k,
-                    filters=None,
+                    filters=filters,
                 )
         elif mode == "sparse":
             # Pure sparse retrieval
             search_results = await self.vector_store.sparse_search(
                 query_text=query,
                 top_k=top_k,
-                filters=None,
+                filters=filters,
             )
         else:
             raise build_error(StatusCode.RETRIEVAL_RETRIEVER_MODE_NOT_SUPPORT, error_msg=f"Unsupported mode: {mode}")
