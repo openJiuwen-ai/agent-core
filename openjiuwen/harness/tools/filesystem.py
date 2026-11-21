@@ -2977,7 +2977,13 @@ class GrepTool(Tool):
                 return ToolOutput(success=False, error="multiline search requires ripgrep (rg) to be installed")
 
         shell_type = "powershell" if os.name == "nt" else "auto"
-        res = await self.operation.shell().execute_cmd(cmd, timeout=30, shell_type=shell_type)
+        # ripgrep always emits UTF-8 regardless of the launching shell's code page.
+        # Without forcing UTF-8 decoding, rg output is decoded as GBK on Chinese
+        # Windows, producing garbled or empty results (the "grep is broken" bug).
+        exec_options = {"encoding": "utf-8"} if rg_bin else None
+        res = await self.operation.shell().execute_cmd(
+            cmd, timeout=30, shell_type=shell_type, options=exec_options,
+        )
 
         if res.code != StatusCode.SUCCESS.code:
             return ToolOutput(success=False, error=res.message)
