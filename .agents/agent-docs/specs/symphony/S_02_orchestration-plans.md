@@ -5,14 +5,18 @@ type: S
 author: lin-xiaoyu
 author_email: xiaoyu.lin.work@outlook.com
 created: 2026-11-20
-updated: 2026-11-20
+updated: 2026-11-21
 modules: [openjiuwen/symphony]
 files: [openjiuwen/symphony/graph_engine.py, openjiuwen/symphony/orchestration/service.py, openjiuwen/symphony/orchestration/planned_graph.py, openjiuwen/symphony/orchestration/planning/expert_tasks.py]
 ---
 
 # Symphony 规划结果与宿主输入处理
 
-宿主用 `runtime.orchestration.plan(...)` 在已发布的能力层规划，用 `runtime.orchestration.plan_subagent_graph(...)` 生成由已安装专家和临时角色承担的任务图。两者都支持具名 `inputs`，返回 `planned_graph.graph`。
+宿主使用 `runtime.orchestration.plan(query, type="skill" | "expert", ...)` 统一规划。类型缺省为 `skill`，调用方提供类型，Core 不增加分类模型调用。`OrchestrationService.plan()` 是类型分流的实现位置，`SymphonyGraphEngine.plan()` 负责运行态检查和技能动态图上下文准备。非法类型在模型调用和图读取前被拒绝。
+
+`plan_skill_graph()` 固定生成技能工作流，与 `plan(type="skill")` 共用技能规划实现；`plan_subagent_graph()` 固定生成由已安装专家和临时角色承担的任务图，与 `plan(type="expert")` 一致。两个专用入口不接受 `type`，Engine 的专用入口以固定类型进入统一入口。三个入口都支持具名 `inputs`、`mode`、`language`、进度，返回 `planned_graph.graph`。
+
+`plan(type="expert")` 替代旧版返回专家能力链的行为，统一输出 `plan_kind=expert_tasks`。专家关系图保留为候选证据，已安装专家与实时 manifest 可见范围取交集；没有技能图、专家图或可用专家时允许纯内联任务。专家规划不读取技能动态图，不要求技能图来源可用。技能专属修订、动态图覆盖和禁用技能参数不能传给专家规划，非空禁用列表或显式图上下文会被拒绝，避免静默丢弃约束。
 
 有效 DAG 的 `metadata.status` 为 `ready`。无法形成可用计划时返回 `no_plan`。图级 `missing_inputs` 描述规划时发现的资料缺项。宿主结合会话资料和 DAG 决定哪些节点可以运行、哪些前置资料需要获取或向用户确认。
 

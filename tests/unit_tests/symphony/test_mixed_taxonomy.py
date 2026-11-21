@@ -43,7 +43,7 @@ class _HandoffModel(GraphModel):
     def __init__(self):
         super().__init__()
         self.expert_extractions = 0
-        self.force_steps = None
+        self.expert_no_plan = False
 
     async def invoke(self, messages, **kwargs):
         try:
@@ -66,9 +66,19 @@ class _HandoffModel(GraphModel):
             ]}
         elif "candidate_plans" in payload:
             result = {"selected_plan_index": 1, "steps": [{"skill_id": name} for name in ("ledger", "writer")]}
+        elif "experts" in payload:
+            if self.expert_no_plan:
+                result = {"status": "no_plan", "reason": "No viable expert assignment."}
+            else:
+                result = {"tasks": [
+                    {"id": "research", "expert_id": "ledger", "task": "Collect source evidence.",
+                     "outputs": [{"name": "evidence_table", "type": "csv"}]},
+                    {"id": "report", "expert_id": "writer", "task": "Write the brief.",
+                     "outputs": [{"name": "brief", "type": "text"}]},
+                ], "handoffs": [{"source": "research", "target": "report", "source_output": "evidence_table"}]}
         elif "can_feed_edges" in payload and "query" in payload:
             ids = {item["id"] for item in payload["skills"]}
-            steps = self.force_steps or [name for name in ("ledger", "writer") if name in ids]
+            steps = [name for name in ("ledger", "writer") if name in ids]
             result = {"status": "ready", "steps": [{"skill_id": name} for name in steps]}
         else:
             return await super().invoke(messages, **kwargs)
@@ -126,15 +136,19 @@ async def test_shared_graph_projects_layers_and_reuses_expert_fingerprints(hando
                 "planned_graph"
             ]["graph"]
             assert plan["metadata"]["status"] == "ready"
-            assert {key: node["metadata"]["type"] for key, node in plan["nodes"].items()} == {
-                "ledger": "expert", "writer": "expert",
+            assert plan["metadata"]["plan_kind"] == "expert_tasks"
+            assert {key: node["metadata"]["expert_id"] for key, node in plan["nodes"].items()} == {
+                "task-1": "ledger", "task-2": "writer",
             }
-            assert plan["edges"] == [{"source": "ledger", "target": "writer", "relation": "can_feed"}]
+            assert plan["edges"] == [{
+                "source": "task-1", "target": "task-2", "relation": "can_feed",
+                "source_output": "evidence_table", "target_input": "evidence_table",
+            }]
 
         plan = (await runtime.orchestration.plan("use ledger", ["ledger"]))["planned_graph"]["graph"]
         assert plan["nodes"]["ledger"]["metadata"]["type"] == "skill"
 
-        model.force_steps = ["ledger", "observer"]
+        model.expert_no_plan = True
         plan = (await runtime.orchestration.plan("write a brief", ["ledger", "observer"], type="expert"))[
             "planned_graph"
         ]["graph"]

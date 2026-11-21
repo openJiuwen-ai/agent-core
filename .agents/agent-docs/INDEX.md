@@ -589,6 +589,7 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [F_20261120_1607_subagent-graph-inputs](features/F_20261120_1607_subagent-graph-inputs.md) | F | 子智能体编排接口改名与 DAG 缺项提示 | lin-xiaoyu | 无独立 D：用户已明确指定 SDK 方法名、规划状态和宿主对输入的决策职责。 |
+| [F_20261121_1035_symphony-unified-planning](features/F_20261121_1035_symphony-unified-planning.md) | F | Symphony 统一规划入口 | lin-xiaoyu | 无独立 D：依据 2026-11-21 当前会话明确确认的统一规划入口方案实施，没有单独创建 D 文档。 |
 | [S_02_orchestration-plans](specs/symphony/S_02_orchestration-plans.md) | S | Symphony 规划结果与宿主输入处理 | lin-xiaoyu | — |
 
 <a id="module-unclassified"></a>

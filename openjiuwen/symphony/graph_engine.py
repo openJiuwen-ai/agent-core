@@ -266,8 +266,13 @@ class SymphonyGraphEngine:
         mode: str | None = None,
         inputs: Sequence[PlanningInput | Mapping[str, Any]] = (),
     ) -> OrchestrationPlan:
+        """Prepare runtime context and dispatch planning by the explicit capability type."""
+        if type not in {"skill", "expert"}:
+            raise ValueError(f"Unsupported orchestration type: {type}")
+        if type == "expert" and (graph_scope_id is not None or merged_revision is not None):
+            raise ValueError("Skill graph revisions cannot be used with type=expert.")
         with self._track_operation():
-            self._check()
+            self._check(require_graph=type == "skill")
             snapshot = None
             if type == "skill" and self._orchestration_service.config.plan.dynamic_graph_enabled:
                 try:
@@ -300,6 +305,37 @@ class SymphonyGraphEngine:
                 inputs=inputs,
             )
 
+    async def plan_skill_graph(
+        self,
+        query: str,
+        candidate_ids: Sequence[str] | None = None,
+        *,
+        language: str = "cn",
+        progress: ProgressCallback | None = None,
+        disabled_capability_ids: Sequence[str] | None = None,
+        graph_scope_id: str | None = None,
+        merged_revision: str | None = None,
+        task_cluster_id: str | None = None,
+        progress_callback: ProgressCallback | None = None,
+        mode: str | None = None,
+        inputs: Sequence[PlanningInput | Mapping[str, Any]] = (),
+    ) -> OrchestrationPlan:
+        """Plan a Skill workflow with the same runtime checks as the unified entrypoint."""
+        return await self.plan(
+            query,
+            candidate_ids,
+            type="skill",
+            language=language,
+            progress=progress,
+            disabled_capability_ids=disabled_capability_ids,
+            graph_scope_id=graph_scope_id,
+            merged_revision=merged_revision,
+            task_cluster_id=task_cluster_id,
+            progress_callback=progress_callback,
+            mode=mode,
+            inputs=inputs,
+        )
+
     async def plan_subagent_graph(
         self,
         query: str,
@@ -312,17 +348,16 @@ class SymphonyGraphEngine:
         inputs: Sequence[PlanningInput | Mapping[str, Any]] = (),
     ) -> OrchestrationPlan:
         """Plan installed expert tasks and inline roles using any published expert evidence."""
-        with self._track_operation():
-            self._check(require_graph=False)
-            return await self._orchestration_service.plan_subagent_graph(
-                query,
-                candidate_ids,
-                expert_manifest_paths=expert_manifest_paths,
-                language=language,
-                progress=progress,
-                mode=mode,
-                inputs=inputs,
-            )
+        return await self.plan(
+            query,
+            candidate_ids,
+            type="expert",
+            expert_manifest_paths=expert_manifest_paths,
+            language=language,
+            progress=progress,
+            mode=mode,
+            inputs=inputs,
+        )
 
     def submit_observation(self, value: GraphEvolutionInput) -> ObservationReceipt:
         """Append one canonical execution observation for asynchronous learning."""

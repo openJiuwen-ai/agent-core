@@ -150,7 +150,8 @@ class _FailingFastPlanLLM(_PlanLLM):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["fast", "beam"])
-async def test_skill_planners_use_named_inputs_without_changing_the_task(monkeypatch, tmp_path, mode):
+@pytest.mark.parametrize("entrypoint", ["default", "skill", "plan_skill_graph"])
+async def test_skill_planners_use_named_inputs_without_changing_the_task(monkeypatch, tmp_path, mode, entrypoint):
     requests = []
     skills = [{
         "id": "summarize", "name": "Summarize", "description": "Summarize text",
@@ -179,8 +180,10 @@ async def test_skill_planners_use_named_inputs_without_changing_the_task(monkeyp
     )
     query = "Summarize the source."
     source = {"name": "source", "kind": "text", "value": "A confirmed observation."}
-    empty = await service.plan(query, candidate_ids=["summarize"], mode=mode)
-    supplied = await service.plan(query, candidate_ids=["summarize"], mode=mode, inputs=[source])
+    plan = service.plan if entrypoint != "plan_skill_graph" else service.plan_skill_graph
+    options = {"type": "skill"} if entrypoint == "skill" else {}
+    empty = await plan(query, candidate_ids=["summarize"], mode=mode, **options)
+    supplied = await plan(query, candidate_ids=["summarize"], mode=mode, inputs=[source], **options)
 
     graph = empty["planned_graph"]["graph"]
     assert graph["metadata"]["status"] == "ready"
@@ -498,7 +501,8 @@ def _directory_runtime(root, *, model, orchestration_config=None):
 
 
 @pytest.mark.asyncio
-async def test_graph_engine_plan_pins_merged_snapshot(tmp_path: Path) -> None:
+@pytest.mark.parametrize("entrypoint", ["plan", "plan_skill_graph"])
+async def test_graph_engine_plan_pins_merged_snapshot(tmp_path: Path, entrypoint: str) -> None:
     runtime = _directory_runtime(
         tmp_path,
         model=_PlanLLM(),
@@ -507,7 +511,7 @@ async def test_graph_engine_plan_pins_merged_snapshot(tmp_path: Path) -> None:
     await runtime.orchestration.build()
 
     snapshot = runtime.orchestration.get_snapshot()
-    result = await runtime.orchestration.plan("query", merged_revision=snapshot.merged_revision)
+    result = await getattr(runtime.orchestration, entrypoint)("query", merged_revision=snapshot.merged_revision)
 
     graph_snapshot = result["planned_graph"]["graph_snapshot"]
     assert graph_snapshot["static_revision"] == snapshot.static_revision
