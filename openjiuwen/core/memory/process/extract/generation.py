@@ -133,7 +133,7 @@ class Generator:
                 exception=str(e)
             )
             return all_memory_results
-        except BaseException as e:
+        except Exception as e:
             memory_logger.warning(
                 "Get conflict info has exception",
                 event_type=LogEventType.MEMORY_PROCESS,

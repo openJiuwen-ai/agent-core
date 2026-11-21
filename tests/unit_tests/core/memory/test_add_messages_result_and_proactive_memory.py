@@ -1,5 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import asyncio
 import os
 import shutil
 import tempfile
@@ -713,6 +714,44 @@ class TestExceptionAndBoundary:
         )
 
         assert isinstance(result, AddMemResult)
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_extraction_skips_write(
+            self, engine, mock_llm, default_config, user_assistant_messages
+    ):
+        """Cancelling add_messages during fragment extraction propagates and writes nothing."""
+        started = asyncio.Event()
+        never = asyncio.Event()
+
+        analysis = _analysis_response(
+            has_key_information=True,
+            variables=[{"variable_key": "姓名", "variable_value": "Tom"}],
+            summary="用户介绍了自己",
+        )
+
+        async def _invoke(*args, **kwargs):
+            if mock_llm.invoke.await_count == 1:
+                return analysis
+            started.set()
+            await never.wait()
+
+        mock_llm.invoke = AsyncMock(side_effect=_invoke)
+
+        with patch.object(
+                engine.write_manager, "add_memories", new_callable=AsyncMock
+        ) as mock_add:
+            task = asyncio.create_task(engine.add_messages(
+                messages=user_assistant_messages,
+                agent_config=default_config,
+                user_id="u1",
+                scope_id="s1",
+            ))
+            await asyncio.wait_for(started.wait(), timeout=5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        mock_add.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_long_content_does_not_crash(
