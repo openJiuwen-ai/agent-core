@@ -40,7 +40,12 @@ from openjiuwen.core.single_agent.interrupt.state import (
     match_answers,
     pending_interrupts,
 )
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    AgentTerminationReason,
+    InvokeInputs,
+    record_termination_reason,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
@@ -294,13 +299,7 @@ class ToolInterruptHandler:
             sub_agent_outputs: list = None,
     ) -> Dict[str, object]:
         """Persist tool interruption state and return interrupt dict."""
-        # FEAT-127 FR-06: record the reason at the commit point (local import
-        # keeps rail.base free of an interrupt-module dependency).
-        from openjiuwen.core.single_agent.rail.base import (
-            AgentTerminationReason,
-            record_termination_reason,
-        )
-
+        # FEAT-127 FR-06: record the reason at the commit point.
         record_termination_reason(AgentTerminationReason.TOOL_INTERRUPT)
         await self._agent.context_engine.save_contexts(session)
         self.save(state, session)

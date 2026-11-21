@@ -3857,7 +3857,7 @@ class ReActAgent(BaseAgent):
                             },
                             session,
                         )
-                    except Exception:  # noqa: BLE001 - never mask the cancellation
+                    except (Exception, asyncio.CancelledError):  # noqa: BLE001 - never mask the cancellation
                         logger.debug("cancelled frame not delivered", exc_info=True)
                 abort_persisted = await self._handle_context_abort(
                     session,
@@ -3883,7 +3883,7 @@ class ReActAgent(BaseAgent):
                             },
                             session,
                         )
-                    except Exception:  # noqa: BLE001 - never mask the original error
+                    except (Exception, asyncio.CancelledError):  # noqa: BLE001 - never mask the original error
                         logger.debug("model-error frame not delivered", exc_info=True)
                 raise
             except Exception as e:
