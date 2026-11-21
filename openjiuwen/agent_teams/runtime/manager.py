@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import time
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
@@ -70,7 +71,7 @@ from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_worktrees
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import raise_error
+from openjiuwen.core.common.exception.errors import BaseError, raise_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.context_engine.context.cancellation import (
@@ -111,6 +112,104 @@ class TeamSessionReleaseInfo:
 
     team_names: list[str]
     db_config: DatabaseConfig
+
+
+# A resumed approval round clears sibling interrupt state until it commits
+# again. The click arrives while that round is still running.
+_INTERRUPT_RESUME_WAIT_SECONDS = 90.0
+_INTERRUPT_RESUME_RETRY_DELAY_SECONDS = 0.25
+
+
+def _member_round_in_flight(agent: object) -> bool:
+    """Return whether ``agent`` still has a round that can restore a pending interrupt."""
+    probe = getattr(agent, "has_in_flight_round", None)
+    if not callable(probe):
+        return False
+    try:
+        return bool(probe())
+    except Exception:
+        team_logger.warning("interrupt resume could not read in-flight round state", exc_info=True)
+        return False
+
+
+def _any_member_round_in_flight(leader: "TeamAgent") -> bool:
+    if _member_round_in_flight(leader):
+        return True
+    spawn_manager = getattr(leader, "spawn_manager", None)
+    handles = getattr(spawn_manager, "spawned_handles", {}) or {}
+    for handle in handles.values():
+        teammate = getattr(handle, "agent_ref", None)
+        if teammate is not None and teammate is not leader and _member_round_in_flight(teammate):
+            return True
+    return False
+
+
+def _wait_for_sibling_interrupt(leader: "TeamAgent", result: DeliverResult) -> bool:
+    """Return whether this rejection is the in-flight sibling-approval race."""
+    if result.reason == "interrupt_resume_busy":
+        return True
+    return (
+        result.reason == "unsupported_interactive_input"
+        and _any_member_round_in_flight(leader)
+    )
+
+
+async def _admit_interactive_input(
+    leader: "TeamAgent",
+    payload: InteractiveInput,
+    run_context: RunContext | None,
+) -> DeliverResult:
+    """Admit an answer on the leader, then on the in-process teammate that owns it."""
+    result = await leader.resume_interrupt(payload, run_context=run_context)
+    if result.ok or result.reason != "unsupported_interactive_input":
+        return result
+    spawn_manager = getattr(leader, "spawn_manager", None)
+    handles = getattr(spawn_manager, "spawned_handles", {})
+    for handle in list(handles.values()):
+        teammate = getattr(handle, "agent_ref", None)
+        if teammate is None or teammate is leader:
+            continue
+        owns = getattr(teammate, "owns_pending_interrupt_answer", None)
+        if owns is None or not owns(payload):
+            continue
+        try:
+            member_result = await teammate.resume_interrupt(payload, run_context=run_context)
+        except BaseError:
+            team_logger.warning(
+                "teammate interrupt resume failed before admission; keeping the answer unclaimed",
+                exc_info=True,
+            )
+            return DeliverResult.failure("interrupt_resume_unavailable")
+        if member_result.ok or member_result.reason != "unsupported_interactive_input":
+            return member_result
+    return result
+
+
+async def _resume_interactive_input(
+    leader: "TeamAgent",
+    payload: InteractiveInput,
+    run_context: RunContext | None,
+) -> DeliverResult:
+    """Admit an answer on the leader, then on the in-process teammate that owns it.
+
+    A teammate is selected only when its current pending fully matches. The
+    teammate's existing ``resume_interrupt`` still decides the receipt. Handles
+    without an in-process agent keep the leader receipt; those members continue
+    to consume the durable approval mail they already poll.
+
+    Parallel permission cards share one round. Admitting the first answer
+    clears the others until that round commits them again, and a click in
+    that window is ``interrupt_resume_busy`` or a temporary mismatch. Wait
+    for the round instead of turning the click into a failed send.
+    """
+    deadline = time.monotonic() + _INTERRUPT_RESUME_WAIT_SECONDS
+    while True:
+        result = await _admit_interactive_input(leader, payload, run_context)
+        if result.ok or not _wait_for_sibling_interrupt(leader, result):
+            return result
+        if time.monotonic() >= deadline:
+            return result
+        await asyncio.sleep(_INTERRUPT_RESUME_RETRY_DELAY_SECONDS)
 
 
 class TeamRuntimeManager:
@@ -621,57 +720,55 @@ class TeamRuntimeManager:
         if entry is None:
             return DeliverResult.failure("not_active")
 
-        if isinstance(payload, InteractiveInput):
-            if entry.agent.has_pending_interrupt():
-                await entry.agent.resume_interrupt(
-                    payload,
-                    run_context=run_context,
+        if not isinstance(payload, InteractiveInput):
+            try:
+                external_event = (
+                    payload
+                    if isinstance(payload, ExternalTeamEvent)
+                    else ExternalTeamEvent.from_wire(payload)
                 )
-                return DeliverResult.success(None)
-            return DeliverResult.failure("unsupported_interactive_input")
+            except ValueError:
+                return DeliverResult.failure("invalid_external_event")
+            if external_event is not None:
+                return await self._route_external_team_event(entry, external_event)
 
-        try:
-            external_event = payload if isinstance(payload, ExternalTeamEvent) else ExternalTeamEvent.from_wire(payload)
-        except ValueError:
-            return DeliverResult.failure("invalid_external_event")
-        if external_event is not None:
-            return await self._route_external_team_event(entry, external_event)
+            try:
+                group_input = GroupChatMessage.from_wire(payload)
+            except ValueError:
+                return DeliverResult.failure("invalid_group_chat")
+            if group_input is not None:
+                payload = group_input
 
-        try:
-            group_input = GroupChatMessage.from_wire(payload)
-        except ValueError:
-            return DeliverResult.failure("invalid_group_chat")
-        if group_input is not None:
-            payload = group_input
+            backend = getattr(entry.agent, "team_backend", None)
+            requested_mode = self._conversation_mode(payload)
+            # An explicit GodViewMessage is a private leader wake (e.g. a scheduled
+            # heartbeat), not a conversation turn, so it does not trip the mode
+            # lock — same as ``deliver_organization_prompt``. Free-form strings
+            # still do: they are user turns in the team conversation mode.
+            if backend is not None and requested_mode is not None and not isinstance(payload, GodViewMessage):
+                if getattr(backend, "conversation_mode", "team") != requested_mode:
+                    return DeliverResult.failure("conversation_mode_mismatch")
 
-        backend = getattr(entry.agent, "team_backend", None)
-        requested_mode = self._conversation_mode(payload)
-        # An explicit GodViewMessage is a private leader wake (e.g. a scheduled
-        # heartbeat), not a conversation turn, so it does not trip the mode
-        # lock — same as ``deliver_organization_prompt``. Free-form strings
-        # still do: they are user turns in the team conversation mode.
-        if backend is not None and requested_mode is not None and not isinstance(payload, GodViewMessage):
-            if getattr(backend, "conversation_mode", "team") != requested_mode:
-                return DeliverResult.failure("conversation_mode_mismatch")
+            if isinstance(payload, str):
+                parsed = parse_interact_str(payload)
+                payloads: list[InteractPayload] = parsed or [GodViewMessage(body=payload)]
+            else:
+                payloads = [payload]
 
-        if isinstance(payload, str):
-            parsed = parse_interact_str(payload)
-            payloads: list[InteractPayload] = parsed or [GodViewMessage(body=payload)]
-        else:
-            payloads = [payload]
-
-        # A swarmflow human-session reply is addressed by correlation id, not a
-        # roster member — route it straight to the run's reply topic before the
-        # roster-matching dispatch would fold it as an unknown mention. It bypasses
-        # the interact gate (a lightweight publish, not a leader round).
-        reply = self._as_swarmflow_human_reply(payloads)
-        if reply is not None:
-            return await self._route_swarmflow_human_reply(entry, reply[0], reply[1], reply[2])
+            # A swarmflow human-session reply is addressed by correlation id, not a
+            # roster member — route it straight to the run's reply topic before the
+            # roster-matching dispatch would fold it as an unknown mention. It bypasses
+            # the interact gate (a lightweight publish, not a leader round).
+            reply = self._as_swarmflow_human_reply(payloads)
+            if reply is not None:
+                return await self._route_swarmflow_human_reply(entry, reply[0], reply[1], reply[2])
 
         ticket = await entry.interact_gate.admit()
         if ticket is None:
             return DeliverResult.failure("gate_closed")
         try:
+            if isinstance(payload, InteractiveInput):
+                return await _resume_interactive_input(entry.agent, payload, run_context=run_context)
             # Strict-match ``@<member>`` recipients against the live
             # roster once we hold the ticket. Unknown mentions are not
             # routing directives — they fold back into a no-mention
