@@ -3,6 +3,7 @@
 """TaskPlanningRail — registers todo tools on DeepAgent."""
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Optional, List
 
 from openjiuwen.core.common.logging import logger
@@ -34,6 +35,11 @@ from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
 _TODO_PROGRESS_REMINDER_KEY = "todo_progress_reminder"  # also tags advance injects (ent name)
 _TODO_SESSION_ID_KEY = "todo_session_id"
+
+# Snapshot of the authoritative todo.json taken at each completed ReAct
+# iteration. It rides in the step increment; a resumed run uses it to pull the
+# file back to the last persisted step.
+STEP_TODO_SNAPSHOT_KEY = "__step_todo_snapshot__"
 
 
 def _todo_session_label(session_id: str) -> str:
@@ -407,6 +413,8 @@ class TaskPlanningRail(DeepAgentRail):
         reset_todo_binding()
         if ctx.session is None:
             return
+        # Align todo.json with the last persisted step before anything reads it.
+        await self._rollback_todo_for_step_resume(ctx)
         tool = self._find_todo_create_tool()
         if tool is None:
             return
@@ -442,6 +450,136 @@ class TaskPlanningRail(DeepAgentRail):
     async def after_task_iteration(self, ctx: AgentCallbackContext) -> None:
         """Sync todo list from task_plan after each iteration."""
         await self._sync_todos_from_plan(ctx)
+
+    async def after_react_iteration(self, ctx: AgentCallbackContext) -> None:
+        """Snapshot todo.json so an unpersisted round can be rolled back.
+
+        Runs before the step record is written, so the snapshot lands in the
+        same increment as the iteration that produced it.
+        """
+        if ctx.session is None:
+            return
+        tool = self._find_todo_tool()
+        if tool is None:
+            return
+        session_id = ctx.session.get_session_id()
+        path = os.path.abspath(tool.get_file_path(session_id))
+        try:
+            result = await tool.fs.read_file(
+                path, mode="text", options={"snapshot": True, "missing_ok": True}
+            )
+        except Exception:
+            logger.warning(
+                "TaskPlanningRail: failed to read todo snapshot session_id=%s", session_id,
+                exc_info=True,
+            )
+            return
+        if getattr(result, "code", -1) != 0 or result.data is None:
+            # Some backends (sandbox providers) ignore ``options``, so a missing
+            # file surfaces as an error instead of ``exists=False``. Probe the
+            # directory to tell "no todo list yet" from a real read failure.
+            exists = await self._todo_file_exists(tool, path)
+            if exists is False:
+                ctx.session.update_state({
+                    STEP_TODO_SNAPSHOT_KEY: {"exists": False, "content": ""}
+                })
+                return
+            logger.debug(
+                "TaskPlanningRail: todo snapshot read returned code=%s session_id=%s",
+                getattr(result, "code", None), session_id,
+            )
+            return
+        content = getattr(result.data, "content", None)
+        exists = getattr(result.data, "exists", None)
+        if not isinstance(exists, bool):
+            # No snapshot metadata: some backends report a missing file as an
+            # empty successful read. Never record "exists with empty content"
+            # on that basis — rolling it back would blank a real todo.json.
+            exists = bool(await self._todo_file_exists(tool, path)) and bool(content)
+        ctx.session.update_state({
+            STEP_TODO_SNAPSHOT_KEY: {
+                "exists": exists,
+                "content": (content or "") if exists else "",
+            }
+        })
+
+    @staticmethod
+    async def _todo_file_exists(tool, path: str) -> bool | None:
+        """Return whether ``path`` exists via a directory listing, or None."""
+        try:
+            listing = await tool.fs.list_files(os.path.dirname(path))
+        except Exception:
+            return None
+        if getattr(listing, "code", -1) != 0 or listing.data is None:
+            return None
+        name = os.path.basename(path)
+        items = getattr(listing.data, "list_items", None) or []
+        return any(getattr(item, "name", None) == name for item in items)
+
+    async def _rollback_todo_for_step_resume(self, ctx: AgentCallbackContext) -> None:
+        """Pull todo.json back to the last persisted step before a resume.
+
+        The todo file is rewritten as tools run, so it can be ahead of the last
+        step record that made it to disk. A resumed run replays the recorded
+        context and must see the list that context was written with.
+        """
+        peek = getattr(ctx.session, "peek_agent_step_resume", None)
+        if not callable(peek) or peek() is None:
+            return
+        snapshot = ctx.session.get_state(STEP_TODO_SNAPSHOT_KEY)
+        if not isinstance(snapshot, dict) or not snapshot.get("exists"):
+            # No file was recorded at that step. There is no delete API on the
+            # fs operation either, so a file created by the unpersisted round
+            # stays; the rerun's todo_create overwrites the whole list.
+            logger.info(
+                "TaskPlanningRail: step resume without a todo file snapshot; leaving todo.json untouched"
+            )
+            return
+        tool = self._find_todo_tool()
+        if tool is None:
+            return
+        session_id = ctx.session.get_session_id()
+        path = os.path.abspath(tool.get_file_path(session_id))
+        content = snapshot.get("content") or ""
+        current_content = None
+        current_exists = None
+        current_digest = None
+        try:
+            current = await tool.fs.read_file(
+                path, mode="text", options={"snapshot": True, "missing_ok": True}
+            )
+            if getattr(current, "code", -1) == 0 and current.data is not None:
+                current_content = getattr(current.data, "content", None)
+                exists_flag = getattr(current.data, "exists", None)
+                if isinstance(exists_flag, bool):
+                    current_exists = exists_flag
+                digest = getattr(current.data, "content_sha256", None)
+                if isinstance(digest, str) and digest:
+                    current_digest = digest
+        except Exception:
+            current_content = None
+        if current_content == content:
+            return
+        # Conditional atomic publication needs the hash/existence observed just
+        # above; without snapshot metadata the backend gets a plain write.
+        options = {}
+        if current_digest is not None and current_exists is not None:
+            options = {
+                "atomic_replace": True,
+                "expected_exists": current_exists,
+                "expected_content_sha256": current_digest,
+            }
+        try:
+            await tool.fs.write_file(
+                path, content, mode="text", prepend_newline=False, options=options,
+            )
+        except Exception:
+            logger.warning(
+                "TaskPlanningRail: failed to roll back todo.json session_id=%s", session_id,
+                exc_info=True,
+            )
+            return
+        self._todos_cache.pop(session_id, None)
 
     # -- internal helpers --
 

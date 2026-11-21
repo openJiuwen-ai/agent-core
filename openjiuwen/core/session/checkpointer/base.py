@@ -5,6 +5,7 @@ from abc import (
     ABC,
     abstractmethod,
 )
+from typing import TYPE_CHECKING
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -13,6 +14,9 @@ from openjiuwen.core.graph.store import Store
 from openjiuwen.core.session.constants import SINGLE_COMPONENT_EXECUTION_KEY
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.session import BaseSession
+
+if TYPE_CHECKING:
+    from openjiuwen.core.session.checkpointer.step_storage import StepResume
 
 
 class Checkpointer(ABC):
@@ -137,6 +141,39 @@ class Checkpointer(ABC):
     @abstractmethod
     def graph_store(self) -> Store:
         ...
+
+    async def save_agent_step(
+        self,
+        session: BaseSession,
+        iteration: int,
+        query: str = "",
+        final: bool = False,
+    ) -> None:
+        """Append one completed ReAct iteration as a durable increment.
+
+        Default: no-op, so backends that do not keep step records keep their
+        current behavior. Implemented by ``PersistenceCheckpointer``.
+
+        Args:
+            session: The agent session whose state is being recorded.
+            iteration: Iteration index of the completed step.
+            query: User query of the run; inherited from the last record when
+                empty and no iteration is known.
+            final: Record the task as finished instead of an intermediate step.
+        """
+        return None
+
+    def begin_agent_steps(self, session: BaseSession) -> "StepResume | None":
+        """Take the pending resume point (once) and mark the run active."""
+        return None
+
+    def peek_agent_step_resume(self, session: BaseSession) -> "StepResume | None":
+        """Read the pending resume point without consuming it."""
+        return None
+
+    async def end_agent_steps(self, session: BaseSession, interrupted: bool) -> None:
+        """Close the current run, recording whether it stopped for confirmation."""
+        return None
 
 
 class Storage(ABC):

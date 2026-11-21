@@ -63,6 +63,7 @@ from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.session import with_session
 from openjiuwen.core.session.agent import Session, create_agent_session
+from openjiuwen.core.session.checkpointer.step_storage import StepResume
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.ability_manager import AbilityManager, illegal_tool_call_reason
@@ -2909,6 +2910,8 @@ class ReActAgent(BaseAgent):
                 ctx.extra["_input_parts"] = list(inputs["_input_parts"])
 
         abort_persisted = False
+        agent_interrupted = False
+        steps_started = False
         try:
             async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
                 user_input = ctx.inputs.query
@@ -2928,6 +2931,11 @@ class ReActAgent(BaseAgent):
                 if interruption_state is not None:
                     # Restore original query so MemoryRail.after_invoke writes the right UserMessage
                     ctx.extra["_original_query"] = interruption_state.original_query
+                # Step increments are consumed once, before the loop decides what
+                # the first iteration of this run is. A pending HITL interrupt
+                # never leaves a resume point behind, so the two cannot overlap.
+                step_resume = self._begin_agent_steps(session)
+                steps_started = True
 
                 state_loaded_at = time.monotonic()
 
@@ -3053,6 +3061,18 @@ class ReActAgent(BaseAgent):
                             pass  # invoke_inputs.result already set by _handle_resume/_commit_interrupt
                         else:
                             start_iteration = ctx.extra.pop(RESUME_START_ITERATION_KEY, 0)
+                elif step_resume is not None:
+                    # Crash resume: the recorded context already contains the
+                    # original question, so only a genuinely new query is added
+                    # as a user turn.
+                    start_iteration = step_resume.iteration + 1
+                    if not resume_continuation and self._step_query(ctx, user_input) != step_resume.query:
+                        await self._admit_user_message(
+                            ctx,
+                            context,
+                            self._extract_user_parts(ctx, user_input),
+                            source="query",
+                        )
                 elif not resume_continuation:
                     await self._admit_user_message(
                         ctx,
@@ -3377,6 +3397,11 @@ class ReActAgent(BaseAgent):
                                             ai_message, "finish_reason", "null"
                                         ),
                                     }
+                                # The final answer is a completed step too; record
+                                # it before the result is handed back.
+                                await self._save_agent_step(
+                                    session, iteration, self._step_query(ctx, user_input), final=True
+                                )
                                 invoke_inputs.result = result
                                 break
 
@@ -3413,6 +3438,12 @@ class ReActAgent(BaseAgent):
                             # all written). Fire AFTER_REACT_ITERATION so rails (e.g.
                             # SnapshotRail) can capture a safe-state snapshot.
                             await ctx.fire(AgentCallbackEvent.AFTER_REACT_ITERATION)
+                            # Persist the increment only after rails had their say:
+                            # the todo snapshot they wrote belongs to this record.
+                            await self.context_engine.save_contexts(session)
+                            await self._save_agent_step(
+                                session, iteration, self._step_query(ctx, user_input)
+                            )
                     else:
                         # The loop exhausted its iteration budget. Honor a
                         # force_finish requested by the final iteration's
@@ -3467,18 +3498,34 @@ class ReActAgent(BaseAgent):
             abort_persisted = await self._persist_context_after_abort(
                 session, "[Request cancelled by user]", cleanup=False,
                 commit_session=not need_cleanup and self._session_supports_agent_lifecycle(session),
+                close_steps=steps_started,
             )
             raise  # Re-raise to propagate cancellation signal
         except Exception as exc:
+            agent_interrupted = isinstance(exc, AgentInterrupt)
             if isinstance(exc, (AbortError, AgentInterrupt)):
                 raise
             if not kwargs.get("_stream_lifecycle_owner"):
                 abort_persisted = await self._persist_context_after_abort(
                     session, "[Request failed with unexpected error]",
                     commit_session=not need_cleanup and self._session_supports_agent_lifecycle(session),
+                    close_steps=steps_started,
                 )
             raise
         finally:
+            # Close this run's step records before any commit, so
+            # post_agent_execute sees an idle or interrupted agent rather than
+            # one still in progress. Every exit path after the run started
+            # lands here (cancel, exception, exhausted iterations), which is
+            # what stops a finished task from being resumed after a crash. An
+            # invoke rejected before the loop began keeps its resume point.
+            if steps_started:
+                step_result = invoke_inputs.result
+                await self._end_agent_steps(
+                    session,
+                    interrupted=agent_interrupted
+                    or (isinstance(step_result, dict) and step_result.get("result_type") == "interrupt"),
+                )
             if need_cleanup:
                 if not abort_persisted:
                     await self.context_engine.save_contexts(session)
@@ -3710,7 +3757,7 @@ class ReActAgent(BaseAgent):
 
     async def _persist_context_after_abort(
             self, session: Session, marker: str, *, cleanup: bool = True,
-            commit_session: bool = False,
+            commit_session: bool = False, close_steps: bool = False,
     ) -> bool:
         """Checkpoint the safe prefix after cancellation or a model failure."""
         if cleanup:
@@ -3735,6 +3782,11 @@ class ReActAgent(BaseAgent):
             logger.warning("Failed to save context after abort", exc_info=True)
             return False
         if commit_session:
+            # Close the run first: post_agent_execute writes the full state only
+            # once the agent is idle, so committing while the track is active
+            # would drop the cleaned prefix this method just saved.
+            if close_steps:
+                await self._end_agent_steps(session, interrupted=False)
             try:
                 result = session.commit()
                 if inspect.isawaitable(result):
@@ -3750,6 +3802,78 @@ class ReActAgent(BaseAgent):
             callable(getattr(session, name, None))
             for name in ("pre_run", "close_stream", "commit")
         )
+
+    @staticmethod
+    def _begin_agent_steps(session) -> "StepResume | None":
+        """Take the step resume point, if this session keeps step records.
+
+        Sessions that do not implement the step API (mocks, workflow sessions,
+        non-persistence checkpointers) return None from the base-class default,
+        and anything that is not a real ``StepResume`` is ignored.
+        """
+        begin = getattr(session, "begin_agent_steps", None)
+        if not callable(begin):
+            return None
+        resume = begin()
+        return resume if isinstance(resume, StepResume) else None
+
+    async def _save_agent_step(
+        self,
+        session,
+        iteration: int,
+        query: str,
+        *,
+        final: bool = False,
+    ) -> None:
+        """Append this iteration's increment without ever failing the run.
+
+        A failed write leaves the storage baseline where it was, so the next
+        round's increment covers both rounds.
+        """
+        save = getattr(session, "save_agent_step", None)
+        if not callable(save):
+            return
+        try:
+            result = save(iteration, query, final=final)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.warning(
+                "[ReActAgent] failed to persist agent step session_id=%s iteration=%s final=%s",
+                session.get_session_id() if hasattr(session, "get_session_id") else "",
+                iteration,
+                final,
+                exc_info=True,
+            )
+
+    async def _end_agent_steps(self, session, *, interrupted: bool) -> None:
+        """Close step records without masking the exception that got us here."""
+        end = getattr(session, "end_agent_steps", None)
+        if not callable(end):
+            return
+        try:
+            result = end(interrupted)
+            if inspect.isawaitable(result):
+                await asyncio.shield(result)
+        except (Exception, asyncio.CancelledError):
+            logger.warning(
+                "[ReActAgent] failed to close agent steps session_id=%s interrupted=%s",
+                session.get_session_id() if hasattr(session, "get_session_id") else "",
+                interrupted,
+                exc_info=True,
+            )
+
+    @staticmethod
+    def _step_query(ctx, user_input) -> str:
+        """Query the step records against.
+
+        A HITL resume keeps the original question so the resumed rounds belong
+        to the same run; otherwise the current input is the run's query.
+        """
+        original = ctx.extra.get("_original_query")
+        if original:
+            return original
+        return user_input if isinstance(user_input, str) else repr(user_input)
 
     async def _save_contexts_on_cancel(self, session: Session) -> None:
         """Legacy compatibility helper; production aborts use _persist_context_after_abort."""
