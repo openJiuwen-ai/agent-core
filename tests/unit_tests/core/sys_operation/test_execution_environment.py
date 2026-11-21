@@ -250,10 +250,10 @@ async def test_native_harness_binds_member_resolver(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Remote POSIX shell wrapper contract")
-@pytest.mark.parametrize("provider", ["aio", "yuanrong"])
+@pytest.mark.parametrize("provider", ["aio", "adx"])
 def test_remote_shell_wrappers_remove_variables(provider: str, monkeypatch: pytest.MonkeyPatch) -> None:
     from openjiuwen.extensions.sys_operation.sandbox.providers.aio import AIOShellProvider
-    from openjiuwen.extensions.sys_operation.sandbox.providers.yuanrong import _exec_args
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx import _exec_args
 
     monkeypatch.setenv("JW_REMOVE_ME", "old")
     script = "test -z \"${JW_REMOVE_ME+x}\" && test \"$JW_VALUE\" = \"hello world\""

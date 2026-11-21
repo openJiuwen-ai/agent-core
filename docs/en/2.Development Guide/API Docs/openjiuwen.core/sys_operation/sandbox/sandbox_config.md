@@ -59,10 +59,12 @@ Pre-deploy Launcher configuration for connecting to existing sandbox services.
 **Parameters**:
 
 * **launcher_type**(Literal["pre_deploy"]): Launcher type, fixed as `"pre_deploy"`.
-* **sandbox_type**(str, optional): Sandbox provider type. Default: `"aio"`.
+* **sandbox_type**(str, optional): Sandbox provider type. Default: `"aio"`. Use `"adx-environment"` for an ADX HTTP endpoint at `base_url`. Existing `"yuanrong"` settings select the same provider.
 * **base_url**(str): Sandbox service base URL (`http://` or `ws://`).
 * **on_stop**(Literal["delete", "pause", "keep"], optional): Sandbox stop behavior strategy. Default: `"delete"`.
 * **idle_ttl_seconds**(int, optional): Idle timeout in seconds. Default: `None`.
+
+For ADX Ingress, set `SandboxGatewayConfig.auth_headers` with an `Authorization: Bearer …` header. In `extra_params`, use `runtime` (for example `"runsc"`) with `image` or a prepared node-local `rootfs`, such as `{"type": "local", "path": "/objects/tool/rootfs"}`. Local paths must be absolute and available on the execution node. Native `mounts` and `network` accept the ADX create request format. File transfers and byte streams use the native ADX binary routes. Single-file transfer does not copy source permissions. The provider sends `append=true` on `file.write` to append. Atomic write conditions are unsupported.
 
 ## class SandboxGatewayConfig
 
