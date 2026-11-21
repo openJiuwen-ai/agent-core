@@ -35,7 +35,10 @@ Complete context-engine configuration.
 **Parameters:**
 
 - `max_context_message_num` (`int | None`): Hard message-count limit for one
-  context. Default: `None`, meaning unlimited.
+  context. If the limit splits a tool call from its results, the remaining
+  results in that group are also discarded, so fewer messages may be retained.
+  Leading orphan tool results in restored history are also removed.
+  Default: `None`, meaning unlimited.
 - `default_window_message_num` (`int | None`): Number of recent messages kept
   when no explicit window size is supplied. Default: `None`, meaning no
   message-count truncation; when set, it must be greater than `0`.

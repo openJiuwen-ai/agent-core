@@ -30,6 +30,10 @@ class ContextEngineConfig(BaseModel):
     ----------
     max_context_message_num : int, optional
         Hard upper limit on the total number of messages allowed in any context.
+        If the oldest retained message would be a tool result, discard the rest
+        of that tool-call group as well. The retained count may be below this
+        limit so results are never separated from a discarded tool call.
+        Leading orphan tool results in restored history are also removed.
         If None (default), no hard limit is enforced.
 
     default_window_message_num : int, optional
