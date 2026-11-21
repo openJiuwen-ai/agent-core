@@ -21,9 +21,11 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import (
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
     ensure_module_attempt_dir,
+    modules_dir,
     to_project_relative,
     workspace_dir,
 )
+from openjiuwen.rsi.usage import usage_tokens
 
 TRACE_SCHEMA_VERSION = 2
 _lock = threading.Lock()
@@ -472,10 +474,75 @@ def trace_file_relative(run_id: str, module: str, round_index: int, attempt: int
         return path.as_posix()
 
 
+USAGE_COUNTERS = (
+    "calls",
+    "failed_calls",
+    "calls_without_usage",
+    "input_tokens",
+    "output_tokens",
+    "cache_hit_tokens",
+)
+
+
+def summarize_model_usage(run_id: str) -> dict[str, dict[str, int]]:
+    """Model calls and tokens per module, summed from the run's agent traces.
+
+    Every ``model_call_end`` record of a call counts as a call. A call whose
+    response reported no token counters is counted in ``calls_without_usage``
+    and never estimated; ``model_call_error`` records count as
+    ``failed_calls``. Counters are normalized by
+    :func:`openjiuwen.rsi.usage.usage_tokens`, so ``cache_hit_tokens`` is a
+    subset of ``input_tokens``. Returns ``{}`` when the run wrote no traces.
+    """
+    root = modules_dir(run_id)
+    summary: dict[str, dict[str, int]] = {}
+    if not root.is_dir():
+        return summary
+    for path in sorted(root.rglob("agent_trace.jsonl")):
+        module = path.relative_to(root).parts[0]
+        entry = summary.setdefault(module, dict.fromkeys(USAGE_COUNTERS, 0))
+        for record in _trace_records(path):
+            event = record.get("event")
+            if event == "model_call_error":
+                entry["failed_calls"] += 1
+                continue
+            usage = record.get("usage") or {}
+            # after_model_call also closes a failed call, with no call id and no usage.
+            if event != "model_call_end" or (record.get("call_id") is None and not usage):
+                continue
+            entry["calls"] += 1
+            tokens = usage_tokens(usage) if isinstance(usage, dict) else None
+            if tokens is None or (tokens.input is None and tokens.output is None):
+                entry["calls_without_usage"] += 1
+                continue
+            entry["input_tokens"] += tokens.input or 0
+            entry["output_tokens"] += tokens.output or 0
+            entry["cache_hit_tokens"] += tokens.cache_hit or 0
+    return summary
+
+
+def _trace_records(path: Path) -> list[dict[str, Any]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    records = []
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue  # a line another process is still writing
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
 __all__ = [
     "ObservabilityRail",
     "TRACE_SCHEMA_VERSION",
+    "USAGE_COUNTERS",
     "reconstruct_messages",
+    "summarize_model_usage",
     "trace_file_relative",
     "with_observability",
 ]
