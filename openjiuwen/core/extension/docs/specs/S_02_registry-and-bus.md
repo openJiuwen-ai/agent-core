@@ -66,12 +66,14 @@ async def open_install_dir(
     poll_interval: float = 0.5, dependency_timeout: float = 300.0, lock_timeout: float = 5.0,
 ) -> None: ...
 
-async def load_installed(self) -> tuple[ActivationReport, ...]: ...
+async def load_installed(
+    self, roots: Sequence[Path | str] | None = None,
+) -> tuple[ActivationReport, ...]: ...
 async def begin_shutdown(self) -> None: ...
 async def close(self) -> None: ...
 ```
 
-报告路径必传，时间单位均为秒。open 完成运行锁与进程登记，不安装包；load 从根目录完整发现、选版、稳定排序，再筛出当前域逐包激活。
+报告路径必传，时间单位均为秒。open 完成运行锁与进程登记，不安装包；load 默认从根目录完整发现，也可接收宿主在启动时截取的安装副本快照，快照项可为 Path 或字符串，但必须指向当前受管目录下的 `<package.id>/<version>`，越界或经符号链接重定向的路径按包级失败拒绝且不写回；随后选版、稳定排序，再筛出当前域逐包激活。传入快照后 Core 不重新扫描目录。
 `domain=None` 保留全量加载；不能和按域实例混用同一报告。每个执行范围只允许一个存活执行者。
 宿主停机先 begin_shutdown 拒绝新操作并结束在途管理任务，撤销本地 Handler 和资源后 close 释放运行锁。
 报告读写、依赖占用及重启规则见 [F_05](../features/F_05_domain-install-report.md)。

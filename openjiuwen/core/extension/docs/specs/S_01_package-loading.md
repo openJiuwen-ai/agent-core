@@ -19,7 +19,7 @@
 
 - **本规约定义：** `manifest.json` 字段与入口边界；安装目录布局与打开目录/zip；包级 / 包内扩展依赖与稳定排序；单包 Plan；prepare 产生 candidate 的成功/失败语义；受限登记可接受的 `handler_level`；Runtime 生效记录与卸载判断；`ActivationReport.error` 使用的 `StatusCode` 名称。
 - **本规约不定义：** EventBus 的 `trigger` 语义、Bus 注册表快照、9 类管理事件的 Core Handler 时序、宿主配置解析、远程仓库与多版本同时生效。
-- **宿主负责：** 确定安装目录，通过 `open_install_dir(install_dir: Path, ...)` 传入本模块；配置键和默认路径由宿主维护。宿主调用异步 `open_install_dir` 绑定安装根目录及必传的报告路径，再调用 `load_installed()`；发现、选版和排序由 Core 完成。
+- **宿主负责：** 确定安装目录，通过 `open_install_dir(install_dir: Path, ...)` 传入本模块；配置键和默认路径由宿主维护。宿主调用异步 `open_install_dir` 绑定安装根目录及必传的报告路径，再调用 `load_installed()`；需要固定启动时目录边界时，可把 Path 或字符串组成的受管安装副本快照传给 `load_installed(roots)`。发现或快照校验、选版和排序由 Core 完成。
 - **Events 负责：** 注册表存储、调用快照与 Handler 执行。扩展包加载在发布 candidate 时写入 Bus（见 S_02）。
 
 ### 1.2 术语
