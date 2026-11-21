@@ -1,0 +1,276 @@
+[
+  {
+    "id": "t0-facts",
+    "query": "根据本轮已给出的三项数字计算总和。",
+    "expected": {
+      "tier": "T0",
+      "execution_mode": "direct"
+    },
+    "rationale": "上下文已包含全部输入"
+  },
+  {
+    "id": "t0-knowledge",
+    "query": "解释什么是拓扑排序。",
+    "expected": {
+      "tier": "T0",
+      "execution_mode": "direct"
+    },
+    "rationale": "通用知识无需外部能力"
+  },
+  {
+    "id": "t0-summary",
+    "query": "用两句话总结上文已贴出的会议纪要。",
+    "expected": {
+      "tier": "T0",
+      "execution_mode": "direct"
+    },
+    "rationale": "内容已读入上下文"
+  },
+  {
+    "id": "t0-planning-only",
+    "query": "仅根据已提供的需求提出思路，不调用工具。",
+    "expected": {
+      "tier": "T0",
+      "execution_mode": "direct"
+    },
+    "rationale": "仅给思路且材料齐全"
+  },
+  {
+    "id": "t0-many-points",
+    "query": "回答以下五个基础概念问题，资料均在本消息中。",
+    "expected": {
+      "tier": "T0",
+      "execution_mode": "direct"
+    },
+    "rationale": "多个问题不等于多专家"
+  },
+  {
+    "id": "t1-skill",
+    "query": "使用 read Skill 解读附件。",
+    "expected": {
+      "tier": "T1",
+      "execution_mode": "single_skill",
+      "skill_ids": [
+        "read"
+      ]
+    },
+    "rationale": "指定一个Skill"
+  },
+  {
+    "id": "t1-skill-internals",
+    "query": "使用 write Skill 产出报告；它内部需要读文件和运行脚本。",
+    "expected": {
+      "tier": "T1",
+      "execution_mode": "single_skill",
+      "skill_ids": [
+        "write"
+      ]
+    },
+    "rationale": "Skill内部多工具仍为单Skill"
+  },
+  {
+    "id": "t1-unread-file",
+    "query": "读取工作区中的说明.txt并概括。",
+    "expected": {
+      "tier": "T1",
+      "execution_mode": "single_tool",
+      "tool_ids": [
+        "read_file"
+      ]
+    },
+    "rationale": "未读文件不能按T0处理"
+  },
+  {
+    "id": "t1-search",
+    "query": "检索一个已知关键词的当前资料。",
+    "expected": {
+      "tier": "T1",
+      "execution_mode": "single_tool",
+      "tool_ids": [
+        "search"
+      ]
+    },
+    "rationale": "一个宿主工具足够"
+  },
+  {
+    "id": "t1-missing-material",
+    "query": "读取我提供的文件；如果路径缺失先询问路径。",
+    "expected": {
+      "tier": "T1",
+      "execution_mode": "single_tool",
+      "tool_ids": [
+        "read_file"
+      ],
+      "missing_inputs": [
+        "文件路径"
+      ]
+    },
+    "rationale": "缺失材料是前提提示"
+  },
+  {
+    "id": "t2-skills",
+    "query": "先用 read Skill 提取内容，再用 write Skill 生成报告。",
+    "expected": {
+      "tier": "T2",
+      "execution_mode": "skill_graph",
+      "skill_ids": [
+        "read",
+        "write"
+      ]
+    },
+    "rationale": "多Skill依赖需要规划"
+  },
+  {
+    "id": "t2-tools",
+    "query": "搜索资料，再读取搜索到的本地文件。",
+    "expected": {
+      "tier": "T2",
+      "execution_mode": "host_workflow",
+      "tool_ids": [
+        "search",
+        "read_file"
+      ]
+    },
+    "rationale": "工具流程继续由主智能体执行"
+  },
+  {
+    "id": "t2-mixed",
+    "query": "搜索资料，再用 write Skill 形成报告。",
+    "expected": {
+      "tier": "T2",
+      "execution_mode": "host_workflow",
+      "tool_ids": [
+        "search"
+      ],
+      "skill_ids": [
+        "write"
+      ]
+    },
+    "rationale": "混合流程不生成工具DAG"
+  },
+  {
+    "id": "t2-no-experts",
+    "query": "不要使用子智能体，依次读取文件和搜索补充资料。",
+    "expected": {
+      "tier": "T2",
+      "execution_mode": "host_workflow",
+      "tool_ids": [
+        "read_file",
+        "search"
+      ]
+    },
+    "rationale": "禁止委派的明确约束"
+  },
+  {
+    "id": "t2-many-steps",
+    "query": "完成十项简单的读取和检索操作，不需要专家隔离。",
+    "expected": {
+      "tier": "T2",
+      "execution_mode": "host_workflow",
+      "tool_ids": [
+        "read_file",
+        "search"
+      ]
+    },
+    "rationale": "步骤多不自动升级T4"
+  },
+  {
+    "id": "t3-installed",
+    "query": "请 reviewer 专家独立审核给出的结论。",
+    "expected": {
+      "tier": "T3",
+      "execution_mode": "expert_tasks",
+      "expert_ids": [
+        "reviewer"
+      ]
+    },
+    "rationale": "一个具名专家足够"
+  },
+  {
+    "id": "t3-inline",
+    "query": "用一个临时统计审查角色独立检查这份分析。",
+    "expected": {
+      "tier": "T3",
+      "execution_mode": "expert_tasks"
+    },
+    "rationale": "无需安装专家也能委派"
+  },
+  {
+    "id": "t3-isolation",
+    "query": "在隔离上下文中安排一名审查者检查推导过程。",
+    "expected": {
+      "tier": "T3",
+      "execution_mode": "expert_tasks"
+    },
+    "rationale": "单角色上下文隔离"
+  },
+  {
+    "id": "t3-persona",
+    "query": "让一名无障碍设计专家审阅现有页面说明。",
+    "expected": {
+      "tier": "T3",
+      "execution_mode": "expert_tasks"
+    },
+    "rationale": "明确专家工作规则"
+  },
+  {
+    "id": "t3-many-subtasks",
+    "query": "由一名 reviewer 完成五个相关检查并给出统一报告。",
+    "expected": {
+      "tier": "T3",
+      "execution_mode": "expert_tasks",
+      "expert_ids": [
+        "reviewer"
+      ]
+    },
+    "rationale": "一个专家的多个任务不要求T4"
+  },
+  {
+    "id": "t4-complementary",
+    "query": "分别安排安全和性能专家独立审查，再合并结论。",
+    "expected": {
+      "tier": "T4",
+      "execution_mode": "expert_tasks"
+    },
+    "rationale": "互补专业与独立上下文"
+  },
+  {
+    "id": "t4-handoff",
+    "query": "由分析专家交付模型，再由验证专家独立复核结果。",
+    "expected": {
+      "tier": "T4",
+      "execution_mode": "expert_tasks"
+    },
+    "rationale": "专家间有交付依赖"
+  },
+  {
+    "id": "t4-independent",
+    "query": "安排两名互不共享中间推理的专家交叉验证关键结论。",
+    "expected": {
+      "tier": "T4",
+      "execution_mode": "expert_tasks"
+    },
+    "rationale": "独立验证需求"
+  },
+  {
+    "id": "t4-parallel",
+    "query": "把两项上下文互相干扰的研究分给独立专家并行完成。",
+    "expected": {
+      "tier": "T4",
+      "execution_mode": "expert_tasks"
+    },
+    "rationale": "明确并行与隔离收益"
+  },
+  {
+    "id": "t4-reviewer",
+    "query": "由临时研究角色产生结论，再交 reviewer 复核。",
+    "expected": {
+      "tier": "T4",
+      "execution_mode": "expert_tasks",
+      "expert_ids": [
+        "reviewer"
+      ]
+    },
+    "rationale": "inline与安装专家交接"
+  }
+]

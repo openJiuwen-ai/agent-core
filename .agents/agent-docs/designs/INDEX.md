@@ -14,6 +14,8 @@ generated: true
 
 | 模块 |
 |---|
+| [/Users/xiaoyulin/Documents/Huawei/code/jiuwenswarm/jiuwenswarm/agents/harness/common/rails/symphony](#module-Users-xiaoyulin-Documents-Huawei-code-jiuwenswarm-jiuwenswarm-agents-harness-common-rails-symphony) |
+| [/Users/xiaoyulin/Documents/Huawei/code/jiuwenswarm/jiuwenswarm/runtime/symphony](#module-Users-xiaoyulin-Documents-Huawei-code-jiuwenswarm-jiuwenswarm-runtime-symphony) |
 | [agent_evolving](#module-agent_evolving) |
 | [agent_evolving/trajectory](#module-agent_evolving-trajectory) |
 | [agent_teams](#module-agent_teams) |
@@ -22,7 +24,28 @@ generated: true
 | [extensions/observability](#module-extensions-observability) |
 | [harness](#module-harness) |
 | [harness_providers](#module-harness_providers) |
+| [symphony](#module-symphony) |
 | [未分类](#module-unclassified) |
+
+<a id="module-Users-xiaoyulin-Documents-Huawei-code-jiuwenswarm-jiuwenswarm-agents-harness-common-rails-symphony"></a>
+
+## /Users/xiaoyulin/Documents/Huawei/code/jiuwenswarm/jiuwenswarm/agents/harness/common/rails/symphony
+
+### 开发中 (active)
+
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
+|---|---|---|---|---|---|
+| [D-20261121-1216-symphony-tier-routing](active/D-20261121-1216-symphony-tier-routing/design.md) | Core 内部 T0–T4 分级规划与宿主自动接入 | in-development | lin-xiaoyu | core | 2026-11-21 |
+
+<a id="module-Users-xiaoyulin-Documents-Huawei-code-jiuwenswarm-jiuwenswarm-runtime-symphony"></a>
+
+## /Users/xiaoyulin/Documents/Huawei/code/jiuwenswarm/jiuwenswarm/runtime/symphony
+
+### 开发中 (active)
+
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
+|---|---|---|---|---|---|
+| [D-20261121-1216-symphony-tier-routing](active/D-20261121-1216-symphony-tier-routing/design.md) | Core 内部 T0–T4 分级规划与宿主自动接入 | in-development | lin-xiaoyu | core | 2026-11-21 |
 
 <a id="module-agent_evolving"></a>
 
@@ -168,6 +191,16 @@ generated: true
 | ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
 |---|---|---|---|---|---|
 | [D-20261110-1839-leader-external-harness](active/D-20261110-1839-leader-external-harness/design.md) | Leader 三方 Harness 插拔设计方案 | in-development | alan_cheng | harness | 2026-11-10 |
+
+<a id="module-symphony"></a>
+
+## symphony
+
+### 开发中 (active)
+
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
+|---|---|---|---|---|---|
+| [D-20261121-1216-symphony-tier-routing](active/D-20261121-1216-symphony-tier-routing/design.md) | Core 内部 T0–T4 分级规划与宿主自动接入 | in-development | lin-xiaoyu | core | 2026-11-21 |
 
 <a id="module-unclassified"></a>
 

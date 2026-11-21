@@ -149,13 +149,15 @@ class SymphonyRuntime:
         protocol = FingerprintProtocolConfig(configuration_signature=identity_hash)
         observer = getattr(model, "symphony_response_observer", None)
 
-        def fingerprint_service(provider, root):
+        def fingerprint_service(provider, root, *, wait_for_lock=False):
             return FingerprintService(
                 provider, root, llm=model, config=policy, protocol=protocol, model_response_observer=observer,
                 allow_metadata_fallback=self.config.retrieval.index_build.task.allow_fallback_tree,
+                wait_for_lock=wait_for_lock,
             )
 
         fingerprint_root = self._storage.root / "cache" / "fingerprints"
+        inventories = {}
         fingerprints = {}
         for kind in ("skill", "expert"):
             if not inventory.sources(kind):
@@ -165,7 +167,8 @@ class SymphonyRuntime:
                 root = fingerprint_root / kind
             else:
                 provider, root = inventory, fingerprint_root
-            fingerprints[kind] = fingerprint_service(provider, root)
+            inventories[kind] = provider
+            fingerprints[kind] = fingerprint_service(provider, root, wait_for_lock=kind == "expert")
         skill_sources = inventory.sources("skill")
         graph_storage = None
         graph_inventory = None
@@ -190,6 +193,8 @@ class SymphonyRuntime:
             source_snapshot={"runtime_schema": LAYOUT_SCHEMA, "fingerprint_policy_sha256": policy_hash,
                              "fingerprint_model_sha256": identity_hash},
             fingerprint_service=graph_fingerprints,
+            expert_inventory=inventories.get("expert") if graph_storage is not None else None,
+            expert_fingerprint_service=fingerprints.get("expert") if graph_storage is not None else None,
         )
         self.orchestration = SymphonyGraphEngine(
             service, storage=graph_storage, inventory=graph_inventory, unavailable_reason=graph_unavailable,

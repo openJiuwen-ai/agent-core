@@ -97,6 +97,10 @@ Pass `COMMITS=N` to check recent commits instead.
 **编码开发必须使用 jw-coding-flow**：凡是实现特性、修复缺陷、重构或补写测试等改动代码的任务，动手前先读取
 `.agents/skills/jw-coding-flow/SKILL.md`，按其阶段路由与强制要求选择 jw-design / jw-dev 等阶段 skill，不得跳过直接改代码。
 
+开发或检视 Symphony 相关改动前，必须先读 [Symphony 模块 AGENTS.md](openjiuwen/symphony/AGENTS.md)。
+适用范围包括 `openjiuwen/symphony/`、`tests/unit_tests/symphony/`、`scripts/export_symphony_config.py`，
+以及目录外调用方中影响 Symphony 行为的改动。
+
 实际资产位于 `.agents/agent-docs/` 的 `designs/`、`specs/`、`features/`、`bugfix/`。
 新 design 使用 `D-YYYYMMDD-HHMM-<slug>`；feature / bugfix 使用 `F_` / `B_` 加 `YYYYMMDD_HHMM` 和主题。时间均采用 Asia/Singapore，
 精确到分钟；历史编号不调整，spec 沿用原命名规则。具体位置与交接规则见对应 skill。

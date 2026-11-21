@@ -2,7 +2,24 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from pathlib import PurePath
+from typing import AbstractSet, Any, Iterable
+
+from openjiuwen.symphony.orchestration.contracts import PlanningInput
+from openjiuwen.symphony.shared.fingerprint.normalization import DataTypeVocabulary
+
+
+def supplied_input_keys(inputs: Iterable[PlanningInput]) -> frozenset[tuple[str, str]]:
+    """Match named planning inputs using the existing Skill artifact types."""
+    vocabulary = DataTypeVocabulary.default()
+    keys = set()
+    for item in inputs:
+        keys.add((item.name, item.kind))
+        if item.kind == "file":
+            suffix = PurePath(item.value).suffix.lstrip(".")
+            if vocabulary.can_feed(suffix, "file"):
+                keys.add((item.name, vocabulary.normalize(suffix)))
+    return frozenset(keys)
 
 
 def missing_inputs(
@@ -22,7 +39,7 @@ def missing_inputs(
 
 def artifact_matches(
     expected: tuple[str, str],
-    available: set[tuple[str, str]],
+    available: AbstractSet[tuple[str, str]],
 ) -> bool:
     name, type_ = expected
     if expected in available:

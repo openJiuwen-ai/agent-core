@@ -1,11 +1,8 @@
-
-from openjiuwen.symphony.config import OrchestrationConfig
 import asyncio
 import importlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
 
 import pytest
 
@@ -184,6 +181,7 @@ async def test_graph_engine_build_and_plan_fast_or_beam(tmp_path: Path, mode: st
     built = await graph_engine.build(progress_callback=events.append)
     result = await graph_engine.plan(
         "extract and summarize",
+        type="skill",
         candidate_ids=["extract"],
         progress_callback=events.append,
         language="en",
@@ -198,8 +196,17 @@ async def test_graph_engine_build_and_plan_fast_or_beam(tmp_path: Path, mode: st
     assert graph["metadata"]["status"] == "ready"
     assert set(graph["metadata"]).issubset({"status", "reason", "missing_inputs"})
     assert graph["nodes"] == {
-        "extract": {"label": "extract", "metadata": {"type": "skill"}},
-        "summarize": {"label": "summarize", "metadata": {"type": "skill"}},
+        "extract": {
+            "label": "extract", "metadata": {"type": "skill", "outputs": [{"name": "text", "type": "text"}]},
+        },
+        "summarize": {
+            "label": "summarize",
+            "metadata": {
+                "type": "skill",
+                "inputs": [{"name": "text", "type": "text", "required": True}],
+                "outputs": [{"name": "summary", "type": "text"}],
+            },
+        },
     }
     assert graph["edges"] == [
         {"source": "extract", "target": "summarize", "relation": "can_feed"},
@@ -218,7 +225,7 @@ async def test_fast_planner_requests_minimal_reasoning_and_disables_thinking(tmp
     )
     await service.build()
 
-    await service.plan("extract and summarize", language="en")
+    await service.plan("extract and summarize", type="skill", language="en")
 
     planning_call = next(
         call

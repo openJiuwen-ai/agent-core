@@ -40,6 +40,7 @@ from openjiuwen.symphony.shared.fingerprint import FingerprintLike
 
 MATCHER_VERSION = "Symphony-ontology-matcher-v2"
 DEFAULT_PROMPT_VERSION = "Orchestration-graph-match-v2"
+EXPERT_PROMPT_VERSION = "Orchestration-expert-graph-match-v1"
 MATCH_SCHEMA_VERSION = "Symphony-ontology-match-schema-v1"
 
 
@@ -75,11 +76,15 @@ class OntologyMatcher:
         graph_config: Mapping[str, Any] | None = None,
         thresholds: Optional[Dict[str, float]] = None,
         progress: Optional[MatchProgress] = None,
+        layer: str = "skill",
     ) -> None:
         self.batch_size = batch_size
         self.max_workers = max(1, max_workers)
         self.require_consensus = require_consensus
-        self.prompt_version = prompt_version or DEFAULT_PROMPT_VERSION
+        self.prompt_version = prompt_version or (
+            EXPERT_PROMPT_VERSION if layer == "expert" else DEFAULT_PROMPT_VERSION
+        )
+        self.system_prompt = SYSTEM_PROMPT.replace("Skill", "expert") if layer == "expert" else SYSTEM_PROMPT
         self.schema_version = schema_version or MATCH_SCHEMA_VERSION
         self.graph_config = dict(graph_config or {})
         self.thresholds = thresholds if thresholds is not None else DEFAULT_THRESHOLDS
@@ -357,7 +362,7 @@ class OntologyMatcher:
         with model_usage_context("graph_construction", operation):
             content = await invoke_json(
                 self.model,
-                system_prompt=SYSTEM_PROMPT,
+                system_prompt=self.system_prompt,
                 user_content=json.dumps(
                     payload,
                     ensure_ascii=False,

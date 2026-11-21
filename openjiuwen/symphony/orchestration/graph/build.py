@@ -63,9 +63,11 @@ class GraphBuildPipeline:
         *,
         resolver: _RelationResolver,
         candidate_generator: CandidateGenerator | None = None,
+        layer: str = "skill",
     ) -> None:
         self.resolver = resolver
         self.candidate_generator = candidate_generator or CandidateGenerator()
+        self.layer = layer
 
     async def __call__(
         self,
@@ -83,7 +85,7 @@ class GraphBuildPipeline:
     ) -> GraphConstructionResult:
         normalized = [coerce_fingerprint(item) for item in fingerprints]
         _emit(progress, "graph.registry.start", fingerprint_count=len(normalized))
-        registry = _build_registry(normalized)
+        registry = _build_registry(normalized, layer=self.layer)
         diagnostics: list[GraphDiagnostic] = list(registry.diagnostics)
         _emit(
             progress,
@@ -154,17 +156,18 @@ class GraphBuildPipeline:
         return diagnostics
 
 
-def _build_registry(fingerprints: Iterable[FingerprintLike]) -> SkillRegistry:
+def _build_registry(fingerprints: Iterable[FingerprintLike], *, layer: str = "skill") -> SkillRegistry:
     skills: dict[str, FingerprintLike] = {}
     diagnostics: list[GraphDiagnostic] = []
+    accepted_types = {"expert"} if layer == "expert" else {"skill", "subagent", "agent"}
     for fingerprint in sorted(fingerprints, key=lambda item: item.id):
-        if fingerprint.type not in {"skill", "subagent", "agent"}:
+        if fingerprint.type not in accepted_types:
             diagnostics.append(
                 GraphDiagnostic(
                     stage="registry",
                     severity="error",
                     code="unsupported_fingerprint_type",
-                    message="Capability Graph accepts skill, subagent, or agent fingerprints.",
+                    message=f"Capability graph layer accepts {', '.join(sorted(accepted_types))} fingerprints.",
                     details={"type": fingerprint.type, "id": fingerprint.id},
                 )
             )
@@ -197,7 +200,7 @@ def _build_registry(fingerprints: Iterable[FingerprintLike]) -> SkillRegistry:
                     stage="registry",
                     severity="warning",
                     code="missing_outputs",
-                    message="Skill has no declared outputs.",
+                    message="Capability has no declared outputs.",
                     skill_id=fingerprint.id,
                 )
             )

@@ -29,6 +29,7 @@ generated: true
 | [harness/subagents](#module-harness-subagents) |
 | [harness/tools/browser_move](#module-harness-tools-browser_move) |
 | [harness_providers](#module-harness_providers) |
+| [symphony](#module-symphony) |
 
 <a id="module-agent_evolving-trajectory"></a>
 
@@ -358,3 +359,13 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [F_20261104_1638_drop-llm-span-cost-attrs](F_20261104_1638_drop-llm-span-cost-attrs.md) | F | LLM span 去掉 usage cost 属性（openjiuwen.gen_ai.usage.*_cost） | weixin_39960157 | 无独立 D：纯删减类变更（去掉一处已定属性的发射），无方案级取舍需要独立设计；键的引入背景与命名迁移见 |
+
+<a id="module-symphony"></a>
+
+## symphony
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261120_1607_subagent-graph-inputs](F_20261120_1607_subagent-graph-inputs.md) | F | 子智能体编排接口改名与 DAG 缺项提示 | lin-xiaoyu | 无独立 D：用户已明确指定 SDK 方法名、规划状态和宿主对输入的决策职责。 |
+| [F_20261121_1035_symphony-unified-planning](F_20261121_1035_symphony-unified-planning.md) | F | Symphony 统一规划入口 | lin-xiaoyu | 无独立 D：依据 2026-11-21 当前会话明确确认的统一规划入口方案实施，没有单独创建 D 文档。 |
+| [F_20261121_1216_symphony-tier-routing](F_20261121_1216_symphony-tier-routing.md) | F | Core 内部自动分级规划 | lin-xiaoyu | [D-20261121-1216-symphony-tier-routing](../designs/active/D-20261121-1216-symphony-tier-routing/design.md) |
