@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagents/`（9 文件）、`openjiuwen/harness/tools/cua/`、`openjiuwen/harness/subagent_lifecycle.py`、`openjiuwen/harness/manifest/harness_elements.py`（subagent 构建器） |
-| 最近一次修订日期 | 2026-11-02 |
+| 最近一次修订日期 | 2026-11-20 |
 | 关联 feature | F_05_browser-task-integrity、F_07_browser-jev-policy、F_08_browser-jev-handover、F_09_browser-runtime-phase-contract、F_10_browser-runtime-simplification、F_11_browser-p0-closure、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_14_browser-model-usage-summary、F_20_react-iteration-limit、F_21_cua-desktop-subagent |
 
 ## 范围 / 边界
@@ -164,6 +164,14 @@ authoritative_browser_result 保留兼容名，但权威范围限于执行/观�
 
 此前 F_10/F_12/F_13/F_16 中与本节冲突的预算、自动证明和试验开关约定由本节取代。
 详见 [F_17](../../features/harness/F_17_browser-runtime-reduction.md)。
+
+### Steering messages continue the browser task (2026-11-20)
+
+The rail names its task by the newest user message that is neither ephemeral browser context
+nor a steering message (source kind `steering`). A steering message from a host, or from the
+rail's own model-protocol recovery, continues the task in progress: the task id, phases, known
+URLs, source observations, the model-protocol retry count and the deadline stay. A new user
+request still starts a new task state. See B_20261119_2300_browser-steering-task-state (#2832).
 
 ## 接口契约
 
