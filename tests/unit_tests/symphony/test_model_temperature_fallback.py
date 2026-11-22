@@ -21,7 +21,7 @@ from openjiuwen.core.foundation.llm import (
 from openjiuwen.core.foundation.llm.request_context import disabled_thinking_fallback_scope
 from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 from openjiuwen.symphony import CapabilityDescriptor, FingerprintService, OrchestrationService, SourceSnapshot
-from openjiuwen.symphony.shared.fingerprint.settings import FingerprintSettings
+from openjiuwen.symphony.config import FingerprintExtractionConfig, FingerprintPolicyConfig
 
 
 _TEMPERATURE_ERROR = "invalid temperature: only 1 is allowed for this model"
@@ -134,7 +134,7 @@ async def test_graph_build_uses_model_defaults_after_temperature_rejection(
     model = make_model(route, respond, temperature=1.0, extra_body=extra_body)
     fingerprints = FingerprintService(
         _Inventory(), tmp_path / "fingerprints", llm=model,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction=FingerprintExtractionConfig(llm_enabled=True)),
     )
     graph = OrchestrationService(
         graph_artifact_root=tmp_path / "graph", capability_provider=[], model=model, fingerprint_service=fingerprints,

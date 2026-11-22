@@ -374,7 +374,7 @@ class MessageDao:
                     message_model.team_name == team_name,
                     message_model.broadcast.is_(True),
                     TeamMember.status.in_((MemberStatus.UNSTARTED.value, MemberStatus.ERROR.value)),
-                    TeamMember.role != "passive_human",
+                    TeamMember.role.notin_(("passive_human", "host_managed")),
                     (read_model.read_at.is_(None)) | (message_model.timestamp > read_model.read_at),
                 )
             )
@@ -521,6 +521,7 @@ class MessageDao:
             .where(
                 TeamMember.team_name == message_model.team_name,
                 TeamMember.member_name == message_model.to_member_name,
+                TeamMember.role != "host_managed",
                 TeamMember.status.not_in(_UNREAD_EXEMPT_STATUSES),
             )
             .exists()
@@ -551,7 +552,7 @@ class MessageDao:
         """Members (restricted to ``only`` when given) with a broadcast above their read watermark.
 
         Group messages count only for mentioned non-passive members; ordinary
-        broadcasts for everyone but the sender. Exempt statuses never count.
+        broadcasts for everyone but the sender. Host-managed members and exempt statuses never count.
         """
         message_model = _get_message_model()
         read_status_model = _get_message_read_status_model()
@@ -571,6 +572,7 @@ class MessageDao:
                 message_model.team_name == team_name,
                 message_model.broadcast.is_(True),
                 TeamMember.status.not_in(_UNREAD_EXEMPT_STATUSES),
+                TeamMember.role != "host_managed",
                 ~covered_by_watermark,
             )
         )

@@ -18,14 +18,16 @@ author_email: chengshuo5@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/external/member_runtime.py`、`openjiuwen/agent_teams/external/cli_agent/spawn.py`、`openjiuwen/agent_teams/spawn/external_cli_spawn.py` |
-| 最近一次修订日期 | 2026-10-22 |
-| 关联 feature | F_95_dsh-external-harness-adapter.md、F_96_protocol-harness-providers-and-member-migration.md、F_113_external-harness-builtin-model-selection.md、F_114_swarmflow-thirdparty-agent.md、F_115_external-session-fork.md、F_116_swarmflow-thirdparty-model-source.md、F_117_third-party-harness-provider-members.md、harness F_08_provider-owned-model-config.md、harness F_09_auth-fallback-as-a-protocol-capability.md、F_125_team-expert-catalog-and-spawn.md |
+| 最近一次修订日期 | 2026-11-10 |
+| 关联 feature | F_95_dsh-external-harness-adapter.md、F_96_protocol-harness-providers-and-member-migration.md、F_113_external-harness-builtin-model-selection.md、F_114_swarmflow-thirdparty-agent.md、F_115_external-session-fork.md、F_116_swarmflow-thirdparty-model-source.md、F_117_third-party-harness-provider-members.md、harness F_08_provider-owned-model-config.md、harness F_09_auth-fallback-as-a-protocol-capability.md、F_125_team-expert-catalog-and-spawn.md、F_20261110_1851_leader-external-harness.md |
 
 ## 范围 / 边界
 
 本规约定义由宿主拥有生命周期的三方 Harness（`openjiuwen.harness_protocol.HarnessProtocol` 实现）
 如何成为团队成员：`ExternalHarnessMemberRuntime` 的契约、它对 `harness_providers.HarnessIOAdapter`
 的依赖、`build_cli_runtime` 对 claude / codex 与三方 provider 的分派，以及 `external_cli_spawn` 的绑定顺序。
+同一个 runtime 也可以驱动 Leader（`LeaderSpec.cli_agent`，见不变量 16–18）：Leader 与 teammate 的差别只在
+runtime 何时构建、session 相关的绑定何时发生。
 
 不在范围内：协议本身（`openjiuwen/harness_protocol`）、provider 实现（`openjiuwen/harness_providers`，
 见 harness `S_19`）、adapter 型子进程 CLI（`CliRuntimeBase`，见 F_22 / F_25）、
@@ -129,6 +131,40 @@ author_email: chengshuo5@huawei.com
     的技能（追加在声明技能之后）、`skill_conflict` 与非默认的 `runtime.config` 键；三条外部 CLI 登记路径
     （`spawn_teammate` 带 `cli_agent`、`spawn_expert`、内联成员）共用 `tool_member.register_external_cli_member`（声明检查 +
     模型规则 + 登记），CLI 类型未声明时不登记。
+16. **Leader 的 runtime 构建期不碰 session**。`LeaderSpec.cli_agent` 按名引用 `external_cli_agents`，
+    `TeamAgentSpec.build()` 把它写进 leader 的 `TeamRuntimeContext.cli_agent`；`AgentConfigurator.setup_agent`
+    据此调用同步的 `build_external_leader_runtime`（`spawn/external_leader.py`）。start context 是
+    `ContextFactory`，CLI 进程不注入 `OPENJIUWEN_TEAM_JOIN`。session 相关的三件事——系统提示词与
+    `host_session_id`、leader 团队工具集、轨迹 recorder——都在每次 `start(team_session)` 时由 startup hook
+    与 context factory 以当前 session 重建；runtime 在每个 run cycle 结束时被 `finalize_round` 停掉，下个
+    cycle 经 Leader 自己的 child AgentSession checkpoint 续接 provider 会话。
+17. **Leader 只能跑在 SDK backend 上，且工具集由 leader 自己的 `TeamBackend` 构造**。leader 工具依赖该
+    backend 上的回调（成员拉起、模型分配、`on_team_built`），stdio MCP 只有最小 backend 接不住，所以
+    `leader.cli_agent` 的 `backend_for(...).kind` 必须是 `sdk`（claude / codex），由 spec 校验保证。工具集与
+    leader 提示词按同一组模式轴解析（`dispatch_mode` / `team_mode` / `bootstrap_mode` / `lifecycle` /
+    `teammate_mode`），并排除要对本地 DeepAgent 对话做快照的 `checkpoint` / `list_checkpoints`；
+    `enable_fork` 与 `leader.cli_agent` 同开时 spec 校验拒绝。Leader 不绑定可靠性上下文与认证 fallback 持久化；
+    它没有上级可报，所以构建时打开 `surface_turn_failures`：FAILED turn 由
+    `HarnessIOAdapter(emit_turn_failure=True)` 投影成 DeepAgent 的 `task_failed` 帧进入 Leader 的输出流。
+    teammate 默认关闭，失败仍走 leader 邮箱。
+    **swarmflow 由 `ExternalSwarmflowHost` 托管**：`enable_swarmflow` 的团队里，`setup_agent` 的外部分支照常
+    构建团队级 `SwarmflowInfra`，`bind_external_leader` 建一个宿主并跨 run cycle 复用（后台 run 比启动它的
+    周期活得久），startup hook 每次只把 Runner 挂接的 session 级控制器刷进宿主；此时工具集含 `swarmflow` 与
+    `async_tasks_list` / `async_task_output` / `async_task_cancel`，bootstrap 提示词带协作机制选择。没有宿主
+    （未启用 swarmflow）时三个 `async_task*` 工具被排除。为此 `ExternalHarnessMemberRuntime` 保存
+    `set_background_task_controller` 传入的控制器（只有 Leader 会被传入），`dispose` 先经它
+    `stop_by_owner(<成员名>, include_paused=True)` 再停 provider。宿主的 `build_context` 永不为空：团队没有
+    平台 build context 时用普通 `BuildContext` 兜底，三方 worker 白名单与专家表才有处可挂（对外部 teammate
+    的宿主同样成立）。
+18. **"历史已恢复"只在 provider 会话真的续上时成立**。Leader 的 startup hook 在 member session 打开后
+    检查 `has_stored_checkpoint()`：没有本 backend 的 checkpoint 就 `clear_history_restored()`，使
+    `build_team` 仍可调用以重新披露协同准则；有 checkpoint 时系统提示词用 `leader_bootstrap_recovered`
+    变体。协同准则的披露时机与原生 Leader 相同：`bootstrap_mode="leader"` 经 `build_team` 返回值，
+    `"framework"` 经 `TeamContextTracker(policy_text=...)` 的 `<team-policy>` 块。
+19. **`pause` 对不能暂停的 provider 降级为 graceful abort**。provider 未声明 `PAUSE_RESUME` 但声明了任一
+    abort 能力时，`pause()` 在 RUNNING 状态下执行 `abort(immediate=False)`：会话历史留在 provider 侧，
+    状态落 IDLE，不产生 `pending_resume`，被暂停的轮次不会自动续跑。既不能暂停也不能中止的 provider 仍抛
+    `UnsupportedHarnessCapabilityError`。对 Leader 与 teammate 同样生效。
 
 ## 接口契约
 
@@ -142,6 +178,11 @@ class ExternalHarnessMemberRuntime:
     def bind_team_context_tracker(tracker) / bind_mcp_servers(servers) / bind_tools(tools) / bind_trajectory_recorder(recorder)
     def bind_fallback_promotion(promote)   # promote: () -> Awaitable[bool]; answers the auth_fallback interaction
     def add_teardown_hook(hook)
+    def add_startup_hook(hook)             # hook(team_session): runs on every start, after the member
+                                           # session is open (agent id known at construction), before
+                                           # the start context is resolved
+    def reset_tool_bindings()              # drop MCP servers / native tools bound for the next start
+    def has_stored_checkpoint() -> bool    # the open member session holds this backend's checkpoint
     def bind_reliability_context(*, session_id, team_backend, leader_name, update_status_cb, messager)
     # MemberRuntime surface
     async start(*, team_session=None) / stop() / dispose(); state; session_id; outputs()

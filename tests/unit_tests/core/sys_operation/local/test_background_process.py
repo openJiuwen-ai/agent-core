@@ -60,7 +60,7 @@ async def test_background_does_not_wait_for_descendant_to_close_stderr():
     handler = AsyncProcessHandler(process)
     started = time.monotonic()
 
-    _, error = await handler.background(grace=0.2)
+    _, error = await handler.background(grace=0.5)
 
     assert time.monotonic() - started < 0.8
     assert error == "process exited early with code 11"

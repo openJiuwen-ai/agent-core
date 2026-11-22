@@ -90,10 +90,12 @@ from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams import extensions as team_extensions
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
     from openjiuwen.agent_teams.experts.catalog import ExpertCatalog
     from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
     from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
+    from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
 
 
 @dataclass(slots=True)
@@ -298,6 +300,7 @@ class TeamRuntimeManager:
     def __init__(self) -> None:
         self._pool: TeamRuntimePool = TeamRuntimePool()
         self._organization_runtime_manager: "OrganizationRuntimeManager | None" = None
+        self._extension_bus: "ExtensionEventBusProtocol | None" = None
 
     @staticmethod
     def set_expert_catalog(catalog: "ExpertCatalog | None") -> None:
@@ -323,6 +326,27 @@ class TeamRuntimeManager:
     def pool(self) -> TeamRuntimePool:
         """Process-local TeamRuntimePool tracking active team runtimes."""
         return self._pool
+
+    @property
+    def extension_bus(self) -> "ExtensionEventBusProtocol | None":
+        """The host-initialized extension bus injected for this Runner, if any.
+
+        None means no extension wiring: teams then run with the default
+        business behavior and no monitor-event bridge is mounted.
+        """
+        return self._extension_bus
+
+    def set_extension_bus(self, bus: "ExtensionEventBusProtocol | None") -> None:
+        """Inject the host-initialized extension bus (before first activate).
+
+        The bus must already have run ``ops.build`` — the team side only
+        triggers events and never registers on it. Passing None drops the
+        wiring; entries activated afterwards mount no bridge.
+
+        Args:
+            bus: A host-initialized bus, or None to unwire.
+        """
+        self._extension_bus = bus
 
     @property
     def organization_runtime_manager(self) -> "OrganizationRuntimeManager":
@@ -373,10 +397,7 @@ class TeamRuntimeManager:
         # and rebuilds it from the current model selection.  A running team is
         # intentionally left alone; its request is rejected by the normal
         # dispatch gate rather than being torn down mid-turn.
-        if (
-            pool_entry is not None
-            and pool_entry.state == RuntimeState.PAUSED
-        ):
+        if pool_entry is not None and pool_entry.state == RuntimeState.PAUSED:
             live_team_spec = pool_entry.agent.runtime_context.team_spec
             live_pool = list(live_team_spec.model_pool or []) if live_team_spec is not None else []
             live_strategy = live_team_spec.model_pool_strategy if live_team_spec is not None else None
@@ -385,8 +406,7 @@ class TeamRuntimeManager:
             live_pool_signature = [_entry_signature(entry) for entry in live_pool]
             requested_pool_signature = [_entry_signature(entry) for entry in requested_pool]
             selection_changed = live_pool_signature != requested_pool_signature or (
-                (live_pool_signature or requested_pool_signature)
-                and live_strategy != requested_strategy
+                (live_pool_signature or requested_pool_signature) and live_strategy != requested_strategy
             )
             if selection_changed:
                 change_reason = "pool" if live_pool_signature != requested_pool_signature else "strategy"
@@ -493,6 +513,7 @@ class TeamRuntimeManager:
                     shutdown_requested,
                     agent.lifecycle,
                 )
+                await self._stop_monitor_event_bridge(entry)
                 await agent.stop_coordination()
                 await self._pool.remove(team_name)
             else:
@@ -629,6 +650,7 @@ class TeamRuntimeManager:
         member = agent.team_member
         member_name = getattr(agent, "member_name", "?")
         try:
+
             async def _release_member_kvc() -> None:
                 harness = getattr(getattr(agent, "resources", None), "harness", None)
                 current_session = getattr(harness, "current_session", None)
@@ -1178,6 +1200,7 @@ class TeamRuntimeManager:
         mark_cancellation_cause(session_id, CancellationCause.CANCEL)
         token = set_session_id(session_id)
         try:
+            await self._stop_monitor_event_bridge(entry)
             if self._organization_runtime_manager is not None:
                 await self._organization_runtime_manager.release_team(team_id=team_name, session_id=session_id)
             await entry.agent.stop_coordination()
@@ -1550,6 +1573,77 @@ class TeamRuntimeManager:
         team_in_db = await db.team.team_exists(team_name)
         return team_in_session, team_in_db, team_db_state
 
+    def _inject_extension_bus(self, spec: "TeamAgentSpec") -> None:
+        """Seed the extension bus into the spec's build-context extras.
+
+        The cold build paths (create / new-in-session / cold recover) all
+        assemble the leader through the spec's build context, and the
+        per-member derive copies carry extras into the rail factories — so
+        one seed here reaches the policy rail of the freshly built runtime,
+        including its native rebuilds. A spec without a build context (nor
+        a seed to materialize one) stays unwired: its members run with the
+        default policy.
+        """
+        bus = self._extension_bus
+        if bus is None:
+            return
+        if spec.build_context is None:
+            spec.materialize_build_context()
+        build_context = spec.build_context
+        extras = getattr(build_context, "extras", None)
+        if isinstance(extras, dict):
+            from openjiuwen.agent_teams.rails.team_context import TeamHandleKey
+
+            extras[TeamHandleKey.EXTENSION_BUS] = bus
+
+    async def _start_monitor_event_bridge(
+        self,
+        agent: "TeamAgent",
+        team_name: str,
+        session_id: str,
+    ) -> "team_extensions.TeamMonitorEventBridge | None":
+        """Mount the extension monitor-event bridge for a freshly built entry.
+
+        No bus wiring means no bridge and no listener — the zero-overhead
+        no-extension path. The listener registers before the consumer task
+        starts so no enqueued notification waits for a task that is not yet
+        draining.
+
+        Lazy imports: the extensions package pulls the prompts chain, which
+        the rest of manager.py keeps out of import time (same convention as
+        the TeamAgent import below).
+        """
+        bus = self._extension_bus
+        if bus is None:
+            return None
+        from openjiuwen.agent_teams.extensions.events import build_monitor_event_dispatcher
+        from openjiuwen.agent_teams.extensions.monitor_event_bridge import TeamMonitorEventBridge
+
+        bridge = TeamMonitorEventBridge(
+            team_name=team_name,
+            session_id=session_id,
+            dispatcher=build_monitor_event_dispatcher(bus),
+        )
+        agent.add_event_listener(bridge.on_internal_event)
+        await bridge.start()
+        return bridge
+
+    async def _stop_monitor_event_bridge(self, entry: ActiveTeam) -> None:
+        """Dismount the entry's bridge: stop accepting, drain nothing, detach.
+
+        Stop order: the bridge stops accepting and its consumer exits
+        (unprocessed notifications count as dropped, never replayed), then
+        the listener detaches so the soon-to-be-torn-down coordination loop
+        no longer delivers into a closed bridge. A pause keeps the bridge —
+        only the stop paths call this.
+        """
+        bridge = entry.monitor_event_bridge
+        if bridge is None:
+            return
+        entry.monitor_event_bridge = None
+        await bridge.stop()
+        entry.agent.remove_event_listener(bridge.on_internal_event)
+
     async def _apply_action(
         self,
         action: RunAction,
@@ -1601,6 +1695,7 @@ class TeamRuntimeManager:
         # would relabel the new team's internal failures as user actions.
         clear_cancellation_cause(session_id)
         if kind is RunActionKind.COLD_RECOVER:
+            self._inject_extension_bus(spec)
             # Lazy import: TeamAgent's module pulls in heavy deps (rails,
             # prompts) that the rest of manager.py doesn't need at import time.
             from openjiuwen.agent_teams.agent.team_agent import TeamAgent
@@ -1621,10 +1716,9 @@ class TeamRuntimeManager:
             await backend.db.initialize()
             await backend.db.member.reset_cold_recovery_execution_status(team_name, (leader_name,))
         elif kind is RunActionKind.NEW_TEAM_IN_SESSION:
+            self._inject_extension_bus(spec)
             await self._pre_run_with_inputs(team_session, inputs)
-            agent = (
-                spec.build(conversation_mode="group_chat") if requested_mode == "group_chat" else spec.build()
-            )
+            agent = spec.build(conversation_mode="group_chat") if requested_mode == "group_chat" else spec.build()
             await agent.resume_for_new_session(team_session)
             # team_in_db is True at this point — the team row exists, so there
             # may be teammate rows left over from before the stop (status
@@ -1637,10 +1731,9 @@ class TeamRuntimeManager:
             # it has no dependency on teammates being spawned first.
             await self._flush_team_manifest(agent, team_session)
         elif kind is RunActionKind.CREATE:
+            self._inject_extension_bus(spec)
             await self._pre_run_with_inputs(team_session, inputs)
-            agent = (
-                spec.build(conversation_mode="group_chat") if requested_mode == "group_chat" else spec.build()
-            )
+            agent = spec.build(conversation_mode="group_chat") if requested_mode == "group_chat" else spec.build()
             await self._flush_team_manifest(agent, team_session)
         else:
             raise RuntimeError(f"Unhandled RunActionKind: {kind!r}")
@@ -1656,6 +1749,7 @@ class TeamRuntimeManager:
                 agent=agent,
                 current_session_id=session_id,
                 state=RuntimeState.RUNNING,
+                monitor_event_bridge=await self._start_monitor_event_bridge(agent, team_name, session_id),
             )
         )
         return TeamRuntimeActivation(agent=agent, session=team_session, action=action)

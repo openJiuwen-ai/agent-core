@@ -15,6 +15,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 from openjiuwen.core.common.run_context import RunContext
+from openjiuwen.core.single_agent.rail.base import RunKind
 from openjiuwen.harness_protocol.state import HarnessState
 
 if TYPE_CHECKING:
@@ -109,6 +110,8 @@ class ActiveRound:
             interrupt answer, a failure retry and a task-plan continuation keep
             the latest one. Stamped on the round's agent spans so one Team
             trace splits into per-member turns.
+        run_kind: Execution kind handed to the task loop. ``RunKind.GOAL`` marks a
+            goal attempt; ``None`` is an ordinary round.
         turn_opened: Whether this round opened ``turn`` (advancing the
             member's persisted turn counter) rather than continuing it.
         graceful_abort: When True, the round is finishing under a graceful
@@ -152,6 +155,7 @@ class ActiveRound:
     steering_queue: asyncio.Queue
     turn: "MemberTurn"
     run_context: RunContext | None = None
+    run_kind: RunKind | None = None
     turn_opened: bool = False
     graceful_abort: bool = False
     failure_retry: bool = False

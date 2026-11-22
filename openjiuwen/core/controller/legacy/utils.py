@@ -293,7 +293,11 @@ class ReasonerUtils:
             model_config.model_provider
         )
 
-        model = await Runner.resource_mgr.get_model(model_id=model_id, session=session)
+        model = await Runner.resource_mgr.get_model(
+            model_id=model_id,
+            session=session,
+            identity={"agent_id": "core.legacy_controller", "agent_name": "core.legacy_controller"},
+        )
 
         if model is None:
             model_client_config = ModelClientConfig(
@@ -318,6 +322,10 @@ class ReasonerUtils:
 
             Runner.resource_mgr.add_model(model_id=model_id, model=create_model)
 
-            model = await Runner.resource_mgr.get_model(model_id=model_id, session=session)
+            model = await Runner.resource_mgr.get_model(
+                model_id=model_id,
+                session=session,
+                identity={"agent_id": "core.legacy_controller", "agent_name": "core.legacy_controller"},
+            )
 
         return model

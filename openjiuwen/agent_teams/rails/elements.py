@@ -25,6 +25,7 @@ cached. State that must survive a rebuild lives in a reused object injected on
 the build context (e.g. ``reliability_components``) and passed into the fresh
 rail's constructor. Returning ``None`` gates the rail out for this member.
 """
+
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -36,11 +37,7 @@ from openjiuwen.agent_teams.harness.manifest import (
     harness_element,
     param_field,
 )
-from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
-from openjiuwen.harness.manifest.builtin_elements import (
-    OBSERVABILITY,
-    observability_dependency_installed,
-)
+from openjiuwen.agent_teams.rails import team_context as team_context_handles
 from openjiuwen.agent_teams.rails.team_context import (
     get_expert_binding,
     get_expert_catalog,
@@ -55,6 +52,11 @@ from openjiuwen.agent_teams.rails.team_context import (
     get_team_backend,
     get_workspace_manager,
 )
+from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
+from openjiuwen.harness.manifest.builtin_elements import (
+    OBSERVABILITY,
+    observability_dependency_installed,
+)
 
 # Element names (the RailSpec ``type`` values). The team rails live under the
 # ``core.team.*`` namespace — the ``core.`` layer prefix plus a ``team`` group —
@@ -66,6 +68,7 @@ TEAM_POLICY = "core.team.policy"
 TEAM_WORKSPACE = "core.team.workspace"
 TEAM_TOOL_APPROVAL = "core.team.tool_approval"
 TEAM_PLAN_MODE = "core.team.plan_mode"
+TEAM_GOAL = "core.team.goal"
 TEAM_RELIABILITY = "core.team.reliability"
 TEAM_SKILL_USE = "core.team.skill_use"
 TEAM_OBSERVABILITY = "core.team.observability"
@@ -112,6 +115,7 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
     inp = TeamToolInput.resolve(params, context)
     return TeamToolRail(
         team_backend=backend,
+        extension_bus=team_context_handles.get_extension_bus(context),
         role=inp.role,
         teammate_mode=inp.teammate_mode,
         dispatch_mode=inp.dispatch_mode,
@@ -197,6 +201,7 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
     backend = get_team_backend(context)
     return TeamPolicyRail(
         role=TeamRole(inp.role),
+        extension_bus=team_context_handles.get_extension_bus(context),
         member_prompt=inp.prompt,
         member_name=inp.member_name or None,
         display_name=inp.display_name,
@@ -345,6 +350,31 @@ def build_team_plan_mode_rail(params: dict[str, Any], context: Any) -> Any:
         # through this loader.
         loader=make_template_loader(backend.workspace_cache if backend is not None else None),
     )
+
+
+# ---------------------------------------------------------------------------
+# team.goal — TeamGoalRail
+# ---------------------------------------------------------------------------
+
+
+class TeamGoalInput(ConstructionInput):
+    """Construction inputs for the member goal rail (it takes none)."""
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=TEAM_GOAL,
+    description="Goal mode for a member's task tools: claim opens the goal, hand-in is assessed first.",
+    input_model=TeamGoalInput,
+)
+def build_team_goal_rail(params: dict[str, Any], context: Any) -> Any:
+    """Build the member goal rail (needs the member's task manager)."""
+    backend = get_team_backend(context)
+    if backend is None:
+        return None
+    from openjiuwen.agent_teams.rails.team_goal_rail import TeamGoalRail
+
+    return TeamGoalRail(task_manager=backend.task_manager)
 
 
 # ---------------------------------------------------------------------------
@@ -519,6 +549,7 @@ __all__ = [
     "TEAM_WORKSPACE",
     "TEAM_TOOL_APPROVAL",
     "TEAM_PLAN_MODE",
+    "TEAM_GOAL",
     "TEAM_RELIABILITY",
     "TEAM_SKILL_USE",
     "TEAM_OBSERVABILITY",

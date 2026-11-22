@@ -199,6 +199,8 @@ class TaskLoopEventExecutor(TaskExecutor):
             inputs=iter_inputs,
             session=session,
         )
+        if state.turn_state is not None:
+            ctx.extra["_turn_state"] = state.turn_state
 
         # Mark task in-progress in TaskPlan
         if self._get_plan_task(state, task_id):
@@ -215,6 +217,8 @@ class TaskLoopEventExecutor(TaskExecutor):
         effective: Dict[str, Any] = {
             "query": effective_query,
         }
+        if state.turn_state is not None:
+            effective["_turn_state"] = state.turn_state
         # Only when a rail did not rewrite the query out from under them: the
         # parts describe the original batch, so a replaced query wins.
         if input_parts is not None and iter_inputs.query == query:

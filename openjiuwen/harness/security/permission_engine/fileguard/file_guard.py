@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from openjiuwen.harness.security.literal_shell import literal_shell_enabled
 from openjiuwen.harness.security.permission_engine.models import PermissionLevel, PermissionResult
 from openjiuwen.harness.security.permission_engine.toolguard.pattern_matchers import contains_path
 from openjiuwen.harness.security.permission_engine.toolguard.tool_categories import (
@@ -509,6 +510,16 @@ def extract_paths_legacy(
             workdir_resolved = workspace
         cmd = str(tool_args.get("command", "") or tool_args.get("cmd", ""))
         paths = _extract_paths_from_command(cmd, workdir_resolved)
+        if literal_shell_enabled(permission_config, tool_name, tool_args):
+            from openjiuwen.harness.security.permission_engine.fileguard.path_extract import (
+                extract_literal_shell_accesses,
+            )
+
+            literal = extract_literal_shell_accesses(cmd, workdir_resolved)
+            if literal is not None:
+                # Retain Legacy checks, including paths absent from literal evidence.
+                paths.extend(p for p, _ in literal)
+                paths = list(dict.fromkeys(paths))
     elif tool_name in _PATH_TOOLS:
         for s in _iter_path_strings(tool_name, tool_args):
             raw = s.strip().strip('"').strip("'")

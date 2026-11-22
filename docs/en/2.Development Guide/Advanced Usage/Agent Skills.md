@@ -55,6 +55,37 @@ Skills minimize context consumption through three loading layers:
 
 This layered approach ensures efficient context usage while preserving full capability depth. This design keeps the base prompt small while preserving access to deeper knowledge when needed.
 
+## Lazy Skill Loading with a Directly Configured ReActAgent
+
+Besides `register_skill()` below, you can reuse the Harness `SkillUseRail` with a directly configured `ReActAgent`. The rail provides the same skill discovery and on-demand loading used by Harness/CLI without requiring `DeepAgent`.
+
+```python
+from openjiuwen.harness.rails import SkillUseRail
+
+skill_rail = SkillUseRail(
+    skills_dir=str(skills_dir),
+    skill_mode="auto_list",
+    include_tools=False,
+)
+await agent.register_rail(skill_rail)
+result = await agent.invoke({"query": "Use the domain-guide skill to summarize its release checklist."})
+```
+
+- `skill_mode="auto_list"` (default) registers `list_skill`. The model can inspect available skills and read their `SKILL.md` bodies on demand with `skill_tool`, keeping detailed domain knowledge out of the static prompt.
+- `skill_mode="all"` injects all enabled skill entries into the system prompt and uses `skill_tool` to read their bodies; use it for a small, stable skill set. The current version does not have an `auto_load` mode.
+- `include_tools=False` disables only the rail's fallback `read_file` and `bash` tools. The rail still registers `skill_tool` and `list_skill`, so existing service-side filesystem tools or a no-shell policy remain intact.
+- Skill directories and changed `SKILL.md` files are scanned before invocation. The cache refreshes incrementally based on file modification times. Each skill requires its own directory and a YAML header containing `name` and `description`.
+
+A directly configured `ReActAgent` uses `agent.invoke()`, not `Runner.run_agent()`. `SkillUseRail` reuses Harness capabilities without requiring `DeepAgent`; other `DeepAgentRail` implementations may require additional Harness lifecycle or context support.
+
+The complete executable example and a synthetic skill are in `examples/skill_use/`. From the repository root, verify skill discovery and tool registration without calling an LLM or providing an API key:
+
+```bash
+python examples/skill_use/react_agent_lazy_skills.py --check
+```
+
+Set `MODEL_PROVIDER`, `API_BASE`, `API_KEY`, and `MODEL_NAME`, then omit `--check` to run with a real model. Set `SKILLS_DIR` to use your own skill root; otherwise, the example reads `skills/domain-guide/SKILL.md`.
+
 # Agent Skills Example - Image Resize
 
 This example uses Agent Skills to resize an image. This example demonstrates how to:

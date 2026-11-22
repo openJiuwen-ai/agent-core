@@ -49,8 +49,15 @@ class SystemPromptBuilder(BaseSystemPromptBuilder):
         """Build prompt according to the current DeepAgent prompt mode."""
         if self.mode == PromptMode.NONE:
             identity = self.get_section(SectionName.IDENTITY)
-            return identity.render(self.language) if identity else ""
+            return self.render_sections((identity.render(self.language),) if identity else ())
         return super().build()
+
+    def get_effective_sections(self) -> List[PromptSection]:
+        """Return exactly the sections represented by the current mode."""
+        if self.mode == PromptMode.NONE:
+            identity = self.get_section(SectionName.IDENTITY)
+            return [identity] if identity is not None else []
+        return super().get_effective_sections()
 
     def build_report(self) -> "PromptReport":  # type: ignore[name-defined]
         """Return a diagnostic report for the current builder state."""

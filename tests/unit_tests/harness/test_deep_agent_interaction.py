@@ -13,8 +13,17 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from openjiuwen.core.events.builtins.event_types.turn import (
+    TURN_COMPLETE,
+    TURN_START,
+    TurnCompleteInput,
+    TurnCompleteOutput,
+    TurnStartInput,
+    TurnStartOutput,
+)
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.config import DeepAgentConfig
@@ -841,7 +850,7 @@ async def test_run_one_round_uses_single_round_path_for_interrupt_resume(
         inputs={"query": interactive_input},
         reset_loop=False,
     )
-    session = MagicMock()
+    session = Session(session_id="resume-1")
     coordinator = MagicMock()
     controller = MagicMock()
     controller.submit_round = AsyncMock()
@@ -853,6 +862,7 @@ async def test_run_one_round_uses_single_round_path_for_interrupt_resume(
     build_next_work = MagicMock(return_value=None)
 
     monkeypatch.setattr(agent, "_ensure_initialized", AsyncMock())
+    monkeypatch.setattr(agent, "_sync_expert_role_attachment", AsyncMock())
     monkeypatch.setattr(
         agent,
         "prepare_interaction_task_loop",
@@ -874,6 +884,121 @@ async def test_run_one_round_uses_single_round_path_for_interrupt_resume(
     build_next_work.assert_not_called()
     write_result.assert_awaited_once_with(result, session)
     assert outcome.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_run_one_round_starts_new_turn_and_resume_preserves_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    session = Session(session_id="round-turn")
+    coordinator = MagicMock()
+    controller = MagicMock()
+    controller.submit_round = AsyncMock()
+    controller.wait_round_completion = AsyncMock(
+        return_value={"result_type": "answer", "output": "done"}
+    )
+    react_agent = MagicMock()
+    react_agent.invoke = AsyncMock(
+        return_value={"result_type": "answer", "output": "resumed"}
+    )
+    agent._react_agent = react_agent
+    starts: list[TurnStartInput] = []
+    completes: list[TurnCompleteInput] = []
+
+    async def trigger(event, event_session):
+        assert event_session is session
+        if event.event_type == TURN_START:
+            persisted = agent.load_state(session).turn_state
+            assert persisted is not None
+            assert event.event_input.turn_id == persisted.turn_id
+            controller.submit_round.assert_not_awaited()
+            starts.append(event.event_input)
+            return TurnStartOutput(turn_id=event.event_input.turn_id)
+        assert event.event_type == TURN_COMPLETE
+        completes.append(event.event_input)
+        return TurnCompleteOutput(
+            text=f"normalized-{len(completes)}",
+            usage={"total_tokens": len(completes)},
+        )
+
+    bus = MagicMock()
+    bus.trigger = trigger
+    monkeypatch.setattr(
+        Runner,
+        "get_extension_bus",
+        classmethod(lambda cls: bus),
+    )
+    write_result = AsyncMock()
+    build_next_work = MagicMock(return_value=None)
+    monkeypatch.setattr(agent, "_ensure_initialized", AsyncMock())
+    monkeypatch.setattr(agent, "_sync_expert_role_attachment", AsyncMock())
+    monkeypatch.setattr(
+        agent,
+        "prepare_interaction_task_loop",
+        AsyncMock(return_value=(coordinator, controller)),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_write_round_result_to_stream",
+        write_result,
+    )
+    monkeypatch.setattr(
+        agent,
+        "_build_interaction_next_work",
+        build_next_work,
+    )
+
+    await agent.run_one_round(
+        RoundWorkItem.user(
+            request_id="new-1",
+            inputs={"query": "new work"},
+        ),
+        "task-1",
+        session,
+    )
+    started = agent.load_state(session).turn_state
+    assert started is not None
+    assert started.step_index == 0
+    assert starts == [TurnStartInput(turn_id=started.turn_id, text="new work")]
+    first_result = {
+        "result_type": "answer",
+        "output": "normalized-1",
+        "usage": {"total_tokens": 1},
+    }
+    assert completes == [
+        TurnCompleteInput(
+            turn_id=started.turn_id,
+            reason="completed",
+            answer="done",
+        )
+    ]
+    write_result.assert_awaited_once_with(first_result, session)
+    assert build_next_work.call_args.kwargs["result"] == first_result
+
+    resume = InteractiveInput()
+    resume.update("call-1", {"action": "allow_once"})
+    await agent.run_one_round(
+        RoundWorkItem.user(
+            request_id="resume-1",
+            inputs={"query": resume},
+            reset_loop=False,
+        ),
+        "task-2",
+        session,
+    )
+
+    assert agent.load_state(session).turn_state == started
+    assert starts == [TurnStartInput(turn_id=started.turn_id, text="new work")]
+    assert completes[-1].turn_id == started.turn_id
+    assert write_result.await_args_list[-1].args == (
+        {
+            "result_type": "answer",
+            "output": "normalized-2",
+            "usage": {"total_tokens": 2},
+        },
+        session,
+    )
 
 
 @pytest.mark.asyncio

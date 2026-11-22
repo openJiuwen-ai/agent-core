@@ -38,19 +38,12 @@ import asyncio
 import json
 import os
 import time
-from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.foundation.tool.function.function import LocalFunction
 from openjiuwen.core.memory.external.provider import MemoryProvider
-from openjiuwen.core.session import InteractiveInput
-from openjiuwen.core.single_agent.interrupt.response import InterruptKind
-from openjiuwen.core.single_agent.interrupt.state import (
-    INTERRUPTION_KEY,
-    RESUME_INTERRUPT_ANSWERS_KEY,
-)
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
@@ -60,6 +53,7 @@ from openjiuwen.harness.prompts.sections.external_memory import (
     build_external_memory_section,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.rails.memory.memory_turn import MemoryTurnBuffer
 
 EXTERNAL_MEMORY_PREFETCH_SECTION = "external_memory_prefetch"
 
@@ -69,53 +63,6 @@ _SYNC_BREAKER_COOLDOWN = 120.0
 # infer=true 抽取里的多轮 LLM 调用留余量；只兜 SDK 无 asyncio 超时的整体路径。
 # 超时即 cancel（不 shield），对齐 F02-jiuwenswarm-rail-sync-turn-timeout.md。
 _SYNC_TURN_TIMEOUT = 130.0
-
-_TURN_MAX_CHARS = 16_000
-_TURN_MAX_SESSIONS = 128
-_TURN_TTL = 1800.0
-_TURN_TRUNCATION = "\n[交互轮次内容已截断]\n"
-_TURN_CONTEXT_KEY = "_jiuwen_memory_turn"
-
-
-@dataclass
-class _MemoryTurn:
-    """Bounded user-side material for one logical turn, never a chat history."""
-
-    original: str
-    additions: list[str] = field(default_factory=list)
-    seen_answers: dict[str, None] = field(default_factory=dict)
-    updated: float = field(default_factory=time.monotonic)
-    truncated: bool = False
-
-    def __post_init__(self) -> None:
-        self.original = self._clip(self.original, _TURN_MAX_CHARS - len(_TURN_TRUNCATION))
-
-    def _clip(self, text: str, limit: int) -> str:
-        if len(text) <= limit:
-            return text
-        self.truncated = True
-        return text[:limit // 2] + text[-(limit - limit // 2):]
-
-    def append(self, text: str) -> None:
-        if not text:
-            return
-        self.updated = time.monotonic()
-        budget = _TURN_MAX_CHARS - len(_TURN_TRUNCATION)
-        # Reserve room for recent complete answers while retaining both ends
-        # of an unusually large original request.
-        if len(self.original) + len(text) + 2 > budget:
-            self.original = self._clip(self.original, budget // 2)
-        if len(self.original) + len(text) + 2 > budget:
-            self.truncated = True
-            return
-        self.additions.append(text)
-        while self.additions and len("\n\n".join([self.original, *self.additions])) > budget:
-            self.additions.pop(0)
-            self.truncated = True
-
-    def render(self) -> str:
-        text = "\n\n".join([self.original, *self.additions])
-        return text + _TURN_TRUNCATION if self.truncated else text
 
 
 class JiuwenMemoryRail(DeepAgentRail):
@@ -171,7 +118,12 @@ class JiuwenMemoryRail(DeepAgentRail):
         # Project resolved from the current invoke context; injected into
         # provider tool calls (mem2_add/mem2_search) as routing coords.
         self._current_project: Optional[str] = None
-        self._memory_turns: dict[str, _MemoryTurn] = {}
+        self._turn_buffer = MemoryTurnBuffer(
+            resolve_user_text=self._resolve_user_text_for_memory,
+            extract_output=self._extract_assistant_output,
+            is_background=self._is_background_run,
+            unwrap_envelope=self._unwrap_jiuwenswarm_envelope,
+        )
 
     def init(self, agent) -> None:
         super().init(agent)
@@ -206,7 +158,7 @@ class JiuwenMemoryRail(DeepAgentRail):
                     self.system_prompt_builder.add_section(section)
 
     def uninit(self, agent) -> None:
-        self._memory_turns.clear()
+        self._turn_buffer.clear()
         # Unregister tools owned by this rail from the agent
         if hasattr(agent, "ability_manager"):
             for tool_name, tool_card in list(self._owned_tool_cards.items()):
@@ -268,7 +220,7 @@ class JiuwenMemoryRail(DeepAgentRail):
         与 ``session_end_extract`` 开关无关——开关只管 ``uninit`` 的隐式触发，
         这里是宿主的显式意图。provider 内部自捕获异常，失败不影响后续 shutdown。
         """
-        self._memory_turns.clear()
+        self._turn_buffer.clear()
         if not self._initialized:
             return
         try:
@@ -285,7 +237,7 @@ class JiuwenMemoryRail(DeepAgentRail):
         if not self._available:
             return
 
-        self._begin_memory_turn(ctx)
+        self._turn_buffer.begin(ctx)
 
         if not self._initialized:
             try:
@@ -374,80 +326,16 @@ class JiuwenMemoryRail(DeepAgentRail):
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Capture accepted ask_user results, after interrupt ownership routing."""
-        if not self._initialized or not self._available or self._is_background_run(ctx):
-            return
-        if (
-            getattr(ctx.inputs, "tool_name", "") != "ask_user"
-            or getattr(ctx, "exception", None) is not None
-            or getattr(ctx, "is_paused", False)
-        ):
-            return
-        turn = self._memory_turns.get(self._turn_session_id(ctx))
-        result = getattr(ctx.inputs, "tool_result", None)
-        if turn is None or not isinstance(result, str) or not result:
-            return
-        call_id = getattr(getattr(ctx.inputs, "tool_call", None), "id", "")
-        answers = ctx.extra.get(RESUME_INTERRUPT_ANSWERS_KEY, {}).get(call_id, {})
-        for answer in answers.values():
-            if answer.kind != InterruptKind.ASK_USER or answer.carried:
-                continue
-            answer_id = answer.request.interrupt_id
-            if answer_id in turn.seen_answers:
-                continue
-            # Replace a plain-text supplement with the accepted question/answer
-            # so values such as an authorization code retain their meaning.
-            if answer.unaddressed and isinstance(answer.value, str):
-                text = self._unwrap_jiuwenswarm_envelope(answer.value.strip())
-                if turn.additions and turn.additions[-1] == text:
-                    turn.additions.pop()
-            turn.append("用户交互回答：\n" + result)
-            turn.seen_answers[answer_id] = None
-            if len(turn.seen_answers) > 128:
-                turn.seen_answers.pop(next(iter(turn.seen_answers)))
+        if self._initialized and self._available:
+            self._turn_buffer.capture_answer(ctx)
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         if not self._initialized or not self._available:
             return
-        if self._is_background_run(ctx):
+        completed = self._turn_buffer.finish(ctx)
+        if completed is None:
             return
-
-        session_id = self._turn_session_id(ctx)
-        turn = ctx.extra.pop(_TURN_CONTEXT_KEY, None)
-        result = getattr(ctx.inputs, "result", None)
-        interrupted = isinstance(result, dict) and result.get("result_type") == "interrupt"
-        output = "" if interrupted else self._extract_assistant_output(ctx)
-        task = asyncio.current_task()
-        cancelled = task is not None and task.cancelling() > 0
-        has_pending_interrupt = (
-            not output
-            and self._interruption_state(ctx) is not None
-            and getattr(ctx, "exception", None) is None
-        )
-        has_invocation_error = getattr(ctx, "exception", None) is not None
-        has_error_result = isinstance(result, dict) and result.get("result_type") in {
-            "error",
-            "cancelled",
-            "canceled",
-        }
-        if cancelled or has_invocation_error or has_error_result:
-            if self._memory_turns.get(session_id) is turn:
-                self._memory_turns.pop(session_id, None)
-            return
-        # Streaming interrupts carry no terminal answer. An empty output alone
-        # is insufficient: errors and cancelled streams must not become turns.
-        if interrupted or has_pending_interrupt:
-            if turn is not None:
-                turn.updated = time.monotonic()
-            return
-        if self._memory_turns.get(session_id) is turn:
-            self._memory_turns.pop(session_id, None)
-
-        query = turn.render() if turn is not None else (
-            "" if isinstance(getattr(ctx.inputs, "query", None), InteractiveInput)
-            else self._resolve_user_text_for_memory(ctx)
-        )
-        if not query or not output:
-            return
+        query, output = completed
         # Capture routing before awaiting the previous task: the host may
         # refresh its project binding for the next invocation meanwhile.
         project = self._resolve_project(ctx)
@@ -583,50 +471,6 @@ class JiuwenMemoryRail(DeepAgentRail):
             logger.error(f"[JiuwenMemoryRail] Failed to register provider tools: {e}")
 
     # ---- Helper methods ----
-
-    @staticmethod
-    def _turn_session_id(ctx: AgentCallbackContext) -> str:
-        session = getattr(ctx, "session", None)
-        if session is not None:
-            session_id = session.get_session_id()
-            if isinstance(session_id, str) and session_id:
-                return session_id
-        conversation_id = getattr(ctx.inputs, "conversation_id", None)
-        return conversation_id if isinstance(conversation_id, str) else ""
-
-    @staticmethod
-    def _interruption_state(ctx: AgentCallbackContext):
-        get_state = getattr(getattr(ctx, "session", None), "get_state", None)
-        return get_state(INTERRUPTION_KEY) if callable(get_state) else None
-
-    def _begin_memory_turn(self, ctx: AgentCallbackContext) -> None:
-        if self._is_background_run(ctx):
-            return
-        now = time.monotonic()
-        for key, turn in list(self._memory_turns.items()):
-            if now - turn.updated >= _TURN_TTL:
-                self._memory_turns.pop(key, None)
-        session_id = self._turn_session_id(ctx)
-        if not session_id:
-            return
-        query = getattr(ctx.inputs, "query", None)
-        resume = isinstance(query, InteractiveInput) or self._interruption_state(ctx) is not None
-        turn = self._memory_turns.get(session_id) if resume else None
-        if not isinstance(query, InteractiveInput):
-            text = self._resolve_user_text_for_memory(ctx)
-            if turn is None and text:
-                turn = _MemoryTurn(text)
-            elif turn is not None:
-                turn.append(text)
-        if turn is None:
-            self._memory_turns.pop(session_id, None)
-            return
-        self._memory_turns.pop(session_id, None)
-        if len(self._memory_turns) >= _TURN_MAX_SESSIONS:
-            self._memory_turns.pop(next(iter(self._memory_turns)))
-        turn.updated = now
-        self._memory_turns[session_id] = turn
-        ctx.extra[_TURN_CONTEXT_KEY] = turn
 
     @staticmethod
     def _is_background_run(ctx: AgentCallbackContext) -> bool:
@@ -858,6 +702,13 @@ class JiuwenMemoryRail(DeepAgentRail):
             f"{raw_context}\n"
             "</memory-context>"
         )
+
+    # Public context helpers shared by sibling memory rails; keep private names compatible.
+    resolve_user_text_for_memory = _resolve_user_text_for_memory
+    is_background_run = _is_background_run
+    build_memory_context_block = _build_memory_context_block
+    extract_assistant_output = _extract_assistant_output
+    unwrap_jiuwenswarm_envelope = _unwrap_jiuwenswarm_envelope
 
 
 __all__ = ["JiuwenMemoryRail"]

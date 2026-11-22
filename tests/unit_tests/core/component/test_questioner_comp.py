@@ -197,6 +197,144 @@ class TestQuestionComp:
     @patch("openjiuwen.core.workflow.components.llm.questioner_comp."
            "QuestionerDirectReplyHandler._invoke_llm_for_extraction")
     @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.foundation.llm.model.Model")
+    def test_questioner_ignores_fields_outside_field_names_when_resuming(self, mock_get_model, mock_llm_inputs,
+                                                                        mock_extraction):
+        """配置外字段不应污染 extracted_key_fields（issue #2459）
+
+        LLM 偶尔会在 JSON 里夹带配置外的键（如 message / prompt）。这些键若被写入
+        state.extracted_key_fields，后续轮次的 `len(field_names) > len(extracted)`
+        会被幻觉字段凑满而返回 False，此时 question_content 为空，组件直接抛
+        [101072]，且脏状态随 checkpoint 持久化，会话无法自愈。
+        """
+        mock_get_model.return_value = MockLLMModel()
+        mock_prompt_template = [
+            dict(role="system", content="系统提示词"),
+            dict(role="user", content="你是一个AI助手")
+        ]
+        mock_llm_inputs.return_value = mock_prompt_template
+        # 三轮提取：第 2 轮夹带 message / prompt 两个配置外字段
+        mock_extraction.side_effect = [
+            dict(location="hangzhou"),
+            dict(location="杭州", message="请提供地点和时间", prompt="请提供时间"),
+            dict(date="明天"),
+        ]
+
+        flow = Workflow()
+
+        key_fields = [
+            FieldInfo(field_name="location", description="地点", required=True),
+            FieldInfo(field_name="date", description="日期", required=True),
+        ]
+
+        questioner_config = QuestionerConfig(
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
+            question_content="",
+            extract_fields_from_response=True,
+            field_names=key_fields,
+            with_chat_history=False,
+        )
+        questioner_component = QuestionerComponent(questioner_comp_config=questioner_config)
+
+        flow.set_start_comp("s", Start(), inputs_schema={"query": "${query}"})
+        flow.set_end_comp("e", End({"responseTemplate": "{{location}} | {{date}}"}),
+                          inputs_schema={"location": "${questioner.location}", "date": "${questioner.date}"})
+        flow.add_workflow_comp("questioner", questioner_component, inputs_schema={"query": "${s.query}"})
+        flow.add_connection("s", "questioner")
+        flow.add_connection("questioner", "e")
+
+        def answer(previous, text):
+            """用上一轮的交互 id 造一条用户回答，走同一个 session。"""
+            payload = previous.result[0].payload
+            assert isinstance(payload, InteractionOutput) and payload.id is not None
+            user_input = InteractiveInput()
+            user_input.update(payload.id, text)
+            return user_input
+
+        session_id = "test_questioner_hallucinated_fields"
+        workflow_context = Session(session_id=session_id).create_workflow_session()
+        first = self.invoke_workflow_with_workflow_context({"query": "查询天气"}, workflow_context, flow)
+
+        # 第 2 轮：LLM 夹带配置外字段。只缺 date，应继续追问而不是结束。
+        workflow_context = Session(session_id=session_id).create_workflow_session()
+        second = self.invoke_workflow_with_workflow_context(answer(first, "地点是杭州"), workflow_context, flow)
+        second_payload = second.result[0].payload
+        assert isinstance(second_payload, InteractionOutput)
+        assert "日期" in second_payload.value
+
+        # 第 3 轮：修复前这里在进入节点后立即抛 [101072]，因为幻觉字段已把
+        # extracted_key_fields 凑满两个。现在应正常发起提取并结束。
+        workflow_context = Session(session_id=session_id).create_workflow_session()
+        final = self.invoke_workflow_with_workflow_context(answer(second, "日期是明天"), workflow_context, flow)
+
+        assert final.result.get("response") == "杭州 | 明天"
+        # 幻觉字段既不进最终输出，也不留在状态里
+        output = final.result.get("response")
+        assert "请提供" not in str(output)
+
+    @staticmethod
+    def test_questioner_state_keeps_only_configured_fields():
+        """_update_state_of_key_fields 只收 field_names 白名单内的键"""
+        from openjiuwen.core.workflow.components.llm.questioner_comp import (
+            QuestionerDirectReplyHandler,
+            QuestionerState,
+        )
+
+        handler = QuestionerDirectReplyHandler()
+        handler.config(QuestionerConfig(
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
+            question_content="",
+            extract_fields_from_response=True,
+            field_names=[
+                FieldInfo(field_name="location", description="地点", required=True),
+                FieldInfo(field_name="date", description="日期", required=True),
+            ],
+            with_chat_history=False,
+        ))
+        handler.state(QuestionerState())
+
+        handler._update_state_of_key_fields(
+            {"location": "杭州", "message": "请提供地点和时间", "prompt": "请提供时间", "date": ""}
+        )
+
+        assert handler.get_state().extracted_key_fields == {"location": "杭州"}
+        # 配置内字段都还没提取全，仍需要继续提取
+        assert handler._need_extract_fields() is True
+
+    @staticmethod
+    def test_need_extract_fields_compares_field_names_not_counts():
+        """幻觉字段数量凑满也不能让 _need_extract_fields 误判为 False（issue #2459）"""
+        from openjiuwen.core.workflow.components.llm.questioner_comp import (
+            QuestionerDirectReplyHandler,
+            QuestionerState,
+        )
+
+        handler = QuestionerDirectReplyHandler()
+        handler.config(QuestionerConfig(
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
+            question_content="",
+            extract_fields_from_response=True,
+            field_names=[
+                FieldInfo(field_name="location", description="地点", required=True),
+                FieldInfo(field_name="date", description="日期", required=True),
+            ],
+            with_chat_history=False,
+        ))
+        # 直接构造被污染的状态，模拟从 checkpoint 反序列化出来的旧会话
+        handler.state(QuestionerState(extracted_key_fields={"location": "杭州", "message": "x"}))
+
+        assert handler._need_extract_fields() is True
+
+        # 两个配置内字段都提取到才返回 False
+        handler.state(QuestionerState(extracted_key_fields={"location": "杭州", "date": "明天"}))
+        assert handler._need_extract_fields() is False
+
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp."
+           "QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
     @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerExecutable._init_prompt")
     @patch("openjiuwen.core.foundation.llm.model.Model")
     def test_stream_questioner_component_in_workflow_initial_ask_with_tracer(self, mock_get_model, mock_init_prompt,

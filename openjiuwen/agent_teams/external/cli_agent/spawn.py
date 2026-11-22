@@ -27,7 +27,7 @@ from openjiuwen.agent_teams.external.cli_agent.injector import StdinPipeInjector
 from openjiuwen.agent_teams.external.cli_agent.transport.base import StreamReaderLike
 from openjiuwen.agent_teams.external.cli_agent.transport.local import LocalTransport
 from openjiuwen.agent_teams.external.descriptor import MCP_SERVER_ENV_VARS, OPENJIUWEN_HOME_ENV, TeamJoinDescriptor
-from openjiuwen.agent_teams.external.member_runtime import ExternalHarnessMemberRuntime
+from openjiuwen.agent_teams.external.member_runtime import ContextFactory, ExternalHarnessMemberRuntime
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase, ExternalCliRuntime, ReinvokeCliRuntime
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.paths import get_openjiuwen_home, team_workspace_dir
@@ -197,6 +197,162 @@ async def _register_mcp_out_of_band(
         )
 
 
+_SDK_MEMBER_KINDS = ("claude", "codex")
+
+
+def build_sdk_member_runtime(
+    ctx: TeamRuntimeContext,
+    *,
+    context: HarnessContext | ContextFactory,
+    join_env: dict[str, str],
+    cwd: str | None = None,
+    add_dirs: tuple[str, ...] = (),
+    command_override: tuple[str, ...] | None = None,
+    cli_path: str | None = None,
+    codex_bin: str | None = None,
+    inject_mcp: bool = True,
+    mcp_server_name: str = TEAM_MCP_SERVER_NAME,
+    mcp_default_tools_approval_mode: str | None = None,
+    codex_bypass_approvals_and_sandbox: bool = True,
+    codex_turn_idle_timeout_s: float | None = None,
+    codex_turn_idle_retries: int | None = None,
+    claude_turn_idle_timeout_s: float | None = None,
+    claude_max_buffer_size: int | None = None,
+    external_model_config: ExternalCliModelConfig | None = None,
+    fallback_external_model_config: ExternalCliModelConfig | None = None,
+    promote_fallback_model: Callable[[], Awaitable[bool]] | None = None,
+    system_prompt_mode: str | None = None,
+    skills: tuple[SkillSource, ...] = (),
+    skill_conflict: str = "skip",
+    extra_env: dict[str, str] | None = None,
+    ssh_transport: SshTransportConfig | None = None,
+    resume_external_backend: bool = False,
+    member_agent_id: str | None = None,
+    team_context_tracker: Any = None,
+    surface_turn_failures: bool = False,
+) -> ExternalHarnessMemberRuntime:
+    """Build the runtime of a member driven by the Claude or Codex SDK.
+
+    Nothing here needs the team session: the caller decides how the start
+    context is obtained and what the CLI process inherits. A spawned teammate
+    passes a ready context and its team-join environment; a leader, built
+    before its session is bound, passes a context factory and no join
+    environment (its team tools are mounted in process).
+
+    Args:
+        ctx: Member runtime context; ``ctx.cli_agent`` is ``"claude"`` or ``"codex"``.
+        context: The provider start context, or a factory resolved at ``start``.
+        join_env: Team-join variables merged into the CLI process environment.
+        surface_turn_failures: Report a failed turn on the member's own output
+            stream; for a leader, which has no one to report it to.
+
+    The remaining arguments mirror :func:`build_cli_runtime`.
+    """
+    if ctx.cli_agent not in _SDK_MEMBER_KINDS:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason=f"'{ctx.cli_agent}' is not an SDK-backed external CLI agent",
+        )
+    if ctx.cli_agent == "claude":
+        if codex_bin is not None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason="codex_bin is only supported for Codex SDK members",
+            )
+        if command_override is not None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason="Claude SDK members do not support command_override; configure cli_path instead",
+            )
+        if codex_turn_idle_timeout_s is not None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason="codex_turn_idle_timeout_s is only supported for Codex SDK members",
+            )
+        if codex_turn_idle_retries is not None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason="codex_turn_idle_retries is only supported for Codex SDK members",
+            )
+        return _build_claude_member_runtime(
+            ctx,
+            context=context,
+            join_env=join_env,
+            cwd=cwd,
+            add_dirs=add_dirs,
+            cli_path=cli_path,
+            inject_mcp=inject_mcp,
+            mcp_server_name=mcp_server_name,
+            max_buffer_size=claude_max_buffer_size,
+            external_model_config=external_model_config,
+            fallback_external_model_config=fallback_external_model_config,
+            promote_fallback_model=promote_fallback_model,
+            system_prompt_mode=system_prompt_mode,
+            skills=skills,
+            skill_conflict=skill_conflict,
+            extra_env=extra_env,
+            ssh_transport=ssh_transport,
+            resume_external_backend=resume_external_backend,
+            member_agent_id=member_agent_id,
+            team_context_tracker=team_context_tracker,
+            surface_turn_failures=surface_turn_failures,
+        )
+    if command_override is not None:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="Codex SDK members do not support command_override; configure cli_path instead",
+        )
+    if claude_turn_idle_timeout_s is not None:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="claude_turn_idle_timeout_s is only supported for Claude SDK members",
+        )
+    if claude_max_buffer_size is not None:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="claude_max_buffer_size is only supported for Claude SDK members",
+        )
+    if ssh_transport is not None:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="ssh transport is not yet supported for Codex SDK members",
+        )
+    if not member_agent_id:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason=f"Codex SDK member '{ctx.member_name}' requires a stable member_agent_id",
+        )
+    if add_dirs:
+        team_logger.debug(
+            "[external-cli] codex member {} uses cwd {}; extra add_dirs are not supported by the Codex SDK",
+            ctx.member_name,
+            cwd,
+        )
+    return _build_codex_member_runtime(
+        ctx,
+        context=context,
+        join_env=join_env,
+        cwd=cwd,
+        codex_bin=cli_path or codex_bin,
+        inject_mcp=inject_mcp,
+        mcp_default_tools_approval_mode=mcp_default_tools_approval_mode,
+        bypass_approvals_and_sandbox=codex_bypass_approvals_and_sandbox,
+        turn_idle_timeout_s=codex_turn_idle_timeout_s,
+        turn_idle_retries=codex_turn_idle_retries,
+        external_model_config=external_model_config,
+        fallback_external_model_config=fallback_external_model_config,
+        promote_fallback_model=promote_fallback_model,
+        system_prompt_mode=system_prompt_mode,
+        skills=skills,
+        skill_conflict=skill_conflict,
+        extra_env=extra_env,
+        resume_external_backend=resume_external_backend,
+        member_agent_id=member_agent_id,
+        team_context_tracker=team_context_tracker,
+        surface_turn_failures=surface_turn_failures,
+    )
+
+
 async def build_cli_runtime(
     ctx: TeamRuntimeContext,
     *,
@@ -305,99 +461,38 @@ async def build_cli_runtime(
             StatusCode.AGENT_TEAM_CONFIG_INVALID,
             reason="external CLI runtime requires session_id in context",
         )
-    if ctx.cli_agent == "claude":
-        if codex_bin is not None:
-            raise_error(
-                StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason="codex_bin is only supported for Codex SDK members",
-            )
-        if command_override is not None:
-            raise_error(
-                StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason="Claude SDK members do not support command_override; configure cli_path instead",
-            )
-        if codex_turn_idle_timeout_s is not None:
-            raise_error(
-                StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason="codex_turn_idle_timeout_s is only supported for Codex SDK members",
-            )
-        if codex_turn_idle_retries is not None:
-            raise_error(
-                StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason="codex_turn_idle_retries is only supported for Codex SDK members",
-            )
-        return await _build_claude_member_runtime(
+    if ctx.cli_agent in _SDK_MEMBER_KINDS:
+        return build_sdk_member_runtime(
             ctx,
-            descriptor,
+            context=_member_context(
+                ctx,
+                descriptor,
+                member_agent_id=member_agent_id,
+                system_prompt=system_prompt,
+                cwd=cwd,
+            ),
+            join_env=descriptor.to_env(),
             cwd=cwd,
             add_dirs=add_dirs,
+            command_override=command_override,
             cli_path=cli_path,
+            codex_bin=codex_bin,
             inject_mcp=inject_mcp,
             mcp_server_name=mcp_server_name,
-            max_buffer_size=claude_max_buffer_size,
+            mcp_default_tools_approval_mode=mcp_default_tools_approval_mode,
+            codex_bypass_approvals_and_sandbox=codex_bypass_approvals_and_sandbox,
+            codex_turn_idle_timeout_s=codex_turn_idle_timeout_s,
+            codex_turn_idle_retries=codex_turn_idle_retries,
+            claude_turn_idle_timeout_s=claude_turn_idle_timeout_s,
+            claude_max_buffer_size=claude_max_buffer_size,
             external_model_config=external_model_config,
             fallback_external_model_config=fallback_external_model_config,
             promote_fallback_model=promote_fallback_model,
-            system_prompt=system_prompt,
             system_prompt_mode=system_prompt_mode,
             skills=skills,
             skill_conflict=skill_conflict,
             extra_env=extra_env,
             ssh_transport=ssh_transport,
-            resume_external_backend=resume_external_backend,
-            member_agent_id=member_agent_id,
-            team_context_tracker=team_context_tracker,
-        )
-    if ctx.cli_agent == "codex":
-        if command_override is not None:
-            raise_error(
-                StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason="Codex SDK members do not support command_override; configure cli_path instead",
-            )
-        if claude_turn_idle_timeout_s is not None:
-            raise_error(
-                StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason="claude_turn_idle_timeout_s is only supported for Claude SDK members",
-            )
-        if claude_max_buffer_size is not None:
-            raise_error(
-                StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason="claude_max_buffer_size is only supported for Claude SDK members",
-            )
-        if ssh_transport is not None:
-            raise_error(
-                StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason="ssh transport is not yet supported for Codex SDK members",
-            )
-        if not member_agent_id:
-            raise_error(
-                StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason=f"Codex SDK member '{ctx.member_name}' requires a stable member_agent_id",
-            )
-        if add_dirs:
-            team_logger.debug(
-                "[external-cli] codex member {} uses cwd {}; extra add_dirs are not supported by the Codex SDK",
-                ctx.member_name,
-                cwd,
-            )
-        return await _build_codex_member_runtime(
-            ctx,
-            descriptor,
-            cwd=cwd,
-            codex_bin=cli_path or codex_bin,
-            inject_mcp=inject_mcp,
-            mcp_default_tools_approval_mode=mcp_default_tools_approval_mode,
-            bypass_approvals_and_sandbox=codex_bypass_approvals_and_sandbox,
-            turn_idle_timeout_s=codex_turn_idle_timeout_s,
-            turn_idle_retries=codex_turn_idle_retries,
-            external_model_config=external_model_config,
-            fallback_external_model_config=fallback_external_model_config,
-            promote_fallback_model=promote_fallback_model,
-            system_prompt=system_prompt,
-            system_prompt_mode=system_prompt_mode,
-            skills=skills,
-            skill_conflict=skill_conflict,
-            extra_env=extra_env,
             resume_external_backend=resume_external_backend,
             member_agent_id=member_agent_id,
             team_context_tracker=team_context_tracker,
@@ -733,10 +828,11 @@ def _codex_process_env(*, extra_env: dict[str, str] | None, join_env: dict[str, 
     return _with_home_env({**dict(os.environ), **(extra_env or {}), **join_env})
 
 
-async def _build_claude_member_runtime(
+def _build_claude_member_runtime(
     ctx: TeamRuntimeContext,
-    descriptor: TeamJoinDescriptor,
     *,
+    context: HarnessContext | ContextFactory,
+    join_env: dict[str, str],
     cwd: str | None,
     add_dirs: tuple[str, ...],
     cli_path: str | None,
@@ -746,7 +842,6 @@ async def _build_claude_member_runtime(
     external_model_config: ExternalCliModelConfig | None,
     fallback_external_model_config: ExternalCliModelConfig | None,
     promote_fallback_model: Callable[[], Awaitable[bool]] | None,
-    system_prompt: str | None,
     system_prompt_mode: str | None,
     skills: tuple[SkillSource, ...],
     skill_conflict: str,
@@ -755,13 +850,14 @@ async def _build_claude_member_runtime(
     resume_external_backend: bool,
     member_agent_id: str | None,
     team_context_tracker: Any,
+    surface_turn_failures: bool,
 ) -> ExternalHarnessMemberRuntime:
     """Build a Claude Code member runtime on the protocol harness."""
     if max_buffer_size is None:
         # An explicit None must not fall back to the SDK's 1 MiB default —
         # a single large tool result (e.g. a base64 image) would kill the turn.
         max_buffer_size = DEFAULT_CLAUDE_MAX_BUFFER_SIZE
-    env = _claude_process_env(extra_env=extra_env, join_env=descriptor.to_env(), ssh_transport=ssh_transport)
+    env = _claude_process_env(extra_env=extra_env, join_env=join_env, ssh_transport=ssh_transport)
     team_logger.info(
         "[external-cli] preparing claude member {} cwd={} cli_path_configured={} inject_mcp={} "
         "mcp_server_name={} team_join_env_present={} ssh_transport_configured={}",
@@ -799,13 +895,15 @@ async def _build_claude_member_runtime(
     harness = ClaudeCodeHarness(config, transport_factory=transport_factory)
     runtime = ExternalHarnessMemberRuntime(
         harness=harness,
-        context=_member_context(ctx, descriptor, member_agent_id=member_agent_id, system_prompt=system_prompt, cwd=cwd),
+        context=context,
         team_context_tracker=team_context_tracker,
         resume_external_backend=resume_external_backend,
         agent_kind="claude",
         cli_path=cli_path,
         inject_mcp=inject_mcp,
         mcp_server_name=mcp_server_name,
+        member_agent_id=member_agent_id,
+        surface_turn_failures=surface_turn_failures,
     )
     runtime.bind_fallback_promotion(promote_fallback_model)
     return runtime
@@ -817,10 +915,11 @@ async def _empty_prompt() -> AsyncIterator[dict[str, Any]]:
     yield {}  # type: ignore[unreachable]
 
 
-async def _build_codex_member_runtime(
+def _build_codex_member_runtime(
     ctx: TeamRuntimeContext,
-    descriptor: TeamJoinDescriptor,
     *,
+    context: HarnessContext | ContextFactory,
+    join_env: dict[str, str],
     cwd: str | None,
     codex_bin: str | None,
     inject_mcp: bool,
@@ -831,7 +930,6 @@ async def _build_codex_member_runtime(
     external_model_config: ExternalCliModelConfig | None,
     fallback_external_model_config: ExternalCliModelConfig | None,
     promote_fallback_model: Callable[[], Awaitable[bool]] | None,
-    system_prompt: str | None,
     system_prompt_mode: str | None,
     skills: tuple[SkillSource, ...],
     skill_conflict: str,
@@ -839,10 +937,11 @@ async def _build_codex_member_runtime(
     resume_external_backend: bool,
     member_agent_id: str,
     team_context_tracker: Any,
+    surface_turn_failures: bool,
 ) -> ExternalHarnessMemberRuntime:
     """Build a Codex member runtime on the protocol harness."""
     member_name = ctx.member_name or ""
-    env = _codex_process_env(extra_env=extra_env, join_env=descriptor.to_env())
+    env = _codex_process_env(extra_env=extra_env, join_env=join_env)
     team_logger.info(
         "[external-cli] preparing codex member {} cwd={} codex_bin_configured={} "
         "inject_mcp={} team_join_env_present={}",
@@ -877,18 +976,14 @@ async def _build_codex_member_runtime(
     harness = CodexHarness(config)
     runtime = ExternalHarnessMemberRuntime(
         harness=harness,
-        context=_member_context(
-            ctx,
-            descriptor,
-            member_agent_id=member_agent_id,
-            system_prompt=system_prompt,
-            cwd=cwd,
-        ),
+        context=context,
         team_context_tracker=team_context_tracker,
         resume_external_backend=resume_external_backend,
         agent_kind="codex",
         cli_path=codex_bin,
         inject_mcp=inject_mcp,
+        member_agent_id=member_agent_id,
+        surface_turn_failures=surface_turn_failures,
     )
     runtime.bind_fallback_promotion(promote_fallback_model)
     return runtime
@@ -985,4 +1080,10 @@ def _build_provider_member_runtime(
     return runtime
 
 
-__all__ = ["MemberRuntimeLike", "build_cli_runtime", "build_cli_workflow_runtime", "descriptor_from_context"]
+__all__ = [
+    "MemberRuntimeLike",
+    "build_cli_runtime",
+    "build_cli_workflow_runtime",
+    "build_sdk_member_runtime",
+    "descriptor_from_context",
+]

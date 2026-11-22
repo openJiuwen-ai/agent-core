@@ -1371,13 +1371,27 @@ class MemberSubtaskUpdateTool(TeamTool):
         return f"Subtask #{d['task_id']} confirmed as still valid against its parent."
 
 
+
+def _assignee_label(task: dict) -> str:
+    """Render a task's owner as ``name`` or ``name[member status]``."""
+    status = task.get("assignee_status")
+    return f"{task['assignee']}[{status}]" if status else task["assignee"]
+
+
 class ViewTaskToolV2(TeamTool):
     """Unified task viewing tool (V2).
 
     Explicit action enum instead of implicit param-based dispatch.
     """
 
-    def __init__(self, task_manager: TeamTaskManager, t: Translator, *, desc_key: str = "view_task"):
+    def __init__(
+        self,
+        task_manager: TeamTaskManager,
+        t: Translator,
+        *,
+        desc_key: str = "view_task",
+        language: str | None = None,
+    ):
         super().__init__(
             ToolCard(
                 id="team.view_task",
@@ -1386,6 +1400,10 @@ class ViewTaskToolV2(TeamTool):
             )
         )
         self.task_manager = task_manager
+        # ``None`` and any code other than ``cn`` / ``en`` follow the process-global
+        # language. Callers that know the team language pass it explicitly so an
+        # English team does not render Chinese relative times.
+        self._language = language if language in ("cn", "en") else None
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -1480,7 +1498,7 @@ class ViewTaskToolV2(TeamTool):
                 f"Content: {d['content']}",
             ]
             if d.get("assignee"):
-                lines.append(f"Assignee: {d['assignee']}")
+                lines.append(f"Assignee: {_assignee_label(d)}")
             if d.get("reviewer"):
                 lines.append(f"Reviewers: {', '.join(d['reviewer'])}")
             if d.get("summary"):
@@ -1488,7 +1506,9 @@ class ViewTaskToolV2(TeamTool):
             if d.get("note"):
                 lines.append(f"Note: {d['note']}")
             if d.get("updated_at") is not None:
-                lines.append(f"Updated: {format_time_context(d['updated_at'], now_ms)}")
+                lines.append(
+                    f"Updated: {format_time_context(d['updated_at'], now_ms, language=self._language)}"
+                )
             if d.get("blocked_by"):
                 lines.append(f"Blocked by: {', '.join(f'#{tid}' for tid in d['blocked_by'])}")
             if d.get("blocks"):
@@ -1513,9 +1533,11 @@ class ViewTaskToolV2(TeamTool):
         for task in tasks:
             parts = [f"#{task['task_id']} [{task['status']}] {task['title']}"]
             if task.get("assignee"):
-                parts.append(f"({task['assignee']})")
+                parts.append(f"assignee={_assignee_label(task)}")
             if task.get("updated_at") is not None:
-                parts.append(f"({format_time_context(task['updated_at'], now_ms)})")
+                parts.append(
+                    f"({format_time_context(task['updated_at'], now_ms, language=self._language)})"
+                )
             if task.get("blocked_by"):
                 parts.append(f"[blocked by {', '.join(f'#{tid}' for tid in task['blocked_by'])}]")
             if task.get("parent_task_id"):

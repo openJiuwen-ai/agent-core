@@ -82,7 +82,7 @@ class CodeOperation(BaseCodeOperation):
             *,
             language: Literal["python", "javascript"] = "python",
             timeout: int = 300,
-            environment: Optional[Dict[str, str]] = None,
+            environment: dict[str, str | None] | None = None,
             cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> ExecuteCodeResult:
@@ -93,7 +93,7 @@ class CodeOperation(BaseCodeOperation):
             code: Non-empty string containing the source code to execute (required positional argument).
             language: Programming language of the code. Strict type constraint to 'python' or 'javascript'.
             timeout: Maximum execution time in seconds. Defaults to 300 seconds (5 minutes).
-            environment: Key-value dict of custom environment variables.
+            environment: Variable overrides; null values remove inherited variables.
             cwd: Working directory for the subprocess.
             options: Additional execution configuration options.
 
@@ -215,7 +215,7 @@ class CodeOperation(BaseCodeOperation):
             *,
             language: Literal["python", "javascript"] = "python",
             timeout: int = 300,
-            environment: Optional[Dict[str, str]] = None,
+            environment: dict[str, str | None] | None = None,
             cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[ExecuteCodeStreamResult]:
@@ -228,7 +228,7 @@ class CodeOperation(BaseCodeOperation):
                 Defaults to "python".
             timeout: Maximum execution time in seconds. Terminates the process if exceeded.
                 Must be a positive integer. Defaults to 300 seconds (5 minutes).
-            environment: Key-value dict of custom environment variables.
+            environment: Variable overrides; null values remove inherited variables.
             cwd: Working directory for the subprocess.
             options: Additional execution configuration options.
 

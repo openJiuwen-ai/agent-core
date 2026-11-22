@@ -982,6 +982,62 @@ async def test_parse_response_preserves_additive_provider_facts():
     assert message.usage_metadata.cache_creation_input_tokens == 1
 
 
+@pytest.mark.asyncio
+async def test_parse_response_usage_model_name_prefers_served_model():
+    response = _Obj(
+        id="resp-2",
+        model="qwen3-max-served",
+        usage=_Obj(prompt_tokens=3, completion_tokens=2, total_tokens=5),
+        choices=[_Obj(message=_Obj(content="answer"), finish_reason="stop")],
+    )
+
+    message = await _make_client()._parse_response(response, None)
+
+    assert message.usage_metadata is not None
+    assert message.usage_metadata.model_name == "qwen3-max-served"
+
+
+@pytest.mark.asyncio
+async def test_parse_response_usage_model_name_falls_back_to_request_config():
+    response = _Obj(
+        id="resp-3",
+        usage=_Obj(prompt_tokens=3, completion_tokens=2, total_tokens=5),
+        choices=[_Obj(message=_Obj(content="answer"), finish_reason="stop")],
+    )
+
+    message = await _make_client()._parse_response(response, None)
+
+    assert message.usage_metadata is not None
+    assert message.usage_metadata.model_name == "MiniMax-M3"
+
+
+def test_parse_stream_chunk_usage_model_name_prefers_served_model():
+    chunk = _Obj(
+        model="qwen3-max-served",
+        usage=_Obj(prompt_tokens=3, completion_tokens=2, total_tokens=5),
+        choices=[],
+    )
+
+    parsed = _make_client()._parse_stream_chunk(chunk)
+
+    assert parsed is not None
+    assert parsed.usage_metadata is not None
+    assert parsed.usage_metadata.model_name == "qwen3-max-served"
+
+
+def test_parse_stream_chunk_usage_model_name_falls_back_to_request_config():
+    chunk = _Obj(
+        usage=_Obj(prompt_tokens=3, completion_tokens=2, total_tokens=5),
+        choices=[],
+    )
+
+    parsed = _make_client()._parse_stream_chunk(chunk)
+
+    assert parsed is not None
+    assert parsed.usage_metadata is not None
+    assert parsed.usage_metadata.model_name == "MiniMax-M3"
+
+
 class TestOpenAIResponsesApiKeyMode:
     """OpenAIModelClient with api_mode=responses talks to /responses."""
 

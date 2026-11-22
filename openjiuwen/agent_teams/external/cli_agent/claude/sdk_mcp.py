@@ -55,6 +55,11 @@ def build_claude_sdk_mcp_tool_set(
     concurrency_governor: Any = None,
     swarmflow_budget: Any = None,
     team_permissions_enabled: bool = False,
+    team_mode: str = "default",
+    bootstrap_mode: str = "leader",
+    exclude_tools: frozenset[str] = frozenset(),
+    expert_catalog: Any = None,
+    expert_binding: Any = None,
 ) -> ClaudeSdkMcpToolSet:
     """Build a Claude SDK MCP server from the current TeamAgent backend.
 
@@ -77,6 +82,11 @@ def build_claude_sdk_mcp_tool_set(
         concurrency_governor: Optional Swarmflow concurrency governor.
         swarmflow_budget: Optional Swarmflow token budget ledger.
         team_permissions_enabled: Whether team permission tools are enabled.
+        team_mode: Team operating mode; selects the workflow ``build_team`` discloses.
+        bootstrap_mode: Who materializes the team; ``"framework"`` drops ``build_team``.
+        exclude_tools: Tool names dropped on top of the always-excluded ``checkpoint``.
+        expert_catalog: The host's expert catalog, for a leader's expert tools.
+        expert_binding: Team-spec data the expert tools work with.
 
     Returns:
         SDK MCP tool set containing the server config and wrapped tools.
@@ -98,7 +108,11 @@ def build_claude_sdk_mcp_tool_set(
         messager=messager,
         team_name=team_name,
         swarmflow_model_resolver=swarmflow_model_resolver,
-        exclude_tools={"checkpoint"},
+        team_mode=team_mode,
+        bootstrap_mode=bootstrap_mode,
+        exclude_tools={"checkpoint", *exclude_tools},
+        expert_catalog=expert_catalog,
+        expert_binding=expert_binding,
         swarmflow_worker_base_spec=swarmflow_worker_base_spec,
         swarmflow_human_base_spec=swarmflow_human_base_spec,
         concurrency_governor=concurrency_governor,

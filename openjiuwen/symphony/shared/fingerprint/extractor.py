@@ -37,7 +37,7 @@ from openjiuwen.symphony.shared.fingerprint.normalization import (
     normalize_io_specs,
     sanitize_io_specs,
 )
-from openjiuwen.symphony.shared.fingerprint.settings import FingerprintSettings
+from openjiuwen.symphony.config import FingerprintPolicyConfig, FingerprintProtocolConfig
 
 _EXTRACTION_SYSTEM_PROMPT = """Extract a capability fingerprint from the supplied capability definition.
 
@@ -83,7 +83,7 @@ class CapabilityFingerprintExtractor:
 
     def __init__(
         self,
-        settings: FingerprintSettings,
+        settings: FingerprintPolicyConfig,
         llm: SymphonyLLM | None = None,
         *,
         model_response_observer: ModelResponseObserver | None = None,
@@ -122,8 +122,8 @@ class CapabilityFingerprintExtractor:
         cancelled = is_cancelled or (lambda: False)
         name_vocabulary = io_name_vocabulary or build_io_name_vocabulary(descriptors)
         results: list[ExtractionOutcome] = []
-        batch_size = max(1, self._settings.batch_size)
-        semaphore = asyncio.Semaphore(max(1, self._settings.max_concurrency))
+        batch_size = max(1, self._settings.extraction.batch_size)
+        semaphore = asyncio.Semaphore(max(1, self._settings.extraction.max_concurrency))
 
         async def extract_bounded(descriptor: CapabilityDescriptor) -> ExtractionOutcome:
             async with semaphore:
@@ -164,7 +164,7 @@ class CapabilityFingerprintExtractor:
         suggestions: list[ImprovementSuggestion] = []
         used_llm = False
 
-        if self._settings.enable_llm_extraction:
+        if self._settings.extraction.llm_enabled:
             try:
                 response = await self._invoke_llm(descriptor)
                 parsed = _response_payload(response)
@@ -314,13 +314,13 @@ class CapabilityFingerprintExtractor:
             "declared_outputs": [item.model_dump(mode="json") for item in descriptor.outputs],
             "classification": descriptor.classification,
             "tags": list(descriptor.tags),
-            "definition": semantic_definition[: max(0, self._settings.body_limit)],
-            "definition_truncated": len(semantic_definition) > max(0, self._settings.body_limit),
+            "definition": semantic_definition[: max(0, self._settings.extraction.max_body_chars)],
+            "definition_truncated": len(semantic_definition) > max(0, self._settings.extraction.max_body_chars),
         }
         safe_context = redact_sensitive_json(context)
-        invoke_kwargs: dict[str, Any] = {"temperature": 0.0, "timeout": self._settings.llm_timeout}
-        if self._settings.llm_max_tokens is not None:
-            invoke_kwargs["max_tokens"] = self._settings.llm_max_tokens
+        invoke_kwargs: dict[str, Any] = {"temperature": 0.0, "timeout": self._settings.extraction.timeout_seconds}
+        if self._settings.extraction.max_output_tokens is not None:
+            invoke_kwargs["max_tokens"] = self._settings.extraction.max_output_tokens
         with disabled_thinking_fallback_scope():
             response = await llm.invoke(
                 [

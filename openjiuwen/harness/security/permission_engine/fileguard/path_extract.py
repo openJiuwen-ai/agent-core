@@ -13,8 +13,14 @@ import os
 import re
 import shlex
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
+
+from openjiuwen.harness.security.literal_shell import (
+    is_script_interpreter,
+    literal_shell_enabled,
+    parse_literal_shell,
+)
 
 from openjiuwen.harness.security.permission_engine.fileguard.file_tool_specs import (
     FileToolSpec,
@@ -36,6 +42,7 @@ _PATH_AWARE_COMMANDS = frozenset({
     "cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat",
     "ls", "dir", "type", "del", "erase", "rd", "rmdir", "copy", "move", "md",
     "head", "tail", "more", "less", "vim", "nano", "gedit", "notepad",
+    "test", "[",
     "get-content", "gc",
     "set-content", "add-content", "out-file", "tee-object", "sc",
     "remove-item", "ri", "new-item", "ni",
@@ -59,6 +66,7 @@ _NT_CMD_SWITCH_COMMANDS = frozenset({
 
 _READ_CMDS = frozenset({
     "cat", "ls", "dir", "type", "head", "tail", "more", "less",
+    "test", "[",
     "get-content", "gc",
 })
 _WRITE_CMDS = frozenset({
@@ -74,6 +82,8 @@ _TRANSFER_CMDS = frozenset({"cp", "copy", "mv", "move"})
 _WIN_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _WIN_USERPROFILE_RE = re.compile(r"%USERPROFILE%", re.IGNORECASE)
 _WIN_HOMEDRIVE_HOMEPATH_RE = re.compile(r"%HOMEDRIVE%%HOMEPATH%", re.IGNORECASE)
+# ``$HOME`` / ``${HOME}`` as the whole token or followed by a separator; ``$HOMEDIR`` is another variable.
+_SHELL_HOME_VAR_RE = re.compile(r"^\$(?:HOME|\{HOME\})(?=$|[/\\])")
 
 
 def _is_windows_abs_text(text: str) -> bool:
@@ -136,7 +146,7 @@ def _unglue_home_hidden(path_text: str) -> str:
 
 
 def _expand_home_token(tok: str) -> str:
-    """Expand ``~`` / ``~/`` / ``~\\`` and Windows home env vars to the user home path."""
+    """Expand ``~`` / ``~/`` / ``~\\``, ``$HOME`` / ``${HOME}`` and Windows home env vars to the user home path."""
     t = tok.strip().strip('"').strip("'")
     if not t:
         return t
@@ -144,6 +154,9 @@ def _expand_home_token(tok: str) -> str:
         return str(Path.home())
     if t.startswith(("~/", "~\\", "~.")):
         return _join_home_rest(t[1:])
+    home_var = _SHELL_HOME_VAR_RE.match(t)
+    if home_var:
+        return _join_home_rest(t[home_var.end():])
     expanded = _WIN_HOMEDRIVE_HOMEPATH_RE.sub(lambda _m: Path.home().as_posix(), t)
     expanded = _WIN_USERPROFILE_RE.sub(lambda _m: Path.home().as_posix(), expanded)
     if expanded == t:
@@ -152,7 +165,7 @@ def _expand_home_token(tok: str) -> str:
 
 
 def _looks_like_redirect_target(token: str) -> bool:
-    t = token.strip().strip('"').strip("'")
+    t = _expand_home_token(token)
     if not t or _FD_ALIAS_RE.match(t):
         return False
     if t.startswith("$") or _UNEXPANDED_VAR_RE.search(t):
@@ -296,11 +309,13 @@ def _path_aware_one_segment(
 
     def _append_path_token(tok: str, idx: int, *, require_path_shape: bool) -> None:
         tok = _strip_separator_residue(tok)
-        if not tok or _UNEXPANDED_VAR_RE.search(tok):
+        if not tok:
             return
         if require_path_shape and not _looks_like_path(tok):
             return
         tok = _expand_home_token(tok)
+        if _UNEXPANDED_VAR_RE.search(tok):
+            return
         p = Path(tok)
         win_abs = _is_windows_abs_text(tok)
         if not p.is_absolute() and not (win_abs and os.name != "nt"):
@@ -384,16 +399,51 @@ def extract_path_aware_command_accesses(
     return combined
 
 
+def extract_literal_shell_accesses(
+    command: str, workdir: Path, *, include_cd_reads: bool = True,
+) -> list[tuple[Path, FileAction]] | None:
+    """Return the accesses in a verified POSIX command, or no evidence."""
+    literal = parse_literal_shell(command)
+    if literal is None:
+        return None
+
+    base = workdir
+    results: list[tuple[Path, FileAction]] = []
+    for call in literal.commands:
+        executable = PurePosixPath(call.argv[0]).name
+        if call.argv[0] == "cd":
+            target = Path(call.argv[-1])
+            base = (target if target.is_absolute() else base / target).resolve()
+            if include_cd_reads:
+                results.append((base, "read"))
+            continue
+        accesses, _ = _path_aware_one_segment(call.text, base)
+        results.extend(accesses)
+        if is_script_interpreter(executable) and len(call.argv) > 1 and not call.argv[1].startswith("-"):
+            target = Path(call.argv[1])
+            target = (target if target.is_absolute() else base / target).resolve()
+            results.append((target, "exec"))
+    return results
+
+
 def extract_shell_path_accesses(
     command: str,
     workdir: str | Path,
     *,
     include_cd_reads: bool = True,
+    skill_authorization: bool = False,
 ) -> list[tuple[Path, FileAction]]:
     if not command or not isinstance(command, str):
         return []
-    command = canonicalize_shell_command_for_permission(command)
     base = Path(workdir).resolve()
+    if skill_authorization:
+        literal = extract_literal_shell_accesses(command, base, include_cd_reads=include_cd_reads)
+        if literal is not None:
+            return literal
+
+    # The compatibility path unwraps launchers for inspection. The POSIX
+    # parser above must see the original invocation, including its launcher.
+    command = canonicalize_shell_command_for_permission(command)
     results: list[tuple[Path, FileAction]] = []
 
     def _resolve(tok: str, *, redirect: bool = False) -> Path | None:
@@ -498,7 +548,8 @@ def extract_accesses_native(
             except (OSError, RuntimeError):
                 pass
         cmd = str(tool_args.get("command", "") or tool_args.get("cmd", ""))
-        for p, act in extract_shell_path_accesses(cmd, workdir_resolved):
+        literal_enabled = literal_shell_enabled(permission_config, tool_name, tool_args)
+        for p, act in extract_shell_path_accesses(cmd, workdir_resolved, skill_authorization=literal_enabled):
             out.append((p, act, "shlex"))
         return out
 
