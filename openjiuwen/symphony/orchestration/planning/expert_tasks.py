@@ -26,15 +26,18 @@ from openjiuwen.symphony.retrieval.search.runtime.lexical import LexicalDocument
 from openjiuwen.symphony.shared.fingerprint.normalization import DataTypeVocabulary, normalize_io_name
 
 _SYSTEM_PROMPT = """
-Assign one task per independently verifiable subject or change. Keep all evidence, checks and formats for
-that subject together. For two independent subjects needing a memo and a table, group outputs as
-[memo_1, table_1] and [memo_2, table_2]. The same expert_id may own both tasks.
-Keep routine steps and revisions of one result with its owner. Put optional research in the consuming task.
-A single coupled result can use one task. Add a handoff only for an output the target needs.
-Put integration after its contributors. A requested independent reviewer is a separate task that receives
-all drafts, original sources and acceptance criteria.
+First identify the results the user can accept independently. Give each result one task that owns it
+from inputs through acceptance, including its supporting research, intermediate artifacts, checks,
+revisions and requested formats. Add a handoff only when another task needs the output. Place
+integration after its contributors. Give a requested independent reviewer a separate task with the
+drafts, original sources and acceptance criteria.
 
-Honor required assignments. Use a matching listed expert_id or an inline role, including when experts is empty.
+Then assign roles, honoring any required assignments. For each capability the tasks need, choose a
+listed expert_id only when its stated specialty directly covers the core work. A shared topic, tool or
+output format alone is a weak match. For a weak or absent match, define a task-specific inline role.
+For independent tasks that need the same capability, choose the role once and reuse its expert_id or
+inline role in each task. Give each instance its own scope and outputs. Leave independent tasks
+unconnected so they can run in parallel.
 Return no_plan with a reason only if there is no assignable work or a mandated installed expert is unavailable.
 Otherwise plan even with missing material: identify its key and what to do once it arrives.
 
