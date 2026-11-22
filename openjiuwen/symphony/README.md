@@ -87,7 +87,8 @@ async def plan_invoice(model):
         await runtime.aclose()
 ```
 
-- `plan(query, type="auto", context=...)` 是统一规划入口，默认值为 `auto`。使用当前注入模型选择足以完成任务的简单策略：直接回答、单项能力、多项能力协作、单专家或多专家。路由是 `plan()` 内部步骤，宿主不单独调用路由函数。`auto` 表示调用时自动选择策略，不会在宿主每条新任务开始时提前调用规划。
+- `plan(query, type="auto", context=...)` 是统一规划入口，默认值为 `auto`。使用当前注入模型选择直接回答、单项能力、多项能力协作、单专家或多专家。路由是 `plan()` 内部步骤，宿主不单独调用路由函数。`auto` 表示调用时自动选择策略，不会在宿主每条新任务开始时提前调用规划。
+- 允许委派时，可分别验收的独立判断或修改优先并行。各分支可以共用资料和工具，合并验收在分支产出后进行。同一结果的多格式导出、批量转换或反复修订适合由主代理处理。
 - 自动结果始终包含 `execution_route`（`strategy`、选定的能力 ID、`reason`、`requires_planning`），`planned_graph` 可选。策略依次为 `direct_answer`、`single_capability`、`capability_workflow`、`single_expert`、`multi_expert`。单项能力由 `skill_ids` 或 `tool_ids` 指明；不含工具的多 Skill 工作流生成技能图，专家策略返回 `plan_kind=expert_tasks`，支持纯内联角色。直接回答、单项能力和含工具的工作流不要求图。工具只作为宿主上下文，不参与 Symphony 工具检索或建图。
 - 迁移自动结果的消费者时，改读 `execution_route.strategy`；原 `tier`、`execution_mode` 和 `initial_tier` 已移除。单节点计划按实际执行归一为单项能力或单专家，`initial_strategy` 记录归一前的策略。统一入口、显式类型及两类图的接口保持不变。
 - `context` 接受 `PlanningContext` 或等价字典，仅提供可见 `skills/experts/tools` 摘要、必选能力 ID 和宿主策略。省略时从配置目录获取 Skill/专家清单。宿主负责实时可见性，Core 在模型前过滤禁用 Skill 和专家 manifest 范围。自动规划传入 `candidate_ids` 时，路由和后续图规划均以候选与可见能力的交集为范围；省略时才从全部可见能力选择。空列表或无效 ID 不会回退到全目录，必选能力不在有效候选中时在模型调用前报错。候选不代表必选，专家策略仍允许临时角色。

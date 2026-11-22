@@ -64,29 +64,29 @@ class RoutingUpgradeRequired(ValueError):
     """Planning found evidence requiring a fresh routing decision."""
 
 
-_SYSTEM_PROMPT = """Select an execution strategy for the user's task. Return strict JSON only.
-Choose the simplest strategy sufficient to satisfy the complete user request.
-The host provides named inputs, eligible capability summaries and any required capability IDs.
-Respect explicit user requirements and required capabilities. Select only from the supplied strategies.
-direct_answer: Answer directly from information already available. Do not assume an unread file
-or missing context has been read. A self-contained knowledge question can be answered directly.
-context_complete=false or preview_truncated=true means some catalogs/materials are omitted;
-do not assume omitted content has been read or that the visible catalog is exhaustive.
-single_capability: One visible Skill OR one host tool suffices. A Skill may internally use several tools.
-capability_workflow: The main agent coordinates multiple Skills/tools. Do not delegate merely because there are
-multiple steps or independent tasks. Include every selected Skill/tool ID.
-Do not invent installed IDs. Tool summaries describe existing host tools, NOT a searchable tool
-catalog or a tool DAG. Tools stay in the main agent's workflow.
-A required unavailable installed capability must be reported as unavailable rather than silently replaced.
-Missing material is advisory; retain a feasible execution strategy when the task can obtain it.
+_SYSTEM_PROMPT = """Choose one supplied strategy. Decide who owns the work before selecting tools.
+Honor delegation limits and required capabilities. Copy IDs from catalog entries, never their descriptions:
+skills → skill_ids, tools → tool_ids, experts → expert_ids. List each selected ID once.
+direct_answer: Answer from known information; leave all ID lists empty.
+single_capability: Use exactly one entry across skill_ids and tool_ids. A Skill can use tools internally.
+capability_workflow: The main agent coordinates two or more Skills/tools for a batch of identical operations, alternate
+formats of one result, or steps that must keep updating the same working result.
+For these three strategies leave expert_ids empty. Host tools are used by the main agent.
+File inputs are references for later reading. Treat truncated previews and partial catalogs as incomplete.
+Flag unavailable required capabilities or genuinely missing material and keep a feasible route.
 """
 
 _EXPERT_PROMPT = """
-single_expert: One installed expert or task-scoped role suffices, with a clear specialist, persona,
-working-rule or context-isolation benefit over execution by the main agent.
-multi_expert: Multiple delegated tasks have clear complementary, handoff, isolation, independent verification
-or parallel-execution benefits over execution by the main agent or a single expert. Explain that benefit briefly.
-Installed experts are optional for expert strategies; an empty expert_ids list allows temporary roles.
+When delegation is allowed, choose by the work. An empty experts list permits both expert strategies:
+use expert_ids=[] and the planner supplies temporary roles.
+multi_expert: Choose this when two or more units can each deliver a verifiable finding, authored result,
+or tested change without needing a sibling's output. This includes distinct evidence for one final decision.
+The units may use identical methods, inputs or tools. A common final check or combined report joins them
+afterwards. Also use this strategy for a necessary specialist handoff or an independent review.
+single_expert: One specialist owns a coupled judgment that benefits from consistent domain expertise.
+For expert routes, start with skill_ids=[] and tool_ids=[]; add only required host capabilities.
+List a matching expert ID once even for several tasks. Use a temporary role for unmatched work.
+In reason, name the independent results or the working result that couples them.
 """
 
 
