@@ -25,6 +25,7 @@ generated: true
 | [core/sys_operation](#module-core-sys_operation) |
 | [extensions.tracer_otel](#module-extensions-tracer_otel) |
 | [extensions/observability](#module-extensions-observability) |
+| [extensions/semantic_cache](#module-extensions-semantic_cache) |
 | [extensions/tracer_otel](#module-extensions-tracer_otel) |
 | [harness](#module-harness) |
 | [harness/rails](#module-harness-rails) |
@@ -278,6 +279,14 @@ generated: true
 | [F_20261103_0928_model-group-routed-model](F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | 无独立 D：issue |
 | [F_20261104_1638_drop-llm-span-cost-attrs](F_20261104_1638_drop-llm-span-cost-attrs.md) | F | LLM span 去掉 usage cost 属性（openjiuwen.gen_ai.usage.*_cost） | weixin_39960157 | 无独立 D：纯删减类变更（去掉一处已定属性的发射），无方案级取舍需要独立设计；键的引入背景与命名迁移见 |
 | [F_20261112_1120_goal-assessment-isolation](F_20261112_1120_goal-assessment-isolation.md) | F | Goal 评估调用的观测隔离实施 | alan_cheng | [D-20261112-1120-goal-assessment-isolation](../designs/active/D-20261112-1120-goal-assessment-isolation/design.md) |
+
+<a id="module-extensions-semantic_cache"></a>
+
+## extensions/semantic_cache
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261118_0930_semantic_response_cache](F_20261118_0930_semantic_response_cache.md) | F | Optional RedisVL read-only response cache implementation | Liuchenbing-2026 | [D-20261120-2155-semantic-response-cache](../designs/proposals/D-20261120-2155-semantic-response-cache/design.md) |
 
 <a id="module-extensions-tracer_otel"></a>
 

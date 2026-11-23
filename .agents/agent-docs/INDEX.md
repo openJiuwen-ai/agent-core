@@ -36,6 +36,7 @@ generated: true
 | [extensions.tracer_otel](#module-extensions-tracer_otel) |
 | [extensions/a2a](#module-extensions-a2a) |
 | [extensions/observability](#module-extensions-observability) |
+| [extensions/semantic_cache](#module-extensions-semantic_cache) |
 | [extensions/tracer_otel](#module-extensions-tracer_otel) |
 | [harness](#module-harness) |
 | [harness/moa](#module-harness-moa) |
@@ -480,6 +481,16 @@ generated: true
 | [F_20261104_1638_drop-llm-span-cost-attrs](features/F_20261104_1638_drop-llm-span-cost-attrs.md) | F | LLM span 去掉 usage cost 属性（openjiuwen.gen_ai.usage.*_cost） | weixin_39960157 | 无独立 D：纯删减类变更（去掉一处已定属性的发射），无方案级取舍需要独立设计；键的引入背景与命名迁移见 |
 | [F_20261112_1120_goal-assessment-isolation](features/F_20261112_1120_goal-assessment-isolation.md) | F | Goal 评估调用的观测隔离实施 | alan_cheng | [D-20261112-1120-goal-assessment-isolation](designs/active/D-20261112-1120-goal-assessment-isolation/design.md) |
 | [B_20261102_1120_avatar-child-session-trace-root](bugfix/agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
+
+<a id="module-extensions-semantic_cache"></a>
+
+## extensions/semantic_cache
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [D-20261120-2155-semantic-response-cache](designs/proposals/D-20261120-2155-semantic-response-cache/design.md) | D | 可选 RedisVL 语义响应缓存扩展设计方案 | Liuchenbing-2026 | — |
+| [F_20261118_0930_semantic_response_cache](features/F_20261118_0930_semantic_response_cache.md) | F | Optional RedisVL read-only response cache implementation | Liuchenbing-2026 | [D-20261120-2155-semantic-response-cache](designs/proposals/D-20261120-2155-semantic-response-cache/design.md) |
+| [S_01_semantic_response_cache](specs/extensions/S_01_semantic_response_cache.md) | S | Opt-in read-only semantic response cache | Liuchenbing-2026 | — |
 
 <a id="module-extensions-tracer_otel"></a>
 
