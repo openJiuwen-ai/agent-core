@@ -102,6 +102,12 @@ The observability file exporter and `TrajectoryStore` are separate outputs: the 
 observability, while `TrajectoryRail` writes one canonical invoke archive for application use. Do not read an
 exporter file back into the Rail.
 
+`TrajectoryRail` depends only on `trajectory_span_processor`, never on the exporter. When you need trajectories but
+not raw-span export, call `acquire_observability(config, export=False)`: the provider still starts and the
+processor still receives spans, while the config-built exporter receives none. The switch is process-wide: any
+runtime in the same process that acquires with `export=True` (the default) re-enables export. An exporter passed
+explicitly through `span_exporter_override` is never affected by this switch.
+
 ## Property
 
 ### trajectory_store -> TrajectoryStore
