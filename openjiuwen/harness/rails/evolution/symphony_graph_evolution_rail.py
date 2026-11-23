@@ -26,9 +26,8 @@ from openjiuwen.agent_evolving.trajectory.messages import DEFAULT_EVOLUTION_MESS
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.agent_evolving.trajectory.spans import (
-    iter_spans,
+    iter_compact_spans,
     merge_trajectories,
-    read_span_error,
     read_tool_call,
     span_attributes,
     span_identity,
@@ -747,7 +746,7 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         if trajectory is None:
             return ()
         issues: list[Mapping[str, object]] = []
-        for span in iter_spans(trajectory):
+        for span in iter_compact_spans(trajectory):
             if span_category(span) != "tool":
                 continue
             attrs = span_attributes(span)
@@ -840,7 +839,7 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         increment: Trajectory,
     ) -> None:
         tokens: list[_CapturedToolToken] = []
-        for span in iter_spans(increment):
+        for span in iter_compact_spans(increment):
             if span_category(span) != "tool":
                 continue
             call = read_tool_call(span)
@@ -901,10 +900,10 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         state = self._state(capture)
         if state is None:
             return projected
-        detached = Trajectory.from_otlp(increment.to_otlp())
         # Events ride along with the work they describe and do not spend the
         # span budget, the same as in the shared clean window.
-        detached_span_count = sum(1 for span in iter_spans(detached) if not is_trajectory_event_span(span))
+        detached = increment.snapshot()
+        detached_span_count = sum(1 for span in iter_compact_spans(detached) if not is_trajectory_event_span(span))
         with state.lock:
             if state.continuity_break_pending:
                 if state.increments:
@@ -1195,7 +1194,7 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
             trace_ids = tuple(state.trace_ids)
             query = state.original_query
         return SymphonyGraphEvolutionInput(
-            trajectory=Trajectory.from_otlp(invoke_trajectory.to_otlp()),
+            trajectory=invoke_trajectory.snapshot(),
             messages=messages,
             planned_graph=planned_graph,
             execution_fragments=tuple(fragments),
@@ -1436,13 +1435,13 @@ def _detach_prepared_input(prepared: SymphonyGraphEvolutionInput) -> SymphonyGra
     """Give a diagnostic consumer an independent view of mutable payloads."""
 
     return SymphonyGraphEvolutionInput(
-        trajectory=Trajectory.from_otlp(prepared.trajectory.to_otlp()),
+        trajectory=prepared.trajectory.snapshot(),
         messages=tuple(deepcopy(prepared.messages)),
         skill_name=prepared.skill_name,
         planned_graph=deepcopy(prepared.planned_graph),
         execution_fragments=prepared.execution_fragments,
         execution_continuities=tuple(
-            (index, Trajectory.from_otlp(trajectory.to_otlp())) for index, trajectory in prepared.execution_continuities
+            (index, trajectory.snapshot()) for index, trajectory in prepared.execution_continuities
         ),
         interrupt_continuations=prepared.interrupt_continuations,
         trace_ids=prepared.trace_ids,
@@ -1466,11 +1465,20 @@ def _build_edge_summaries(
 ) -> dict[str, SymphonyEdgeEvaluationSummary]:
     """Build bounded local summaries; candidate provenance is never included."""
 
+    if not candidates:
+        return {}
+    endpoint_ids = {
+        (fragment.trace_id, span_id)
+        for candidate in candidates
+        for fragment in (candidate.source_fragment, candidate.target_fragment)
+        for span_id in fragment.span_ids
+    }
     span_map: dict[tuple[str, str], Mapping[str, Any]] = {}
     for _, trajectory in continuities:
-        for span in iter_spans(trajectory):
+        for span in iter_compact_spans(trajectory):
             identity = span_identity(span)
-            if identity is not None:
+            if identity in endpoint_ids:
+                # Keep the last matching record, as with the full-span index.
                 span_map[identity] = span
 
     def endpoint(fragment: SymphonyExecutionFragment) -> SymphonyEdgeEndpointSummary:
@@ -1479,14 +1487,11 @@ def _build_edge_summaries(
             span = span_map.get((fragment.trace_id, span_id))
             if span is None:
                 continue
-            error = read_span_error(span)
             call = read_tool_call(span)
-            if isinstance(call, Mapping) and call:
-                event = _summary_tool_event(call, error)
-                if event is not None:
-                    events.append(event)
-                elif error:
-                    events.append(_synthetic_error_event(error))
+            error = call.get("error")
+            event = _summary_tool_event(call, error) if call else None
+            if event is not None:
+                events.append(event)
             elif error:
                 events.append(_synthetic_error_event(error))
         selected_indexes = _select_summary_event_indexes(events)

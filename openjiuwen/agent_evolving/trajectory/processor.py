@@ -29,8 +29,9 @@ from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import TRAJECTORY_ID
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, attributes_to_map
 from openjiuwen.extensions.observability import semconv
+from openjiuwen.extensions.observability.content_addressing import parse_sequence_reference
 from openjiuwen.extensions.observability.otlp_codec import ADDRESSED_ATTRIBUTE_KEYS
-from openjiuwen.extensions.observability.sequence_registry import materialize_stated_value
+from openjiuwen.extensions.observability.sequence_registry import lookup_sequence_head, unresolvable_placeholder
 
 __all__ = ["TrajectorySpanProcessor"]
 
@@ -184,40 +185,32 @@ def _span_kind(span: Any) -> str:
     return f"SPAN_KIND_{name}"
 
 
-def _materialize_evolution_attributes(attrs: Mapping[str, Any]) -> dict[str, Any]:
-    """Resolve sequence references in restated attributes for evolution consumption.
-
-    The evolution clean windows are standalone consumers: a span copy they
-    accumulate cannot consult the process-local sequence registry at read
-    time (windows outlive the registry TTL), so references are materialized
-    once at capture.  The input is the raw span attribute mapping; OTLP
-    encoding happens after materialization so the resolved full content --
-    not the reference string -- is what gets encoded.
-    """
-    resolved: dict[str, Any] = {}
-    for key, value in attrs.items():
-        if key in ADDRESSED_ATTRIBUTE_KEYS and isinstance(value, str):
-            resolved[key] = materialize_stated_value(value)
-        else:
-            resolved[key] = value
-    return resolved
-
-
 def _span_to_otlp(span: ReadableSpan) -> tuple[dict[str, Any], tuple[str, str]]:
-    """Copy one ended span into the canonical OTLP JSON representation."""
+    """Copy one ended span, owning each addressed attribute by its sequence head."""
 
     trace_id, span_id = _span_identity(span)
     parent_context = getattr(span, "parent", None)
     parent_span_id = _normalise_span_id(getattr(parent_context, "span_id", None))
+
+    attrs = dict(getattr(span, "attributes", None) or {})
+    for key in ADDRESSED_ATTRIBUTE_KEYS:
+        reference = parse_sequence_reference(attrs.get(key))
+        if reference is None:
+            continue
+        seq_hash, depth = reference
+        head = lookup_sequence_head(seq_hash)
+        if head is None:
+            _LOGGER.warning("sequence reference %s is not registered; stating an unresolvable placeholder", seq_hash)
+            attrs[key] = unresolvable_placeholder(seq_hash, depth)
+        else:
+            attrs[key] = head
 
     encoded: dict[str, Any] = {
         "traceId": trace_id,
         "spanId": span_id,
         "name": str(getattr(span, "name", "")),
         "kind": _span_kind(span),
-        "attributes": attributes_from_map(
-            _materialize_evolution_attributes(getattr(span, "attributes", None) or {})
-        ),
+        "attributes": attributes_from_map(attrs),
         "status": _span_status(span),
     }
     if parent_span_id:

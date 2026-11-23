@@ -89,7 +89,7 @@ def _metadata_value(trajectory: Trajectory, key: str) -> str | None:
 
 def _canonical_input(trajectory: Any) -> Trajectory:
     if isinstance(trajectory, Trajectory):
-        return Trajectory.from_otlp(trajectory.to_otlp())
+        return Trajectory.from_otlp(trajectory.copy_compact_payload())
     raise TypeError("store accepts only canonical Trajectory")
 
 

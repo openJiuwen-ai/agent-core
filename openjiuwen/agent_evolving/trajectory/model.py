@@ -19,18 +19,48 @@ from openjiuwen.agent_evolving.trajectory.schema import (
     TEAM_ID,
     TRAJECTORY_ID,
 )
+from openjiuwen.extensions.observability.content_addressing import SequenceHead
 
 
-def _copy_json(value: Any) -> Any:
+def _copy_json(value: Any, *, materialize: bool = False) -> Any:
     """Return a detached copy while normalising mapping implementations."""
 
+    if isinstance(value, SequenceHead):
+        return value.materialize() if materialize else value
     if isinstance(value, Mapping):
-        return {str(key): _copy_json(item) for key, item in value.items()}
+        return {str(key): _copy_json(item, materialize=materialize) for key, item in value.items()}
     if isinstance(value, list):
-        return [_copy_json(item) for item in value]
+        return [_copy_json(item, materialize=materialize) for item in value]
     if isinstance(value, tuple):
-        return [_copy_json(item) for item in value]
+        return [_copy_json(item, materialize=materialize) for item in value]
     return deepcopy(value)
+
+
+def _payload_matches(
+    left: Any, right: Any, inline_comparisons: list[tuple[SequenceHead, str]]
+) -> bool:
+    """Compare structure and hashes before rebuilding any inline values."""
+
+    if left is right:
+        return True
+    if isinstance(left, SequenceHead):
+        if isinstance(right, SequenceHead):
+            return left.seq_hash == right.seq_hash
+        if isinstance(right, str):
+            inline_comparisons.append((left, right))
+            return True
+        return False
+    if isinstance(right, SequenceHead):
+        return _payload_matches(right, left, inline_comparisons)
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(
+            _payload_matches(value, right[key], inline_comparisons) for key, value in left.items()
+        )
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(
+            _payload_matches(a, b, inline_comparisons) for a, b in zip(left, right)
+        )
+    return bool(left == right)
 
 
 def _decode_otlp_value(value: Any) -> Any:
@@ -164,7 +194,17 @@ class Trajectory:
     def to_otlp(self) -> dict[str, object]:
         """Return an independent JSON-like copy of the canonical payload."""
 
+        return _copy_json(self._payload, materialize=True)
+
+    def copy_compact_payload(self) -> dict[str, Any]:
+        """Return independently editable containers sharing immutable sequence nodes."""
+
         return _copy_json(self._payload)
+
+    def snapshot(self) -> "Trajectory":
+        """Detach the trajectory while sharing immutable sequence heads."""
+
+        return Trajectory(self._payload)
 
     @property
     def resource_attributes(self) -> dict[str, Any]:
@@ -214,7 +254,7 @@ class Trajectory:
 
         if not isinstance(attributes, Mapping):
             raise TypeError("attributes must be a mapping")
-        payload = self.to_otlp()
+        payload = self.copy_compact_payload()
         resource_spans = payload["resourceSpans"]
         resource_span = resource_spans[0]
         resource = resource_span.setdefault("resource", {})
@@ -254,7 +294,10 @@ class Trajectory:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Trajectory):
             return NotImplemented
-        return self._payload == other._payload
+        inline_comparisons: list[tuple[SequenceHead, str]] = []
+        if not _payload_matches(self._payload, other._payload, inline_comparisons):
+            return False
+        return all(head.materialize() == inline for head, inline in inline_comparisons)
 
     def __repr__(self) -> str:
         return f"Trajectory(trajectory_id={self.trajectory_id!r}, spans={len(self._payload['resourceSpans'])})"

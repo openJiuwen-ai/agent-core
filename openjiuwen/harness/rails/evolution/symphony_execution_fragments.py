@@ -13,9 +13,10 @@ from typing import Any, Literal
 
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.spans import (
-    iter_spans,
+    iter_compact_spans,
     read_span_error,
-    read_tool_call,
+    read_tool_input,
+    read_tool_output,
     span_attributes,
     span_identity,
     span_sort_key,
@@ -104,7 +105,7 @@ def _project_continuity(
     *,
     team_members_only: bool,
 ) -> list[SymphonyExecutionFragment]:
-    spans = [span for span in iter_spans(trajectory) if span_identity(span) is not None]
+    spans = [span for span in iter_compact_spans(trajectory) if span_identity(span) is not None]
     if not spans:
         return []
     spans.sort(key=span_sort_key)
@@ -169,7 +170,7 @@ def _team_member_fragments(
     for identity, span in by_identity.items():
         if span_category(span) != "agent":
             continue
-        member_id = str(span_attributes(span).get(semconv.AT_MEMBER_NAME) or "").strip()
+        member_id = str(_attribute(span, semconv.AT_MEMBER_NAME) or "").strip()
         if not member_id:
             continue
         trace_roots = roots_by_trace.get(identity[0])
@@ -271,7 +272,7 @@ def _orphan_step_branches(
 def _is_step_wrapper(span: Mapping[str, Any]) -> bool:
     """Return whether an agent-named span is an iteration, not a branch."""
 
-    return str(span_attributes(span).get(semconv.OJ_TRAJECTORY_RECORD_KIND) or "").strip() == "step"
+    return str(_attribute(span, semconv.OJ_TRAJECTORY_RECORD_KIND) or "").strip() == "step"
 
 
 def _skill_fragments(
@@ -450,13 +451,12 @@ def _exclude_foreign_script_spans(
 
 
 def _tool_references_skill_script(span: Mapping[str, Any], skill_name: str) -> bool:
-    tool_call = read_tool_call(span)
-    if _canonical_tool_name(tool_call.get("name")) == _SKILL_TOOL_NAME:
+    if _canonical_tool_name(_attribute(span, semconv.GEN_AI_TOOL_NAME)) == _SKILL_TOOL_NAME:
         return False
     absolute = re.compile(rf"(?<![A-Za-z0-9_.-]){re.escape(skill_name)}/scripts(?:/|\\b)")
     return any(
         absolute.search(value) is not None or _references_relative_skill_script(value, skill_name)
-        for value in _trace_text_values(tool_call.get("input"))
+        for value in _trace_text_values(read_tool_input(span))
     )
 
 
@@ -597,9 +597,10 @@ def _tool_and_subagent_fragments(
             continue
         descendants = _descendants_before_boundary({identity}, None, by_identity, children)
         child_agents = _nearest_child_agents(identity, by_identity, children)
-        subagent_name = _subagent_capability_name(span, child_agents, by_identity)
-        is_subagent = (canonical_name in _SUBAGENT_DISPATCH_TOOLS and subagent_name is not None) or bool(child_agents)
-        if is_subagent:
+        subagent_name = None
+        if child_agents or canonical_name in _SUBAGENT_DISPATCH_TOOLS:
+            subagent_name = _subagent_capability_name(span, child_agents, by_identity)
+        if child_agents or subagent_name is not None:
             branch = child_agents[0] if child_agents else branches[identity]
             fragments.append(
                 _fragment(
@@ -702,15 +703,18 @@ def _ordered_span_ids(
 
 
 def _effective_skill_name(span: Mapping[str, Any]) -> str | None:
-    if span_category(span) != "tool" or read_span_error(span) is not None:
+    if span_category(span) != "tool":
         return None
-    tool_call = read_tool_call(span)
-    if _canonical_tool_name(tool_call.get("name")) != _SKILL_TOOL_NAME:
+    if _canonical_tool_name(_attribute(span, semconv.GEN_AI_TOOL_NAME)) != _SKILL_TOOL_NAME:
         return None
-    inputs = _tool_input_mapping(tool_call.get("input"))
+    if read_span_error(span) is not None:
+        return None
+    inputs = _tool_input_mapping(read_tool_input(span))
     skill_name = str(inputs.get("skill_name") or "").strip() if inputs is not None else ""
-    output = tool_call.get("output")
-    if not skill_name or not (_explicit_success(output) or _authoritative_truncated_success(span, output)):
+    if not skill_name:
+        return None
+    output = read_tool_output(span)
+    if not (_explicit_success(output) or _authoritative_truncated_success(span, output)):
         return None
     return skill_name
 
@@ -721,7 +725,7 @@ def _subagent_capability_name(
     by_identity: Mapping[tuple[str, str], Mapping[str, Any]],
 ) -> str | None:
     inputs = _tool_input_mapping(
-        read_tool_call(span).get("input"),
+        read_tool_input(span),
         required_key="subagent_type",
     )
     if inputs is not None:
@@ -729,16 +733,21 @@ def _subagent_capability_name(
         if subagent_type:
             return subagent_type
     for identity in child_agents:
-        attrs = span_attributes(by_identity[identity])
-        for key in (semconv.AT_AGENT_ID, semconv.GEN_AI_AGENT_NAME):
+        keys = (semconv.AT_AGENT_ID, semconv.GEN_AI_AGENT_NAME)
+        attrs = span_attributes(by_identity[identity], keys=keys)
+        for key in keys:
             value = str(attrs.get(key) or "").strip()
             if value:
                 return value
     return None
 
 
+def _attribute(span: Mapping[str, Any], key: str) -> Any:
+    return span_attributes(span, keys=(key,)).get(key)
+
+
 def _tool_name(span: Mapping[str, Any]) -> str | None:
-    name = read_tool_call(span).get("name")
+    name = _attribute(span, semconv.GEN_AI_TOOL_NAME)
     if name is not None and str(name).strip():
         return str(name).strip()
     span_name = str(span.get("name") or "").strip()
@@ -829,7 +838,7 @@ def _authoritative_truncated_success(
         or _TRUNCATED_JSON_SUCCESS_PREFIX.match(stripped) is None
     ):
         return False
-    if span_attributes(span).get(semconv.OJ_TOOL_AUTHORITATIVE) is not True:
+    if _attribute(span, semconv.OJ_TOOL_AUTHORITATIVE) is not True:
         return False
     code = str(span_status(span).get("code") or "").upper()
     return code in {"1", "OK", "STATUS_CODE_OK"}
