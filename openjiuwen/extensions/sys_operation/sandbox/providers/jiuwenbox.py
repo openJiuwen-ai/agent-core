@@ -249,16 +249,31 @@ def _authentication_failure(error: BaseException) -> bool:
     return False
 
 
-def _is_permanent_acl_cleanup_error(error: BaseException) -> bool:
-    """Only an explicit Box receipt disables transport-level cleanup retries."""
-    if not isinstance(error, httpx.HTTPStatusError) or error.response is None or error.response.status_code != 409:
-        return False
+def _acl_cleanup_receipt(error: BaseException) -> dict | None:
+    if (not isinstance(error, httpx.HTTPStatusError) or error.response is None
+            or error.response.status_code not in (409, 503)):
+        return None
     try:
         payload = error.response.json()
     except ValueError:
-        return False
-    return (isinstance(payload, dict) and payload.get("code") == "SANDBOX_ACL_CLEANUP_FAILED"
-            and payload.get("retryable") is False)
+        return None
+    if isinstance(payload, dict) and payload.get("code") == "SANDBOX_ACL_CLEANUP_FAILED":
+        return payload
+    return None
+
+
+def _deferred_acl_cleanup(error: BaseException, receipt: dict | None) -> tuple[str | None, str | None]:
+    if not isinstance(error, httpx.HTTPStatusError) or receipt is None:
+        return None, None
+    if error.response.status_code != 503 or receipt.get("execution_stopped") is not True:
+        return None, None
+    cleanup = receipt.get("cleanup")
+    sandbox_id = cleanup.get("sandbox_id") if isinstance(cleanup, dict) else None
+    epoch = error.response.headers.get("X-JiuwenBox-ACL-Epoch", "")
+    if (isinstance(sandbox_id, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", sandbox_id)
+            and re.fullmatch(r"[0-9a-f]{32}", epoch)):
+        return sandbox_id, epoch
+    return None, None
 
 
 # Match jiuwenbox "Sandbox '<id>' not found" 404 only; not file/dir 404s.
@@ -427,18 +442,50 @@ class _JiuwenBoxClient:
             json=body,
             timeout=max(self._client.timeout.read or 0, _CREATE_SANDBOX_MIN_TIMEOUT_SECONDS),
         )
+        if response.status_code == 500:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict) and payload.get("code") == "SANDBOX_ACL_APPLY_FAILED":
+                sandbox_id = payload.get("sandbox_id")
+                if isinstance(sandbox_id, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", sandbox_id):
+                    startup_error = str(payload.get("error") or "ACL initialization failed")
+                    self._cleanup_after_failed_create(sandbox_id, startup_error)
         _raise_for_status(response)
         data = response.json()
         sandbox_id = data["id"]
         if data.get("phase") == "error":
-            # A failed DELETE must override the startup error: ACL cleanup is
-            # mandatory before a host may retry or choose local execution.
-            self.delete_sandbox(sandbox_id)
             error = data.get("error_message") or "sandbox startup failed"
+            self._cleanup_after_failed_create(sandbox_id, error)
             if data.get("failure_kind") == "runtime_start":
                 raise JiuwenBoxUnavailableError(error)
             raise RuntimeError(error)
         return sandbox_id
+
+    def _cleanup_after_failed_create(self, sandbox_id: str, startup_error: str) -> None:
+        # Preserve the cleanup failure as the state barrier, with the original
+        # initialization failure included in the diagnostic.
+        try:
+            self.delete_sandbox(sandbox_id)
+        except httpx.HTTPStatusError as error:
+            if _acl_cleanup_receipt(error) is None:
+                raise
+            raise httpx.HTTPStatusError(
+                f"{startup_error}; {error}", request=error.request, response=error.response,
+            ) from error
+
+    def acl_cleanup_completed(self, sandbox_id: str, epoch: str) -> bool:
+        response = self._client.get(f"/api/v1/sandboxes/{sandbox_id}", timeout=2.0)
+        if response.headers.get("X-JiuwenBox-ACL-Epoch") != epoch:
+            return False
+        try:
+            _raise_for_status(response)
+        except httpx.HTTPStatusError as error:
+            if _is_sandbox_not_found_error(error):
+                return True
+            raise
+        return False
 
     def set_idle_timeout(
         self,
@@ -734,6 +781,9 @@ class _JiuwenBoxProviderMixin:
     # so retries never pick up a hook registered later under the same key.
     _pending_deletions: ClassVar[Dict[tuple[str, str], tuple[bool, Optional[Callable[[str, dict], None]]]]] = {}
     _delete_tasks: ClassVar[Dict[tuple[str, str], asyncio.Task[None]]] = {}
+    # Diagnostic, process epoch, and next allowed completion probe.
+    # An absent epoch means only explicit lifecycle cleanup may retire this entry.
+    _acl_cleanup_details: ClassVar[Dict[tuple[str, str], tuple[str, str | None, float]]] = {}
     # A bulk cleanup must also drain creates that have not published an ID yet.
     _bulk_deletions: ClassVar[int] = 0
     _inflight_recreations: ClassVar[set[asyncio.Task[str]]] = set()
@@ -1013,6 +1063,8 @@ class _JiuwenBoxProviderMixin:
             return self._get_sandbox_id_locked()
 
     async def _acquire_sandbox_id(self) -> str:
+        await self.reconcile_deferred_acl_cleanup()
+
         async def resolve() -> str:
             lock = await self.acquire_scope_lifecycle_lock(self._shared_scope_key())
             try:
@@ -1093,6 +1145,7 @@ class _JiuwenBoxProviderMixin:
                                     "[jiuwenbox] cleanup after failed create hook/upload failed",
                                     exc_info=True,
                                 )
+                        self.remember_deferred_create_failure(shared_key, lifecycle_hook, exc)
                         with self._shared_lock:
                             if self._creation_locks.get(shared_key) is create_lock:
                                 self._creation_failures[shared_key] = (time.monotonic() + 30.0, exc)
@@ -1117,6 +1170,65 @@ class _JiuwenBoxProviderMixin:
                 self._shared_sandbox_ids[shared_key] = self._sandbox_id
                 self._launcher_extra_params(create=True)["sandbox_id"] = self._sandbox_id
         return self._sandbox_id
+
+    @classmethod
+    def remember_deferred_create_failure(
+        cls, shared_key: str, lifecycle_hook: Optional[Callable[[str, dict], None]], error: Exception,
+    ) -> bool:
+        """Register pending ACL cleanup if failed creation left a stopped sandbox."""
+        sandbox_id, epoch = _deferred_acl_cleanup(error, _acl_cleanup_receipt(error))
+        if sandbox_id is None:
+            return False
+        identity = (shared_key, sandbox_id)
+        with cls._shared_lock:
+            cls._pending_deletions.setdefault(identity, (False, lifecycle_hook))
+            cls._acl_cleanup_details[identity] = (str(error), epoch, time.monotonic() + 1.0)
+        return True
+
+    async def reconcile_deferred_acl_cleanup(self) -> None:
+        """Release a stopped identity only after Box confirms background revocation."""
+        key = self._shared_scope_key()
+        with self._shared_lock:
+            now = time.monotonic()
+            entries = []
+            for identity, (detail, epoch, check_after) in self._acl_cleanup_details.items():
+                if identity[0] != key or identity not in self._pending_deletions:
+                    continue
+                if epoch is not None and check_after <= now:
+                    entries.append((identity, epoch))
+                    self._acl_cleanup_details[identity] = (detail, epoch, now + 1.0)
+        if not entries:
+            return
+        lock = await self.acquire_scope_lifecycle_lock(key)
+        try:
+            for identity, epoch in entries:
+                with self._shared_lock:
+                    entry = self._acl_cleanup_details.get(identity)
+                    if identity not in self._pending_deletions or entry is None or entry[1] != epoch:
+                        continue
+                    if self._bulk_deletions or self._policy_updates:
+                        continue
+                _, sandbox_id = identity
+                try:
+                    completed = await asyncio.to_thread(self._get_client().acl_cleanup_completed, sandbox_id, epoch)
+                except httpx.HTTPError:
+                    continue
+                if not completed:
+                    continue
+                await self.delete_cached_sandboxes(
+                    shared_key=key, sandbox_id=sandbox_id, service_stopped=True,
+                    reason="background_acl_cleanup_completed", raise_on_error=True,
+                )
+                base_url, _, isolation_key = key.partition("|")
+                if isolation_key:
+                    providers = await SandboxGateway.get_instance().invalidate_sandbox_cache(
+                        "jiuwenbox", base_url, isolation_key=isolation_key,
+                    )
+                    for provider in providers:
+                        provider.invalidate_cached_sandbox()
+                self.invalidate_cached_sandbox()
+        finally:
+            lock.release()
 
     async def prepare_for_execution(self) -> None:
         """Prepare an instance without dispatching a tool; retry only known startup failures."""
@@ -1167,10 +1279,12 @@ class _JiuwenBoxProviderMixin:
                     break
             code = "SANDBOX_DELETION_FAILED" if failed else "SANDBOX_DELETION_PENDING"
             recovery = "retry sandbox.restart" if failed else "wait for cleanup to finish"
+            diagnostics = next((cls._acl_cleanup_details[(shared_key, sid)][0] for sid in pending
+                                if (shared_key, sid) in cls._acl_cleanup_details), None)
             raise _SandboxDeletionError(
                 StatusCode.SYS_OPERATION_SANDBOX_PROVIDER_ERROR, operation="acquire",
                 error_msg=f"[{code}] jiuwenbox sandbox deletion is pending: {', '.join(pending)}; "
-                f"operation was not executed; {recovery}",
+                f"operation was not executed; {recovery}" + (f"; {diagnostics}" if diagnostics else ""),
                 details={"shared_key": shared_key, "sandbox_ids": pending, "deletion_code": code},
             )
 
@@ -1513,7 +1627,17 @@ class _JiuwenBoxProviderMixin:
                             await asyncio.to_thread(client.delete_sandbox, sandbox_id)
                         break
                     except Exception as exc:
-                        if attempt == _SANDBOX_DELETE_MAX_ATTEMPTS or _is_permanent_acl_cleanup_error(exc):
+                        receipt = _acl_cleanup_receipt(exc)
+                        deferred_id, epoch = _deferred_acl_cleanup(exc, receipt)
+                        if receipt is not None:
+                            with cls._shared_lock:
+                                cls._acl_cleanup_details[identity] = (
+                                    str(exc), epoch if deferred_id == sandbox_id else None, time.monotonic() + 1.0,
+                                )
+                                if deferred_id == sandbox_id and cls._shared_sandbox_ids.get(shared_key) == sandbox_id:
+                                    cls._shared_sandbox_ids.pop(shared_key, None)
+                        retry_denied = receipt is not None and receipt.get("retryable") is False
+                        if attempt == _SANDBOX_DELETE_MAX_ATTEMPTS or deferred_id == sandbox_id or retry_denied:
                             raise _DeleteTransportError(
                                 f"cleanup failed after {attempt} attempts; replacement creation blocked; "
                                 f"last error: {type(exc).__name__}: {exc}"
@@ -1528,7 +1652,9 @@ class _JiuwenBoxProviderMixin:
                         await asyncio.sleep(_SANDBOX_DELETE_RETRY_SLEEP_SECONDS)
             with cls._shared_lock:
                 cls._pending_deletions.pop(identity, None)
-                if cls._shared_sandbox_ids.get(shared_key) == sandbox_id:
+                acl_failure = cls._acl_cleanup_details.pop(identity, None)
+                current = cls._shared_sandbox_ids.get(shared_key)
+                if current == sandbox_id or (current is None and acl_failure is not None):
                     cls._shared_sandbox_ids.pop(shared_key, None)
                     cls._lifecycle_hooks.pop(shared_key, None)
                     cls._creation_failures.pop(shared_key, None)
@@ -1998,9 +2124,14 @@ async def _force_recreate_jiuwenbox_sandbox(
                 timeout_seconds=timeout_seconds, reason=reason, raise_on_error=True,
             )
     with _JiuwenBoxClient(base_url=base_url, timeout_seconds=timeout_seconds) as client:
-        sandbox_id = await asyncio.to_thread(
-            client.create_sandbox, policy=policy, policy_mode=policy_mode,
-        )
+        try:
+            sandbox_id = await asyncio.to_thread(
+                client.create_sandbox, policy=policy, policy_mode=policy_mode,
+            )
+        except Exception as error:
+            if _JiuwenBoxProviderMixin.remember_deferred_create_failure(shared_key, lifecycle_hook, error):
+                raise _SandboxLifecyclePendingError(str(error)) from error
+            raise
         if preserve_files_upload:
             await _upload_preserve_files(client, sandbox_id, preserve_files_upload)
 

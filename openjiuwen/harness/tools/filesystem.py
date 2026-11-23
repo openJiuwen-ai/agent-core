@@ -650,7 +650,9 @@ class ReadFileTool(Tool):
             read_ranges = _merge_range(read_ranges, (start_line, end_line))
 
         is_logically_complete = (
-            total_known and total_lines > 0 and _ranges_cover(read_ranges, 1, total_lines)
+            total_known
+            and (total_lines > 0 or record.size_bytes == 0)
+            and _ranges_cover(read_ranges, 1, total_lines)
         )
 
         # Full-file content snapshot for stale re-check: only keep it once the
@@ -1250,7 +1252,7 @@ class WriteFileTool(Tool):
                     is_logically_complete = (
                         read_state is not None
                         and read_state.total_lines_known
-                        and read_state.total_lines > 0
+                        and (read_state.total_lines > 0 or read_state.size_bytes == 0)
                         and ranges is not None
                         and _ranges_cover(ranges, 1, read_state.total_lines)
                     )
@@ -1268,13 +1270,10 @@ class WriteFileTool(Tool):
                             lines_read = sum(e - s + 1 for s, e in (ranges or []))
                             if read_state.total_lines_known:
                                 msg = (
-                                    f"Error: File has not been fully read yet. "
-                                    f"You have read {lines_read} of "
-                                    f"{read_state.total_lines} lines. "
-                                    f"Continue with read_file offset={resume_offset} before writing."
-                                    f"until the whole file is covered, then write. "
-                                    f"A full-file overwrite cannot use partial reads — "
-                                    f"it would lose the unread content."
+                                    f"Error: File has not been fully read yet "
+                                    f"({lines_read} of {read_state.total_lines} lines read). "
+                                    f"Resume with read_file offset={resume_offset}. "
+                                    "Read the remaining lines before overwriting the file."
                                 )
                             else:
                                 msg = (

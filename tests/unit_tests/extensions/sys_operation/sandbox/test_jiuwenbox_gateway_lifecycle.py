@@ -23,7 +23,7 @@ def remote(monkeypatch):
     monkeypatch.setattr(jb, "_SANDBOX_DELETE_RETRY_SLEEP_SECONDS", 0)
     cls = jb._JiuwenBoxProviderMixin
     for name in ("_shared_sandbox_ids", "_creation_locks", "_creation_failures", "_lifecycle_hooks",
-                 "_pending_deletions", "_delete_tasks", "_idle_timeout_cache"):
+                 "_pending_deletions", "_delete_tasks", "_idle_timeout_cache", "_acl_cleanup_details"):
         monkeypatch.setattr(cls, name, {})
     monkeypatch.setattr(cls, "_bulk_deletions", 0)
     monkeypatch.setattr(cls, "_inflight_recreations", set())
@@ -34,7 +34,7 @@ def remote(monkeypatch):
     state = SimpleNamespace(
         gateway=gateway, requests=[], created=[], active=set(), fail_delete=False, delete_failures=0, block_create=False,
         entered=threading.Event(), release=threading.Event(), clients=[], lost=set(), inventory=None,
-        delete_receipt=None,
+        delete_receipt=None, delete_status=409, acl_epoch="", create_acl_error=None,
     )
 
     def respond(request):
@@ -51,16 +51,24 @@ def remote(monkeypatch):
             sid = f"sandbox-{len(state.created) + 1}"
             state.created.append((request.url.port, json.loads(request.content), sid))
             state.active.add(sid)
+            if state.create_acl_error is not None:
+                return httpx.Response(500, json={**state.create_acl_error, "sandbox_id": sid})
             return httpx.Response(201, json={"id": sid})
         sid = request.url.path.split("/")[4]
         if request.method == "DELETE":
             if state.fail_delete or state.delete_failures:
                 state.delete_failures = max(0, state.delete_failures - 1)
                 if state.delete_receipt is not None:
-                    return httpx.Response(409, json=state.delete_receipt)
+                    return httpx.Response(state.delete_status, json=state.delete_receipt,
+                                          headers={"X-JiuwenBox-ACL-Epoch": state.acl_epoch})
                 return httpx.Response(500, json={"detail": "ACL cleanup failed"})
             state.active.discard(sid)
             return httpx.Response(204)
+        if request.method == "GET" and request.url.path == f"/api/v1/sandboxes/{sid}":
+            if sid in state.active:
+                return httpx.Response(200, json={"id": sid, "phase": "deleting" if state.fail_delete else "ready"})
+            return httpx.Response(404, json={"error": f"Sandbox '{sid}' not found"},
+                                  headers={"X-JiuwenBox-ACL-Epoch": state.acl_epoch})
         assert request.method == "GET" and request.url.path.endswith("/download")
         if sid in state.lost:
             return httpx.Response(404, json={"detail": f"Sandbox '{sid}' not found"})
@@ -149,6 +157,57 @@ async def test_permanent_acl_receipt_stops_retries_but_preserves_pending_ownersh
     remote.fail_delete = False
     assert await jb.release_jiuwenbox_scope("http://localhost:8321", key) == ["sandbox-1"]
     assert not jb._JiuwenBoxProviderMixin._pending_deletions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_create", [False, True])
+async def test_deferred_acl_cleanup_retires_stopped_binding_only_after_same_box_confirms(remote, failed_create):
+    owned = operation()
+    key = f"http://localhost:8321|{owned.isolation_key_template}"
+    identity = (key, "sandbox-1")
+    if not failed_create:
+        assert (await owned.fs().read_file("/probe")).code == 0
+    else:
+        remote.create_acl_error = {"code": "SANDBOX_ACL_APPLY_FAILED",
+                                   "error": "ACL initialization failed: path=first-directory WinError=5"}
+
+    remote.fail_delete = True
+    remote.delete_status = 503
+    remote.acl_epoch = "a" * 32
+    remote.delete_receipt = {
+        "code": "SANDBOX_ACL_CLEANUP_FAILED", "execution_stopped": True, "retryable": False,
+        "cleanup": {"sandbox_id": "sandbox-1"},
+        "error": "Windows sandbox host ACL cleanup failed: path=blocked-directory WinError=5",
+    }
+    if failed_create:
+        result = await owned.fs().read_file("/probe")
+        assert result.code != 0 and "first-directory" in result.message
+        remote.create_acl_error = None
+    else:
+        with pytest.raises(RuntimeError, match="blocked-directory"):
+            await jb.release_jiuwenbox_scope("http://localhost:8321", owned.isolation_key_template)
+
+    cls = jb._JiuwenBoxProviderMixin
+    assert cls._shared_sandbox_ids.get(key) is None
+    assert identity in cls._pending_deletions
+
+    def allow_probe():
+        message, epoch, _ = cls._acl_cleanup_details[identity]
+        cls._acl_cleanup_details[identity] = message, epoch, 0.0
+
+    remote.active.remove("sandbox-1")
+    remote.acl_epoch = "b" * 32
+    allow_probe()
+    blocked = await owned.fs().read_file("/probe")
+    assert blocked.code != 0 and "blocked-directory" in blocked.message and "WinError=5" in blocked.message
+    assert identity in cls._pending_deletions
+
+    remote.acl_epoch = "a" * 32
+    allow_probe()
+    result = await owned.fs().read_file("/probe")
+    assert result.code == 0 and result.data.content == "sandbox-2"
+    assert identity not in cls._pending_deletions and identity not in cls._acl_cleanup_details
+    assert sum(method == "DELETE" for method, _ in remote.requests) == 1
 
 
 @pytest.mark.asyncio
