@@ -3172,6 +3172,18 @@ class DeepAgent(BaseAgent):
             _rid = getattr(work, "request_id", None)
             if _rid:
                 session.update_state({"_last_committed_request_id": str(_rid)})
+            # 轮末强制把活窗池摆渡到即将 commit 的交互 session，覆盖 react_agent
+            # 任何终结分支（含非 AssistantMessage break、resume 短路）跳过
+            # save_contexts 导致池/state 分裂的场景；显式传入 session 也避开
+            # rewind 对 session_ref 的劫持。
+            try:
+                await self._react_agent.context_engine.save_contexts(session)
+            except Exception:
+                logger.warning(
+                    "[DeepAgent] round-end save_contexts failed for task_id=%s",
+                    task_id,
+                    exc_info=True,
+                )
             # 把本轮的 deepagent 状态 + ContextEngine 上下文真正落库。
             # 外部传入 session 时 ReActAgent.stream 的 need_cleanup 为 False，
             # SDK 自身的 post_agent_execute 永远不会触发，checkpointer 恒为空；
