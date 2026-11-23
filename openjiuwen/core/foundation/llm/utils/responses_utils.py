@@ -266,6 +266,9 @@ class ResponsesStreamParser:
         self._model_name = model_name
         # Response item id -> (tool call id, arguments emitted so far).
         self._streamed_calls: dict[str, tuple[str, str]] = {}
+        # Whether a function call was emitted, so the terminal event can report
+        # ``tool_calls`` as Chat Completions does.
+        self._has_function_call = False
 
     def parse(self, event: Optional[dict[str, Any]]) -> Optional[AssistantMessageChunk]:
         """Turn one Responses SSE event into an ``AssistantMessageChunk``.
@@ -294,7 +297,12 @@ class ResponsesStreamParser:
         if event_type == "response.output_item.done":
             return self._done_output_item_chunk(event)
         if event_type in {"response.completed", "response.incomplete"}:
-            return _terminal_stream_chunk(event, event_type=event_type, model_name=self._model_name)
+            return _terminal_stream_chunk(
+                event,
+                event_type=event_type,
+                model_name=self._model_name,
+                has_tool_calls=self._has_function_call,
+            )
         if event_type in {"response.failed", "error"}:
             raise OpenAIAccountResponsesError(_stream_error_message(event))
         return None
@@ -312,6 +320,7 @@ class ResponsesStreamParser:
         initial_arguments = _json_argument_string(item.get("arguments") or "")
         tool_call.arguments = initial_arguments
         self._streamed_calls[item_id] = (tool_call.id or "", initial_arguments)
+        self._has_function_call = True
         return AssistantMessageChunk(content="", tool_calls=[tool_call], finish_reason="null")
 
     def _function_call_arguments_delta_chunk(self, event: dict[str, Any]) -> Optional[AssistantMessageChunk]:
@@ -360,6 +369,7 @@ class ResponsesStreamParser:
                 remainder = tool_call.arguments[len(emitted_arguments):]
             tool_call.name = ""
             tool_call.arguments = remainder
+        self._has_function_call = True
         return AssistantMessageChunk(
             content="",
             tool_calls=[tool_call],
@@ -449,8 +459,13 @@ def message_from_stream_chunk(chunk: Optional[AssistantMessageChunk]) -> Assista
     if chunk is None:
         return AssistantMessage(content="", finish_reason="stop")
 
-    finish_reason = "tool_calls" if chunk.tool_calls else chunk.finish_reason
-    if finish_reason == "null":
+    # An explicit cause such as "length" or "content_filter" is kept even when
+    # the message has tool calls: a call cut off by the output limit has
+    # incomplete arguments.
+    finish_reason = chunk.finish_reason
+    if chunk.tool_calls and finish_reason in {"null", "stop"}:
+        finish_reason = "tool_calls"
+    elif finish_reason == "null":
         finish_reason = "stop"
 
     return AssistantMessage(
@@ -732,10 +747,15 @@ def _terminal_stream_chunk(
     *,
     event_type: str,
     model_name: str,
+    has_tool_calls: bool,
 ) -> AssistantMessageChunk:
     response_payload = event.get("response")
     usage = response_payload.get("usage") if isinstance(response_payload, dict) else event.get("usage")
-    finish_reason = "length" if event_type == "response.incomplete" else "stop"
+    finish_reason = _finish_reason(
+        response_payload if isinstance(response_payload, dict) else {},
+        has_tool_calls=has_tool_calls,
+        incomplete=True if event_type == "response.incomplete" else None,
+    )
     return AssistantMessageChunk(
         content="",
         usage_metadata=_usage_from_payload(usage, model_name=model_name),
@@ -819,12 +839,22 @@ def _response_provider_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     return metadata
 
 
-def _finish_reason(payload: dict[str, Any], *, has_tool_calls: bool) -> str:
-    if has_tool_calls:
-        return "tool_calls"
-    if str(payload.get("status") or "") == "incomplete":
-        return "length"
-    return "stop"
+def _finish_reason(payload: dict[str, Any], *, has_tool_calls: bool, incomplete: Optional[bool] = None) -> str:
+    """Map a Responses outcome to the ``finish_reason`` Chat Completions reports.
+
+    An incomplete response keeps its cause even when it contains tool calls:
+    ``content_filter`` stays ``content_filter``, while ``max_output_tokens``,
+    any other reason or no reason becomes ``length``. A completed response is
+    ``tool_calls`` when it contains tool calls, otherwise ``stop``.
+    ``incomplete`` defaults to the payload's ``status``.
+    """
+    if incomplete is None:
+        incomplete = str(payload.get("status") or "") == "incomplete"
+    if incomplete:
+        details = payload.get("incomplete_details")
+        reason = details.get("reason") if isinstance(details, dict) else None
+        return "content_filter" if reason == "content_filter" else "length"
+    return "tool_calls" if has_tool_calls else "stop"
 
 
 def _http_error_message(payload: Any) -> Optional[str]:
