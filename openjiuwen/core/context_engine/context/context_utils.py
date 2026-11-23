@@ -13,6 +13,7 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow
 from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
+from openjiuwen.core.context_engine.token_estimate import estimate_text_tokens_rough
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, ToolMessage
 
 CONTEXT_MESSAGE_ID_KEY = "context_message_id"
@@ -660,13 +661,14 @@ class ContextUtils:
 
     @staticmethod
     def estimate_tokens(content: Any) -> int:
-        """估计内容的 token 数，使用字符数 // 4 的粗略估算。
+        """估计内容的 token 数（CJK 感知的字符粗估）。
 
-        ``// 4`` 与 ``TiktokenCounter`` 自身 fallback 一致，且更接近真实
-        token 量级，可与按真实 context window 标定的阈值对齐。
+        CJK 统一表意文字按 ~1.8 字符/token，其余字符按 ~4 字符/token；
+        图片 base64 先由 ``sanitize_content_for_text`` 剥离，避免把图片
+        payload 当文本计数。纯 ``len // 4`` 会显著低估中文内容。
         """
         text = sanitize_content_for_text(content)
-        return max(len(text) // 4, 1)
+        return max(estimate_text_tokens_rough(text), 1)
 
     @staticmethod
     def estimate_message_tokens(message: BaseMessage) -> int:

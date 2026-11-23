@@ -99,7 +99,7 @@ class TestMicroCompactProcessor:
         ]
 
     @pytest.mark.asyncio
-    async def test_streams_state_when_micro_compact_processor_triggers(self):
+    async def test_suppresses_state_stream_when_micro_compact_processor_triggers(self):
         session = Session(session_id="micro-compact-stream-session")
         config = MicroCompactProcessorConfig(
             trigger_threshold=1,
@@ -120,8 +120,8 @@ class TestMicroCompactProcessor:
             ]),
         )
 
-        assert_context_state_pair(states, processor_type="MicroCompactProcessor")
-        assert "modified" in states[1].summary
+        # Rule-based tool-result clearance is log/history only; stream stays silent.
+        assert states == []
 
     @pytest.mark.asyncio
     async def test_keep_recent_per_tool_is_applied_per_tool_name(self):

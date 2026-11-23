@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
+from openjiuwen.core.context_engine.token_estimate import estimate_text_tokens_rough
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.token.tiktoken_counter import _image_block_tokens
 from openjiuwen.core.context_engine.context.session_memory_manager import (
@@ -280,14 +281,14 @@ def _image_content_tokens(content: Any) -> int:
 def estimate_content_tokens(content: Any) -> int:
     """Approximate token count when no token counter is available.
 
-    Uses ``len // 4`` to mirror ``TiktokenCounter``'s own fallback and align
-    with thresholds scaled to real context-window token counts. Image blocks in
-    multimodal list content are additionally priced by dimension via
-    ``_image_content_tokens`` (same rule as ``_len4``), so the fallback path does
-    not under-count image-heavy contexts by ~1400 tokens per image.
+    Image blocks are stripped to placeholders by ``sanitize_content_for_text``
+    and then priced by dimension via ``_image_content_tokens`` (same rule as
+    ``_len4``), so the fallback path does not under-count image-heavy contexts
+    by ~1400 tokens per image.  Remaining text uses the CJK-aware rough
+    estimator instead of a uniform ``len // 4``.
     """
     text = sanitize_content_for_text(content)
-    return max(len(text) // 4, 1) + _image_content_tokens(content)
+    return max(estimate_text_tokens_rough(text), 1) + _image_content_tokens(content)
 
 
 def count_messages_tokens(
@@ -301,7 +302,7 @@ def count_messages_tokens(
 
     When ``usage_aware`` is True, prefer the cumulative ``total_tokens``
     reported by the last AssistantMessage carrying ``usage_metadata`` and
-    only ``len // 4``-estimate the tail messages after it. This avoids
+    only roughly estimate the tail messages after it (CJK-aware). This avoids
     re-tokenizing the whole window on threshold checks. Single-message or
     partial-list callers must leave ``usage_aware`` False (default), since a
     per-message size cannot be derived from a conversation-cumulative usage.
@@ -335,7 +336,7 @@ def _last_usage_base(messages: List[BaseMessage]) -> Optional[Tuple[int, List[Ba
     carrying a positive ``usage_metadata``, or ``None`` when no such message
     exists. ``total_tokens`` is the model-reported cumulative input+output and
     already includes the tools/system present at that turn; ``tail_messages``
-    are the messages added after it (estimated with ``len // 4``).
+    are the messages added after it (estimated with the CJK-aware rough rule).
     """
     for idx in range(len(messages) - 1, -1, -1):
         message = messages[idx]
@@ -345,8 +346,11 @@ def _last_usage_base(messages: List[BaseMessage]) -> Optional[Tuple[int, List[Ba
 
 
 def _len4(message: BaseMessage) -> int:
-    """Estimate a single message's tokens with ``len // 4`` (mirrors the
-    fallback coefficient used elsewhere in this module).
+    """Estimate a single message's tokens with the CJK-aware rough estimator.
+
+    ``sanitize_content_for_text`` strips image payloads first; the remaining
+    text is priced by ``estimate_text_tokens_rough`` (CJK ~1.8 chars/token,
+    non-CJK ~4 chars/token).
 
     Image blocks in multimodal list content are priced by dimension via
     ``_image_content_tokens`` (max of OpenAI tile / Claude patch formulas) instead
@@ -363,7 +367,7 @@ def _len4(message: BaseMessage) -> int:
     avoids re-implementing its block serialization) and negligible (~0.4% of one image).
     """
     content = getattr(message, "content", "")
-    base = len(sanitize_content_for_text(content)) // 4
+    base = estimate_text_tokens_rough(sanitize_content_for_text(content))
     return base + _image_content_tokens(content)
 
 

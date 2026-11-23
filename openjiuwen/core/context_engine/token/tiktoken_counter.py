@@ -9,6 +9,7 @@ from typing import List, Optional, Tuple
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text, sanitize_value_for_text
+from openjiuwen.core.context_engine.token_estimate import estimate_text_tokens_rough
 from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -250,12 +251,18 @@ class TiktokenCounter(TokenCounter):
             try:
                 return len(self._enc.encode(text, disallowed_special=()))
             except UnicodeEncodeError:
-                logger.warning(f"Tiktoken encoding failed for text (len={len(text)}), using len//4 fallback.")
-                return len(text) // 4
+                logger.warning(
+                    f"Tiktoken encoding failed for text (len={len(text)}), "
+                    "using CJK-aware rough fallback."
+                )
+                return estimate_text_tokens_rough(sanitize_content_for_text(text))
         if not self._fallback_warning_printed:
             self._fallback_warning_printed = True
-            logger.warning("Tiktoken initialization failed, using len(text)//4 as fallback for token counting. ")
-        return len(text) // 4
+            logger.warning(
+                "Tiktoken initialization failed, using CJK-aware rough fallback "
+                "for token counting."
+            )
+        return estimate_text_tokens_rough(sanitize_content_for_text(text))
 
     def count_messages(self, messages: List[BaseMessage], *, model: str = "", **kwargs) -> int:
         if not messages:

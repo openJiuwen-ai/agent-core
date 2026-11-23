@@ -24,6 +24,7 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.util imp
     build_compressor_reinjected_state_message,
     count_messages_tokens,
     count_usage_tokens_with_tail,
+    estimate_text_tokens_rough,
     resolve_context_max,
     resolve_ratio_token_threshold,
 )
@@ -186,15 +187,18 @@ class PrefixCompactProcessor(ContextProcessor):
         if self._compression_executor is None:
             return False
 
-        total_tokens = self._count_context_window_tokens(context_window, context)
+        total_tokens, token_source = self._count_context_window_tokens_with_source(
+            context_window, context
+        )
         context_max = self._resolve_context_max(context, kwargs)
         absolute_threshold = self._resolve_trigger_token_limit(context_max)
         if total_tokens < absolute_threshold:
             logger.debug(
-                "[%s not-triggered] reason=below_threshold total_tokens=%s(usage) threshold=%s "
+                "[%s not-triggered] reason=below_threshold total_tokens=%s(%s) threshold=%s "
                 "context_max=%s trigger_context_ratio=%s",
                 self.processor_type(),
                 total_tokens,
+                token_source,
                 absolute_threshold,
                 context_max,
                 getattr(self.config, "trigger_context_ratio", None),
@@ -204,6 +208,7 @@ class PrefixCompactProcessor(ContextProcessor):
                 "threshold_check",
                 phase="get_context_window",
                 total_tokens=total_tokens,
+                token_source=token_source,
                 context_max=context_max,
                 threshold=absolute_threshold,
                 hit=False,
@@ -245,6 +250,7 @@ class PrefixCompactProcessor(ContextProcessor):
                 "threshold_check",
                 phase="get_context_window",
                 total_tokens=total_tokens,
+                token_source=token_source,
                 context_max=context_max,
                 threshold=absolute_threshold,
                 hit=False,
@@ -255,12 +261,13 @@ class PrefixCompactProcessor(ContextProcessor):
             return False
 
         logger.info(
-            "[%s triggered] context tokens %s(usage) reached threshold %s of max %s "
+            "[%s triggered] context tokens %s(%s) reached threshold %s of max %s "
             "trigger_context_ratio=%s min_target_context_ratio=%s "
             "target_tokens=%s min_target_tokens=%s "
             "keep_recent_messages=%s",
             self.processor_type(),
             total_tokens,
+            token_source,
             absolute_threshold,
             context_max,
             getattr(self.config, "trigger_context_ratio", None),
@@ -274,6 +281,7 @@ class PrefixCompactProcessor(ContextProcessor):
             "threshold_check",
             phase="get_context_window",
             total_tokens=total_tokens,
+            token_source=token_source,
             context_max=context_max,
             threshold=absolute_threshold,
             hit=True,
@@ -935,16 +943,41 @@ class PrefixCompactProcessor(ContextProcessor):
         return True
 
     def _count_context_window_tokens(self, context_window: ContextWindow, context: ModelContext) -> int:
-        messages = list(context_window.system_messages or []) + list(context_window.context_messages or [])
+        tokens, _source = self._count_context_window_tokens_with_source(
+            context_window, context
+        )
+        return tokens
+
+    def _count_context_window_tokens_with_source(
+            self,
+            context_window: ContextWindow,
+            context: ModelContext,
+    ) -> tuple[int, str]:
+        """Return the trigger token count and the scale it was measured on.
+
+        Priority:
+        1. valid model-reported usage + tail (projected next request);
+        2. raw tokenizer × context-level scale factor (after a rewrite);
+        3. raw tokenizer.
+        """
+        messages = list(context_window.system_messages or []) + list(
+            context_window.context_messages or []
+        )
         usage_tokens = count_usage_tokens_with_tail(messages)
         if usage_tokens is not None:
             # The model-reported usage already includes the system prompt and
             # tools that were present when this still-valid baseline was made.
-            return usage_tokens
-        return self._count_messages_tokens(messages, context) + self._count_tools_tokens(
+            return usage_tokens, "usage+tail"
+        raw_tokens = self._count_messages_tokens(messages, context) + self._count_tools_tokens(
             list(context_window.tools or []),
             context,
         )
+        scale_factor = getattr(context, "token_scale_factor", None)
+        if callable(scale_factor):
+            scale_factor = scale_factor()
+        if isinstance(scale_factor, (int, float)) and scale_factor > 0 and raw_tokens > 0:
+            return max(int(round(raw_tokens * scale_factor)), 0), "tokenizer-calibrated"
+        return raw_tokens, "tokenizer"
 
     def _count_tools_tokens(self, tools: list[ToolInfo], context: ModelContext) -> int:
         token_counter = context.token_counter()
@@ -984,7 +1017,9 @@ class PrefixCompactProcessor(ContextProcessor):
 
     @staticmethod
     def _estimate_text_tokens(text: str) -> int:
-        return max(len(text) // 4, 1) if text else 0
+        if not text:
+            return 0
+        return max(estimate_text_tokens_rough(text), 1)
 
     def _context_debug_enabled(self) -> bool:
         return bool(getattr(self.config, "enable_compression_dump", False))
@@ -1008,7 +1043,12 @@ class PrefixCompactProcessor(ContextProcessor):
             {
                 "idx": idx,
                 "role": getattr(message, "role", None),
-                "tokens": max(len(str(getattr(message, "content", "") or "")) // 4, 1),
+                "tokens": max(
+                    estimate_text_tokens_rough(
+                        str(getattr(message, "content", "") or "")
+                    ),
+                    1,
+                ),
                 "preview": (str(getattr(message, "content", "") or ""))[:200],
             }
             for idx, message in enumerate(messages)
