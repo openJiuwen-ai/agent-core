@@ -14,6 +14,10 @@ the same full content they received before references existed.
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from threading import Barrier
+from weakref import ref
 from types import SimpleNamespace
 
 import pytest
@@ -25,6 +29,7 @@ from openjiuwen.extensions.observability.callback_handler import (
 )
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.content_addressing import (
+    build_sequence,
     parse_sequence_reference,
 )
 from openjiuwen.extensions.observability.exporters.langfuse import _generation_input
@@ -38,6 +43,8 @@ from openjiuwen.extensions.observability.otlp_codec import (
 )
 from openjiuwen.extensions.observability import sequence_registry as sequence_registry_module
 from openjiuwen.extensions.observability.sequence_registry import (
+    lookup_sequence,
+    lookup_sequence_head,
     materialize_stated_value,
     registry_stats,
     register_sequence,
@@ -133,8 +140,6 @@ def test_cap_overflow_falls_back_to_stating_the_full_value_inline() -> None:
 def test_duplicate_registration_charges_content_once() -> None:
     """The same sequence registered twice adds no element and no charge."""
     value = json.dumps([{"role": "user", "content": "same request"}])
-    from openjiuwen.extensions.observability.content_addressing import build_sequence
-
     sequence = build_sequence(GEN_AI_INPUT_MESSAGES, value)
     assert sequence is not None
     assert register_sequence(sequence)
@@ -564,3 +569,86 @@ def test_set_sequence_addressed_attribute_inlines_non_array_values() -> None:
 
     assert span.attributes["some.scalar.attribute"] == "not json at all"
     provider.shutdown()
+
+
+def test_concurrent_registrations_share_complete_heads_prefixes_and_forked_bodies():
+    inputs = ('["A","B","C"]', '["A","B"]', '["摘要","C"]', '["A","B","C"]')
+    barrier = Barrier(len(inputs))
+
+    def register_and_read(value):
+        sequence = build_sequence(GEN_AI_INPUT_MESSAGES, value)
+        barrier.wait(timeout=5)
+        assert register_sequence(sequence)
+        head = lookup_sequence_head(sequence.seq_hash)
+        assert head is not None and head.materialize() == value
+        return head
+
+    with ThreadPoolExecutor(max_workers=len(inputs)) as executor:
+        abc, ab, sc, duplicate = executor.map(register_and_read, inputs)
+
+    assert abc is duplicate
+    assert abc.previous is ab
+    assert abc.message is sc.message
+    assert abc.previous is not sc.previous
+    assert registry_stats()[0] == 4
+    head_lifetime, body_lifetime = ref(abc), ref(abc.message)
+    reset_registry()
+    assert lookup_sequence_head(abc.seq_hash) is None
+    assert abc.materialize() == inputs[0]
+    del abc, duplicate
+    assert head_lifetime() is None and body_lifetime() is sc.message
+    del sc
+    assert body_lifetime() is None
+
+
+def test_head_refresh_keeps_expired_prefix_bytes_charged_and_full_lookup_refreshes_prefix(_ttl_clock):
+    ab = build_sequence(GEN_AI_INPUT_MESSAGES, '["A","B"]')
+    unrelated = build_sequence(GEN_AI_INPUT_MESSAGES, '["C"]')
+    byte_cap = 2 * _NODE_OVERHEAD_BYTES + sum(map(len, ab.blobs.values()))
+    reset_registry(max_bytes=byte_cap)
+    assert register_sequence(ab)
+    prefix_hash = ab.nodes[0].seq_hash
+
+    _ttl_clock.now += sequence_registry_module._TTL_SECONDS - 100
+    held = lookup_sequence_head(ab.seq_hash)
+    assert held is not None
+    _ttl_clock.now += 200
+
+    assert not register_sequence(unrelated)
+    assert lookup_sequence_head(prefix_hash) is None
+    assert lookup_sequence(prefix_hash) is None
+    assert lookup_sequence_head(ab.seq_hash) is held
+    assert held.materialize() == '["A","B"]'
+    assert registry_stats() == (2, byte_cap)
+
+    restored = lookup_sequence(ab.seq_hash)
+    assert restored is not None
+    assert restored.nodes == ab.nodes and restored.blobs == ab.blobs
+    assert lookup_sequence_head(prefix_hash) is held.previous
+
+    _ttl_clock.now += sequence_registry_module._TTL_SECONDS + 1
+    assert register_sequence(unrelated)
+    assert lookup_sequence_head(ab.seq_hash) is None
+    assert registry_stats() == (1, _NODE_OVERHEAD_BYTES + len(b'"C"'))
+    assert held.materialize() == '["A","B"]'
+
+
+def test_invalid_registration_leaves_no_partial_entries_or_ttl_refresh(_ttl_clock):
+    a = build_sequence(GEN_AI_INPUT_MESSAGES, '["A"]')
+    ab = build_sequence(GEN_AI_INPUT_MESSAGES, '["A","B"]')
+    assert register_sequence(a)
+    charged = registry_stats()
+
+    _ttl_clock.now += sequence_registry_module._TTL_SECONDS - 100
+    bad_blobs = {**ab.blobs, ab.nodes[-1].blob_hash: b'"wrong"'}
+    assert not register_sequence(replace(ab, blobs=bad_blobs))
+    broken_node = replace(ab.nodes[-1], prev_hash=None)
+    assert not register_sequence(replace(ab, nodes=(ab.nodes[0], broken_node)))
+    assert registry_stats() == charged
+    assert lookup_sequence_head(ab.seq_hash) is None
+
+    _ttl_clock.now += 200
+    unrelated = build_sequence(GEN_AI_INPUT_MESSAGES, '["C"]')
+    assert register_sequence(unrelated)
+    assert lookup_sequence_head(a.seq_hash) is None
+    assert registry_stats()[0] == 1
