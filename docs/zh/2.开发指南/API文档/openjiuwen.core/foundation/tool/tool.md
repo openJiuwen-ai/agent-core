@@ -222,6 +222,8 @@ async def stream(inputs: Input, **kwargs) -> AsyncIterator[Output]
 
 ## decrator @tool
 
+当函数参数使用 `Enum` 或 `IntEnum` 注解时，生成的参数 Schema 保留实际枚举值，并按值推断字符串、整数、数字、布尔值或空值类型。整数与浮点数混合时使用 `number`；其他混合类型仅通过 `enum` 限定合法值，不添加冲突的统一类型约束。
+
 ```python
 def tool(
     func: Optional[Callable] = None,

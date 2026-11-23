@@ -190,12 +190,24 @@ class CallableSchemaExtractor:
 
     @staticmethod
     def get_enum_schema(enum_type: Type[Enum]) -> Dict:
-        """Handle enum types"""
-        return {
+        """根据枚举值生成类型约束，混合类型仅使用 enum 限定合法值。"""
+        values = [member.value for member in enum_type]
+        schema = {
             "type": "string",
-            "enum": [e.value for e in enum_type],
+            "enum": values,
             "description": f"Enum values: {', '.join([str(e.value) for e in enum_type])}"
         }
+        value_types = {type(value) for value in values}
+        type_mapping = {str: "string", int: "integer", float: "number", bool: "boolean", type(None): "null"}
+        if value_types:
+            if value_types <= {int, float}:
+                schema["type"] = "number" if float in value_types else "integer"
+            elif len(value_types) == 1 and next(iter(value_types)) in type_mapping:
+                schema["type"] = type_mapping[next(iter(value_types))]
+            else:
+                # 不添加会与已声明枚举值冲突的统一类型约束。
+                schema.pop("type")
+        return schema
 
     @classmethod
     def _generate_input_schema(cls, callable_obj: Callable, signature, type_hints) -> Dict:
