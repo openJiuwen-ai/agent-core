@@ -2218,6 +2218,7 @@ def test_edge_summary_errors_stay_within_ten_standard_events() -> None:
                     {
                         semconv.GEN_AI_TOOL_NAME: "execute",
                         semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"value": span_id},
+                        semconv.GEN_AI_TOOL_CALL_RESULT: {"success": True},
                     }
                 ),
             }

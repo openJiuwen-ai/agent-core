@@ -20,7 +20,10 @@ def to_json_compatible(value: Any, *, preserve_sequences: bool = False) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, Mapping):
-        return {str(key): to_json_compatible(item, preserve_sequences=preserve_sequences) for key, item in value.items()}
+        return {
+            str(key): to_json_compatible(item, preserve_sequences=preserve_sequences)
+            for key, item in value.items()
+        }
     if isinstance(value, (list, tuple, set, frozenset)):
         return [to_json_compatible(item, preserve_sequences=preserve_sequences) for item in value]
     if is_dataclass(value) and not isinstance(value, type):

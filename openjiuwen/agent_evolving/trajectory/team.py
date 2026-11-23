@@ -123,12 +123,16 @@ def select_team_spans(
     if trace_id is not None:
         routed_trace_ids = {str(trace_id)}
     elif team_id is not None:
-        routed_trace_ids = {
-            str(span.get("traceId") or "")
-            for span in all_spans
-            if span.get("traceId")
-            and str(span_attributes(span, keys=(semconv.AT_TEAM_ID,)).get(semconv.AT_TEAM_ID) or "") == str(team_id)
-        }
+        routed_trace_ids = set()
+        team_key = semconv.AT_TEAM_ID
+        requested_team_id = str(team_id)
+        for span in all_spans:
+            span_trace_id = span.get("traceId")
+            if not span_trace_id:
+                continue
+            span_team_id = span_attributes(span, keys=(team_key,)).get(team_key)
+            if str(span_team_id or "") == requested_team_id:
+                routed_trace_ids.add(str(span_trace_id))
     else:
         routed_trace_ids = None
     if team_id is not None and not routed_trace_ids:

@@ -210,7 +210,7 @@ def _span_to_otlp(span: ReadableSpan) -> tuple[dict[str, Any], tuple[str, str]]:
         "spanId": span_id,
         "name": str(getattr(span, "name", "")),
         "kind": _span_kind(span),
-        "attributes": attributes_from_map(attrs),
+        "attributes": attributes_from_map(attrs, preserve_sequences=True),
         "status": _span_status(span),
     }
     if parent_span_id:

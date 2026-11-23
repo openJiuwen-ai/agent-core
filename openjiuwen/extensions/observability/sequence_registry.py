@@ -161,12 +161,10 @@ class _SequenceRegistry:
                 held = self._nodes.get(node.seq_hash)
                 if held is not None:
                     head = held.head
-                    if (
-                        head.depth != depth
-                        or head.message.blob_hash != node.blob_hash
-                        or (head.previous.seq_hash if head.previous is not None else None) != previous
-                        or head.message.content != content
-                    ):
+                    previous_hash = head.previous.seq_hash if head.previous is not None else None
+                    if head.depth != depth or previous_hash != previous:
+                        return False
+                    if head.message.blob_hash != node.blob_hash or head.message.content != content:
                         return False
                     existing.append(held)
                 else:

@@ -247,7 +247,7 @@ def test_trimmed_window_keeps_events_off_the_budget_and_stays_replayable(monkeyp
     assert source is not None and register_sequence(source)
     head = lookup_sequence_head(source.seq_hash)
     assert head is not None
-    spans[-2]["attributes"].extend(attributes_from_map({key: head}))
+    spans[-2]["attributes"].extend(attributes_from_map({key: head}, preserve_sequences=True))
     history = _trajectory(spans)
     with monkeypatch.context() as patch:
         def unexpected_read(_head):

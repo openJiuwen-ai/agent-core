@@ -857,7 +857,7 @@ class EvolutionRail(DeepAgentRail):
             attrs[RL_COMPLETION_TOKEN_IDS] = deepcopy(completion_ids)
         if logprobs is not None:
             attrs[RL_LOGPROBS] = deepcopy(logprobs)
-        target["attributes"] = attributes_from_map(attrs)
+        target["attributes"] = attributes_from_map(attrs, preserve_sequences=True)
         return Trajectory.from_otlp(payload)
 
     async def _trigger_evolution(

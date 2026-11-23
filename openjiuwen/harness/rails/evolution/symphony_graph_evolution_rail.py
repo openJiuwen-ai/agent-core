@@ -1467,12 +1467,10 @@ def _build_edge_summaries(
 
     if not candidates:
         return {}
-    endpoint_ids = {
-        (fragment.trace_id, span_id)
-        for candidate in candidates
-        for fragment in (candidate.source_fragment, candidate.target_fragment)
-        for span_id in fragment.span_ids
-    }
+    endpoint_ids: set[tuple[str, str]] = set()
+    for candidate in candidates:
+        for fragment in (candidate.source_fragment, candidate.target_fragment):
+            endpoint_ids.update((fragment.trace_id, span_id) for span_id in fragment.span_ids)
     span_map: dict[tuple[str, str], Mapping[str, Any]] = {}
     for _, trajectory in continuities:
         for span in iter_compact_spans(trajectory):

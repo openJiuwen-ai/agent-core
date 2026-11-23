@@ -219,7 +219,8 @@ def _iter_compact_trajectory_events(value: Any) -> list[TrajectoryEvent]:
                         {
                             **attributes_to_map(span.get("attributes"), preserve_sequences=True),
                             **span_attributes(span_event),
-                        }
+                        },
+                        preserve_sequences=True,
                     ),
                     "events": [],
                 }
@@ -610,7 +611,7 @@ def _trim_baseline_span(
         "kind": first.span.get("kind", "SPAN_KIND_INTERNAL"),
         "startTimeUnixNano": str(start),
         "endTimeUnixNano": str(start),
-        "attributes": attributes_from_map(attributes),
+        "attributes": attributes_from_map(attributes, preserve_sequences=True),
         "status": {"code": "STATUS_CODE_OK"},
     }
     return span

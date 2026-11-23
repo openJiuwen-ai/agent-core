@@ -36,7 +36,12 @@ SpanIdentity: TypeAlias = tuple[str, str]
 def encode_otlp_value(value: Any) -> dict[str, Any]:
     """Encode a Python value in the OTLP JSON ``AnyValue`` representation."""
 
-    value = to_json_compatible(value, preserve_sequences=True)
+    return _encode_otlp_value(to_json_compatible(value))
+
+
+def _encode_otlp_value(value: Any) -> dict[str, Any]:
+    """Encode a normalized value, including a sequence head in a compact payload."""
+
     if value is None:
         return {"stringValue": ""}
     if isinstance(value, bool):
@@ -48,11 +53,11 @@ def encode_otlp_value(value: Any) -> dict[str, Any]:
     if isinstance(value, (str, SequenceHead)):
         return {"stringValue": value}
     if isinstance(value, list):
-        return {"arrayValue": {"values": [encode_otlp_value(item) for item in value]}}
+        return {"arrayValue": {"values": [_encode_otlp_value(item) for item in value]}}
     if isinstance(value, Mapping):
         return {
             "kvlistValue": {
-                "values": [{"key": str(key), "value": encode_otlp_value(item)} for key, item in value.items()]
+                "values": [{"key": str(key), "value": _encode_otlp_value(item)} for key, item in value.items()]
             }
         }
     return {"stringValue": str(value)}
@@ -66,7 +71,7 @@ def decode_otlp_value(value: Any, *, preserve_sequences: bool = False) -> Any:
     """
 
     if not isinstance(value, Mapping):
-        return to_json_compatible(value)
+        return to_json_compatible(value, preserve_sequences=preserve_sequences)
     if "stringValue" in value:
         return to_json_compatible(value["stringValue"], preserve_sequences=preserve_sequences)
     if "boolValue" in value:
@@ -84,18 +89,21 @@ def decode_otlp_value(value: Any, *, preserve_sequences: bool = False) -> Any:
     if "arrayValue" in value:
         array = value.get("arrayValue") or {}
         values = array.get("values") if isinstance(array, Mapping) else []
-        return [decode_otlp_value(item) for item in values or []]
+        return [decode_otlp_value(item, preserve_sequences=preserve_sequences) for item in values or []]
     if "kvlistValue" in value:
         kvlist = value.get("kvlistValue") or {}
         values = kvlist.get("values") if isinstance(kvlist, Mapping) else []
         return {
-            str(item.get("key")): decode_otlp_value(item.get("value"))
+            str(item.get("key")): decode_otlp_value(item.get("value"), preserve_sequences=preserve_sequences)
             for item in values or []
             if isinstance(item, Mapping) and item.get("key") is not None
         }
     # Attribute mappings used by tests and some exporters are already plain
     # dictionaries; recursively detach them rather than returning the input.
-    return {str(key): decode_otlp_value(item) for key, item in value.items()}
+    return {
+        str(key): decode_otlp_value(item, preserve_sequences=preserve_sequences)
+        for key, item in value.items()
+    }
 
 
 def attributes_to_map(
@@ -127,18 +135,26 @@ def attributes_to_map(
     return result
 
 
-def attributes_from_map(attributes: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Encode and deterministically order a Python attribute mapping."""
+def attributes_from_map(
+    attributes: Mapping[str, Any], *, preserve_sequences: bool = False
+) -> list[dict[str, Any]]:
+    """Encode sorted OTLP attributes, optionally preserving heads for internal use."""
 
     return [
-        {"key": str(key), "value": encode_otlp_value(attributes[key])}
+        {
+            "key": str(key),
+            "value": _encode_otlp_value(
+                to_json_compatible(attributes[key], preserve_sequences=preserve_sequences)
+            ),
+        }
         for key in sorted(attributes)
         if attributes[key] is not None
     ]
 
 
 def _normalize_attributes(attributes: Any) -> list[dict[str, Any]]:
-    return attributes_from_map(attributes_to_map(attributes, preserve_sequences=True))
+    attrs = attributes_to_map(attributes, preserve_sequences=True)
+    return attributes_from_map(attrs, preserve_sequences=True)
 
 
 def normalize_span(span: Mapping[str, Any]) -> Span:
@@ -266,7 +282,10 @@ def iter_spans(value: Any) -> Iterator[Span]:
 
 
 def iter_compact_spans(value: Any) -> Iterator[Span]:
-    """Yield spans with captured message sequences in their compact form."""
+    """Yield internal span copies that may hold SequenceHead objects in stringValue.
+
+    Use iter_spans() for detached, JSON-compatible spans.
+    """
 
     for span in iter_payload_spans(compact_payload_for(value)):
         yield normalize_span(span)
@@ -845,7 +864,8 @@ def is_compaction_span(span: Mapping[str, Any]) -> bool:
 
 def is_goal_assessment_span(span: Mapping[str, Any]) -> bool:
     """Whether a request independently judges a goal instead of executing it."""
-    return span_attributes(span, keys=(semconv.OJ_REQUEST_PURPOSE,)).get(semconv.OJ_REQUEST_PURPOSE) == "goal_assessment"
+    key = semconv.OJ_REQUEST_PURPOSE
+    return span_attributes(span, keys=(key,)).get(key) == "goal_assessment"
 
 
 def read_llm_exchange(

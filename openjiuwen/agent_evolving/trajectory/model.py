@@ -197,7 +197,10 @@ class Trajectory:
         return _copy_json(self._payload, materialize=True)
 
     def copy_compact_payload(self) -> dict[str, Any]:
-        """Return independently editable containers sharing immutable sequence nodes."""
+        """Copy internal containers while sharing immutable SequenceHead objects.
+
+        Use to_otlp() when the result needs to be JSON serializable.
+        """
 
         return _copy_json(self._payload)
 

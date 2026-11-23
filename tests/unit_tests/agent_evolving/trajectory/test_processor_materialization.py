@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """End-to-end ownership and lazy reads of captured sequence attributes."""
 
+import json
 from weakref import ref
 
 import pytest
@@ -10,6 +11,9 @@ from opentelemetry.sdk.trace import TracerProvider
 from openjiuwen.agent_evolving.trajectory import Trajectory, TrajectorySpanProcessor
 from openjiuwen.agent_evolving.trajectory.schema import TRAJECTORY_ID
 from openjiuwen.agent_evolving.trajectory.spans import (
+    attributes_from_map,
+    attributes_to_map,
+    encode_otlp_value,
     iter_compact_spans,
     iter_spans,
     read_llm_exchange,
@@ -61,6 +65,24 @@ def _register(*messages, key=_INPUT):
 def _head(trajectory, key=_INPUT):
     span = list(iter_compact_spans(trajectory))[-1]
     return next(item["value"]["stringValue"] for item in span["attributes"] if item["key"] == key)
+
+
+def test_public_otlp_encoding_emits_plain_strings_for_sequence_heads():
+    reference, expected = _register(_A, _B)
+    head = lookup_sequence_head(reference.split(":")[2])
+    assert head is not None
+
+    encoded = encode_otlp_value([head])
+    assert json.loads(json.dumps(encoded)) == {"arrayValue": {"values": [{"stringValue": expected}]}}
+    attrs = attributes_from_map({_INPUT: head})
+    assert json.loads(json.dumps(attrs)) == [{"key": _INPUT, "value": {"stringValue": expected}}]
+
+    compact = attributes_from_map({_INPUT: head}, preserve_sequences=True)
+    assert compact[0]["value"]["stringValue"] is head
+
+    nested = attributes_from_map({_INPUT: {"messages": [head]}}, preserve_sequences=True)
+    decoded = attributes_to_map(nested, preserve_sequences=True)
+    assert decoded[_INPUT]["messages"][0] is head
 
 
 def test_pending_window_snapshots_own_only_reachable_sequences(monkeypatch):
