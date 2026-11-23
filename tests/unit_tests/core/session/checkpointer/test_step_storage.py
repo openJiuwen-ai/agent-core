@@ -233,3 +233,21 @@ async def test_end_writes_interrupt_even_without_baseline_and_final_only_with_re
     storage.begin(untouched)
     await storage.end(untouched, interrupted=False)
     assert keys(kv, "s-idle") == []
+
+
+@pytest.mark.asyncio
+async def test_session_without_agent_card_is_ignored():
+    """Card-less sessions have no agent id; step storage must not crash on them."""
+    kv = MockKVStore()
+    storage = AgentStepStorage(kv)
+    session = AgentSession(session_id="s-nocard", config=Config())
+
+    assert storage.begin(session) is None
+    assert storage.peek_resume(session) is None
+    assert storage.has_records(session) is False
+    assert storage.status(session) is None
+    await storage.append(session, kind="step", iteration=0, query="q")
+    await storage.recover(session)
+    await storage.end(session, interrupted=False)
+
+    assert kv._store == {}

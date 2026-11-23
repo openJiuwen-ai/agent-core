@@ -3814,7 +3814,11 @@ class ReActAgent(BaseAgent):
         begin = getattr(session, "begin_agent_steps", None)
         if not callable(begin):
             return None
-        resume = begin()
+        try:
+            resume = begin()
+        except Exception:  # noqa: BLE001 - a broken checkpointer must not break the turn
+            logger.debug("[ReActAgent] begin_agent_steps failed", exc_info=True)
+            return None
         return resume if isinstance(resume, StepResume) else None
 
     async def _save_agent_step(

@@ -56,6 +56,7 @@ from openjiuwen.core.session.checkpointer import (
     Storage,
     WORKFLOW_NAMESPACE_GRAPH,
 )
+from openjiuwen.core.session.checkpointer.base import safe_agent_id
 from openjiuwen.core.session.checkpointer.step_storage import AgentStepStorage, StepResume
 from openjiuwen.core.session.constants import FORCE_DEL_WORKFLOW_STATE_KEY
 
@@ -753,13 +754,20 @@ class PersistenceCheckpointer(Checkpointer):
 
     async def pre_agent_execute(self, session: BaseSession, inputs):
         """Prepare agent execution by recovering agent state."""
+        agent_id = safe_agent_id(session)
         session_logger.info(
             "Agent checkpoint restore initiated",
             event_type=LogEventType.CHECKPOINT_RESTORE,
             session_id=session.session_id(),
-            agent_id=session.agent_id(),
+            agent_id=agent_id,
             metadata={"operation": "pre_execute", "storage_type": "persistence"}
         )
+        if agent_id is None:
+            # No agent id: nothing is keyed for this session, but interaction
+            # inputs still belong to the caller.
+            if inputs is not None:
+                session.state().update({INTERACTIVE_INPUT: [inputs]})
+            return
         await self._agent_storage.recover(session)
         # Step increments carry the whole state, so they must be applied after
         # the older blob and before the interaction inputs.
@@ -781,27 +789,33 @@ class PersistenceCheckpointer(Checkpointer):
 
     async def interrupt_agent_execute(self, session: BaseSession):
         """Record the interrupt as a step increment instead of a full blob."""
+        agent_id = safe_agent_id(session)
         session_logger.info(
             "Agent checkpoint save on interrupt",
             event_type=LogEventType.CHECKPOINT_SAVE,
             session_id=session.session_id(),
-            agent_id=session.agent_id(),
+            agent_id=agent_id,
             metadata={"reason": "interaction_required", "storage_type": "persistence"}
         )
+        if agent_id is None:
+            return
         await self._step_storage.end(session, interrupted=True)
 
     async def post_agent_execute(self, session: BaseSession):
         """Save agent state after execution completes."""
+        agent_id = safe_agent_id(session)
         session_logger.info(
             "Agent checkpoint save on completion",
             event_type=LogEventType.CHECKPOINT_SAVE,
             session_id=session.session_id(),
-            agent_id=session.agent_id(),
+            agent_id=agent_id,
             metadata={"reason": "agent_finished", "storage_type": "persistence"}
         )
+        if agent_id is None:
+            return
         log_base = dict(
             session_id=session.session_id(),
-            agent_id=session.agent_id(),
+            agent_id=agent_id,
         )
         if self._step_storage.has_records(session):
             status = self._step_storage.status(session)
@@ -825,7 +839,7 @@ class PersistenceCheckpointer(Checkpointer):
             if status == "idle":
                 saved = await self._agent_storage.save(session)
                 if saved:
-                    await self._step_storage.clear(session.session_id(), session.agent_id())
+                    await self._step_storage.clear(session.session_id(), agent_id)
                     session_logger.info(
                         "Agent steps cleared after completion",
                         event_type=LogEventType.CHECKPOINT_CLEAR,

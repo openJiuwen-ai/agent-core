@@ -205,6 +205,24 @@ SESSION_NAMESPACE_WORKFLOW = "workflow"
 WORKFLOW_NAMESPACE_GRAPH = "workflow-graph"
 
 
+def safe_agent_id(session: BaseSession) -> str | None:
+    """Return the session's agent id, or None when the session has none.
+
+    Standalone agent sessions may be built without a card, and
+    ``AgentSession.agent_id()`` raises ``AttributeError`` for them. Checkpoint
+    receivers treat such a session as non-persistent instead of failing the
+    turn, so every caller that needs an agent id goes through this helper.
+    """
+    try:
+        agent_id = session.agent_id()
+    except Exception:  # noqa: BLE001 - card-less sessions are a supported shape
+        session_logger.debug(
+            "agent id unavailable for session %s", session.session_id(), exc_info=True
+        )
+        return None
+    return agent_id or None
+
+
 def build_key(*parts: str) -> str:
     """
     Build key by joining parts with colon separator.
