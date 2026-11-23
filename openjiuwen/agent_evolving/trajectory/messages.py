@@ -12,9 +12,9 @@ from typing import Any, Final, Literal, TypeAlias
 
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.spans import (
+    iter_compact_spans,
     is_compaction_span,
     is_goal_assessment_span,
-    iter_spans,
     read_llm_exchange,
     read_tool_call,
     span_sort_key,
@@ -317,13 +317,14 @@ def project_trajectory_messages(
     # logged on an agent span outside this window, say); a later commit still
     # replays, so it does not make any message wrong.
     projection.issues.extend(issue for issue in replay.issues if issue.get("code") != "v2.sequence_gap")
-    for span in sorted(iter_spans(trajectory), key=span_sort_key):
+    for span in sorted(iter_compact_spans(trajectory), key=span_sort_key):
         category = span_category(span)
         if category == "llm":
             if is_compaction_span(span) or is_goal_assessment_span(span):
                 continue
-            raw_prompt, raw_completions = read_llm_exchange(span)
             window = window_for_inference(replay, span)
+            needs_prompt = window is None and (not invoke_local or not projection.messages)
+            raw_prompt, raw_completions = read_llm_exchange(span, include_prompt=needs_prompt)
             if window is None:
                 projection.issues.append(
                     MappingProxyType(

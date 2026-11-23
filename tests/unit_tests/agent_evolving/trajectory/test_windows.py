@@ -10,9 +10,10 @@ from typing import Any
 
 import pytest
 
+from openjiuwen.agent_evolving.trajectory.messages import trajectory_to_messages
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import TRAJECTORY_ID
-from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, iter_spans
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, iter_spans, span_attributes
 from openjiuwen.agent_evolving.trajectory.windows import (
     apply_context_delta,
     iter_trajectory_events,
@@ -21,6 +22,8 @@ from openjiuwen.agent_evolving.trajectory.windows import (
     window_for_inference,
 )
 from openjiuwen.extensions.observability import semconv
+from openjiuwen.extensions.observability.content_addressing import SequenceHead, build_sequence
+from openjiuwen.extensions.observability.sequence_registry import lookup_sequence_head, register_sequence
 
 _VECTORS = Path(__file__).parent / "fixtures" / "v2"
 _SCHEMA = (
@@ -234,13 +237,25 @@ def _request(sequence: int) -> dict[str, Any]:
     }
 
 
-def test_trimmed_window_keeps_events_off_the_budget_and_stays_replayable() -> None:
+def test_trimmed_window_keeps_events_off_the_budget_and_stays_replayable(monkeypatch) -> None:
     from openjiuwen.agent_evolving.trajectory.windows import trim_trajectory_window
 
     spans = [span for sequence, commit in enumerate(_chain(), 1) for span in (_request(sequence), commit)]
+    key = semconv.GEN_AI_INPUT_MESSAGES
+    stated = '[{"role":"user","parts":[{"type":"text","content":"kept prompt"}]}]'
+    source = build_sequence(key, stated)
+    assert source is not None and register_sequence(source)
+    head = lookup_sequence_head(source.seq_hash)
+    assert head is not None
+    spans[-2]["attributes"].extend(attributes_from_map({key: head}, preserve_sequences=True))
     history = _trajectory(spans)
+    with monkeypatch.context() as patch:
+        def unexpected_read(_head):
+            pytest.fail("window trimming and rebase must not materialize GenAI messages")
 
-    trimmed = trim_trajectory_window(history, 1)
+        patch.setattr(SequenceHead, "materialize", unexpected_read)
+        trimmed = trim_trajectory_window(history, 1)
+        assert trajectory_to_messages(trimmed)
 
     kept = list(iter_spans(trimmed))
     assert [span["spanId"] for span in kept if span["name"] == "chat model"] == ["inference-3"]
@@ -249,6 +264,7 @@ def test_trimmed_window_keeps_events_off_the_budget_and_stays_replayable() -> No
     assert _ids(window_for_inference(replay, {"spanId": "inference-3"})) == ["a", "b", "c"]
     # Nothing beyond the request, its own commit and the restated base.
     assert len(kept) == 3
+    assert next(span_attributes(span)[key] for span in kept if span["name"] == "chat model") == stated
 
 
 @pytest.mark.parametrize("limit", [None, 3, 4])

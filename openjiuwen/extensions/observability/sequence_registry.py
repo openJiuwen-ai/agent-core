@@ -16,9 +16,11 @@ content is stored however many chains state it). A growing conversation
 therefore costs its increment here: the same prefix sharing
 :mod:`content_addressing` documents for its chains.
 
-Entries are reclaimed, not kept forever: content nothing has touched for the
-retention TTL goes, so a finished session's history does not accumulate on a
-long-lived worker. Every consumer of a reference drains in seconds -- export
+Lookup entries expire after the retention TTL. A discoverable descendant
+keeps its predecessors charged even if those predecessors are no longer
+individually discoverable. A consumer holding an acquired head can read its
+chain after eviction; the registry charges only the chains it retains.
+Every consumer of a reference drains in seconds -- export
 batches, the storage sink -- while the TTL is hours, so an in-flight reference
 always finds its content; a reference that outlives its content (a consumer
 stalled for hours) states itself with a warning rather than failing the
@@ -36,13 +38,17 @@ from __future__ import annotations
 import os
 import threading
 import time
+from dataclasses import dataclass
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.extensions.observability.content_addressing import (
     AddressedSequence,
+    MessageBody,
+    SequenceHead,
     SequenceNode,
+    chain_hash,
+    content_hash,
     parse_sequence_reference,
-    rebuild_value,
 )
 
 # Sized against a measured heavy load: a seven-subject team restating
@@ -53,7 +59,7 @@ from openjiuwen.extensions.observability.content_addressing import (
 # rather than failing.
 _DEFAULT_MAX_BYTES = 512 * 1024 * 1024
 _ENV_MAX_BYTES = "OPENJIUWEN_SEQUENCE_REGISTRY_MAX_BYTES"
-# A node is three hashes and a depth; charge a flat per-node allowance so a
+# Charge a flat per-node allowance for a sequence head and its index so a
 # long conversation of tiny elements still counts its chains against the cap.
 _NODE_BYTES = 160
 # Content nothing has touched for this long is reclaimed. Deliberately not
@@ -82,15 +88,14 @@ def _resolve_default_cap() -> int:
     return cap if cap > 0 else _DEFAULT_MAX_BYTES
 
 
-class _SequenceRegistry:
-    """Thread-safe store of chain nodes and element content, TTL-reclaimed.
+@dataclass(slots=True)
+class _RegisteredNode:
+    head: SequenceHead
+    touched: float | None  # None means retained as an ancestor, but not individually discoverable.
 
-    Two maps: nodes by their chain-prefix hash (shared by every sequence
-    extending them) and blobs by their content hash (shared by every node
-    stating them). Both carry a last-touched stamp that registration and
-    every chain walk refresh, so an entry ages out only when no consumer has
-    reached it through any chain for the whole TTL.
-    """
+
+class _SequenceRegistry:
+    """Thread-safe, TTL-indexed sequences with registry-reachable byte accounting."""
 
     __slots__ = (
         "_blobs",
@@ -105,8 +110,8 @@ class _SequenceRegistry:
 
     def __init__(self, max_bytes: int) -> None:
         self._lock = threading.Lock()
-        self._blobs: dict[str, tuple[bytes, float]] = {}
-        self._nodes: dict[str, tuple[str | None, str, int, float]] = {}
+        self._blobs: dict[str, MessageBody] = {}
+        self._nodes: dict[str, _RegisteredNode] = {}
         self._max_bytes = max(0, int(max_bytes))
         self._stored_bytes = 0
         self._warned = False
@@ -129,7 +134,7 @@ class _SequenceRegistry:
             already held, or has just been added. ``False`` when adding what
             it lacks would cross the byte cap (the caller then states the
             full value inline, the pre-registry behavior) or when the
-            sequence is malformed (a node without its element's content).
+            sequence is inconsistent or missing content.
         """
         with self._lock:
             now = _clock()
@@ -139,22 +144,46 @@ class _SequenceRegistry:
                 and now - self._last_sweep_at >= _SWEEP_MIN_INTERVAL_SECONDS
             ):
                 self._evict_expired_locked(now)
-            pending_nodes: list[tuple[str, str | None, str, int]] = []
+            nodes = sequence.nodes
+            if not nodes or sequence.depth != len(nodes) or sequence.seq_hash != nodes[-1].seq_hash:
+                return False
+
+            existing: list[_RegisteredNode] = []
+            pending_nodes: list[SequenceNode] = []
             pending_blobs: dict[str, bytes] = {}
-            for node in sequence.nodes:
-                content = sequence.blobs.get(node.blob_hash)
-                if content is None:
+            previous = None
+            for depth, node in enumerate(nodes, start=1):
+                if node.prev_hash != previous or node.depth != depth:
                     return False
-                held_node = self._nodes.get(node.seq_hash)
-                if held_node is None:
-                    pending_nodes.append((node.seq_hash, node.prev_hash, node.blob_hash, node.depth))
+                content = sequence.blobs.get(node.blob_hash)
+                if not isinstance(content, bytes):
+                    return False
+                held = self._nodes.get(node.seq_hash)
+                if held is not None:
+                    head = held.head
+                    previous_hash = head.previous.seq_hash if head.previous is not None else None
+                    if head.depth != depth or previous_hash != previous:
+                        return False
+                    if head.message.blob_hash != node.blob_hash or head.message.content != content:
+                        return False
+                    existing.append(held)
                 else:
-                    self._nodes[node.seq_hash] = (held_node[0], held_node[1], held_node[2], now)
-                held_blob = self._blobs.get(node.blob_hash)
-                if held_blob is None:
-                    pending_blobs.setdefault(node.blob_hash, content)
-                else:
-                    self._blobs[node.blob_hash] = (held_blob[0], now)
+                    body = self._blobs.get(node.blob_hash)
+                    if body is not None:
+                        if body.content != content:
+                            return False
+                    elif node.blob_hash in pending_blobs:
+                        if pending_blobs[node.blob_hash] != content:
+                            return False
+                    else:
+                        if content_hash(content) != node.blob_hash:
+                            return False
+                        pending_blobs[node.blob_hash] = content
+                    if chain_hash(previous, node.blob_hash) != node.seq_hash:
+                        return False
+                    pending_nodes.append(node)
+                previous = node.seq_hash
+
             added_bytes = sum(len(content) for content in pending_blobs.values())
             added_bytes += _NODE_BYTES * len(pending_nodes)
             if self._stored_bytes + added_bytes > self._max_bytes:
@@ -166,97 +195,100 @@ class _SequenceRegistry:
                         self._max_bytes,
                     )
                 return False
-            for seq_hash, prev_hash, blob_hash, depth in pending_nodes:
-                self._nodes[seq_hash] = (prev_hash, blob_hash, depth, now)
-                self._stored_bytes += _NODE_BYTES
+
             for blob_hash, content in pending_blobs.items():
-                self._blobs[blob_hash] = (content, now)
-                self._stored_bytes += len(content)
+                self._blobs[blob_hash] = MessageBody(blob_hash, content)
+            head = existing[-1].head if existing else None
+            for node in pending_nodes:
+                head = SequenceHead(node.seq_hash, node.depth, self._blobs[node.blob_hash], head)
+                self._nodes[node.seq_hash] = _RegisteredNode(head, now)
+            for entry in existing:
+                entry.touched = now
+            self._stored_bytes += added_bytes
             return True
 
-    def sequence(self, seq_hash: str) -> AddressedSequence | None:
-        """Rebuild the addressed sequence a chain head names.
-
-        The rebuild is a fresh view over shared entries: nodes and blobs are
-        held once by the registry, and the returned
-        :class:`AddressedSequence` is the only per-caller copy, discarded
-        with the record that asked for it. Every entry the walk visits has
-        its last-touched stamp refreshed, which is what keeps a live chain
-        -- shared prefixes included -- from aging out.
-        """
+    def sequence_head(self, seq_hash: str) -> SequenceHead | None:
+        """Return a discoverable head and refresh only that entry in constant time."""
         with self._lock:
+            entry = self._nodes.get(seq_hash)
+            if entry is None or entry.touched is None:
+                return None
+            entry.touched = _clock()
+            return entry.head
+
+    def sequence(self, seq_hash: str) -> AddressedSequence | None:
+        """Rebuild the storage encoder's view and refresh the complete chain."""
+        with self._lock:
+            entry = self._nodes.get(seq_hash)
+            if entry is None or entry.touched is None:
+                return None
             now = _clock()
             nodes: list[SequenceNode] = []
             blobs: dict[str, bytes] = {}
-            key: str | None = seq_hash
-            while key:
-                entry = self._nodes.get(key)
-                if entry is None:
-                    return None
-                prev_hash, blob_hash, depth, _touched = entry
-                content_entry = self._blobs.get(blob_hash)
-                if content_entry is None:
-                    return None
-                self._nodes[key] = (prev_hash, blob_hash, depth, now)
-                self._blobs[blob_hash] = (content_entry[0], now)
-                nodes.append(SequenceNode(seq_hash=key, prev_hash=prev_hash, blob_hash=blob_hash, depth=depth))
-                blobs[blob_hash] = content_entry[0]
-                key = prev_hash
-            if not nodes:
-                return None
+            head = entry.head
+            node: SequenceHead | None = head
+            while node is not None:
+                previous = node.previous
+                body = node.message
+                self._nodes[node.seq_hash].touched = now
+                nodes.append(SequenceNode(node.seq_hash, previous.seq_hash if previous else None,
+                                          body.blob_hash, node.depth))
+                blobs[body.blob_hash] = body.content
+                node = previous
             nodes.reverse()
             return AddressedSequence(
                 key="",
-                seq_hash=nodes[-1].seq_hash,
-                depth=len(nodes),
+                seq_hash=head.seq_hash,
+                depth=head.depth,
                 logical_bytes=sum(len(content) for content in blobs.values()),
                 nodes=tuple(nodes),
                 blobs=blobs,
             )
 
     def _evict_expired_locked(self, now: float) -> None:
-        """Reclaim entries nothing has touched for the TTL; caller holds the lock.
-
-        Nodes and their elements are touched as pairs by registration and by
-        every walk, so their stamps stay in step and both age out together;
-        an entry that somehow survives alone makes its chain resolve as
-        missing, which the readers already treat as a stated warning.
-        """
+        """Expire discoverability, then release only unreachable nodes and bodies."""
         self._last_sweep_at = now
         self._registers_since_sweep = 0
         deadline = now - _TTL_SECONDS
-        reclaimed = 0
-        dead_nodes = [seq_hash for seq_hash, entry in self._nodes.items() if entry[3] < deadline]
+        reachable: set[str] = set()
+        live_blobs: set[str] = set()
+        for entry in self._nodes.values():
+            if entry.touched is None or entry.touched < deadline:
+                entry.touched = None
+                continue
+            node: SequenceHead | None = entry.head
+            while node is not None and node.seq_hash not in reachable:
+                reachable.add(node.seq_hash)
+                live_blobs.add(node.message.blob_hash)
+                node = node.previous
+
+        dead_nodes = self._nodes.keys() - reachable
         for seq_hash in dead_nodes:
             del self._nodes[seq_hash]
-            self._stored_bytes -= _NODE_BYTES
-            reclaimed += 1
-        dead_blobs = [blob_hash for blob_hash, entry in self._blobs.items() if entry[1] < deadline]
+        self._stored_bytes -= _NODE_BYTES * len(dead_nodes)
+
+        dead_blobs = self._blobs.keys() - live_blobs
         for blob_hash in dead_blobs:
-            content, _touched = self._blobs.pop(blob_hash)
-            self._stored_bytes -= len(content)
-            reclaimed += 1
+            self._stored_bytes -= len(self._blobs.pop(blob_hash).content)
+
+        reclaimed = len(dead_nodes) + len(dead_blobs)
         if reclaimed:
-            logger.info(
-                "sequence registry reclaimed {} entries past the {}s TTL",
-                reclaimed,
-                _TTL_SECONDS,
-            )
-            # Reclaiming re-arms the one-shot cap warning, so a later cap hit
-            # is not silent just because an earlier one already logged.
+            logger.info("sequence registry reclaimed {} entries past the {}s TTL", reclaimed, _TTL_SECONDS)
             self._warned = False
 
     def materialize(self, seq_hash: str) -> str | None:
-        """Return the attribute value a chain head states, rebuilt verbatim.
-
-        The caller attached the value with compact separators, so rebuilding
-        from the per-element blobs reproduces the attached bytes exactly.
-        """
-        sequence = self.sequence(seq_hash)
-        if sequence is None:
-            return None
-        elements = [sequence.blobs[node.blob_hash].decode("utf-8") for node in sequence.nodes]
-        return rebuild_value(elements)
+        """Refresh the full discoverable sequence and rebuild it outside the lock."""
+        with self._lock:
+            entry = self._nodes.get(seq_hash)
+            if entry is None or entry.touched is None:
+                return None
+            head = entry.head
+            now = _clock()
+            node: SequenceHead | None = head
+            while node is not None:
+                self._nodes[node.seq_hash].touched = now
+                node = node.previous
+        return head.materialize()
 
     def stats(self) -> tuple[int, int]:
         """Return the held element count and the charged byte total."""
@@ -283,6 +315,14 @@ def register_sequence(sequence: AddressedSequence) -> bool:
     See :meth:`_SequenceRegistry.register` for the return contract.
     """
     return _get_registry().register(sequence)
+
+
+def lookup_sequence_head(seq_hash: str) -> SequenceHead | None:
+    """Acquire an immutable head, refreshing only its lookup entry.
+
+    A held head remains readable after registry eviction or reset.
+    """
+    return _get_registry().sequence_head(seq_hash)
 
 
 def lookup_sequence(seq_hash: str) -> AddressedSequence | None:

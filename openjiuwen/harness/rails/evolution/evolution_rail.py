@@ -47,6 +47,7 @@ from openjiuwen.agent_evolving.trajectory.schema import (
 )
 from openjiuwen.agent_evolving.trajectory.spans import (
     attributes_from_map,
+    attributes_to_map,
     iter_payload_spans,
     span_attributes,
     span_sort_key,
@@ -568,7 +569,7 @@ class EvolutionRail(DeepAgentRail):
     def _with_scope_metadata(trajectory: Trajectory, metadata: Mapping[str, Any]) -> Trajectory:
         """Replace producer resource attributes with the canonical envelope."""
 
-        payload = trajectory.to_otlp()
+        payload = trajectory.copy_compact_payload()
         for resource_span in payload.get("resourceSpans") or []:
             resource = resource_span.setdefault("resource", {})
             resource["attributes"] = attributes_from_map(metadata)
@@ -757,7 +758,7 @@ class EvolutionRail(DeepAgentRail):
         if trajectory is None:
             return ()
         issues: list[Mapping[str, object]] = []
-        for span in iter_payload_spans(trajectory.to_otlp()):
+        for span in iter_payload_spans(trajectory.copy_compact_payload()):
             if span_category(span) != "tool":
                 continue
             attrs = span_attributes(span)
@@ -798,7 +799,7 @@ class EvolutionRail(DeepAgentRail):
                 increment is not None
                 and any(
                     span_category(span) == required_category
-                    for span in iter_payload_spans(increment.to_otlp())
+                    for span in iter_payload_spans(increment.copy_compact_payload())
                 )
             )
             if not has_required:
@@ -833,7 +834,7 @@ class EvolutionRail(DeepAgentRail):
         _, prompt_ids, completion_ids, logprobs = _split_response_token_fields(response)
         if prompt_ids is None and completion_ids is None and logprobs is None:
             return trajectory
-        payload = trajectory.to_otlp()
+        payload = trajectory.copy_compact_payload()
         target: dict[str, Any] | None = None
         # ``iter_spans`` intentionally returns detached projections.  Locate
         # the mutable copy in the private payload tree instead, then wrap the
@@ -849,14 +850,14 @@ class EvolutionRail(DeepAgentRail):
                         target = span
         if target is None:
             return trajectory
-        attrs = span_attributes(target)
+        attrs = attributes_to_map(target.get("attributes"), preserve_sequences=True)
         if prompt_ids is not None:
             attrs[RL_PROMPT_TOKEN_IDS] = deepcopy(prompt_ids)
         if completion_ids is not None:
             attrs[RL_COMPLETION_TOKEN_IDS] = deepcopy(completion_ids)
         if logprobs is not None:
             attrs[RL_LOGPROBS] = deepcopy(logprobs)
-        target["attributes"] = attributes_from_map(attrs)
+        target["attributes"] = attributes_from_map(attrs, preserve_sequences=True)
         return Trajectory.from_otlp(payload)
 
     async def _trigger_evolution(

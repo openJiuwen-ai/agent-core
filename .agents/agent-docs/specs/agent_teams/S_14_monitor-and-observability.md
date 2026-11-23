@@ -18,7 +18,7 @@ author_email: chengshuo5@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/monitor/`、`openjiuwen/agent_teams/observability/`（agent 层 span 在 `openjiuwen/harness/observability/`） |
-| 最近一次修订日期 | 2026-11-05 |
+| 最近一次修订日期 | 2026-11-23 |
 | 关联 feature | F_09_team-stream-logging.md、F_37_observability-otel-trace.md、F_83_agent-tier-rail-split.md、F_110_genai-semconv-canonicalization.md、B_01_team-root-adopts-foreign-session-root.md、F_112_harness-protocol-trajectory-observation.md、F_124_monitor-message-template-meta.md、F_20261103_0928_model-group-routed-model.md、B_20261105_0911_swarmflow-thirdparty-trajectory.md |
 
 ## 范围 / 边界
@@ -70,6 +70,12 @@ author_email: chengshuo5@huawei.com
 16. **GenAI 标准键只有一套写入真相**。所有模型、工具、Codex/Claude bridge、trajectory、RL 与前端投影都使用 OpenTelemetry GenAI semantic conventions 的当前名称；后端类型不得改变字段形状。OpenJiuwen 关联信息只能写入 `openjiuwen.*`。旧 `gen_ai.prompt.*`、`gen_ai.completion.*`、`gen_ai.tool.input/output/id` 等不再有任何读取边界：历史轨迹不被读取，也不得重新引入回退。
 17. **run root 只按 session 归属，绝不跨会话猜测**。单 Agent 与 Team 会话天然隔离：已知自身 session 的调用方（`_maybe_attach_observability`、`get_team_span(session_id=...)`、`get_or_create_team_span`）只能拿到本 session 的 root——`get_session_root_span(session_id)` 仅接受绑定 session 为空或相等的上下文 root，其余只查 `_root_registry[session_id]`，不走 ambient、不回退到其他 session。`get_root_span()` 在无 session 时只看上下文绑定的 root 与宿主显式设置的 ambient root，**不存在"注册表唯一存活 root"兜底**：进程里唯一在飞的 root 只是恰好在跑的那个会话，认领它会让本会话的 root 永远不被创建、整条轨迹静默丢失（见 B_01）。harness 的 `resolve_run_root_span` 同样只按 session 精确查自己的 `_ROOT_SPANS`（单 Agent run 和子 Agent 别名；Team root 不进入该表），它依赖 `DeepAgent.start()` 在派生 supervisor 等 task 之前绑定 observability session。订阅投递来的事件由 `CoordinationKernel` 在整个处理期间绑定订阅 topic 所属的 session（listener 分发和 per-session 表查询都在其中），所以 monitor handler / rail 里的 `get_team_span()` 总能按本会话解析。
 18. **模型组调用的 span 以实际路由命名（F_20261103_0928）**：intelli_router 客户端在**每次尝试发送时**触发 `LLM_ROUTE_ATTEMPT`（早于任何响应），`OtelCallbackHandler` 据此把当前 LLM span 改名为 `chat <routed_model>`、同步 `gen_ai.request.model` 并记 `openjiuwen.model_group.id/route_id`；`LLM_ROUTE`（路由应答后）走同一处理。span 的最终名 = 最后一次尝试，failover 与被拒请求（如 401）同样可见。记录输入（`gen_ai.input.messages` / `gen_ai.system_instructions`）从**首次记录的原文**逐次重填为该次请求实际收到的内容（占位符替换后）。整通调用失败时客户端触发 `LLM_CALL_ERROR`，span 标 ERROR + `error.type`——与 openai / anthropic 客户端同款模式，杜绝"无输出却像成功"。选路 INFO 日志（含冷却跳过列表）覆盖无 trace 上下文的后台调用。
+
+19. **内容寻址序列的查找与已取得对象的生命周期独立**。 observability 登记成功后，span 保存短引用。
+    Registry 按哈希共享不可变正文和节点。快速查找 `lookup_sequence_head()` 只刷新命中的索引项，
+    完整查找与可读导出刷新整条链。TTL 清理先移除过期项的独立查找资格，再释放从有效查找项无法到达的
+    节点和正文。仍被有效后继持有的前缀继续计入 registry 容量，仅由消费者持有的内容从 registry 账目移除。
+    已取得的头在清理或 reset 后仍可读取。超容量或登记失败时，handler 保留原内联值。
 
 ## 接口契约
 

@@ -31,6 +31,8 @@ subscribe(scope) → on_end(span) → drain(scope) → clean Trajectory
 - clean window、detached prepared input 和执行归档是三个不同生命周期。异步执行前必须复制
   callback 期间仍有效的数据，不能在后台继续读取可变 session/context。
 - `EvolutionRail.get_trajectory()` 只返回当前 clean view；`TrajectoryStore` 是显式归档边界。
+- 进程内序列持有和对外导出的契约见 [S_04](../../../.agents/agent-docs/specs/harness/S_04_rails-contract.md)
+  不变量 16。轨迹内部直接持有 observability 登记的不可变序列头，公开 span 投影仍返回标准 OTLP 字段。
 
 ## Canonical 模型铁律
 
