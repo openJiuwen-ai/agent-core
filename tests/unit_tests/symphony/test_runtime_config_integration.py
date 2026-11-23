@@ -3,7 +3,6 @@
 import asyncio
 import json
 import re
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -193,7 +192,7 @@ async def test_no_model_discovery_and_fallback_build_with_real_directory(tmp_pat
     with pytest.raises(ValueError, match="requires a model"):
         await runtime.orchestration.build()
     with pytest.raises(ValueError, match="requires a model"):
-        await runtime.orchestration.plan("invoice")
+        await runtime.orchestration.plan("invoice", type="skill")
     await runtime.aclose()
 
 
@@ -270,10 +269,8 @@ async def test_graph_build_binds_root_with_catalog_fingerprints_and_finder_metad
 
         built = await runtime.orchestration.build(force=True)
         assert runtime.orchestration.status().version == built.version
-        assert runtime.orchestration.read()["schema_version"] == "1.0"
+        assert runtime.orchestration.read()["schema_version"] == "2.0"
         assert (root / "runtime.json").is_file()
-        assert not (taxonomy_root / "runtime.json").exists()
-        assert (await runtime.retrieval.build())["success"]
         assert (taxonomy_root / "runtime.json").is_file()
         assert all(path.read_text() == "{}" for path in catalog_files)
         assert all(path.read_bytes() == b"finder metadata" for path in finder_files)
@@ -420,8 +417,12 @@ async def test_retrieval_build_and_graph_share_fingerprint_extraction(tmp_path):
     config["orchestration"]["enabled"] = True
     runtime = SymphonyRuntime(model, SymphonyConfig.model_validate(config))
     try:
-        await runtime.orchestration.build()
+        graph = await runtime.orchestration.build()
+        assert graph.counts["reused_count"] == 1
         assert model.extractions == 1
+        published = graph.graph_path.with_name("fingerprint.json")
+        shared = tmp_path / "runtime" / "cache" / "fingerprints" / "fingerprint.json"
+        assert published.read_bytes() == shared.read_bytes()
         runtime.retrieval.bind_search(disabled_capability_ids=lambda: disabled)
         disabled.add("alpha")
         hidden = await runtime.retrieval.search("escrowreconciliation", type="skill")
@@ -477,7 +478,7 @@ async def test_experience_distills_on_third_success_and_planning_can_read_after_
     reader = SymphonyRuntime(GraphModel(), config)
     try:
         assert not reader.flow.enabled
-        planned = (await reader.orchestration.plan("invoice", candidate_ids=[])).to_dict()["planned_graph"]
+        planned = (await reader.orchestration.plan("invoice", type="skill", candidate_ids=[])).to_dict()["planned_graph"]
         assert planned["graph_snapshot"]["observation_revision"] == learned["observation_revision"]
     finally:
         await reader.aclose()
@@ -492,7 +493,7 @@ async def test_empty_or_unknown_candidate_set_never_expands_to_inventory(tmp_pat
     runtime = SymphonyRuntime(model, make_config(tmp_path, orchestration={"plan": {"mode": mode}}))
     await runtime.orchestration.build()
     calls_before = model.calls
-    result = (await runtime.orchestration.plan("invoice", candidate_ids=candidates)).to_dict()["planned_graph"]["graph"]
+    result = (await runtime.orchestration.plan("invoice", type="skill", candidate_ids=candidates)).to_dict()["planned_graph"]["graph"]
     assert result["metadata"]["status"] == "no_plan"
     assert result["nodes"] == {} and result["edges"] == []
     assert model.calls == calls_before
@@ -651,7 +652,7 @@ async def test_cancelled_close_waiter_still_drains_nested_graph_operation_and_fl
     flow._worker_task = asyncio.create_task(release_flow.wait())
 
     async def prepare(_path):
-        await runtime.orchestration.plan("invoice", candidate_ids=[])
+        await runtime.orchestration.plan("invoice", type="skill", candidate_ids=[])
         entered.set()
         await asyncio.Event().wait()
 

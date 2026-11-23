@@ -1,76 +1,48 @@
-# Symphony
+# openjiuwen.symphony
 
-Symphony 提供 Skill、专家和 MCP 检索，以及 Skill 编排和执行观测 / Flow。统一入口为 `SymphonyRuntime(model, config)`；扫描、指纹和服务组装由 Core 管理。
+`openjiuwen.symphony` 为 Agent 应用提供能力检索、能力编排和经验沉淀。宿主通过 `SymphonyRuntime(model, config)` 调用这些能力，并根据编排计划调度任务。
 
-## 配置与调用
+## 快速开始
+
+在 `./capabilities/invoice/SKILL.md` 中写入以下 Skill 定义。
+
+```markdown
+---
+name: invoice
+description: Extract invoice numbers and totals from documents.
+---
+
+Extract the invoice number, currency, and total from each document.
+```
+
+在同一工作目录运行以下 Python 示例，搜索会话中的 Skill。目录发现可直接使用 `model=None`。
 
 ```python
+import asyncio
+
 from openjiuwen.symphony import SymphonyConfig, SymphonyRuntime
 
 config = SymphonyConfig.model_validate({
     "capability": {"sources": [{"type": "skill", "root": "./capabilities"}]},
     "storage": {"artifact_root": "./.symphony/runtime"},
-    "retrieval": {
-        "index_build": {"request": {"max_concurrency": 2}},
-        "use_existing_index": True,
-    },
-    "orchestration": {
-        "min_edge_confidence": 0.7,
-        "plan": {"mode": "fast"},
-        "experience": {"enabled": True},
-    },
 })
 
-# model 是宿主已创建的 openjiuwen.core.foundation.llm.Model。
-runtime = SymphonyRuntime(model=model, config=config)
-try:
-    await runtime.retrieval.build(force=False, progress=on_progress)
-    await runtime.orchestration.build(force=False, progress=on_progress)
-    runtime.retrieval.bind_search(
-        session_scope="conversation-1",
-        visible_capability_ids=lambda: {"extract", "summarize"},
-        disabled_capability_ids=lambda: disabled_ids,
-        source_by_id={"extract": "installed"},
-        pin_index_revision=True,
-    )
-    candidates = await runtime.retrieval.search(type=["skill"], query="summarize documents")
-    plan = await runtime.orchestration.plan(
-        "Summarize the document", candidate_ids=["extract", "summarize"],
-        disabled_capability_ids=disabled_ids,
-    )
-finally:
-    await runtime.aclose()
+
+async def main():
+    runtime = SymphonyRuntime(model=None, config=config)
+    try:
+        result = await runtime.retrieval.search(query="invoice")
+        print([(match["type"], match["id"]) for match in result["matches"]])
+    finally:
+        await runtime.aclose()
+
+
+asyncio.run(main())
 ```
 
-`on_progress` 可以是同步或异步回调。构造函数只保存独立配置快照并固定相对路径，不扫描、构建、请求模型或启动任务。配置模型使用 Pydantic v2，支持 `model_validate`、`model_dump_json`、`model_validate_json` 和中文 JSON Schema。
+`capability.sources` 至少包含一个来源，每项指定 `type` 和 `root`。`storage.artifact_root` 指定索引、关系图和经验沉淀产物的根目录。接入构图或规划时，传入宿主创建的 `openjiuwen.core.foundation.llm.Model`。使用完毕后调用 `await runtime.aclose()`，模型仍由宿主管理。
 
-`capability.sources` 是非空目录列表，每项声明 `type` 和 `root`，整组共用 `scan`、`fingerprint` 和 `storage.artifact_root`。多个 `skill` 和 `expert` 目录可共用一棵分类树。专家读取器从独立专家包的 `manifest.json` 投影 `name`（ID 和默认显示名）、`description` 及 `package_type: agent_template`。关系图与 Flow 只使用 Skill，并要求恰有一个 Skill 目录。
-
-顶层配置包含 `capability`、`storage`、`retrieval` 和 `orchestration`；Flow 策略位于 `orchestration.experience`。公共配置树及默认值见 [config.tree.txt](config.tree.txt)。
-
-## 三个入口
-
-| 入口 | 能力 |
-|---|---|
-| `runtime.retrieval` | `status()` / `read()` / `await build()` / `await cancel_build()` / `search()` / `get_tools()` / `bind_search()` |
-| `runtime.orchestration` | `status()` / `read()` / `await build()` / `await cancel_build()` / `await plan()` |
-| `runtime.flow` | 惰性默认 Flow；`status()`、`await start()`、提交和候选操作，以及 `create_scope(store=...)` |
-
-树构建返回含 `success/result/data` 的字典，并携带 `build_id`、`version`、变化 / 复用计数和诊断。图构建返回 `GraphBuildResult`；图状态和图内容提供 `to_dict()`。构建 ID 表示本次尝试，版本表示最后发布产物；复用会取得新构建 ID 并保留版本。整图复用的 `graph_reused_count=1`，本次关系匹配调用计数为零。
-
-两个构建入口的 `prepare_artifact(version_dir)` 回调可写入宿主附属产物，完成后才发布。构建取消或发布前集合变化均保留之前的可用版本。关闭 Runtime 会等待自己的构建、图增量、规划、Flow 和会话任务收尾；取消某个关闭等待者不会取消内部关闭任务。注入的宿主模型始终由宿主关闭。
-
-检索与编排开关独立；经验沉淀和 Flow 需要 `orchestration.enabled` 与 `orchestration.experience.enabled` 同时开启。禁用能力可查询状态，执行入口拒绝操作。`model=None` 支持状态、产物读取和确定性发现；构图与规划会报告缺少模型。构树按 `task.allow_fallback_tree` 处理；启用旧索引保护时，不用失败后的回退树替换已有可用分类树。
-
-## 构建与模型
-
-分类树保留一次性生成、递归细分、后处理、等价分组和增量更新算法，直接消费 `retrieval.index_build` 的子模型。同步算法由 Runtime 在工作线程调度，模型请求桥接至宿主事件循环。未绑定事件循环的原生 `Model` 不支持直接同步构建；异步 Runtime 和 CLI 会完成绑定。
-
-请求超时、任务超时和取消均传播到模型请求。鉴权和参数等永久 HTTP 错误不会重试；瞬态错误按请求策略重试，前一次调用完成清理后才允许下一次调用。取消清理超界时终止整个构建，不重试、不回退、不发布。截断结果会被拒绝，模型用量由宿主响应观察器计量。
-
-指纹语义提取、质量评估和缓存分别消费 `capability.fingerprint.extraction/evaluation/cache`。构图提取并发为提取上限与 `orchestration.build.max_concurrency` 的较小值；批量上限仍限制每批对象数。`max_output_tokens=None` 沿用宿主模型配置。
-
-构图和 fast / beam 规划共用 `orchestration.min_edge_confidence`。`candidate_ids=None` 表示未限制候选；显式空列表或全部无效 ID 返回空计划，不扩大到全量。`dynamic_graph_enabled` 只决定规划是否使用已收集的观测，不关闭观测写入。
+顶层配置包含 `capability`、`storage`、`retrieval` 和 `orchestration`。Flow 策略位于 `orchestration.experience`。公开配置和默认值见仓库中的 [config.tree.txt](config.tree.txt)。程序也可以通过 `SymphonyConfig.model_json_schema()` 获取配置说明。
 
 ## 能力检索
 
@@ -95,34 +67,63 @@ finally:
 
 单类和多类型检索都按 `retrieval.output.max_chars` 裁剪展示内容，从实际展示的条目之后续页。成功续页会消费旧游标。目录临时读取失败可以用原游标重试，已选目录的版本发生变化则需要重新发起查询。分类分支的全部后代都对当前成员可见时，检索保留该分支的说明和选择条件。
 
-## 产物与版本
+## 能力编排
 
-单 Skill 目录继续使用以下布局。多目录及专家集合的分类树位于 `taxonomy_collections/<scope_id>/tree`，集合身份由排序去重的绝对来源路径和类型确定，来源重排复用同一棵树。添加专家来源可直接在原产物根下构建新树。
+`await runtime.orchestration.build()` 要求配置恰好一个 Skill 来源，可同时纳入专家来源。调用返回 `GraphBuildResult`，可用 `version` 记录产物版本，用 `graph_path` 定位文件。以下函数沿用快速开始的配置，由宿主在异步环境中传入模型调用。
 
-```text
-storage.artifact_root/
-├── runtime.json       # 布局版本与集合身份
-├── inventory/         # Core 生成的集合快照
-├── cache/             # 指纹等缓存
-├── tree/              # 当前分类树及构建状态
-├── graph/             # 原子发布图版本、关系缓存和观测
-└── flow/              # 默认 Flow 证据与候选
+```python
+async def plan_invoice(model):
+    runtime = SymphonyRuntime(model=model, config=config)
+    try:
+        await runtime.orchestration.build()
+        result = await runtime.orchestration.plan(
+            "Extract the total from an invoice",
+            type="skill",
+            candidate_ids=["invoice"],
+            inputs=[{"name": "invoice", "kind": "file", "value": "invoices/latest.pdf"}],
+        )
+        return result["planned_graph"]["graph"]
+    finally:
+        await runtime.aclose()
 ```
 
-目录按固定能力根和类型绑定，其他集合不能共用。新签名包含对象内容、相关构建策略、协议和模型身份；规划参数、Flow 阈值和展示开关不参与树内容签名。无模型状态查询保留产物模型身份，同时继续检查内容和构建策略，并明确未核验模型身份。
+- `plan(query, type="auto", context=...)` 是统一规划入口，默认值为 `auto`。使用当前注入模型选择直接回答、单项能力、多项能力协作、单专家或多专家。路由是 `plan()` 内部步骤，宿主不单独调用路由函数。`auto` 表示调用时自动选择策略，不会在宿主每条新任务开始时提前调用规划。
+- 允许委派时，可分别验收的独立判断或修改优先并行。各分支可以共用资料和工具，合并验收在分支产出后进行。同一结果的多格式导出、批量转换或反复修订适合由主代理处理。
+- 自动结果始终包含 `execution_route`（`strategy`、选定的能力 ID、`reason`、`requires_planning`），`planned_graph` 可选。策略依次为 `direct_answer`、`single_capability`、`capability_workflow`、`single_expert`、`multi_expert`。单项能力由 `skill_ids` 或 `tool_ids` 指明；不含工具的多 Skill 工作流生成技能图，专家策略返回 `plan_kind=expert_tasks`，支持纯内联角色。直接回答、单项能力和含工具的工作流不要求图。工具只作为宿主上下文，不参与 Symphony 工具检索或建图。
+- 迁移自动结果的消费者时，改读 `execution_route.strategy`；原 `tier`、`execution_mode` 和 `initial_tier` 已移除。单节点计划按实际执行归一为单项能力或单专家，`initial_strategy` 记录归一前的策略。统一入口、显式类型及两类图的接口保持不变。
+- `context` 接受 `PlanningContext` 或等价字典，仅提供可见 `skills/experts/tools` 摘要、必选能力 ID 和宿主策略。省略时从配置目录获取 Skill/专家清单。宿主负责实时可见性，Core 在模型前过滤禁用 Skill 和专家 manifest 范围。自动规划传入 `candidate_ids` 时，路由和后续图规划均以候选与可见能力的交集为范围；省略时才从全部可见能力选择。空列表或无效 ID 不会回退到全目录，必选能力不在有效候选中时在模型调用前报错。候选不代表必选，专家策略仍允许临时角色。
+- `allow_experts=False` 由程序移除专家候选和专家策略，并校验模型不能返回专家策略，包括内联角色。该开关、请求 ID 和重判预算不进入模型上下文。任务和约束写入 `query`，已有资料通过 `inputs` 提供；原 `context.facts/constraints/work_mode` 字段移除，不再复制会话或系统提示词。路由只读取有界目录和输入预览，完整具名输入继续交给规划与执行；只有显式必选能力会附加对应要求。
+- 自动路由一般增加一次模型调用；无效 JSON/决定最多修复一次，规划不可行最多重新判级一次。`execution_route.reconsiderations` 记录已消耗次数，`context.reconsiderations=1` 保留为已消耗预算的兼容输入；Swarm 按需调用时不管理该预算。取消和模型异常向调用方传播。
+- `SymphonyGraphEngine.plan(..., prepare_skill_graph=callback)` 在自动选择不含工具的多 Skill 工作流，或显式 `type="skill"` 时请求宿主准备图，再检查技能图并读取动态图快照。其他自动策略不检查技能图。固定图修订或 `task_cluster_id` 要显式使用 `type="skill"`。
+- 显式 `plan(type="skill"|"expert")` 直接选择规划实现，不调用路由模型。`type="expert"` 返回专家任务图，替代早期版本返回专家能力链的行为。迁移原先省略类型的技能图调用时，请补上 `type="skill"`，或者改为消费自动结果的可选图。
+- `plan_skill_graph(query, candidate_ids=...)` 与 `plan(type="skill")` 使用相同的技能规划实现。`candidate_ids=None` 表示使用当前可见候选，传入 ID 列表可指定起始候选。列表为空或所有 ID 均无效时，返回 `no_plan`。动态图、指定修订与禁用技能过滤沿用技能规划契约。
+- `plan_subagent_graph(query, candidate_ids=...)` 与 `plan(type="expert")` 生成相同的子智能体任务图。规划模型通过 `expert_id` 引用已安装专家，或通过含 `name`、`description` 的 `role` 定义内联角色，二者只能选一个。Core 据此生成节点的 `metadata.type`（`expert` 或 `inline`）。未知专家 ID 会触发校验错误。没有技能图、已发布的专家图或可用专家时，也可以生成纯内联计划。`expert_manifest_paths` 限定可用专家；候选为空或均不可用时仍可使用内联角色。
+- 两个专用入口不接收 `type`。统一入口拒绝未知类型；专家规划不接受技能图修订、动态覆盖与禁用技能等专属参数。`SymphonyGraphEngine` 和直接使用的 `OrchestrationService` 遵循相同的类型分流语义。
+- 三个入口均支持通过 `orchestration.plan.mode` 选择 `fast` 或 `beam`。显式技能/专家规划通过 `result["planned_graph"]["graph"]` 返回图；自动结果先检查 `execution_route` 和可选图。节点和依赖分别位于 `nodes` 和 `edges`。专家任务图的交接边引用本轮任务的 `source_output` 和 `target_input`。
+- 可选的 `inputs` 接收一组 `PlanningInput` 或等价字典。每项的 `name` 唯一，`kind` 为 `text` 或 `file`，`value` 为已知文本或宿主已校验的文件引用，`description` 可注明用途。直接使用 SDK 时，由宿主负责解析文件引用。
 
-不兼容旧 Runtime 构造参数、配置别名、旧缓存签名及旧布局。历史目录不自动迁移或删除，请为新配置选择独立产物目录并重新构建。
+Skill 和子智能体编排均以 `graph.metadata.status=ready` 返回有效任务图，无法形成计划时返回 `no_plan`。宿主可结合已掌握的资料、图中的交接关系和 `graph.metadata.missing_inputs` 判断哪些节点可以执行。Skill 节点的 `metadata.inputs` 和 `outputs` 描述已声明的端口，`metadata.missing_inputs` 标记规划时发现的节点缺项。子智能体节点用 `metadata.external_inputs` 引用所需资料名。Core 会将已引用但未提供的资料汇总到图级 `missing_inputs`，模型也可以补充缺项的类型和用途。节点自身入边已经提供的产物由交接传递，只有单独声明的同名外部资料才计入外部输入。
 
-## 编排经验与宿主职责
+子智能体草稿只需给出 `tasks` 和必要的 `handoffs`。非空任务图通过校验后，Core 补上 `ready`。节点可以省略 `title`，此时使用任务正文的首句或首行作为显示标题。
 
-`orchestration.experience.enabled` 默认关闭。与 `orchestration.enabled` 同时开启时，Runtime 接收图观测，并将合格的成功子图送给 Flow 沉淀组合能力包。`orchestration.plan.dynamic_graph_enabled` 独立控制规划是否采用已有动态图。
+子智能体草稿结构或交接校验失败时，Core 将原请求、错误和限长的上一份草稿交给模型补试一次。只报告缺项的空草稿也使用这一次补试额度。再次无法形成计划时，`graph.metadata.reason` 给出原因。模型明确返回的 `no_plan`（无资料缺项）直接保留，模型调用异常和取消沿调用链传播。
 
-`orchestration.experience.acceptance` 默认要求至少 3 次成功及 0.8 成功率，`narrative.max_examples` 默认保留最多 5 个示例。`runtime.flow.create_scope(store=user_store)` 用宿主受限存储创建隔离视图，共用默认服务的打包和审核组件。用户证据范围、候选确认和安装授权由宿主决定。
+专家任务图的 `metadata.task` 是 Markdown 正文，包含节点目标、约束、产物内容和验收要求。产物的名称和类型由 `metadata.outputs` 声明。Core 根据交接边生成 `metadata.inputs`，接收端口默认沿用源产物名。交接用 `target_input` 指定别名或把多个产物汇入同一端口。
 
-`capture_graph_snapshot()` 和 `submit_evolution()` 保留供现有 Rail 使用。旧模型检索服务、分支浏览工具、紧凑码表和独立 Experience 包已退役，不恢复旧入口。
+分类树支持按类浏览和搜索。关系图按能力的输入输出连接候选。`plan_subagent_graph` 可沿这些关系补充候选专家，规划模型收到的每位专家只有 `id`、`name` 和 `description`。模型先按用户可独立验收的结果划分任务，同一结果由一个节点负责交付，可单独验收且有明确交接产物的支撑工作可以拆分，再按所需能力选择角色。任务说明写明下游如何使用产物、成稿需要保留哪些信息，以及由谁依据什么条件核查最终交付物。已安装专家的专长直接匹配核心工作时采用该专家，匹配较弱时使用内联角色。需要相同能力的独立任务优先复用同一专家或内联角色，分别创建节点，供宿主并行派发。单节点计划同样有效，跨节点交接按实际依赖定义。
 
-## 配置文档与验证
+## 管理构建与产物
 
-修改配置后运行 `python scripts/export_symphony_config.py` 自动更新配置树。`--include-internal` 额外输出内部配置参考。
+通过 `runtime.retrieval.status()` 和 `runtime.orchestration.status()` 查看索引与图的状态。两者都支持 `read()` 读取当前产物，关系图还可用 `read(version)` 读取指定版本。构建可传 `progress` 接收进度，用 `await cancel_build()` 取消。默认配置下，重建失败或取消时仍可读取上次成功发布的版本。
 
-相关行为测试位于 `tests/unit_tests/symphony/`。配置默认值与基线快照比较；运行测试覆盖真实目录、模型替身、HTTP 连接复用、取消、原子发布、会话可见性、观测和 Flow。此流程不运行格式化或静态检查。
+如需随构建发布宿主附属文件，可传入 `prepare_artifact(version_dir)` 回调，在收到的目录中写入文件。
+
+检索与编排可独立启用。禁用时仍可查状态，执行入口会拒绝操作。不提供模型时，仍可查状态、读取产物和发现能力。若启用了 `retrieval.index_build.task.allow_fallback_tree`，构树也可使用回退策略。启用已有索引保护时，失败后的回退树会保留已有的可用分类树。
+
+## 执行观测与经验沉淀
+
+同时启用 `orchestration.enabled` 与 `orchestration.experience.enabled` 后，`openjiuwen.symphony` 接收 Skill 执行证据，更新动态关系，并为满足接纳条件的组合生成候选能力包。
+
+- 宿主可在执行开始时调用 `runtime.capture_graph_snapshot()`，将返回值写入 `execution_graph["graph_snapshot"]`。执行结束后用 `await runtime.submit_evolution(planned_graph, execution_graph, session_id=..., capture_mode=...)` 提交。返回的 `EvolutionSubmitResult` 包含 `graph_receipt` 和 `new_candidates`。`capture_mode` 可取 `agent` 或 `team`。
+- 用 `runtime.flow.list_candidates()` 查看候选，或通过 `runtime.flow.create_scope(store=...)` 使用宿主管理的存储。候选确认和安装由宿主负责。
+- 使用 `orchestration.plan.dynamic_graph_enabled` 控制 Skill 规划是否读取已有的动态观测。
