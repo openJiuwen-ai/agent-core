@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/rails/` |
-| 最近一次修订日期 | 2026-11-23 |
+| 最近一次修订日期 | 2026-11-24 |
 | 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_21_cua-desktop-subagent.md`、`F_22_cli-jiuwen-memory-rail-mount-and-switch.md` |
 
 ## 范围 / 边界
@@ -293,12 +293,8 @@ class BaseSecurityRail(AgentRail):
 
 ## Team 文档记忆
 
-JiuwenTeamMemoryRail 从 openjiuwen.harness.rails 导出，沿用 Coding Rail 的身份参数，增加可选 content_allowed(text)->bool。宿主 Provider 除既有 MemoryProvider 方法外实现 async add_team_memories(items)->int，items 为 label/content，标签限 decision/lesson/member/context。
+`JiuwenTeamMemoryRail` 从 `openjiuwen.harness.rails` 导出，沿用 Coding Rail 的身份、工具、写队列和排空机制。每位回答者持有自己的 Rail。宿主 Provider 使用 `sync_turn(..., sources=...)` 接收结构化来源。`sources[].id` 在单次提交内唯一，用于引用本次来源证据。Core 不决定成员权、项目键、落点、模型或共享 Runtime。
 
-每位回答者独立实例。正常非空回合执行普通 sync_turn 和专用条目抽取，独立处理失败；无回答者模型不提取团队结论。模型只提交 confirmed=true 的条目，不直接写文件。conclude_round(material, model=...) 供 Leader 会话释放前收口；drain/aclose 包含在途收口任务。Core 不决定项目、团队键或共享 Runtime。
+含可信真人来源的成功回合可触发回写。宿主标记的原文和已接受的 `ask_user` 答复属于真人来源，问题正文属于 Agent 上下文。匹配卡片选项时，来源额外提供已选项说明和问题，上送的证据正文仍是用户答复。异常、取消、暂停中的回合和纯内部对话不触发人机回写。
 
-团队抽取调用 LLM 前检查 Provider 的 add_team_memories 是否可调用；缺失或不可调用时跳过团队抽取，每个 Rail 仅告警一次，普通 sync_turn 保持可用。不向通用 MemoryProvider 添加默认空写入实现。
-
-Leader 收口材料使用 TeamAgentSpec.memory.timezone_offset_hours 渲染消息时间，与旧记忆 Manager 是否启用无关；未提供记忆配置时沿用 TeamMemoryConfig 默认值（UTC+8）。数据库中的原始时间戳不变。
-
-成员回合内两条抽取任务并发执行，共用 Coding Rail 的 130 秒外层上限；普通异常互不取消，超时会取消仍未完成的任务，已完成的写入不撤销。成员回合与团队收口均保留抽取，允许产生重复结论；Swarm 宿主选择 Jiuwen 时关闭旧 TeamMemoryManager。
+子任务验收可触发回写。验收以任务 ID、任务修订号和评审轮次去重。任务提交与成功执行回复可精确关联时一起提交，验收可等待该轮的最后回复，任务状态流转和通知照常进行。没有实质交付文本时跳过抽取。回合退出时清理活动交付记录，包括所有者解绑和来源处理异常。退出排空已提交写入，最后一个 owner 退出后释放缓存和 Provider。

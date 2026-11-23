@@ -4,8 +4,9 @@
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from typing import Literal, NotRequired, TypedDict
 
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.response import InterruptKind
@@ -14,11 +15,19 @@ from openjiuwen.core.single_agent.interrupt.state import (
     RESUME_INTERRUPT_ANSWERS_KEY,
 )
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.harness.rails.interrupt.ask_user_rail import parse_ask_user_payload
 
 _TURN_MAX_CHARS = 16_000
 _TURN_MAX_SESSIONS = 128
 _TURN_TTL = 1800.0
 _TURN_TRUNCATION = "\n[交互轮次内容已截断]\n"
+
+
+class MemorySource(TypedDict):
+    id: str
+    role: Literal["user", "agent", "assistant"]
+    text: str
+    selection: NotRequired[dict[str, str]]
 
 
 @dataclass
@@ -30,6 +39,7 @@ class _MemoryTurn:
     seen_answers: dict[str, None] = field(default_factory=dict)
     updated: float = field(default_factory=time.monotonic)
     truncated: bool = False
+    sources: list[MemorySource] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.original = self._clip(self.original, _TURN_MAX_CHARS - len(_TURN_TRUNCATION))
@@ -61,6 +71,17 @@ class _MemoryTurn:
         text = "\n\n".join([self.original, *self.additions])
         return text + _TURN_TRUNCATION if self.truncated else text
 
+    def record_source(
+        self, role: Literal["user", "agent"], text: str, *, selection: dict[str, str] | None = None,
+    ) -> None:
+        budget = _TURN_MAX_CHARS - sum(len(source["text"]) for source in self.sources)
+        if text.strip() and budget > 0 and len(self.sources) < 32:
+            limit = min(budget, _TURN_MAX_CHARS // 2)
+            source: MemorySource = {"id": str(len(self.sources)), "role": role, "text": text[:limit]}
+            if selection is not None and len(text) <= limit:
+                source["selection"] = selection
+            self.sources.append(source)
+
 
 class MemoryTurnBuffer:
     """Keep pending turns for one rail owner, isolated by actual session ID."""
@@ -72,12 +93,14 @@ class MemoryTurnBuffer:
         extract_output: Callable[[AgentCallbackContext], str],
         is_background: Callable[[AgentCallbackContext], bool],
         unwrap_envelope: Callable[[str], str],
+        structured: bool = False,
     ) -> None:
         self.turns: dict[str, _MemoryTurn] = {}
         self._resolve_user_text_for_memory = resolve_user_text
         self._extract_assistant_output = extract_output
         self._is_background_run = is_background
         self._unwrap_jiuwenswarm_envelope = unwrap_envelope
+        self._structured = structured
         # Different owners may share callback extras during nested invocation.
         self._context_key = f"_jiuwen_memory_turn.{id(self):x}"
 
@@ -99,6 +122,15 @@ class MemoryTurnBuffer:
         get_state = getattr(getattr(ctx, "session", None), "get_state", None)
         return get_state(INTERRUPTION_KEY) if callable(get_state) else None
 
+    @staticmethod
+    def _human_input(ctx: AgentCallbackContext) -> str:
+        run = getattr(ctx.inputs, "run_context", None) or ctx.extra.get("run_context")
+        extras = run.get("extra") if isinstance(run, Mapping) else getattr(run, "extra", None)
+        if not isinstance(extras, Mapping):
+            return ""
+        raw = extras.get("raw_query")
+        return raw.strip() if extras.get("raw_query_origin") == "human" and isinstance(raw, str) else ""
+
     def begin(self, ctx: AgentCallbackContext) -> None:
         if self._is_background_run(ctx):
             return
@@ -118,6 +150,9 @@ class MemoryTurnBuffer:
                 turn = _MemoryTurn(text)
             elif turn is not None:
                 turn.append(text)
+            if turn is not None and self._structured:
+                human = self._human_input(ctx)
+                turn.record_source("user" if human else "agent", human or text)
         if turn is None:
             self.turns.pop(session_id, None)
             return
@@ -157,9 +192,30 @@ class MemoryTurnBuffer:
                 if turn.additions and turn.additions[-1] == text:
                     turn.additions.pop()
             turn.append("用户交互回答：\n" + result)
+            if self._structured:
+                self._record_answer_sources(turn, answer.request, answer.value)
             turn.seen_answers[answer_id] = None
             if len(turn.seen_answers) > 128:
                 turn.seen_answers.pop(next(iter(turn.seen_answers)))
+
+    def _record_answer_sources(self, turn: _MemoryTurn, request, value) -> None:
+        questions = getattr(request, "questions", [])
+        answers = parse_ask_user_payload(value, questions).answers
+        for question in questions:
+            prompt = question.get("question", "")
+            text = self._unwrap_jiuwenswarm_envelope(answers.get(prompt, "").strip()).strip()
+            if not text or not prompt:
+                continue
+            options = [option for option in (question.get("options") or ()) if option.get("label") == text]
+            selection = None
+            if len(options) == 1:
+                description = options[0].get("description")
+                selection = {
+                    "question": prompt[:2000],
+                    "description": description[:2000] if isinstance(description, str) else "",
+                }
+            turn.record_source("agent", prompt)
+            turn.record_source("user", text, selection=selection)
 
     def finish(self, ctx: AgentCallbackContext) -> tuple[str, str] | None:
         """Keep paused turns; consume completed or failed turns once."""
@@ -204,3 +260,15 @@ class MemoryTurnBuffer:
         if not query or not output:
             return None
         return query, output
+
+    def finish_sources(
+        self, ctx: AgentCallbackContext, *, on_output: Callable[[str], None] | None = None,
+    ) -> list[MemorySource]:
+        """Submit only completed turns with evidence attributable to a human."""
+        turn = ctx.extra.get(self._context_key)
+        completed = self.finish(ctx)
+        if completed is not None and on_output is not None:
+            on_output(completed[1])
+        if completed is None or turn is None or not any(s["role"] == "user" for s in turn.sources):
+            return []
+        return [*turn.sources, {"id": "answer", "role": "assistant", "text": completed[1][:_TURN_MAX_CHARS]}]

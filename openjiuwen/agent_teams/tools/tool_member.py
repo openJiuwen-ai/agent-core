@@ -1335,6 +1335,10 @@ class ShutdownMemberTool(TeamTool):
             member_name=member_name,
             force=inputs.get("force", False),
         )
+        if result.ok and self.team.on_explicit_member_change is not None:
+            await self.team.notify_explicit_member_change(
+                member_name, added=False, force=inputs.get("force", False),
+            )
         return ToolOutput(
             success=result.ok,
             data={"member_name": member_name},

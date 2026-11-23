@@ -17,8 +17,6 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
 )
 from openjiuwen.agent_teams.agent.coordination.kernel import CoordinationKernel
 from openjiuwen.agent_teams.harness.state import HarnessState
-from openjiuwen.agent_teams.memory.config import TeamMemoryConfig
-from openjiuwen.agent_teams.memory.jiuwen import extract_jiuwen_team_round
 from openjiuwen.agent_teams.runtime.metadata import (
     merge_pending_resume,
     read_pending_resume,
@@ -640,56 +638,15 @@ async def test_start_never_builds_a_team_for_a_non_leader():
 
 
 @pytest.mark.asyncio
-async def test_jiuwen_round_runs_once_before_session_release():
+async def test_jiuwen_writes_drain_before_session_release():
     host = _make_kernel_host()
-    rail = SimpleNamespace(drain=AsyncMock(), conclude_round=AsyncMock())
-    host.resources.harness.find_rails = MagicMock(return_value=[rail])
-    host.resources.harness.model = object()
-    host.infra.task_manager = SimpleNamespace(list_tasks=AsyncMock(return_value=[
-        SimpleNamespace(title="architecture", status="done", assignee="coder", content="confirmed"),
-    ]))
     events = []
-    async def conclude(material, *, model):
-        assert "architecture" in material and "confirmed" in material
-        assert model is host.resources.harness.model
-        events.append("extract")
-    rail.conclude_round.side_effect = conclude
+    rail = SimpleNamespace(drain=AsyncMock(side_effect=lambda: events.append("drain")))
+    host.resources.harness.find_rails = MagicMock(return_value=[rail])
     host.session_manager.release_session.side_effect = lambda: events.append("release")
     kernel = CoordinationKernel(host)
     kernel._lifecycle_state = "running"
     await kernel.pause()
     await kernel.stop()
     rail.drain.assert_awaited_once()
-    rail.conclude_round.assert_awaited_once()
-    assert events[0] == "extract" and "release" in events
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("memory_config", "expected_time"), [
-    (None, "01-01 08:00"),
-    (TeamMemoryConfig(), "01-01 08:00"),
-    (TeamMemoryConfig(timezone_offset_hours=0.0), "01-01 00:00"),
-    (TeamMemoryConfig(timezone_offset_hours=-5.5), "12-31 18:30"),
-])
-async def test_jiuwen_round_uses_configured_timezone_without_native_memory(memory_config, expected_time):
-    host = _make_kernel_host()
-    host.spec = SimpleNamespace(memory=memory_config)
-    rail = SimpleNamespace(drain=AsyncMock(), conclude_round=AsyncMock())
-    host.resources.harness.find_rails = MagicMock(return_value=[rail])
-    host.resources.harness.model = object()
-    message = SimpleNamespace(
-        timestamp=0, broadcast=True, from_member_name="coder", content="confirmed decision",
-    )
-    host.infra.task_manager = None
-    host.infra.team_backend = SimpleNamespace(db=SimpleNamespace(
-        message=SimpleNamespace(get_team_messages=AsyncMock(return_value=[message])),
-    ))
-
-    await extract_jiuwen_team_round(host)
-
-    rail.drain.assert_awaited_once()
-    rail.conclude_round.assert_awaited_once()
-    material = rail.conclude_round.await_args.args[0]
-    assert f"[{expected_time}] coder -> 全体: confirmed decision" in material
-    assert rail.conclude_round.await_args.kwargs["model"] is host.resources.harness.model
-    assert message.timestamp == 0
+    assert events[0] == "drain" and "release" in events

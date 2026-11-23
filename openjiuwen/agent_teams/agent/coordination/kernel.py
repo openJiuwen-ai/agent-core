@@ -348,9 +348,9 @@ class CoordinationKernel:
         memory_manager = host.resources.memory_manager
         if memory_manager:
             await memory_manager.extract_after_round()
-        from openjiuwen.agent_teams.memory.jiuwen import extract_jiuwen_team_round
+        from openjiuwen.agent_teams.memory.jiuwen import drain_jiuwen_team_memory
 
-        await extract_jiuwen_team_round(host)
+        await drain_jiuwen_team_memory(host)
         if host.role == TeamRole.LEADER:
             paused_teammates = tuple(host.spawn_manager.spawned_handles)
             await self._mark_live_teammates(MemberStatus.PAUSED)
@@ -571,9 +571,9 @@ class CoordinationKernel:
         if memory_manager and self._lifecycle_state == "running":
             await memory_manager.extract_after_round()
         if self._lifecycle_state == "running":
-            from openjiuwen.agent_teams.memory.jiuwen import extract_jiuwen_team_round
+            from openjiuwen.agent_teams.memory.jiuwen import drain_jiuwen_team_memory
 
-            await extract_jiuwen_team_round(host)
+            await drain_jiuwen_team_memory(host)
         if host.role == TeamRole.LEADER:
             # Mirror of the pause path: mark every spawned teammate so the
             # persistence layer captures why the runtime went away. STOPPED

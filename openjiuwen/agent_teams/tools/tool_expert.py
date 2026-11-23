@@ -1044,6 +1044,8 @@ class SpawnExpertTool(_SpawnToolBase):
             permissions_override=inputs.get("permissions"),
             agent_template=expert_member_record(template),
         )
+        if result.ok and self.team.on_explicit_member_change is not None:
+            await self.team.notify_explicit_member_change(identity.member_name, added=True)
         if result.ok and snapshot is not None:
             self.team.mark_fork_on_spawn(identity.member_name, True, fork_source=source, snapshot=snapshot)
         return self._registered(result, template, identity.member_name, identity.display_name, role_type="teammate")

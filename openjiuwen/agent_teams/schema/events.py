@@ -8,6 +8,7 @@ Events are published via Messager.publish() with topic_id as event type
 and session_id as team_name for team isolation.
 """
 
+from dataclasses import dataclass
 from enum import Enum
 from typing import (
     Any,
@@ -369,9 +370,21 @@ class TaskStartedEvent(BaseEventMessage):
     )
 
 
+@dataclass(frozen=True)
+class TaskAcceptedEvent:
+    """Local delivery snapshot dispatched to the task author's subscribers."""
+
+    task_id: str
+    acceptance_version: str
+    content: str
+    summary: str
+    note: str
+
+
 class TaskCompletedEvent(BaseEventMessage):
     """Event published when a task is completed"""
     task_id: str = Field(..., description="Task unique identifier")
+    acceptance_version: str | None = None
 
 
 class TaskCancelledEvent(BaseEventMessage):
@@ -426,6 +439,7 @@ class TaskVerifiedEvent(BaseEventMessage):
     unblocks downstream tasks the same way a direct completion does.
     """
     task_id: str = Field(..., description="Task unique identifier")
+    acceptance_version: str | None = None
 
 
 class TaskRevisionRequestedEvent(BaseEventMessage):

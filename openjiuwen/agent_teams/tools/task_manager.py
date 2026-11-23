@@ -9,6 +9,7 @@ This module provides task management functionality for agent teams.
 import json
 import shutil
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -23,6 +24,7 @@ from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.paths import team_workspace_dir
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
+    TaskAcceptedEvent,
     TaskCancelledEvent,
     TaskClaimedEvent,
     TaskCompletedEvent,
@@ -160,6 +162,47 @@ class TeamTaskManager:
         self.team_plan_id = _safe_token(team_plan_id or get_session_id() or team_name, "team_plan")
         self.leader_member_name = str(leader_member_name or "").strip()
         self._dispatch_mode = dispatch_mode
+        self._acceptance_listener: Callable[[TaskAcceptedEvent], Awaitable[None]] | None = None
+        self._delivery_listener: Callable[[str, str], None] | None = None
+
+    def set_task_acceptance_listener(
+        self, listener: Callable[[TaskAcceptedEvent], Awaitable[None]],
+        *, on_delivery: Callable[[str, str], None] | None = None,
+    ) -> None:
+        self._acceptance_listener = listener
+        self._delivery_listener = on_delivery
+
+    @staticmethod
+    def _acceptance_version(task: TeamTaskBase) -> str:
+        return f"{task.revision}:{task.review_round}"
+
+    def _notify_task_delivered(self, task_id: str, version: str) -> None:
+        if self._delivery_listener is not None:
+            try:
+                self._delivery_listener(task_id, version)
+            except Exception as exc:
+                team_logger.warning("Task delivery listener failed: %s", type(exc).__name__)
+
+    async def _notify_task_accepted(self, task: TeamTaskBase) -> None:
+        listener = self._acceptance_listener
+        if listener is None or task.assignee != self.member_name:
+            return
+        try:
+            await listener(TaskAcceptedEvent(
+                task.task_id, self._acceptance_version(task), task.content or "",
+                task.summary or "", task.note or "",
+            ))
+        except Exception as exc:
+            team_logger.warning("Task acceptance listener failed: %s", type(exc).__name__)
+
+    async def notify_task_acceptance(self, task_id: str, version: str) -> None:
+        """Load authored delivery from its committed record when a peer accepts it."""
+        if self._acceptance_listener is None:
+            return
+        task = await self.db.task.get_task(task_id)
+        if task is not None and task.team_name == self.team_name and task.status == TaskStatus.COMPLETED.value:
+            if self._acceptance_version(task) == version:
+                await self._notify_task_accepted(task)
 
     @property
     def dispatch_mode(self) -> str:
@@ -755,11 +798,15 @@ class TeamTaskManager:
 
         team_logger.info(f"Task {task_id} completed")
 
+        self._notify_task_delivered(task_id, self._acceptance_version(completed_task))
+        await self._notify_task_accepted(completed_task)
+
         await self._publish_task_event(
             TaskCompletedEvent(
                 team_name=self.team_name,
                 task_id=task_id,
                 member_name=completed_task.assignee,
+                acceptance_version=self._acceptance_version(completed_task),
             ),
             error_label=f"Task completed event for {task_id}",
         )
@@ -798,12 +845,13 @@ class TeamTaskManager:
         framework to dispatch/notify.
         """
         submitted = await self.db.task.submit_for_review(task.task_id, summary=summary, note=note)
-        if not submitted:
+        if submitted is None:
             return TaskOpResult.fail(
                 f"Task {task.task_id} cannot be submitted for review from status "
                 f"'{task.status}' (must be in_progress)"
             )
         team_logger.info("Task %s submitted for review", task.task_id)
+        self._notify_task_delivered(task.task_id, self._acceptance_version(submitted))
         await self._publish_task_event(
             TaskSubmittedForReviewEvent(
                 team_name=self.team_name,
@@ -1088,11 +1136,13 @@ class TeamTaskManager:
         completed_task = result.get("task")
         unblocked_tasks = result.get("unblocked_tasks", [])
         team_logger.info("Task %s verified (passed) and completed", task.task_id)
+        await self._notify_task_accepted(completed_task)
         await self._publish_task_event(
             TaskVerifiedEvent(
                 team_name=self.team_name,
                 task_id=task.task_id,
                 member_name=completed_task.assignee,
+                acceptance_version=self._acceptance_version(completed_task),
             ),
             error_label=f"Task verified event for {task.task_id}",
         )
