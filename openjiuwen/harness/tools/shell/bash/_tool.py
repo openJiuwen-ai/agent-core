@@ -5,13 +5,17 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import (
     Any,
+    Mapping,
     AsyncIterator,
     Dict,
     Optional,
+    TYPE_CHECKING,
 )
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -41,6 +45,10 @@ from openjiuwen.harness.tools.filesystem import (
     _parse_rm_targets,
     _record_rm_targets_before_deletion,
 )
+
+if TYPE_CHECKING:
+    from openjiuwen.harness.security.permission_engine.fileguard.shell_paths import ShellPathAnalysis
+
 
 # Matches sudo not already followed by -n / -En / --non-interactive
 _SUDO_NEEDS_N_RE = re.compile(
@@ -145,6 +153,52 @@ class BashTool(Tool):
             shell_type=shell_type,
             description=inputs.get("description", ""),
         )
+
+    def analyze_local_paths(self, inputs: dict[str, Any]) -> ShellPathAnalysis | None:
+        """Extract local POSIX path evidence for a call with no environment overlay."""
+        if sys.platform not in {"linux", "darwin"}:
+            return None
+        from openjiuwen.core.sys_operation.local.shell_operation import ShellOperation
+
+        operation = self._operation.shell()
+        if type(operation) is not ShellOperation:
+            return None
+        command = inputs.get("command")
+        workdir = inputs.get("workdir")
+        shell_type = inputs.get("shell_type", "auto")
+        if (
+            not isinstance(command, str)
+            or not command.strip()
+            or not isinstance(workdir, str)
+            or not Path(workdir).is_absolute()
+            or shell_type not in ("auto", "sh")
+            or inputs.get("run_in_background")
+        ):
+            return None
+
+        return self._analyze_posix_context(
+            command, workdir, shell_type, operation._resolve_cwd(workdir), dict(os.environ),
+        )
+
+    @staticmethod
+    def _analyze_posix_context(
+        command: str, workdir: str, shell_type: str, cwd: Path, env: Mapping[str, str],
+    ) -> ShellPathAnalysis:
+        from openjiuwen.harness.security.permission_engine.fileguard.shell_paths import (
+            ShellPathAnalysis,
+            analyze_posix_shell_paths,
+        )
+
+        if (
+            any(env.get(key) for key in ("CDPATH", "ENV", "BASH_ENV", "SHELLOPTS", "BASHOPTS"))
+            or any(key.startswith("BASH_FUNC_") for key in env)
+            or _make_sudo_noninteractive(command.strip()) != command.strip()
+        ):
+            return ShellPathAnalysis(command, workdir, shell_type, cwd, "unsupported")
+        pwd = env.get("PWD")
+        if pwd and Path(pwd) != cwd and Path(pwd).resolve() == cwd:
+            return ShellPathAnalysis(command, workdir, shell_type, cwd, "unsupported")
+        return analyze_posix_shell_paths(command, workdir, shell_type, cwd)
 
     # ── invoke ────────────────────────────────────────────────
 

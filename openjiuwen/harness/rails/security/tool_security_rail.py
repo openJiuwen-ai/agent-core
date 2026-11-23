@@ -131,6 +131,11 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
         tool_name = tool_call.name or ""
         tool_args = self.parse_tool_args(tool_call)
+        from openjiuwen.harness.security.permission_engine.shell_path_context import current_shell_path_analysis
+
+        if current_shell_path_analysis(self._normalize_tool_name(tool_name), tool_args) is not None:
+            # The old command-only key cannot identify the analyzed cwd.
+            return ""
 
         if is_shell_tool(
             self._normalize_tool_name(tool_name),
@@ -366,6 +371,11 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         accesses = self._collect_file_guard_persist_accesses(
             normalized_name, tool_args, cfg
         )
+        from openjiuwen.harness.security.permission_engine.shell_path_context import current_shell_path_analysis
+
+        analysis = current_shell_path_analysis(normalized_name, tool_args)
+        if analysis is not None and analysis.blocks_remember(set(accesses)):
+            return False
         ok_ext = False
         if accesses:
             cfg, ok_ext = merge_file_guard_access_allows(cfg, accesses)

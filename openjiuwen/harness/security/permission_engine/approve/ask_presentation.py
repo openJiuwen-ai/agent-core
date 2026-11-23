@@ -336,9 +336,14 @@ def _shell_file_access_summary(
         extract_shell_path_accesses,
     )
 
+    from openjiuwen.harness.security.permission_engine.shell_path_context import current_shell_path_analysis
+
+    analysis = current_shell_path_analysis(tool_name, tool_args)
     try:
-        accesses = extract_shell_path_accesses(
-            cmd, _workdir(tool_args), include_cd_reads=False,
+        accesses = (
+            [(entry.path, entry.action) for entry in analysis.accesses if entry.kind == "file_io"]
+            if analysis is not None
+            else extract_shell_path_accesses(cmd, _workdir(tool_args), include_cd_reads=False)
         )
     except (OSError, RuntimeError, ValueError):
         return ""
