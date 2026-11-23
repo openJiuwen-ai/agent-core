@@ -56,6 +56,13 @@ _CASES = [
     ("tool_call_content_filter", [_call_done(), _incomplete("content_filter")], "content_filter"),
     ("incomplete_without_reason", [_text(), _incomplete(None)], "length"),
     ("incomplete_other_reason", [_text(), _incomplete("max_messages")], "length"),
+    # A gateway may end with response.completed but leave status "incomplete" in the payload.
+    (
+        "completed_event_with_incomplete_status",
+        [_call_done(), {**_incomplete("max_output_tokens"), "type": "response.completed"}],
+        "length",
+    ),
+    ("tool_call_without_done_event", [_added(), _arguments_delta(), _completed()], "tool_calls"),
 ]
 _CASE_IDS = [case_id for case_id, _, _ in _CASES]
 

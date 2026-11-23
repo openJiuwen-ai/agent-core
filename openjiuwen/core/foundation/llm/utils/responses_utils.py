@@ -754,7 +754,7 @@ def _terminal_stream_chunk(
     finish_reason = _finish_reason(
         response_payload if isinstance(response_payload, dict) else {},
         has_tool_calls=has_tool_calls,
-        incomplete=event_type == "response.incomplete",
+        incomplete=True if event_type == "response.incomplete" else None,
     )
     return AssistantMessageChunk(
         content="",
