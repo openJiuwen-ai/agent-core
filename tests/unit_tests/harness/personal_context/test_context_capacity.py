@@ -800,8 +800,16 @@ async def test_fast_empty_collection_defers_expensive_reclaim_and_keeps_progress
 
 @pytest.mark.asyncio
 async def test_usage_save_failure_keeps_completed_collection_and_cursor(tmp_path, monkeypatch):
-    from openjiuwen.harness.personal_context import PersonalContext, context_usage
+    from openjiuwen.harness.personal_context import PersonalContext, context_capacity, context_usage
     from tests.unit_tests.harness.personal_context.capacity_worker_helpers import ready_worker
+
+    run_maintenance = context_capacity.run_capacity_maintenance
+
+    async def run_with_fixed_budget(home, *, limit_bytes, timeout, cancelled):
+        # Isolate the usage-save regression from the duration of the tiny collection.
+        return await run_maintenance(home, limit_bytes=limit_bytes, timeout=2.0, cancelled=cancelled)
+
+    monkeypatch.setattr(context_capacity, "run_capacity_maintenance", run_with_fixed_budget)
 
     home = tmp_path / "home"
     source = tmp_path / "source"
@@ -827,12 +835,7 @@ async def test_usage_save_failure_keeps_completed_collection_and_cursor(tmp_path
         await core._manual_fetch_tasks["notes"]
         record = (await core.get_fetch_run_status("notes"))["runs"][0]
         assert record["run_state"] == "succeeded" and record["created_node_count"] > 0
-        # Capacity is optional after collect. A deferred time_budget skip must
-        # not roll back published pages or the cursor (this test breaks saves).
-        cap = record["capacity_maintenance"]
-        assert cap["status"] == "succeeded" or (
-            cap["status"] == "failed" and cap.get("reason") == "time_budget"
-        )
+        assert record["capacity_maintenance"]["status"] == "succeeded"
         assert core._read_cursor("notes") is not None
         assert any("Accounting failure" in page.read_text(encoding="utf-8")
                    for page in (home / "workspace/context").rglob("*.md"))
