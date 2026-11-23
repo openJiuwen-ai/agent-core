@@ -172,6 +172,8 @@ pause/resume。`checkpoint.py` 使用 JSON 信封和现有 VCS context codec 保
 NativeHarness 装配绑定成员 BuildContext 的 `resolve_execution_environment`，由 AbilityManager
 在每次工具调用开始时解析。team 会话设置由 `TeamDatabase.session_settings` 保存版本，
 平台可按调用读取，因此冷恢复和跨进程成员不依赖首轮请求上下文。见 `F_20261104_1721_session-execution-settings`。
+三方 harness 成员没有 AbilityManager：同一 resolver 由 `AgentConfigurator` 绑定到
+`ExternalHarnessMemberRuntime`，每次 provider `start` 时并入 `HarnessContext.env`（S_27 不变量 20）。
 
 ## Team 记忆释放
 
