@@ -42,7 +42,6 @@ from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.state import (
     INTERRUPTION_KEY,
-    can_retarget_stale_permission_answer,
     match_answers,
     pending_interrupts,
 )
@@ -522,14 +521,10 @@ class TeamHarness:
         session = self._interrupt_session()
         if session is None:
             return False
-        # Any answer to something no longer pending makes the input stale,
-        # except one permission card whose interrupt id was replaced and is
-        # the only permission interrupt still waiting.
+        # Every answer must address a pending request, including a lone permission.
         pending = pending_interrupts(session.get_state(INTERRUPTION_KEY))
         matched = match_answers(user_input, pending)
-        if bool(matched.answers) and not matched.unmatched:
-            return True
-        return can_retarget_stale_permission_answer(user_input, pending)
+        return bool(matched.answers) and not matched.unmatched
 
     def _interrupt_session(self) -> Optional[Any]:
         if self._native is None:

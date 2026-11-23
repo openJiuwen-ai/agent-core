@@ -17,9 +17,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.single_agent.interrupt.state import (
     INTERRUPTION_KEY,
-    PendingInterrupt,
     pending_interrupts,
-    retarget_stale_permission_answer,
 )
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -45,11 +43,11 @@ async def deliver(manager, entry, answer):
 
 
 @pytest.mark.asyncio
-async def test_empty_pending_interrupt_is_unavailable(tmp_path, monkeypatch):
+async def test_readable_empty_pending_rejects_an_unmatched_answer(tmp_path, monkeypatch):
     async with runtime(tmp_path, monkeypatch) as run:
         run.native.loop_session.update_state({INTERRUPTION_KEY: None})
         result = await run.agent.resume_interrupt(approval_answer("call-a", True))
-        assert not result.ok and result.reason == "interrupt_resume_unavailable"
+        assert not result.ok and result.reason == "unsupported_interactive_input"
         assert run.edit.calls == 0
 
 
@@ -100,7 +98,7 @@ async def test_busy_answer_never_enters_fifo_or_query(tmp_path, monkeypatch, hoo
         monkeypatch.setattr(react, hook, original)
         if duplicate:
             stale = await run.agent.resume_interrupt(approval_answer("call-a", True))
-            assert not stale.ok and stale.reason == "interrupt_resume_unavailable"
+            assert not stale.ok and stale.reason == "unsupported_interactive_input"
         else:
             assert [item.tool_call_id for item in pending_interrupts(
                 run.native.loop_session.get_state(INTERRUPTION_KEY)
@@ -498,14 +496,14 @@ async def test_cleared_sibling_interrupt_is_retried_until_the_owner_round_settle
         return DeliverResult.success()
 
     def owns(payload):
-        return seen["n"] >= 1 and payload is answer
+        return seen["n"] >= 2 and payload is answer
 
     def in_flight():
-        seen["n"] += 1
         return seen["n"] == 1
 
     leader = NS(
-        resume_interrupt=AsyncMock(return_value=DeliverResult.failure("interrupt_resume_unavailable")),
+        resume_interrupt=AsyncMock(return_value=DeliverResult.failure("unsupported_interactive_input")),
+        has_pending_interrupt=lambda: False,
         has_in_flight_round=lambda: False,
         spawn_manager=NS(spawned_handles={
             "mate": NS(agent_ref=NS(
@@ -517,6 +515,7 @@ async def test_cleared_sibling_interrupt_is_retried_until_the_owner_round_settle
     )
 
     async def attempt():
+        seen["n"] += 1
         return await runtime_manager._resume_interactive_input(leader, answer, None)
 
     result = await runtime_manager._resume_interactive_input_when_ready(leader, attempt)
@@ -524,22 +523,7 @@ async def test_cleared_sibling_interrupt_is_retried_until_the_owner_round_settle
 
 
 @pytest.mark.asyncio
-async def test_stale_permission_answer_follows_the_only_remaining_interrupt():
-    answer = InteractiveInput()
-    answer.answer("intr-old", {"approved": True, "feedback": "", "auto_confirm": True})
-    pending = [PendingInterrupt("intr-new", "call-a", "permission")]
-    assert retarget_stale_permission_answer(answer, pending)
-    assert answer.interrupt_answers == {
-        "intr-new": {"approved": True, "feedback": "", "auto_confirm": True},
-    }
-    two = [PendingInterrupt("intr-a", "call-a", "permission"), PendingInterrupt("intr-b", "call-b", "permission")]
-    other = InteractiveInput()
-    other.answer("intr-old", {"approved": True})
-    assert not retarget_stale_permission_answer(other, two)
-
-
-@pytest.mark.asyncio
-async def test_sibling_card_cleared_by_in_flight_round_is_already_resolved(monkeypatch):
+async def test_wait_budget_does_not_prove_a_cleared_card_was_resolved(monkeypatch):
     from openjiuwen.agent_teams.runtime import manager as runtime_manager
 
     monkeypatch.setattr(runtime_manager, "_INTERRUPT_RESUME_UNOWNED_WAIT_SECONDS", 0)
@@ -561,12 +545,12 @@ async def test_sibling_card_cleared_by_in_flight_round_is_already_resolved(monke
         return await runtime_manager._resume_interactive_input(leader, answer, None)
 
     result = await runtime_manager._resume_interactive_input_when_ready(leader, attempt)
-    assert not result.ok and result.reason == "interrupt_already_resolved"
+    assert not result.ok and result.reason == "interrupt_resume_unavailable"
     leader.spawn_manager.spawned_handles["mate"].agent_ref.resume_interrupt.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_sibling_card_is_resolved_only_after_the_owner_round_goes_idle(monkeypatch):
+async def test_round_becoming_idle_does_not_prove_an_answer_was_consumed(monkeypatch):
     from openjiuwen.agent_teams.runtime import manager as runtime_manager
 
     monkeypatch.setattr(runtime_manager, "_INTERRUPT_RESUME_RETRY_DELAY_SECONDS", 0)
@@ -593,8 +577,9 @@ async def test_sibling_card_is_resolved_only_after_the_owner_round_goes_idle(mon
         return await runtime_manager._resume_interactive_input(leader, answer, None)
 
     result = await runtime_manager._resume_interactive_input_when_ready(leader, attempt)
-    assert not result.ok and result.reason == "interrupt_already_resolved"
-    assert seen["n"] == 2
+    assert not result.ok and result.reason == "interrupt_resume_unavailable"
+    assert leader.resume_interrupt.await_count == 2
+    leader.spawn_manager.spawned_handles["mate"].agent_ref.resume_interrupt.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -648,6 +633,7 @@ async def test_confirmed_mismatch_is_not_retried_while_another_member_works(monk
     answer = approval_answer("expired", True)
     leader = NS(
         resume_interrupt=AsyncMock(return_value=DeliverResult.failure("unsupported_interactive_input")),
+        has_pending_interrupt=lambda: True,
         has_in_flight_round=lambda: False,
         spawn_manager=NS(spawned_handles={
             "mate": NS(agent_ref=NS(
