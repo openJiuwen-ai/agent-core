@@ -236,3 +236,28 @@ async def test_abort_closes_steps_before_committing_the_cleanup(monkeypatch):
     commits = [i for i, e in enumerate(recorder.events) if e == "commit"]
     assert ends and commits
     assert ends[0] < commits[0]
+
+
+@pytest.mark.asyncio
+async def test_card_less_session_with_persistence_checkpointer_still_invokes(monkeypatch):
+    """Sessions without an agent card have no agent id; the loop must still run."""
+    from openjiuwen.core.session.agent import create_agent_session as make_session
+    from openjiuwen.core.session.checkpointer import CheckpointerFactory
+    from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointer
+    from tests.unit_tests.core.session.checkpointer.test_persistence_storage import MockKVStore
+
+    cp = PersistenceCheckpointer(MockKVStore())
+    original = CheckpointerFactory._default_checkpointer
+    CheckpointerFactory.set_default_checkpointer(cp)
+    try:
+        llm = MockLLMModel()
+        llm.set_responses([create_text_response("ok")])
+        agent = make_step_agent("step-nocard")
+        session = make_session(session_id="sess-nocard")
+        monkeypatch.setattr(agent, "_get_llm", lambda: llm)
+
+        result = await agent.invoke({"query": "hi"}, session=session)
+
+        assert result["result_type"] == "answer"
+    finally:
+        CheckpointerFactory.set_default_checkpointer(original)

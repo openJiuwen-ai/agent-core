@@ -90,7 +90,10 @@ class AgentStepStorage:
         Raises:
             Exception: Whatever the KV store raised; the step is not recorded.
         """
-        sid, aid = self._ids(session)
+        ids = self._ids(session)
+        if ids is None:
+            return
+        sid, aid = ids
         track = self._tracks.setdefault((sid, aid), _StepTrack())
         snapshot = build_step_snapshot(session.state().get_state())
         base = track.baseline if track.baseline is not None else {"context": {}, "state": {}}
@@ -132,7 +135,10 @@ class AgentStepStorage:
         the store at all. Any other process replays keys in order and truncates
         from the first record that fails to deserialize.
         """
-        sid, aid = self._ids(session)
+        ids = self._ids(session)
+        if ids is None:
+            return
+        sid, aid = ids
         track = self._tracks.get((sid, aid))
         if track is not None and track.baseline is not None:
             session.state().set_state(restore_full_state(track.baseline))
@@ -221,7 +227,10 @@ class AgentStepStorage:
 
     def begin(self, session: BaseSession) -> StepResume | None:
         """Take the pending resume point (once) and mark the agent active."""
-        track = self._tracks.setdefault(self._ids(session), _StepTrack())
+        ids = self._ids(session)
+        if ids is None:
+            return None
+        track = self._tracks.setdefault(ids, _StepTrack())
         resume = track.resume
         track.resume = None
         track.status = "active"
@@ -229,7 +238,10 @@ class AgentStepStorage:
 
     def peek_resume(self, session: BaseSession) -> StepResume | None:
         """Read the pending resume point without consuming it."""
-        track = self._tracks.get(self._ids(session))
+        ids = self._ids(session)
+        if ids is None:
+            return None
+        track = self._tracks.get(ids)
         return track.resume if track is not None else None
 
     async def end(self, session: BaseSession, *, interrupted: bool) -> None:
@@ -241,7 +253,10 @@ class AgentStepStorage:
         does not accumulate junk. The status is set in ``finally`` so it stays
         correct even when the append fails.
         """
-        sid, aid = self._ids(session)
+        ids = self._ids(session)
+        if ids is None:
+            return
+        sid, aid = ids
         track = self._tracks.setdefault((sid, aid), _StepTrack())
         try:
             if interrupted:
@@ -261,18 +276,35 @@ class AgentStepStorage:
             )
 
     def status(self, session: BaseSession) -> StepStatus | None:
-        track = self._tracks.get(self._ids(session))
+        ids = self._ids(session)
+        if ids is None:
+            return None
+        track = self._tracks.get(ids)
         return track.status if track is not None else None
 
     def has_records(self, session: BaseSession) -> bool:
-        track = self._tracks.get(self._ids(session))
+        ids = self._ids(session)
+        if ids is None:
+            return False
+        track = self._tracks.get(ids)
         return track is not None and track.baseline is not None
 
     # --- internals ---
 
     @staticmethod
-    def _ids(session: BaseSession) -> tuple[str, str]:
-        return session.session_id(), session.agent_id()
+    def _ids(session: BaseSession) -> tuple[str, str] | None:
+        """Return ``(session_id, agent_id)``, or None when there is no agent id.
+
+        Standalone agent sessions may be built without a card; they have no
+        agent id to key records by, so step storage is a no-op for them.
+        """
+        try:
+            agent_id = session.agent_id()
+        except Exception:
+            return None
+        if not agent_id:
+            return None
+        return session.session_id(), agent_id
 
     @staticmethod
     def _prefix(session_id: str, agent_id: str) -> str:
