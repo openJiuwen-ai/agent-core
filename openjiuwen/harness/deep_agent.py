@@ -4577,6 +4577,60 @@ class DeepAgent(BaseAgent):
                 get_agent_runtime().unbind(sid, self)
                 raise
 
+    async def aclose(self) -> None:
+        """Extend :meth:`BaseAgent.aclose` to session-scoped tasks, the wrapped
+        react agent and subagents.
+
+        Rails register on both this agent's callback manager and the inner
+        ``_react_agent``'s one, so both namespaces must be cleared; cached
+        subagent controls for every parent session are cancelled as well.
+        Session-scoped asyncio tasks must be stopped too — the eviction path
+        that only cleared callbacks/tools left per-session consumers pending
+        forever (issue#5240 residual).
+
+        Order matters for permanent teardown (``NativeHarness.dispose`` and
+        session eviction): ``stop()`` / controller ``stop()`` run first so a
+        still-live supervisor or round cannot observe tools/callbacks already
+        yanked from the process-global registries. ``BaseAgent.aclose`` then
+        drops this instance's callback namespace and owner-scoped tools;
+        ``_react_agent.aclose`` clears the bridged rail namespace. ``stop()`` is
+        idempotent, so hosts that already stopped before calling ``aclose``
+        are fine.
+        """
+        try:
+            await self.stop()
+        except Exception as exc:  # noqa: BLE001 - 释放路径不抛出
+            logger.warning("[DeepAgent] aclose: stop loops failed: %s", exc)
+        controllers = []
+        for owner in (self, self._react_agent):
+            ctl = getattr(owner, "_loop_controller", None) or getattr(owner, "_controller", None)
+            if ctl is not None and ctl not in controllers:
+                controllers.append(ctl)
+        for ctl in controllers:
+            try:
+                await ctl.stop()
+            except Exception as exc:  # noqa: BLE001 - 释放路径不抛出
+                logger.warning("[DeepAgent] aclose: controller stop failed: %s", exc)
+        await super().aclose()
+        react_agent = self._react_agent
+        if react_agent is not None and react_agent is not self:
+            try:
+                await react_agent.aclose()
+            except Exception as exc:  # noqa: BLE001 - 释放路径不抛出
+                logger.warning(
+                    "[DeepAgent] aclose: react agent close failed: %s", exc
+                )
+        try:
+            from openjiuwen.harness.tools.subagent._control_registry import (
+                release_all_subagent_controls,
+            )
+
+            await release_all_subagent_controls(self, reason="agent_closed")
+        except Exception as exc:  # noqa: BLE001 - 释放路径不抛出
+            logger.warning(
+                "[DeepAgent] aclose: subagent control release failed: %s", exc
+            )
+
     async def stop(self) -> None:
         """Serialize teardown with start and terminate this interaction runtime."""
         async with self._interaction_start_lock:
