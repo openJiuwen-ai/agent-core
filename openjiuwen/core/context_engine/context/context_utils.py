@@ -165,6 +165,8 @@ MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {
     "grok-4.3": 1000000,
     "grok-4.3-latest": 1000000,
     "grok-latest": 500000,
+    "openpangu-2.0-pro": 512000,
+    "openpangu-2.0-flash": 512000,
     "openpangu-2.1-pro": 512000,
 }
 
