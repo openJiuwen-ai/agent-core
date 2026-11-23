@@ -260,7 +260,7 @@ class BrowserMoveStdioClient(StdioClient):
         self._leaked_owner_task = leaked_owner_task
         self._is_disconnected = True
 
-    async def list_tools(self, *, timeout: float = NO_TIMEOUT) -> List[Any]:
+    async def list_tools(self, *, timeout: float = NO_TIMEOUT) -> list[McpToolCard]:
         """List available tools via Stdio, with auto-reconnect and timeout."""
         if not self._session:
             connected = await self._reconnect(timeout=timeout)
@@ -392,7 +392,9 @@ class BrowserMoveStdioClient(StdioClient):
                     f"Stdio tool call failed for '{tool_name}': {type(e).__name__}: {e!r}"
                 ) from e
 
-    async def get_tool_info(self, tool_name: str, *, timeout: float = NO_TIMEOUT) -> Optional[Any]:
+    async def get_tool_info(
+        self, tool_name: str, *, timeout: float = NO_TIMEOUT
+    ) -> McpToolCard | None:
         """Get specific tool info via Stdio."""
         tools = await self.list_tools(timeout=timeout)
         for tool in tools:

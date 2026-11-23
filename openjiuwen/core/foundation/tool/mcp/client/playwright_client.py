@@ -78,7 +78,7 @@ class PlaywrightClient(McpClient):
             self._read = None
             self._write = None
 
-    async def list_tools(self, *, timeout: float = NO_TIMEOUT) -> List[Any]:
+    async def list_tools(self, *, timeout: float = NO_TIMEOUT) -> List[McpToolCard]:
         """List available browser tools"""
         if not self._session:
             raise RuntimeError("Not connected to Playwright server")
@@ -119,7 +119,7 @@ class PlaywrightClient(McpClient):
             logger.error(f"Browser tool call failed: {e}")
             raise
 
-    async def get_tool_info(self, tool_name: str, *, timeout: float = NO_TIMEOUT) -> Optional[Any]:
+    async def get_tool_info(self, tool_name: str, *, timeout: float = NO_TIMEOUT) -> Optional[McpToolCard]:
         """Get specific browser tool info"""
         tools = await self.list_tools(timeout=timeout)
         for tool in tools:

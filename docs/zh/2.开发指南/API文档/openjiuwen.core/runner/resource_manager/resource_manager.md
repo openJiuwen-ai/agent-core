@@ -991,6 +991,40 @@ async get_mcp_tool_infos(self,
 >>> tool_infos = await Runner.resource_mgr.get_mcp_tool_infos(server_id="mcp1")
 ```
 
+### get_mcp_tool_schema
+
+```python
+async get_mcp_tool_schema(self,
+                              name: str,
+                              server_id: str,
+                              *,
+                              timeout: float = NO_TIMEOUT
+                              ) -> Optional[dict[str, Any]]
+```
+
+从自持 MCP client 实时获取单个工具的原始输入 JSON Schema，供本地 `@tool` 包装或校验逻辑复用 `enum`、`required` 等约束，无需手抄 docstring。
+
+**参数：**
+
+* **name**(str)：MCP 工具名称。
+* **server_id**(str)：已注册的 MCP server ID。必须明确指定，避免不同 server 的同名工具产生歧义。
+* **timeout**(float，可选)：查询超时时间，沿用 MCP client 的 `NO_TIMEOUT` 约定。
+
+**返回：**
+
+**Optional[dict[str, Any]]**：server 声明的输入 JSON Schema。工具不存在时返回 `None`；工具存在但 schema 为空时返回 `{}`。server 未注册时抛出 MCP 工具查询异常。该方法实时查询 client；`get_mcp_tool_infos()` 返回的是注册缓存中的工具信息。
+
+**样例：**
+
+```python
+>>> schema = await Runner.resource_mgr.get_mcp_tool_schema(
+...     name="create_fluid",
+...     server_id="thermo-server-01",
+...     timeout=10.0,
+... )
+>>> enum_values = schema["properties"]["method"]["enum"]
+```
+
 ### get_resource_by_tag
 
 ```python

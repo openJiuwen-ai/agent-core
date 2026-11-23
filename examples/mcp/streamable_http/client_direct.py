@@ -55,6 +55,13 @@ async def main() -> None:
         logger.info(f"Tool info for 'add_note': {tool_info.name} — {tool_info.description}")
         logger.info("")
 
+    # Reuse the server-declared schema (including enum/required constraints)
+    # when wrapping the remote tool locally instead of copying its docstring.
+    tool_schema = await client.get_tool_schema("add_note")
+    if tool_schema is not None:
+        logger.info(f"Input JSON Schema for 'add_note': {tool_schema}")
+        logger.info("")
+
     # --- Call tools ---
     logger.info("Calling tools:")
 

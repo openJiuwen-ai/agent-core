@@ -991,6 +991,40 @@ Get MCP tool information/metadata by name and server.
 >>> tool_infos = await Runner.resource_mgr.get_mcp_tool_infos(server_id="mcp1")
 ```
 
+### get_mcp_tool_schema
+
+```python
+async get_mcp_tool_schema(self,
+                              name: str,
+                              server_id: str,
+                              *,
+                              timeout: float = NO_TIMEOUT
+                              ) -> Optional[dict[str, Any]]
+```
+
+Fetch one tool's original input JSON Schema from a self-hosted MCP client. Local `@tool` wrappers and validation code can reuse server-declared constraints such as `enum` and `required` instead of duplicating them in a docstring.
+
+**Parameters:**
+
+* **name**(str): MCP tool name.
+* **server_id**(str): Registered MCP server ID. This is required to avoid ambiguity when different servers expose the same tool name.
+* **timeout**(float, optional): Query timeout using the MCP client's `NO_TIMEOUT` convention.
+
+**Returns:**
+
+**Optional[dict[str, Any]]**: The server-declared input JSON Schema. Returns `None` if the tool does not exist, and `{}` for an existing tool with an empty schema. Raises the MCP tool lookup error if the server is not registered. This method queries the live client; `get_mcp_tool_infos()` returns the registered tool metadata cache.
+
+**Example:**
+
+```python
+>>> schema = await Runner.resource_mgr.get_mcp_tool_schema(
+...     name="create_fluid",
+...     server_id="thermo-server-01",
+...     timeout=10.0,
+... )
+>>> enum_values = schema["properties"]["method"]["enum"]
+```
+
 ### get_resource_by_tag
 
 ```python

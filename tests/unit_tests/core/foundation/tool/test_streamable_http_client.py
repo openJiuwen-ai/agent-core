@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import WorkflowError
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
 from openjiuwen.core.foundation.tool.auth.auth import ToolAuthResult
 from openjiuwen.core.foundation.tool.auth.auth_callback import AuthHeaderAndQueryProvider
@@ -184,6 +186,45 @@ class TestStreamableHttpClient(unittest.IsolatedAsyncioTestCase):
             disconnected = await client.disconnect()
             self.assertTrue(disconnected)
 
+    async def test_get_tool_schema_preserves_server_constraints(self):
+        server_schema = {
+            "type": "object",
+            "properties": {
+                "method": {"type": "string", "enum": ["PENG-ROB", "IDEAL"]},
+                "temperature": {"type": "number", "minimum": 100},
+            },
+            "required": ["method"],
+        }
+        client = StreamableHttpClient("http://127.0.0.1:8930/mcp", "thermo-server")
+
+        class FakeClientSession:
+            def __init__(self):
+                self.calls = []
+
+            async def list_tools(self):
+                self.calls.append("list_tools")
+                return SimpleNamespace(tools=[
+                    SimpleNamespace(
+                        name="create_fluid",
+                        description="Create fluid",
+                        inputSchema=server_schema,
+                    ),
+                    SimpleNamespace(name="ping", description="Ping", inputSchema={}),
+                ])
+
+        fake_session = FakeClientSession()
+        client._session = fake_session
+        schema = await client.get_tool_schema("create_fluid", timeout=3.0)
+        empty_schema = await client.get_tool_schema("ping")
+        missing_schema = await client.get_tool_schema("missing")
+
+        self.assertEqual(schema, server_schema)
+        self.assertEqual(schema["properties"]["method"]["enum"], ["PENG-ROB", "IDEAL"])
+        self.assertEqual(schema["required"], ["method"])
+        self.assertEqual(empty_schema, {})
+        self.assertIsNone(missing_schema)
+        self.assertEqual(fake_session.calls, ["list_tools"] * 3)
+
     async def test_connect_returns_false_on_error(self):
         def fake_streamablehttp_client(*args, **kwargs):
             raise RuntimeError("connection failed")
@@ -293,6 +334,16 @@ class TestStreamableHttpResourceManagerIntegration(unittest.IsolatedAsyncioTestC
             self.assertEqual(len(tool_infos), 2)
             self.assertSetEqual({item.name for item in tool_infos}, {"browser_navigate", "browser_extract_text"})
 
+            server_id = mcp_server_config.server_id
+            schema = await self.resource_mgr.get_mcp_tool_schema("browser_navigate", server_id)
+            self.assertEqual(schema, mock_tools[0].input_params)
+            self.assertEqual(schema["required"], ["url"])
+            self.assertIsNone(await self.resource_mgr.get_mcp_tool_schema("missing", server_id))
+
+            with self.assertRaises(WorkflowError) as error:
+                await self.resource_mgr.get_mcp_tool_schema("browser_navigate", "unregistered-server")
+            self.assertEqual(error.exception.code, StatusCode.RESOURCE_MCP_TOOL_GET_ERROR.code)
+
             tools = await self.resource_mgr.get_mcp_tool(name="browser_navigate", server_name="streamable-server")
             self.assertEqual(len(tools), 1)
             self.assertIsNotNone(tools[0])
@@ -307,6 +358,40 @@ class TestStreamableHttpResourceManagerIntegration(unittest.IsolatedAsyncioTestC
 
             remaining_infos = await self.resource_mgr.get_mcp_tool_infos(server_name="streamable-server")
             self.assertEqual(remaining_infos, [])
+
+    async def test_mcp_tool_schema_uses_server_id_to_disambiguate(self):
+        def make_schema(server_id):
+            return {
+                "type": "object",
+                "properties": {"mode": {"enum": [server_id]}},
+                "required": ["mode"],
+            }
+
+        configs = [
+            McpServerConfig(
+                server_id=server_id,
+                server_name="shared-server",
+                server_path="http://127.0.0.1:8930/mcp",
+                client_type="streamable-http",
+            )
+            for server_id in ("server-a", "server-b")
+        ]
+
+        for config in configs:
+            card = McpToolCard(
+                name="shared_tool",
+                server_name=config.server_name,
+                input_params=make_schema(config.server_id),
+            )
+            with (
+                patch.object(self.client_class, "connect", AsyncMock(return_value=True)),
+                patch.object(self.client_class, "disconnect", AsyncMock(return_value=True)),
+                patch.object(self.client_class, "list_tools", AsyncMock(return_value=[card])),
+            ):
+                add_result = await self.resource_mgr.add_mcp_server(config)
+                self.assertTrue(add_result.is_ok())
+                schema = await self.resource_mgr.get_mcp_tool_schema("shared_tool", config.server_id)
+                self.assertEqual(schema["properties"]["mode"]["enum"], [config.server_id])
 
     async def test_mcp_tool_drops_missing_optional_arguments(self):
         mock_tools = [
