@@ -27,7 +27,7 @@ from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, iter_spans
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, RunKind
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.harness.prompts.sections import SectionName
@@ -54,6 +54,7 @@ from openjiuwen.agent_evolving.ttse.dream import load_dream_state
 from openjiuwen.agent_evolving.ttse.taxonomy.classify import parse_assignments
 from openjiuwen.agent_evolving.ttse.recall.consult import (
     CONSULT_ALL_CATEGORY,
+    TTSE_CONSULT_TOOL_NAME,
     consult_arg_errors,
     parse_consult_categories,
     parse_consult_category,
@@ -1884,6 +1885,92 @@ async def test_disk_catalog_attachment_uses_context_session_id(tmp_path):
     await rail.before_model_call(ctx)
     attached = await manager.collect_for_session("from-context")
     assert attached and attached[0].section == "ttse_catalog"
+
+
+def _model_call_ctx(manager, builder, *, extra=None, run_kind=None):
+    return SimpleNamespace(
+        session=SimpleNamespace(session_id="sess-bg"),
+        agent=SimpleNamespace(prompt_attachment_manager=manager),
+        inputs=SimpleNamespace(
+            system_prompt_builder=builder,
+            query="remind me",
+            messages=[],
+            run_kind=run_kind,
+            tools=[SimpleNamespace(name=TTSE_CONSULT_TOOL_NAME), SimpleNamespace(name="read_file")],
+        ),
+        extra=extra or {},
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "extra, run_kind",
+    [
+        ({"run_kind": RunKind.CRON}, None),
+        ({"run_kind": "heartbeat"}, None),
+        ({}, RunKind.CRON),
+    ],
+)
+async def test_background_run_withholds_consult_guidance_catalog_and_tool(tmp_path, extra, run_kind):
+    rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"), cfg=_disk_catalog_cfg(tmp_path))
+    manager = PromptAttachmentManager()
+    builder = SystemPromptBuilder()
+    await rail.before_model_call(_model_call_ctx(manager, builder))
+    assert builder.get_section(SectionName.TTSE_FACTS_TIPS) is not None
+    assert await manager.collect_for_session("sess-bg")
+
+    ctx = _model_call_ctx(manager, builder, extra=extra, run_kind=run_kind)
+    await rail.before_model_call(ctx)
+
+    assert builder.get_section(SectionName.TTSE_FACTS_TIPS) is None
+    assert [tool.name for tool in ctx.inputs.tools] == ["read_file"]
+    assert await manager.collect_for_session("sess-bg") == []
+
+
+@pytest.mark.asyncio
+async def test_background_withhold_restores_shared_state_for_next_normal_call(tmp_path):
+    rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"), cfg=_disk_catalog_cfg(tmp_path))
+    manager = PromptAttachmentManager()
+    builder = SystemPromptBuilder()
+
+    bg_ctx = _model_call_ctx(manager, builder, extra={"run_kind": RunKind.CRON})
+    await rail.before_model_call(bg_ctx)
+    assert builder.get_section(SectionName.TTSE_FACTS_TIPS) is None
+    assert await manager.collect_for_session("sess-bg") == []
+
+    await rail.after_model_call(bg_ctx)
+    # Shared builder and session attachment are back to the pre-invoke baseline
+    # even for build paths that never run before_model_call.
+    assert builder.get_section(SectionName.TTSE_FACTS_TIPS) is not None
+    assert await manager.collect_for_session("sess-bg")
+
+    normal_ctx = _model_call_ctx(manager, builder)
+    await rail.before_model_call(normal_ctx)
+    assert builder.get_section(SectionName.TTSE_FACTS_TIPS) is not None
+    assert await manager.collect_for_session("sess-bg")
+    assert [tool.name for tool in normal_ctx.inputs.tools] == [TTSE_CONSULT_TOOL_NAME, "read_file"]
+
+
+@pytest.mark.asyncio
+async def test_background_restore_keeps_guidance_off_when_inject_disabled(tmp_path):
+    cfg = _disk_catalog_cfg(tmp_path)
+    cfg.inject_enabled = False
+    rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"), cfg=cfg)
+    manager = PromptAttachmentManager()
+    builder = SystemPromptBuilder()
+    bg_ctx = _model_call_ctx(manager, builder, extra={"run_kind": RunKind.CRON})
+    await rail.before_model_call(bg_ctx)
+    await rail.after_model_call(bg_ctx)
+    assert builder.get_section(SectionName.TTSE_FACTS_TIPS) is None
+    assert await manager.collect_for_session("sess-bg") == []
+
+
+@pytest.mark.asyncio
+async def test_normal_run_keeps_consult_tool(tmp_path):
+    rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"), cfg=_disk_catalog_cfg(tmp_path))
+    ctx = _model_call_ctx(PromptAttachmentManager(), SystemPromptBuilder(), extra={"run_kind": ""})
+    await rail.before_model_call(ctx)
+    assert [tool.name for tool in ctx.inputs.tools] == [TTSE_CONSULT_TOOL_NAME, "read_file"]
 
 
 def test_trajectory_adapter_reads_openai_tool_args_and_keeps_tail():
