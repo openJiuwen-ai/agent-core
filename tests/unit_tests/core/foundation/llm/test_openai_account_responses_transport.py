@@ -211,7 +211,8 @@ def test_iter_sse_events_and_stream_parser():
     assert chunks[1].tool_calls[0].id == "call_1"
     assert chunks[1].finish_reason == "tool_calls"
     assert chunks[2].usage_metadata.total_tokens == 5
-    assert chunks[2].finish_reason == "stop"
+    # The response contained a function call, so it ends with "tool_calls" as in Chat mode.
+    assert chunks[2].finish_reason == "tool_calls"
 
 
 def test_stream_parser_raises_on_error_event():
