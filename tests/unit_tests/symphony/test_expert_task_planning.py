@@ -324,6 +324,34 @@ async def test_expert_task_plan_derives_ports_for_expert_without_published_ports
 
 
 @pytest.mark.asyncio
+async def test_expert_task_plan_preserves_evidence_and_final_acceptance(tmp_path, monkeypatch):
+    evidence = _port("measurements", "csv")
+    collect = _task("collect", outputs=[evidence])
+    collect["task"] = "Record measurements with their source locations and test conditions."
+    deliver = _task("deliver")
+    deliver["task"] = (
+        "Use measurements to write the summary. Preserve source locations and test conditions "
+        "beside the claims. Before delivery, check the final summary against measurements."
+    )
+    service, model = _service(tmp_path, {
+        "tasks": [collect, deliver],
+        "handoffs": [_handoff("collect", "deliver", "measurements", "measurements")],
+    }, monkeypatch)
+
+    result = await service.plan_subagent_graph("Summarize the measurements and make each claim traceable.")
+    graph = result["planned_graph"]["graph"]
+
+    assert graph["nodes"]["task-1"]["metadata"]["task"] == collect["task"]
+    assert graph["nodes"]["task-2"]["metadata"]["task"] == deliver["task"]
+    assert graph["nodes"]["task-2"]["metadata"]["inputs"] == [evidence]
+    prompt = model.planning_prompts[0]
+    assert "checked independently" in prompt
+    assert "small or tightly coupled work" in prompt
+    assert "what must survive integration" in prompt
+    assert "final version" in prompt
+
+
+@pytest.mark.asyncio
 async def test_expert_task_plan_recovers_legacy_node_ids_in_input_ports(tmp_path, monkeypatch):
     platform_outputs = {
         "xhs-final": "xhs_final", "wechat-final": "wechat_final", "bilibili-final": "bilibili_final",
