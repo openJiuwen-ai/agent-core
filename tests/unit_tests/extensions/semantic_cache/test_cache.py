@@ -610,6 +610,37 @@ class TestSemanticResponseCache(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("secret-response-abc", rendered)
         self.assertEqual(cache.stats.backend_errors, 2)
 
+    async def test_backend_exception_message_is_not_logged_in_warning(self):
+        cache = SemanticResponseCache(self.backend, enabled=True, timeout=0.5)
+        prompt_canary = "secret-prompt-canary-987"
+        answer_canary = "secret-answer-canary-654"
+        detail_canary = "canary-error-detail-321"
+        self.backend.lookup.side_effect = RuntimeError(f"embed 400 echoing {prompt_canary} {detail_canary}")
+        self.backend.store.side_effect = RuntimeError(f"redis rejected {answer_canary} {detail_canary}")
+        with patch("openjiuwen.extensions.semantic_cache.cache.llm_logger") as mock_logger:
+            res = await cache.invoke(
+                prompt_canary,
+                scope=SCOPE,
+                generate=AsyncMock(return_value=GeneratedAnswer(answer_canary, reusable=True)),
+                can_reuse=self.validate,
+                eligible=True,
+            )
+        self.assertFalse(res.cache_hit)
+        self.assertEqual(res.text, answer_canary)
+        self.assertEqual(mock_logger.warning.call_count, 2)
+        for op, call in zip(("lookup", "store"), mock_logger.warning.call_args_list, strict=True):
+            rendered = call.args[0] % call.args[1:]
+            self.assertIn(op, rendered)
+            self.assertIn("RuntimeError", rendered)
+            self.assertIn(SCOPE.key[:12], rendered)
+            self.assertNotIn(prompt_canary, rendered)
+            self.assertNotIn(answer_canary, rendered)
+            self.assertNotIn(detail_canary, rendered)
+            self.assertNotIn("embed 400", rendered)
+            self.assertNotIn("redis rejected", rendered)
+        self.assertEqual(cache.stats.backend_errors, 1)
+        self.assertEqual(cache.stats.store_errors, 1)
+
     async def test_coalesce_skips_queued_lookups_and_keeps_in_flight_until_store_finishes(self):
         gen_entered = asyncio.Event()
         release_gen = asyncio.Event()

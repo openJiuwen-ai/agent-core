@@ -232,7 +232,7 @@ class SemanticResponseCache:
 
     def _record_backend_error(self, op: str, scope_key: str, exc: Exception, *, is_probe: bool = False) -> None:
         """Log backend error without user content and open the breaker at threshold."""
-        llm_logger.warning("Semantic cache %s failed (scope=%s): %s: %s", op, scope_key[:12], type(exc).__name__, exc)
+        llm_logger.warning("Semantic cache %s failed (scope=%s): %s", op, scope_key[:12], type(exc).__name__)
         if self._circuit_breaker_threshold is None:
             return
         self._consecutive_backend_errors += 1
