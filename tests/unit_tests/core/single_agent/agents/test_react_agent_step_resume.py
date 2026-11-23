@@ -261,3 +261,28 @@ async def test_card_less_session_with_persistence_checkpointer_still_invokes(mon
         assert result["result_type"] == "answer"
     finally:
         CheckpointerFactory.set_default_checkpointer(original)
+
+
+@pytest.mark.asyncio
+async def test_card_less_session_stream_does_not_crash(monkeypatch):
+    """The stream path calls pre_run/commit; a card-less session must survive it."""
+    from openjiuwen.core.session.agent import create_agent_session as make_session
+    from openjiuwen.core.session.checkpointer import CheckpointerFactory
+    from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointer
+    from tests.unit_tests.core.session.checkpointer.test_persistence_storage import MockKVStore
+
+    cp = PersistenceCheckpointer(MockKVStore())
+    original = CheckpointerFactory._default_checkpointer
+    CheckpointerFactory.set_default_checkpointer(cp)
+    try:
+        llm = MockLLMModel()
+        llm.set_responses([create_text_response("ok")])
+        agent = make_step_agent("step-nocard-stream")
+        session = make_session(session_id="sess-nocard-stream")
+        monkeypatch.setattr(agent, "_get_llm", lambda: llm)
+
+        chunks = [chunk async for chunk in agent.stream({"query": "hi"}, session=session)]
+
+        assert chunks
+    finally:
+        CheckpointerFactory.set_default_checkpointer(original)

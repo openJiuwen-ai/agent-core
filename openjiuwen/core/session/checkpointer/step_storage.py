@@ -18,7 +18,7 @@ from typing import Any, Literal
 
 from openjiuwen.core.common.logging import LogEventType, session_logger
 from openjiuwen.core.graph.store import create_serializer
-from openjiuwen.core.session.checkpointer.base import build_key_with_namespace
+from openjiuwen.core.session.checkpointer.base import build_key_with_namespace, safe_agent_id
 from openjiuwen.core.session.checkpointer.step_delta import (
     STEP_WINDOW_KEY,  # noqa: F401  (re-exported for callers building snapshots)
     StepKind,
@@ -298,11 +298,8 @@ class AgentStepStorage:
         Standalone agent sessions may be built without a card; they have no
         agent id to key records by, so step storage is a no-op for them.
         """
-        try:
-            agent_id = session.agent_id()
-        except Exception:
-            return None
-        if not agent_id:
+        agent_id = safe_agent_id(session)
+        if agent_id is None:
             return None
         return session.session_id(), agent_id
 

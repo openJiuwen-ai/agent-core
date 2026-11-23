@@ -335,3 +335,17 @@ async def test_session_exists_does_not_match_like_wildcards(tmp_path):
         assert await cp.session_exists("axb") is True
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_card_less_session_lifecycle_is_a_noop():
+    """The checkpointer must not require an agent card on its lifecycle hooks."""
+    kv = MockKVStore()
+    cp = PersistenceCheckpointer(kv)
+    session = AgentSession(session_id="s-nocard", config=Config())
+
+    await cp.pre_agent_execute(session, None)
+    await cp.interrupt_agent_execute(session)
+    await cp.post_agent_execute(session)
+
+    assert kv._store == {}
