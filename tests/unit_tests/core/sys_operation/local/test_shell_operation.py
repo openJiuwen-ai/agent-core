@@ -656,3 +656,160 @@ def test_windows_auto_multiline_without_bash_falls_back_to_cmd(monkeypatch):
 
     assert resolved_shell == "cmd"
     assert use_shell is True
+
+
+# ── Windows AUTO shell syntax signals ─────────────────────────
+
+
+def _install_windows_bash(monkeypatch, shell_operation):
+    exe = r"C:\Program Files\Git\bin\bash.exe"
+    monkeypatch.setattr(shell_operation.os, "name", "nt", raising=False)
+    monkeypatch.setattr(shell_operation, "_available_bash", lambda *, allow_wsl=True: exe)
+    return exe
+
+
+def test_windows_auto_routes_printf_pipeline_to_git_bash(monkeypatch):
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    exe = _install_windows_bash(monkeypatch, shell_operation)
+    command = "printf '%s' '{}' | node runner.mjs --request -"
+
+    args, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert resolved_shell == "bash"
+    assert use_shell is False
+    assert args[0] == exe
+
+
+def test_windows_auto_routes_env_prefix_to_git_bash(monkeypatch):
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    _install_windows_bash(monkeypatch, shell_operation)
+    command = 'cd "E:/work" && PYTHONIOENCODING=utf-8 python make.py'
+
+    args, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert resolved_shell == "bash"
+    assert use_shell is False
+
+
+def test_windows_auto_routes_msys_drive_path_to_git_bash(monkeypatch):
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    _install_windows_bash(monkeypatch, shell_operation)
+    command = "cd /e/code/project && python run.py"
+
+    args, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert resolved_shell == "bash"
+    assert use_shell is False
+
+
+def test_windows_auto_routes_cmd_null_redirect_to_cmd(monkeypatch):
+    """cmd-only syntax must win over POSIX command names and avoid the bash nul guard."""
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    _install_windows_bash(monkeypatch, shell_operation)
+    command = 'mkdir "input" 2>nul & dir /b'
+
+    args, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert resolved_shell == "cmd"
+    assert use_shell is True
+    assert args == command
+
+
+def test_windows_auto_ignores_quoted_null_redirect(monkeypatch):
+    """A quoted '>nul' is data, not a redirect: grep must stay on Git Bash."""
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    _install_windows_bash(monkeypatch, shell_operation)
+    command = "grep -rn '>nul' src/"
+
+    args, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert resolved_shell == "bash"
+    assert use_shell is False
+
+
+def test_windows_auto_mixed_posix_with_null_redirect_raises_actionable_error(monkeypatch):
+    """`ls -la 2>nul` has no knowable intent: surface the /dev/null hint, don't switch to cmd."""
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    _install_windows_bash(monkeypatch, shell_operation)
+    command = "ls -la 2>nul"
+
+    with pytest.raises(Exception) as exc_info:
+        ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert "nul" in str(exc_info.value)
+    assert "/dev/null" in str(exc_info.value)
+
+
+def test_windows_auto_routes_cmd_set_env_to_cmd(monkeypatch):
+    """cmd's `set NAME=value` must not be mistaken for a POSIX VAR=value prefix."""
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    _install_windows_bash(monkeypatch, shell_operation)
+    command = "set PYTHONIOENCODING=utf-8 && python make.py"
+
+    args, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert resolved_shell == "cmd"
+    assert use_shell is True
+
+
+def test_windows_auto_routes_cmd_set_a_to_cmd(monkeypatch):
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    _install_windows_bash(monkeypatch, shell_operation)
+    command = "set /a x=1+2"
+
+    args, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert resolved_shell == "cmd"
+    assert use_shell is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'ls -la > "log-$(date +%Y%m%d).txt"',
+        "ls -la > url-%E4%B8%AD.txt",
+    ],
+)
+def test_windows_auto_percent_text_is_not_cmd_variable(monkeypatch, command):
+    """date formats and URL escapes use adjacent '%', not %VAR% expansion."""
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    _install_windows_bash(monkeypatch, shell_operation)
+
+    args, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert resolved_shell == "bash"
+    assert use_shell is False
+
+
+def test_windows_auto_routes_cmd_percent_variable_to_cmd(monkeypatch):
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    _install_windows_bash(monkeypatch, shell_operation)
+    command = "echo %PATH%"
+
+    args, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert resolved_shell == "cmd"
+    assert use_shell is True
+
+
+def test_windows_auto_ignores_quoted_dir_operand(monkeypatch):
+    """A literal `dir` operand plus an absolute path must not look like `dir /b`."""
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    _install_windows_bash(monkeypatch, shell_operation)
+    command = "cp -r dir /backup"
+
+    args, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert resolved_shell == "bash"
+    assert use_shell is False

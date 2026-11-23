@@ -133,13 +133,23 @@ def _start_background_pipe_discard(process: asyncio.subprocess.Process) -> None:
 _POSIX_COMMANDS = frozenset({
     "ls", "grep", "egrep", "fgrep", "cat", "head", "tail", "find", "rm",
     "cp", "mv", "touch", "chmod", "chown", "sed", "awk", "gawk", "cut",
-    "sort", "uniq", "wc", "du", "df", "pwd", "which", "mkdir",
+    "sort", "uniq", "wc", "du", "df", "pwd", "which", "mkdir", "printf",
 })
 _QUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?P<quote>['\"])(?P<path>[A-Za-z]:\\[^'\"]+)(?P=quote)")
 _UNQUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?<![\w/])(?P<path>[A-Za-z]:\\[^\s|&;]+)")
-# Unix-style absolute paths (/some/path). Requires ≥1 non-separator char after '/' so bare '/'
-# and short escape sequences (/n, /t …) are excluded.
-_UNIX_ABS_PATH_PATTERN = re.compile(r"(?:^|[\s\"'(=,])(/[a-zA-Z0-9_.][^\s\"'|&;()*?]*)")
+
+# POSIX-only syntax: cmd / PowerShell 5 have no equivalent, so a match must run
+# under a POSIX shell; otherwise the command fails with a misleading
+# "not recognized" error inside the wrong shell.
+_POSIX_SYNTAX_PATTERNS = (
+    re.compile(r"(^|[\s;&|(])[A-Za-z_][A-Za-z0-9_]*="),  # VAR=value prefix
+    re.compile(r"<<-?\s*['\"]?[A-Za-z_]"),                # heredoc
+    re.compile(r"/dev/null\b"),
+    re.compile(r"\$\("),                                   # command substitution
+    re.compile(r"(^|\s)/[A-Za-z]/"),                       # MSYS drive path /e/code/...
+    re.compile(r"(^|[\s;&|])export\s+[A-Za-z_]"),
+)
+
 # cmd-style redirects to the Windows null device, e.g. ">nul", "2>nul", ">>nul",
 # "&>nul", "1>nul" (case-insensitive, optional spaces). The trailing negative
 # lookahead requires `nul` to be a complete shell token, so filename continuations
@@ -154,6 +164,29 @@ _UNIX_ABS_PATH_PATTERN = re.compile(r"(?:^|[\s\"'(=,])(/[a-zA-Z0-9_.][^\s\"'|&;(
 # restricts the match to a complete shell token so `nul.txt`/`nul/foo`/`nul-foo`
 # (filename continuations, not the bare null device) are not flagged.
 _NUL_REDIRECT_PATTERN = re.compile(r"(?i)([12&]?>>?)(\s*)\bnul\b(?![\w./\\-])")
+
+# cmd-only syntax that POSIX shells cannot express at all. `mkdir`/`ls` exist in
+# cmd too, but `dir /b`, `%VAR%`, `if exist` and `set NAME=value` only work there.
+# These are unambiguous, so they may win over POSIX command names; the ambiguous
+# `>nul` redirect is handled separately (see _resolve_execution_plan) because it
+# also appears in genuine POSIX commands as a user mistake.
+#
+# `%VAR%` needs boundary guards: without them `date +%Y%m%d`, URL escapes such as
+# `%E4%B8%AD` and adjacent printf formats would look like cmd variable expansion.
+# `dir /b` is anchored to the start of a command so an operand named `dir` in
+# `cp -r dir /backup` does not look like a flag.
+# `set NAME=value` must be claimed for cmd before the POSIX `VAR=value` prefix
+# rule, which would otherwise match the ` NAME=` tail and route `set` to Git Bash,
+# where it silently rebinds positional parameters instead of exporting env vars.
+_CMD_NON_NULL_PATTERNS = (
+    re.compile(r"(?<![%+\w])%[A-Za-z_][A-Za-z0-9_]*%(?![\w%])"),
+    re.compile(r"(^|[;&|\n])\s*dir\s+/[A-Za-z]", re.IGNORECASE),
+    re.compile(r"(^|[\s;&|])if\s+exist\b", re.IGNORECASE),
+    re.compile(r"(^|[\s;&|])set(\s+/[a-z])?\s+[A-Za-z_][A-Za-z0-9_]*=", re.IGNORECASE),
+)
+# Unix-style absolute paths (/some/path). Requires ≥1 non-separator char after '/' so bare '/'
+# and short escape sequences (/n, /t …) are excluded.
+_UNIX_ABS_PATH_PATTERN = re.compile(r"(?:^|[\s\"'(=,])(/[a-zA-Z0-9_.][^\s\"'|&;()*?]*)")
 
 
 def _track_shell_process(proc: asyncio.subprocess.Process) -> str | None:
@@ -263,6 +296,30 @@ def _strip_matching_quotes(value: str) -> str:
     return stripped
 
 
+def _strip_quoted_text(command: str) -> str:
+    """Blank out quoted segments so literals are not read as shell syntax.
+
+    Syntax detection must ignore text a user is merely passing through, e.g.
+    ``grep -rn '>nul' src/`` or ``cp -r "dir /backup" x``. Quoted runs are
+    replaced with spaces rather than removed so token boundaries stay intact
+    for the anchored patterns.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    for char in command or "":
+        if quote is None:
+            if char in {'"', "'"}:
+                quote = char
+                out.append(" ")
+                continue
+            out.append(char)
+            continue
+        if char == quote:
+            quote = None
+        out.append(" ")
+    return "".join(out)
+
+
 def _unwrap_powershell_command(command: str) -> str | None:
     """Extract the script from an explicit powershell -Command wrapper.
 
@@ -326,6 +383,25 @@ def _segment_base_command(segment: str) -> str:
 
 def _looks_like_posix(command: str) -> bool:
     return any(_segment_base_command(segment) in _POSIX_COMMANDS for segment in _split_shell_segments(command or ""))
+
+
+def _has_posix_syntax(command: str) -> bool:
+    """True when the command uses POSIX-only syntax (no cmd/PowerShell 5 equivalent)."""
+    return any(pattern.search(command or "") for pattern in _POSIX_SYNTAX_PATTERNS)
+
+
+def _has_unambiguous_cmd_syntax(command: str) -> bool:
+    """True for cmd-only signals with no POSIX reading (%VAR%, dir /x, if exist, set NAME=value).
+
+    Quoted literals are ignored first: ``grep -rn '>nul' src/`` passes ``>nul``
+    as data, not as a redirect, so it must stay on the POSIX path.
+    """
+    unquoted = _strip_quoted_text(command)
+    return any(pattern.search(unquoted) for pattern in _CMD_NON_NULL_PATTERNS)
+
+
+def _has_unquoted_null_redirect(command: str) -> bool:
+    return _NUL_REDIRECT_PATTERN.search(_strip_quoted_text(command)) is not None
 
 
 def _contains_multiline_payload(command: str) -> bool:
@@ -442,11 +518,29 @@ class ShellOperation(BaseShellOperation):
                     exe = _available_powershell()
                     command = ShellOperation._inject_ps_utf8(command)
                     return [exe, "-NoProfile", "-NonInteractive", "-Command", command], False, "powershell"
-                if _looks_like_posix(command) or _contains_multiline_payload(command):
+                # Unambiguous cmd syntax (dir /x, %VAR%, if exist, set NAME=value)
+                # wins over POSIX command names: mkdir/ls exist in both shells, but
+                # these constructs only work in cmd.
+                if _has_unambiguous_cmd_syntax(command):
+                    return command, True, "cmd"
+                # `>nul` is ambiguous: it is cmd-only, but also shows up in genuine
+                # POSIX commands as a user mistake. Pair it with a POSIX command and
+                # the intent is unknowable, so surface the actionable error instead
+                # of silently switching shells and failing with "'ls' is not
+                # recognized" — that was the pre-existing contract for this case.
+                uses_posix = (
+                    _looks_like_posix(command)
+                    or _has_posix_syntax(command)
+                    or _contains_multiline_payload(command)
+                )
+                if uses_posix:
+                    if _has_unquoted_null_redirect(command):
+                        _reject_cmd_null_redirect_for_bash(command)
                     exe = _available_bash(allow_wsl=False)
                     if exe:
-                        _reject_cmd_null_redirect_for_bash(command)
                         return [exe, "-lc", _normalize_windows_paths_for_bash(command)], False, "bash"
+                # Pure cmd intent: either a bare `>nul` with no POSIX reading, or
+                # nothing recognisable at all.
                 return command, True, "cmd"
             if shell_type == ShellType.POWERSHELL:
                 exe = _available_powershell()
