@@ -399,6 +399,9 @@ async def test_before_model_rail_can_interrupt_finalization(rig):
     ctx = AgentCallbackContext(agent=agent, context=context, session=session)
     with patch.object(agent, "_get_llm", return_value=model):
         result = await agent._finish_max_iterations(ctx, context, session)
+    # FEAT-127: this direct call returns the rail's dict untouched; the reason is
+    # injected by invoke's result path (its value is asserted by the feature's
+    # force-finish-during-finalization case in test_termination_reason.py).
     assert result == expected
     model.invoke.assert_not_awaited()
 
@@ -447,6 +450,7 @@ async def test_last_iteration_rail_finish_takes_precedence_over_exhaustion(rig, 
     )
     with patch.object(agent, "_get_llm", return_value=model):
         result = await agent.invoke({"query": "find"}, session=session)
-    assert result == expected
+    assert {k: v for k, v in result.items() if k != "termination_reason"} == expected
+    assert result["termination_reason"] == "force_finish"
     model.invoke.assert_awaited_once()
     agent.context_engine.save_contexts.assert_awaited_once()

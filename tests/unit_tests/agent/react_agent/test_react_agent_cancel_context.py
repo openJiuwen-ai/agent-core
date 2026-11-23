@@ -269,6 +269,9 @@ async def test_stream_abort_error_propagates_without_error_result(owned_session)
             pass
 
     assert exc_info.value is abort
+    # FEAT-127 FR-04 / J-05: only a model-class framework error adds a terminal
+    # frame; a non-model BaseError keeps today's frame-less stream and still
+    # propagates unchanged.
     agent._write_invoke_result_to_stream.assert_not_awaited()
     agent.context_engine.save_contexts.assert_awaited_once_with(session)
     context.set_messages.assert_called_once()
