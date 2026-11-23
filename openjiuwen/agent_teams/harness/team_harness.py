@@ -161,6 +161,8 @@ class TeamHarness:
         by the child session.
         """
         if self._native is None or self._native.state is HarnessState.TERMINATED:
+            if self._native is not None:
+                await self._native.close_team_memory()
             self._native = NativeHarness(self._agent_spec, self._build_context)
             self._remount_dynamic_tools()
         if self._goal is not None:
@@ -220,6 +222,8 @@ class TeamHarness:
             The invoke result dict (same shape as ``Runner.run_agent``).
         """
         if self._native is None or self._native.state is HarnessState.TERMINATED:
+            if self._native is not None:
+                await self._native.close_team_memory()
             self._native = NativeHarness(self._agent_spec, self._build_context)
             self._remount_dynamic_tools()
             # Unlike ``start`` (:meth:`start` re-pushes ``_bg_controller`` onto
