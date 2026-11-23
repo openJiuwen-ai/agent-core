@@ -435,7 +435,7 @@ class OpenAIModelClient(BaseModelClient):
             model_client_config.client_provider, "OpenAI-compatible",
         )
         self._responses_request_fallback = RequestParameterFallback(
-            model_client_config.client_provider, "OpenAI Responses",
+            model_client_config.client_provider, "OpenAI Responses", retry_without_stop=True,
         )
 
     def _use_shared_client(self) -> bool:

@@ -36,6 +36,22 @@ _DISABLED_THINKING_VALUE_MARKERS = (
     "关闭",
 )
 _UNSUPPORTED_PARAMETER_CODES = {"unknown_parameter", "unrecognized_parameter", "unsupported_parameter"}
+_UNSUPPORTED_PARAMETER_MARKERS = (
+    "unknown parameter",
+    "unrecognized parameter",
+    "unsupported",
+    "not support",
+    "does not support",
+    "doesn't support",
+    "not allowed",
+    "not permitted",
+    "不支持",
+    "不允许",
+    "未知参数",
+    "无法识别",
+)
+_STOP_FIELD = re.compile(r"(?<![a-z0-9_])stop(?![a-z0-9_])")
+_MAX_STOP_CACHE_ENTRIES = 128
 _MAX_TEMPERATURE_CACHE_ENTRIES = 128
 _TEMPERATURE_FIELD = re.compile(r"\btemperature\b")
 _UNSUPPORTED_TEMPERATURE = re.compile(
@@ -53,15 +69,26 @@ _DEFAULT_TEMPERATURE_ONLY = re.compile(
 
 
 class RequestParameterFallback:
-    """Remember provider parameter rejections for one client and API."""
+    """Remember provider parameter rejections for one client and API.
 
-    def __init__(self, provider: str, api_label: str) -> None:
+    Temperature and disabled-thinking recovery only run inside
+    ``disabled_thinking_fallback_scope``. With ``retry_without_stop``, a refused
+    ``stop`` is also retried without it on every request: some Responses endpoints
+    (OpenAI) reject the field while others (e.g. Qwen and DeepSeek via OpenRouter)
+    honour it, so it is sent as configured and dropped only after a refusal.
+    """
+
+    def __init__(self, provider: str, api_label: str, *, retry_without_stop: bool = False) -> None:
         self._provider = provider
         self._api_label = api_label
+        self._retry_without_stop = retry_without_stop
         self._models_rejecting_disabled_thinking: set[str] = set()
+        self._models_rejecting_stop: OrderedDict[str, None] = OrderedDict()
         self._rejected_temperatures: OrderedDict[tuple[str, str], None] = OrderedDict()
 
     def apply_cached(self, params: dict[str, Any]) -> dict[str, Any]:
+        if self._retry_without_stop and "stop" in params and self._model_key(params) in self._models_rejecting_stop:
+            params = self._without_stop(params)
         if not is_disabled_thinking_fallback_allowed():
             return params
         model_key = self._model_key(params)
@@ -78,18 +105,26 @@ class RequestParameterFallback:
         *,
         is_stream: bool,
     ) -> Any:
-        if not is_disabled_thinking_fallback_allowed():
+        scoped = is_disabled_thinking_fallback_allowed()
+        if not scoped and not self._retry_without_stop:
             return await create(**params)
 
         request_params = self.apply_cached(params)
         model_key = self._model_key(request_params)
         rejected_temperature = None
+        rejected_stop = False
         # Each recovery removes the fields it matches, so it can run only once.
         while True:
             try:
                 result = await create(**request_params)
             except Exception as exc:
-                if self._rejects_temperature(exc):
+                if self._retry_without_stop and "stop" in request_params and self._rejects_stop(exc):
+                    request_params = self._without_stop(request_params)
+                    rejected_stop = True
+                    rejected_option = "stop"
+                elif not scoped:
+                    raise exc
+                elif self._rejects_temperature(exc):
                     if self._exception_status_code(exc) != 400 or not self._has_temperature(request_params):
                         raise exc
                     rejected_temperature = self._temperature_cache_key(request_params)
@@ -110,11 +145,53 @@ class RequestParameterFallback:
                     is_stream=is_stream,
                 )
             else:
+                if rejected_stop and model_key:
+                    self._models_rejecting_stop[model_key] = None
+                    if len(self._models_rejecting_stop) > _MAX_STOP_CACHE_ENTRIES:
+                        self._models_rejecting_stop.popitem(last=False)
                 if rejected_temperature is not None:
                     self._rejected_temperatures[rejected_temperature] = None
                     if len(self._rejected_temperatures) > _MAX_TEMPERATURE_CACHE_ENTRIES:
                         self._rejected_temperatures.popitem(last=False)
                 return result
+
+    @staticmethod
+    def _without_stop(params: Mapping[str, Any]) -> dict[str, Any]:
+        cleaned = dict(params)
+        cleaned.pop("stop", None)
+        return cleaned
+
+    @classmethod
+    def _rejects_stop(cls, exc: BaseException) -> bool:
+        """Return whether ``exc`` says the endpoint does not accept the ``stop`` field at all.
+
+        A structured error that names ``stop`` in ``param`` counts only with an
+        unknown/unsupported-parameter ``code`` or refusal wording, because value and
+        type errors set ``param`` too. Otherwise the error text must name ``stop`` and
+        use refusal wording. Value errors such as "Invalid type for 'stop'" and errors
+        about other fields are raised as before.
+        """
+        status_code = cls._exception_status_code(exc)
+        if status_code is None or not 400 <= status_code < 500 or status_code in _DISABLED_THINKING_NON_RETRY_STATUSES:
+            return False
+
+        body = cls._exception_attr(exc, "body")
+        error = body.get("error", body) if isinstance(body, Mapping) else None
+        details = error if isinstance(error, Mapping) else {}
+        field = str(details.get("param") or "").strip().lower()
+        if field:
+            if field != "stop":
+                return False
+            code = str(details.get("code") or "").lower()
+            message = str(details.get("message") or "").lower()
+            return code in _UNSUPPORTED_PARAMETER_CODES or any(
+                marker in message for marker in _UNSUPPORTED_PARAMETER_MARKERS
+            )
+
+        # The whole error is searched, so errors that a gateway wraps (e.g. OpenRouter's
+        # error.metadata.raw) are found too.
+        text = cls._exception_text(exc).lower()
+        return any(marker in text for marker in _UNSUPPORTED_PARAMETER_MARKERS) and bool(_STOP_FIELD.search(text))
 
     @staticmethod
     def _has_temperature(params: Mapping[str, Any]) -> bool:
