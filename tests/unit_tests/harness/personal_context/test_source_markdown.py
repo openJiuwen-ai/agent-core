@@ -19,6 +19,21 @@ def normalize(markdown: str) -> str:
     return module.normalize_source_links(markdown)
 
 
+@pytest.mark.parametrize("prose", ["word " * 2000, "word " * 1000 + "` unmatched "])
+def test_long_prose_rewrite_preserves_literal_code(prose: str) -> None:
+    module = importlib.import_module("openjiuwen.harness.personal_context.source_markdown")
+    markdown = prose + "\n\n`word` and ``word ` sample`` word\n\n```md\nword\n```\n\n    word\n"
+    expected = prose.replace("word", "changed") + (
+        "\n\n`word` and ``word ` sample`` changed\n\n```md\nword\n```\n\n    word\n"
+    )
+    # An unclosed tick can pair with a later code span; test it separately from
+    # the literal blocks so this expectation follows Markdown's existing rules.
+    if "`" in prose:
+        markdown = prose
+        expected = prose.replace("word", "changed")
+    assert module.rewrite_markdown_prose(markdown, lambda text: text.replace("word", "changed")) == expected
+
+
 @pytest.mark.parametrize(
     "target",
     [

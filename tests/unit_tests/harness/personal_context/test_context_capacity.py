@@ -6,11 +6,12 @@ import json
 import os
 import shutil
 import threading
+import time
 
 import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.harness.personal_context import context_graph
+from openjiuwen.harness.personal_context import context_graph, context_pipeline
 from openjiuwen.harness.personal_context.config import PersonalContextConfig
 from openjiuwen.harness.personal_context.context_capacity import maintain_capacity
 from openjiuwen.harness.personal_context.context_usage import (
@@ -31,6 +32,14 @@ def _page(home, relative, text, stamp=100):
     path.write_text(text, encoding="utf-8")
     os.utime(path, (stamp, stamp))
     return path
+
+
+def _commit_without_process_scheduling(manifest, *, deadline, cancelled):
+    """Test deletion semantics with real writes, independent of child scheduling."""
+    from openjiuwen.harness.personal_context._capacity_commit import commit
+
+    assert not cancelled()
+    return commit(json.loads(manifest.read_text(encoding="utf-8")), seconds=max(0, deadline - time.monotonic()))
 
 
 @pytest.mark.parametrize("value", [9, 10001, 50.5, "50", True, None])
@@ -423,7 +432,7 @@ def test_oversized_removal_still_reclaims_to_sixty_percent(tmp_path):
     old = _page(tmp_path, "old.md", "# Old\n" + "a" * 4000, 100)
     recent = _page(tmp_path, "recent.md", "# Recent\n" + "b" * 4500, 200)
     huge = _page(tmp_path, "huge.md", "# Huge\n" + "c" * 12000, 300)
-    result = maintain_capacity(tmp_path, limit_bytes=10_000)
+    result = maintain_capacity(tmp_path, limit_bytes=10_000, commit_candidate=_commit_without_process_scheduling)
     assert result["removed_count"] == 2 and result["oversized_count"] == 1
     assert result["after_bytes"] <= 6000
     assert recent.exists() and not old.exists() and not huge.exists()
@@ -502,10 +511,14 @@ def test_ledger_damage_recovers_but_disk_read_error_skips_only_current_deletion(
             with pytest.raises(OSError):
                 maintain_capacity(tmp_path, limit_bytes=1000)
         else:
-            assert maintain_capacity(tmp_path, limit_bytes=1000)["removed_count"] == 1
+            assert maintain_capacity(
+                tmp_path, limit_bytes=1000, commit_candidate=_commit_without_process_scheduling,
+            )["removed_count"] == 1
     if failure == "read":
         assert page.exists() and ledger.read_text(encoding="utf-8") == invalid
-        assert maintain_capacity(tmp_path, limit_bytes=1000)["removed_count"] == 1
+        assert maintain_capacity(
+            tmp_path, limit_bytes=1000, commit_candidate=_commit_without_process_scheduling,
+        )["removed_count"] == 1
     records = _load_usage(tmp_path)["pages"]
     assert records["topic/page.md"]["present"] is False
     assert not (tmp_path / "context_usage.suspended").exists()
@@ -548,14 +561,15 @@ async def test_capacity_preparation_allows_reads_and_preserves_newly_used_candid
     _page(tmp_path, "b.md", "# B\n" + "b" * 2000, 200)
     preparing = threading.Event()
     proceed = threading.Event()
-    original_copy = context_capacity._copy_tree
+    original_prepare = context_capacity._prepare_capacity_candidate
 
-    def copy(source, destination):
-        original_copy(source, destination)
+    def prepare(*args):
+        prepared = original_prepare(*args)
         preparing.set()
         assert proceed.wait(5)
+        return prepared
 
-    monkeypatch.setattr(context_capacity, "_copy_tree", copy)
+    monkeypatch.setattr(context_capacity, "_prepare_capacity_candidate", prepare)
     worker = asyncio.create_task(asyncio.to_thread(maintain_capacity, tmp_path, limit_bytes=8000))
     try:
         assert await asyncio.to_thread(preparing.wait, 5)
@@ -578,22 +592,22 @@ def test_capacity_batch_repairs_navigation_once_and_reports_actual_size(tmp_path
         _page(tmp_path, f"page-{number}.md", f"# Page {number}\n" + "x" * 4000, 100 + number)
     render_calls = []
     size_calls = []
-    original_render = context_capacity._render_context_navigation
+    original_prepare = context_capacity._prepare_capacity_candidate
     original_sizes = context_capacity._markdown_sizes
 
-    def render(root):
-        render_calls.append(root)
-        return original_render(root)
+    def prepare(*args):
+        render_calls.append(args[0])
+        return original_prepare(*args)
 
     def sizes(root):
         size_calls.append(root)
         return original_sizes(root)
 
-    monkeypatch.setattr(context_capacity, "_render_context_navigation", render)
+    monkeypatch.setattr(context_capacity, "_prepare_capacity_candidate", prepare)
     monkeypatch.setattr(context_capacity, "_markdown_sizes", sizes)
     result = maintain_capacity(tmp_path, limit_bytes=125_000)
     assert result["removed_count"] > 1
-    assert len(render_calls) == 1 and len(size_calls) == 3
+    assert len(render_calls) == 1 and len(size_calls) == 1
     assert result["after_bytes"] == sum(original_sizes(tmp_path / "workspace/context").values())
     assert not hasattr(context_capacity, "_single_page_size")
 
@@ -606,7 +620,7 @@ def test_capacity_recreates_missing_navigation_while_preserving_retained_body(tm
     hot = _page(tmp_path, "hot/keep.md", "# Keep\n" + "b" * 5000, 200)
     root = tmp_path / "workspace/context"
     (root / missing).unlink()
-    result = maintain_capacity(tmp_path, limit_bytes=10_000)
+    result = maintain_capacity(tmp_path, limit_bytes=10_000, commit_candidate=_commit_without_process_scheduling)
     assert result["status"] == "succeeded" and result["removed_count"] == 1
     assert not old.exists() and hot.read_text(encoding="utf-8") == "# Keep\n" + "b" * 5000
     assert (root / missing).is_file()
@@ -614,18 +628,94 @@ def test_capacity_recreates_missing_navigation_while_preserving_retained_body(tm
     _validate_description_coverage(root)
 
 
+def test_sparse_capacity_candidate_changes_only_navigation_and_backlinks(tmp_path):
+    from openjiuwen.harness.personal_context import context_capacity
+
+    old = _page(tmp_path, "cold/old.md", "# Old\n" + "a" * 7000, 100)
+    keep = _page(tmp_path, "hot/keep.md", "# Keep\n" + "b" * 4000 +
+                 "\n[Old](../cold/old.md?query=1#anchor) [Topic](../cold/description.md)\n"
+                 "`[Example](../cold/old.md)`\n", 200)
+    untouched = _page(tmp_path, "hot/untouched.md", "# Untouched\nkeep exactly\n", 300)
+    untouched_before = untouched.read_bytes()
+    read_with_usage(tmp_path, "hot/keep.md", allowed=lambda: True)
+    record_before = dict(_load_usage(tmp_path)["pages"]["hot/keep.md"])
+    inspected = []
+
+    def inspect_and_commit(manifest, **kwargs):
+        plan = json.loads(manifest.read_text(encoding="utf-8"))
+        from pathlib import Path
+        candidate = Path(plan["candidate"])
+        assert not (candidate / "hot/untouched.md").exists()
+        assert not (candidate / "cold/old.md").exists()
+        assert (candidate / "hot/keep.md").exists()
+        assert set(plan["remove"]) == {"cold/old.md", "cold/description.md"}
+        inspected.append(True)
+        return _commit_without_process_scheduling(manifest, **kwargs)
+
+    result = maintain_capacity(tmp_path, limit_bytes=10_000, commit_candidate=inspect_and_commit)
+    assert inspected and result["removed_count"] == 1 and result["after_bytes"] <= 6000
+    assert not old.exists() and untouched.read_bytes() == untouched_before
+    assert "[Topic]" not in keep.read_text(encoding="utf-8")
+    assert "[Old]" not in keep.read_text(encoding="utf-8")
+    assert "`[Example](../cold/old.md)`" in keep.read_text(encoding="utf-8")
+    record_after = _load_usage(tmp_path)["pages"]["hot/keep.md"]
+    assert record_after["fingerprint"] != record_before["fingerprint"]
+    for stamp in ("created_at", "updated_at", "last_read_at"):
+        assert record_after[stamp] == record_before[stamp]
+    context_pipeline._validate_description_coverage(tmp_path / "workspace/context")
+    assert result["after_bytes"] == sum(context_capacity._markdown_sizes(tmp_path / "workspace/context").values())
+
+
+def test_sparse_capacity_keeps_topic_with_non_markdown_files(tmp_path):
+    from openjiuwen.harness.personal_context import context_capacity
+
+    page = _page(tmp_path, "topic/old.md", "# Old\n" + "x" * 7000)
+    unrelated = page.parent / "attachment.bin"
+    unrelated.write_bytes(b"not capacity-managed")
+    result = maintain_capacity(tmp_path, limit_bytes=1000, commit_candidate=_commit_without_process_scheduling)
+    assert result["removed_count"] == 1 and not page.exists()
+    assert unrelated.read_bytes() == b"not capacity-managed"
+    assert (page.parent / "description.md").is_file()
+    context_pipeline._validate_description_coverage(tmp_path / "workspace/context")
+
+
+def test_sparse_capacity_rejects_noncanonical_navigation(tmp_path):
+    page = _page(tmp_path, "old.md", "# Old\n" + "x" * 7000)
+    root = tmp_path / "workspace/context"
+    (root / "description.md").rename(root / "Description.md")
+    with pytest.raises(BaseError, match="canonical lowercase"):
+        maintain_capacity(tmp_path, limit_bytes=1000, commit_candidate=_commit_without_process_scheduling)
+    assert page.exists()
+
+
+def test_sparse_capacity_retires_empty_topics_even_without_description(tmp_path):
+    from openjiuwen.harness.personal_context import context_capacity
+
+    old = _page(tmp_path, "cold/nested/old.md", "# Old\n" + "x" * 7000)
+    (old.parent / "description.md").unlink()
+    (old.parent.parent / "description.md").unlink()
+    root = tmp_path / "workspace/context"
+    (root / "already-empty").mkdir()
+    result = maintain_capacity(tmp_path, limit_bytes=1000, commit_candidate=_commit_without_process_scheduling)
+    assert result["removed_count"] == 1
+    assert not (root / "cold").exists() and not (root / "already-empty").exists()
+    context_pipeline._validate_description_coverage(root)
+    assert result["after_bytes"] == sum(context_capacity._markdown_sizes(root).values())
+
+
 def test_capacity_final_usage_lock_contention_keeps_published_tree(tmp_path, monkeypatch):
     from openjiuwen.harness.personal_context import context_capacity
 
     page = _page(tmp_path, "page.md", "# Page\n" + "x" * 20000)
     held = usage_lock(tmp_path)
-    repair = context_capacity._repair_navigation
+    prepare = context_capacity._prepare_capacity_candidate
 
-    def repair_and_hold(root, removed):
-        repair(root, removed)
+    def prepare_and_hold(*args):
+        prepared = prepare(*args)
         held.acquire(timeout=0)
+        return prepared
 
-    monkeypatch.setattr(context_capacity, "_repair_navigation", repair_and_hold)
+    monkeypatch.setattr(context_capacity, "_prepare_capacity_candidate", prepare_and_hold)
     try:
         result = maintain_capacity(tmp_path, limit_bytes=1000)
     finally:
