@@ -204,7 +204,7 @@ async def test_approval_is_not_acknowledged_before_resume_admission(error):
 
 
 @pytest.mark.asyncio
-async def test_unavailable_after_interrupt_is_gone_consumes_the_durable_copy():
+async def test_unavailable_without_pending_keeps_the_durable_reply_unclaimed():
     host = NS(
         has_pending_interrupt=lambda: False,
         has_in_flight_round=lambda: False,
@@ -213,7 +213,8 @@ async def test_unavailable_after_interrupt_is_gone_consumes_the_durable_copy():
     )
     handler, mailbox, _ = mailbox_handler([mail("1", approval=True)], host)
     await handler._process_unread_messages("worker")
-    assert mailbox.read == ["1"]
+    assert mailbox.read == []
+    host.resume_interrupt.assert_awaited_once()
     host.deliver_input.assert_not_awaited()
 
 
