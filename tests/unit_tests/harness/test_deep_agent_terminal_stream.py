@@ -20,7 +20,7 @@ from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream.base import OutputSchema
-from openjiuwen.core.single_agent.rail.base import AgentRail
+from openjiuwen.core.single_agent.rail.base import AgentRail, reset_termination_reason
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.config import DeepAgentConfig
@@ -359,10 +359,16 @@ async def test_react_emitter_preserves_result_extensions():
     browser = DeepAgent(AgentCard(id="emitter-test")).configure(
         DeepAgentConfig(model=_create_dummy_model(), enable_task_loop=False)
     )
+    reset_termination_reason()  # this test writes outside any invoke
     session = SimpleNamespace(write_stream=AsyncMock())
     result = {"output": "ok", "result_type": "answer", "rail_field": "kept"}
     await browser.react_agent.write_invoke_result_to_stream(result, session)
-    assert session.write_stream.call_args.args[0].payload == result
+    payload = session.write_stream.call_args.args[0].payload
+    # FEAT-127: the written frame always adds a termination reason (here the
+    # result-type mapping for an answer); every other field, including
+    # rail-added extensions, is carried through unchanged.
+    assert payload.pop("termination_reason") == "text_termination"
+    assert payload == result
 
 
 @pytest.mark.asyncio
