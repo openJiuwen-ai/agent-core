@@ -5,7 +5,7 @@
 | 项 | 值 |
 | --- | --- |
 | 建档日期 | 2026-10-19 |
-| 最近修订 | 2026-10-21 |
+| 最近修订 | 2026-11-24 |
 | 范围 | 单包 Plan、prepare candidate、生效记录、重载兼容与卸载判断 |
 | 方案成熟度 | 已确认。契约以 [S_01](../specs/S_01_package-loading.md) 第 4 节为准 |
 | 计划条目 | [EX-02](../designs/extension-development-plan.md#ex-02-单包-plancandidate-与生效记录) |
@@ -90,3 +90,11 @@ flowchart LR
 | 2026-10-21 | `pytest tests/unit_tests/core/extension/ -q` | 51 passed, 1 skipped（与 F_01 同次执行） |
 
 **结论：** Plan、candidate 与生效/卸载判断可按 S_01 使用。写入 EventBus 见开发计划 EX-04。
+
+
+## 8. 2026-11-24 managed root 与依赖豁免
+
+- 生效记录仍只由 Runtime 维护；bundle 成员的文件事实由宿主容器记录，Core 不持有成员状态。
+- 宿主通过 `register_managed_root` 注册成员根后，`list_installed`、`version_dir`、`managed_versions` 和启动快照可识别深层根；`copy_into_store`、`remove_installed` 不改动宿主副本。
+- `PackageOperationToken.skip_dependencies` 允许宿主在容器层完成成员依赖检查后跳过 Core 的报告等待；普通包不传该标记，依赖检查语义不变。
+- 失败回滚、成员版本切换和冲突裁决由宿主负责；Core 只保证同 ID 单版本加载和报告事实。验证见 `test_managed_roots.py` 与宿主契约测试。

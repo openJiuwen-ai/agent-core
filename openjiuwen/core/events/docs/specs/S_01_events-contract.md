@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | `S_01 / events-contract` |
 | 关联模块 | `openjiuwen/core/events/`；消费方包括 Core 业务模块、扩展运行时和 JiuwenSwarm 宿主 |
-| 最近一次修订日期 | 2026-11-11 |
+| 最近一次修订日期 | 2026-11-24 |
 | 关联 feature | [F_01 公共契约](../features/F_01_ev01-public-contract.md)、[F_06 包信息能力](../features/F_06_ops-package.md)、[F_11 tool.register](../features/F_11_ev11-tool-register-ops.md)、[F_14 store 持久化](../features/F_14_ops-store.md)、[F_16 prompt.attachment Agent Loop 事件](../features/F_16_prompt-attachment-event.md)、[F_17 prompt.section](../features/F_17_prompt-section-event.md)、[F_18 prompt.compose](../features/F_18_prompt-compose-event.md)；已撤回的限定派发提案见 [F_09](../features/F_09_handler-selection.md)，进度见[开发计划](../designs/events-development-plan.md) |
 | 设计依据 | [设计概览](../designs/events-overview.md)、[详细架构](../designs/events-architecture.md) |
 
@@ -91,6 +91,30 @@ class PackageMetadata:
     root: Path | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class HostPackageInstallRequest:
+    package_id: str
+    version: str
+    operation: str = "install"
+    container_id: str = ""
+    container_version: str = ""
+    event_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class PackageInstallOutcome:
+    event_id: str
+    operation: str
+    package_id: str
+    version: str
+    status: str
+    active: bool
+    enabled: bool
+    error: str = ""
+    container_id: str = ""
+    container_version: str = ""
+
+
 MatchPattern: TypeAlias = Mapping[str, object]
 MatchPatternFunc: TypeAlias = Callable[[EventInput, MatchPattern], bool]
 EventInputValidator: TypeAlias = Callable[[EventInput], bool]
@@ -130,6 +154,7 @@ EventType 使用字符串，不使用枚举。业务平台可以在自己的仓�
 - 标识与模型：EventType、EventInput、EventOutput、HandlerId、OPS_BUILD_EVENT_TYPE、HandlerLevel、Event、SessionContext、PackageMetadata、MatchPattern、MatchPatternFunc、EventInputValidator、EventOutputValidator。
 - 回调与协议：EventHandler、OpsMethod、ExtensionEventBusProtocol。
 - 运行时对象：EventNext（`openjiuwen/core/events/event_next.py`）、EventHandlerOpsBuilder 和 EventHandlerOps（`openjiuwen/core/events/ops.py`）、ExtensionEventBus。
+- 宿主包生命周期：`HostPackageInstallRequest`、`PackageInstallOutcome`、`register_host_package_lifecycle`（见 4.4.1）。
 
 事件专属 DTO 不提升到顶层公共导出；例如 `prompt.attachment` 的输入、输出和 matcher
 从其内置事件模块直接导入，具体业务契约见 [F_16](../features/F_16_prompt-attachment-event.md)。
@@ -241,6 +266,15 @@ Bus 按以下顺序处理普通调用：
 8. 将最外层合法结果交给调用方；CORE 或入口校验失败时 `trigger()` 失败。
 
 Validator 返回 `False` 表示业务值非法；Validator 抛异常或返回非 `bool` 时视为事件定义错误，原样传播，不适用扩展 Handler 的 skip。预置事件通过同一注册参数声明 Validator，不增加专用容错分支。
+
+#### 4.4.1 宿主包生命周期回调
+
+`package.install` 支持两种输入：Registry 使用的 `InstallRequest`，以及宿主加载自身成员使用的 `HostPackageInstallRequest`；只有后者进入宿主回调分支，普通管理请求仍转发给包的 Registry 编排。
+
+- `register_host_package_lifecycle(bus, *, install_handler, outcome_handler)` 按 Bus 注册回调，内部使用 `WeakKeyDictionary`，Bus 回收后自动清理；同一 Bus 再次注册会覆盖旧回调。
+- 收到 `HostPackageInstallRequest` 时，Core 调用 `install_handler`；结果必须是 `PackageInstallOutcome`。回调异常或返回非该类型时，Core 生成 failed outcome 并发布 `package.install_failed`，不让成员静默停留 pending。
+- 成功/失败结果分别以 `package.install_finish` / `package.install_failed` 发布，交给同一 Bus 的 `outcome_handler`。发布失败只记录日志，不改变已经得到的加载结果。
+- 没有注册宿主回调的 Bus 不处理该类输入；旧 Bus 不认识新增事件类型时按未知事件忽略。
 
 ### 4.5 EventNext
 
@@ -401,6 +435,7 @@ USER / BUILTIN Handler 在自身抛异常、返回非 awaitable、转发输入�
 - 嵌套深度、宿主并发限额、输入大小和 Handler 数量没有公共默认值。
 - 同进程回调、只读模型和受控注册入口不构成恶意代码沙箱。
 - 当前没有旧 Events 公共 API，S_01 是首版兼容基线。后续修改公共名称、参数、默认值、错误码或不变量时，必须同步本规约和契约测试。
+- 宿主包生命周期模型与事件为新增契约：未注册回调和未登记事件类型的旧 Bus 行为不变；`make_core_handler` 的 `bus` 为可选参数，旧调用签名保持可用。
 
 ## 7. 验证索引
 

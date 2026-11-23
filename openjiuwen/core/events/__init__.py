@@ -6,6 +6,11 @@
 from openjiuwen.core.events.bus import ExtensionEventBus
 from openjiuwen.core.events.event_next import EventNext
 from openjiuwen.core.events.ops import EventHandlerOps, EventHandlerOpsBuilder
+from openjiuwen.core.events.package_lifecycle import (
+    HostPackageInstallRequest,
+    PackageInstallOutcome,
+    register_host_package_lifecycle,
+)
 from openjiuwen.core.events.protocol import EventHandler, ExtensionEventBusProtocol
 from openjiuwen.core.events.types import (
     OPS_BUILD_EVENT_TYPE,
@@ -45,4 +50,7 @@ __all__ = [
     "EventHandlerOps",
     "ExtensionEventBusProtocol",
     "ExtensionEventBus",
+    "HostPackageInstallRequest",
+    "PackageInstallOutcome",
+    "register_host_package_lifecycle",
 ]

@@ -50,6 +50,8 @@ class PackageOperationToken:
     process_id: str
     package_id: str
     operation_id: str
+    #: Host-managed instances already checked dependencies outside this report.
+    skip_dependencies: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,7 +375,9 @@ class PackageInstallReport:
                 try:
                     manifest = load_manifest(root, require_domain=package_manager.require_domain)
                     package_manager.validate_manifest(manifest, match_domain=False)
-                    if manifest.package_id != root.parent.name or manifest.version != root.name:
+                    if not package_manager.is_managed_root(root) and (
+                        manifest.package_id != root.parent.name or manifest.version != root.name
+                    ):
                         _fail(StatusCode.EXTENSION_MANIFEST_INVALID, reason=f"manifest does not match directory {root}")
                     if not manifest.enable:
                         continue
@@ -469,6 +473,7 @@ class PackageInstallReport:
 
     async def begin_operation(
         self, manifest: Manifest, operation: PackageOperation, *, startup: bool = False,
+        skip_dependencies: bool = False,
     ) -> PackageOperationToken:
         self._check_manifest(manifest)
         issued: list[PackageOperationToken] = []
@@ -569,6 +574,7 @@ class PackageInstallReport:
                 self.process_id,
                 manifest.package_id,
                 pending["operation_id"],
+                skip_dependencies=skip_dependencies,
             )
             self._tokens[token.operation_id] = token
             issued.append(token)
@@ -602,6 +608,8 @@ class PackageInstallReport:
         return row
 
     async def wait_for_dependencies(self, token: PackageOperationToken) -> None:
+        if token.skip_dependencies:
+            return
         deadline = time.monotonic() + self.dependency_timeout
 
         def check(data: dict[str, Any]) -> bool:
@@ -658,7 +666,7 @@ class PackageInstallReport:
             if pending["requires"] != _requirements(manifest):
                 _report_error("dependencies changed after admission")
             self._check_dependents(data, manifest, operation)
-            if operation != "uninstall":
+            if operation != "uninstall" and not token.skip_dependencies:
                 self._require_dependencies(data, pending["requires"], token.package_id)
 
         await self._transaction(validate, write=False)
@@ -760,7 +768,8 @@ class PackageInstallReport:
                 _report_error("success was not confirmed by the local runtime")
             if report.status == "SUCCESS":
                 if not disabled_operation:
-                    self._require_dependencies(data, pending["requires"], token.package_id)
+                    if not token.skip_dependencies:
+                        self._require_dependencies(data, pending["requires"], token.package_id)
                     if active.version != pending["version"] or active.domain != row["domain"]:
                         _report_error("local activation does not match the admitted package")
             if active is not None:

@@ -5,6 +5,7 @@
 | 项 | 值 |
 | --- | --- |
 | 建档日期 | 2026-10-19 |
+| 最近修订 | 2026-11-24 |
 | 范围 | `agent-core` 的 `openjiuwen.core.events` 公共模型、Protocol、公开导出，以及 `StatusCode` 中的 Events 契约失败码 |
 | 方案成熟度 | 已确认。契约以 [S_01](../specs/S_01_events-contract.md) 为准；号段以开发计划 EV-08「已决定号段」为准 |
 | 计划条目 | [EV-08](../designs/events-development-plan.md#ev-08-公共契约与接口基线可供外部并行开发)。负责人、状态和验收 ID 只在开发计划维护 |
@@ -304,3 +305,10 @@ JiuwenSwarm 可以依赖 `openjiuwen.core.events` 的公开名字编写自己的
 - 旧结论的效力：原步骤和测试主题已由第 5～7 节替代。进度状态不再在本文登记。
 - 影响与同步：未改代码、spec 和开发计划。第 6.2、8 节记录了因此仍然过时的入口。
 - 验证：本次是文档重排，未重新执行测试。
+
+
+## 10. 2026-11-24 宿主包生命周期契约
+
+- 新增 `HostPackageInstallRequest`、`PackageInstallOutcome` 和按 Bus 注册的 `register_host_package_lifecycle`；`package.install` 通过输入类型区分 Registry `InstallRequest` 与宿主成员加载请求。
+- 新增 `package.install_finish` / `package.install_failed` 通知事件；回调异常或返回非法值时 Core 生成失败 outcome，通知监听器失败只记录日志，不改变加载结果。
+- 均为新增契约：旧 Bus 未注册宿主回调或未知事件类型时行为不变；`make_core_handler` 的 `bus` 保持可选。验证见 `test_package_events.py` 与 `test_events_contract.py`。

@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | `S_02 / registry-and-bus` |
 | 关联模块 | `openjiuwen/core/extension/`；九类事件登记模块在 `openjiuwen/core/events/builtins/` |
-| 最近一次修订日期 | 2026-11-06 |
+| 最近一次修订日期 | 2026-11-24 |
 | 关联 feature | [F_03](../features/F_03_registry.md)、[F_04](../features/F_04_bus-wiring.md)、[F_06](../features/F_06_package-enable.md) |
 | 设计依据 | [开发计划](../designs/extension-development-plan.md)、[架构](../designs/extension-architecture.md) |
 
@@ -95,6 +95,15 @@ async def close(self) -> None: ...
 | `package.uninstall` | 注册移除且安装副本删除 | `PACKAGE_BUSY` / `PACKAGE_IN_USE` |
 | `package.reload` | 该包 Handler 已热切换 | 依赖方不兼容、准备失败 |
 | `package.query` | 本地 active/installed/inflight/published 与共享 packages | 报告不可读时明确失败 |
+
+### 3.1 宿主包生命周期事件
+
+宿主加载 bundle 成员时，`package.install` 可以承载 `HostPackageInstallRequest`（`package_id`、`version`、`operation`、`container_id`、`container_version`）；Core Handler 将它交给该 Bus 注册的宿主 install 回调，不在本进程执行 Registry 安装。回调结果统一为 `PackageInstallOutcome`，再以 `package.install_finish` / `package.install_failed` 发布给同一 Bus 的宿主 outcome 回调。
+
+- 回调异常或返回非 `PackageInstallOutcome` 时，Core 生成 failed outcome 并发布失败事件，不让成员静默停留 pending。
+- 监听器失败只记录日志，不改变已得到的加载结果；未知事件类型的旧 Bus 按未知事件忽略。
+- 解析阶段没有合法 `package_id` 的失败条目不发布 outcome，避免把源路径当成包标识；已解析包的失败 outcome 正常发布。
+- 这两个事件是宿主通知语义，不属于本规约的 Registry 管理事件编排。模型、注册与导出契约见 Events S_01；宿主容器自行维护成员状态与启动恢复。
 
 管理写操作先由报告登记 operation_id，并取得 `PackageOperationToken`。`PlanRequest.operation_token` 与 `ApplyRequest.operation_token` 必须显式携带该 token；Handler 按 token 校验包、操作、进程和 operation_id。token 随事件请求传递，因此计划和 apply 可以跨异步任务调度，不依赖发起任务的上下文变量，也不能单独绕过报告执行。apply 在校验后自行进入操作范围，文件写入仍由该范围授权。依赖等待不持报告锁；发布前再次校验。
 

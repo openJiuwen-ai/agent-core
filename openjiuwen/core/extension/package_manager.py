@@ -82,9 +82,69 @@ class PackageManager:
         self.allowed_domains = None if allowed_domains is None else frozenset(allowed_domains)
         self.require_domain = domain is not None or allowed_domains is not None
         self.install_report = None
+        #: Roots managed outside ``<store>/<id>/<version>`` (bundle members).
+        self._managed_roots: dict[tuple[str, str], Path] = {}
+
+    def register_managed_root(self, package_id: str, version: str, root: Path) -> Path:
+        """Register one package root that lives outside the two-level store.
+
+        Bundle members have their own root inside a bundle copy. The host
+        registers the root that is currently allowed to load; standby roots
+        stay unregistered, so Core never discovers or loads them.
+        """
+
+        if not package_id or not version:
+            raise ExtensionFailure(StatusCode.EXTENSION_SOURCE_INVALID, reason="managed root needs an identity")
+        candidate = Path(root).expanduser().resolve()
+        store = self.store.resolve()
+        if not candidate.is_relative_to(store) or candidate == store:
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_SOURCE_INVALID,
+                reason="managed root must stay inside the install store",
+            )
+        if not candidate.is_dir() or not has_manifest(candidate):
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_SOURCE_INVALID,
+                reason=f"managed root has no manifest: {candidate}",
+            )
+        _assert_no_symlinks(candidate)
+        manifest = load_manifest(candidate, require_domain=self.require_domain)
+        self.validate_manifest(manifest)
+        if manifest.is_bundle:
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_SOURCE_INVALID,
+                reason="a bundle root cannot be registered as a managed member",
+            )
+        if manifest.package_id != package_id or manifest.version != version:
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_SOURCE_INVALID,
+                reason="managed root identity does not match its manifest",
+            )
+        self._managed_roots[(package_id, version)] = candidate
+        return candidate
+
+    def unregister_managed_root(
+        self, package_id: str, version: str, *, root: Path | None = None,
+    ) -> None:
+        """Forget one managed external root, optionally only when it matches."""
+
+        key = (package_id, version)
+        current = self._managed_roots.get(key)
+        if current is None:
+            return
+        if root is not None and current != Path(root).expanduser().resolve():
+            return
+        del self._managed_roots[key]
+
+    def is_managed_root(self, root: Path) -> bool:
+        candidate = Path(root).expanduser().resolve()
+        return any(item == candidate for item in self._managed_roots.values())
 
     def validate_manifest(self, manifest: Manifest, *, match_domain: bool = True) -> None:
         """Validate generic host restrictions without knowing product domain names."""
+        if manifest.is_bundle:
+            # A bundle root has no host domain of its own; its members declare theirs.
+            return
         if self.require_domain and (not isinstance(manifest.domain, str) or not manifest.domain.strip()):
             raise ExtensionFailure(StatusCode.EXTENSION_MANIFEST_INVALID, reason="package.domain is required")
         if self.allowed_domains is not None and manifest.domain not in self.allowed_domains:
@@ -98,10 +158,11 @@ class PackageManager:
             self.install_report.require_file_operation(package_id)
 
     def list_installed(self) -> list[Path]:
-        """Return each ``<package.id>/<version>`` directory that has a manifest.
+        """Return every installed copy root that has a manifest.
 
-        Hidden directories are skipped. The caller passes these paths to the
-        startup batch install. This method does not choose among duplicates.
+        Standard copies live at ``<package.id>/<version>``; roots registered by a
+        host (bundle members) are appended. Hidden directories are skipped and
+        duplicates are not resolved.
         """
         if not self.store.exists():
             return []
@@ -114,15 +175,23 @@ class PackageManager:
                     continue
                 if has_manifest(version_dir):
                     found.append(version_dir.resolve())
+        for root in self._managed_roots.values():
+            if root not in found and root.is_dir() and has_manifest(root):
+                found.append(root)
         return found
 
     def require_managed_root(self, root: Path) -> Path:
-        """Return one canonical managed version root, rejecting redirected paths."""
+        """Return one canonical installed root, rejecting redirected paths.
+
+        Registered managed roots may live deeper than ``<id>/<version>``; they are
+        still required to stay inside the store and contain no symbolic links.
+        """
         absolute = Path(os.path.abspath(root.expanduser()))
         resolved = absolute.resolve()
         redirected = os.path.normcase(str(absolute)) != os.path.normcase(str(resolved))
         outside_store = not resolved.is_relative_to(self.store)
-        wrong_depth = resolved.parent.parent != self.store
+        registered = self.is_managed_root(resolved)
+        wrong_depth = not registered and resolved.parent.parent != self.store
         if redirected or outside_store or wrong_depth:
             raise ExtensionFailure(
                 StatusCode.EXTENSION_SOURCE_INVALID,
@@ -165,6 +234,11 @@ class PackageManager:
             ExtensionFailure: The copy cannot be completed. The source is kept.
         """
         self.validate_manifest(manifest)
+        if manifest.is_bundle:
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_SOURCE_INVALID,
+                reason="a bundle root is owned by the host container layer",
+            )
         self._guard_mutation(manifest.package_id)
         source_root = source_root.resolve()
         if not source_root.exists():
@@ -232,6 +306,8 @@ class PackageManager:
                 root = self.require_managed_root(root)
                 manifest = load_manifest(root, require_domain=self.require_domain)
                 self.validate_manifest(manifest, match_domain=False)
+                if manifest.is_bundle:
+                    continue
                 if manifest.package_id != root.parent.name or manifest.version != root.name:
                     continue
                 document = _read_manifest_document(root)
@@ -251,6 +327,7 @@ class PackageManager:
             raise ExtensionFailure(StatusCode.EXTENSION_MANIFEST_INVALID, reason="enable must be a boolean")
         self._guard_mutation(package_id)
         target = self.version_dir(package_id, version)
+        managed = self.is_managed_root(target)
         original = self.store / package_id / version
         unsafe_components = any(
             (
@@ -262,7 +339,9 @@ class PackageManager:
         )
         outside_store = not target.is_relative_to(self.store)
         wrong_depth = target.parent.parent != self.store
-        if unsafe_components or outside_store or wrong_depth:
+        unsafe_path = outside_store or unsafe_components
+        wrong_layout = not managed and wrong_depth
+        if unsafe_path or wrong_layout:
             raise ExtensionFailure(
                 StatusCode.EXTENSION_INSTALL_COPY_FAILED,
                 reason="refusing to update a path outside the install store",
@@ -276,17 +355,25 @@ class PackageManager:
         _assert_no_symlinks(target)
         manifest = load_manifest(target, require_domain=self.require_domain)
         self.validate_manifest(manifest)
+        if manifest.is_bundle:
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_SOURCE_INVALID,
+                reason="a bundle root is owned by the host container layer",
+            )
         if manifest.package_id != package_id or manifest.version != version:
             raise ExtensionFailure(StatusCode.EXTENSION_SOURCE_INVALID, reason="managed copy identity mismatch")
         _write_manifest_enable(target, enabled)
 
     def managed_versions(self, package_id: str, *, known_versions: Sequence[str] = ()) -> tuple[str, ...]:
         """Verify copies, retaining ownership facts from active or pending records."""
+        external = [
+            version for (managed_id, version) in self._managed_roots if managed_id == package_id
+        ]
         package_dir = self.store / package_id
         if package_dir.is_symlink() or package_dir.resolve().parent != self.store or package_dir == self.store:
             raise ExtensionFailure(StatusCode.EXTENSION_SOURCE_INVALID, reason="invalid managed package directory")
         if not package_dir.exists():
-            return ()
+            return tuple(dict.fromkeys(external))
         versions: list[str] = []
         for root in sorted(package_dir.iterdir()):
             if root.name.startswith(".") or not root.is_dir():
@@ -309,7 +396,7 @@ class PackageManager:
             except ExtensionFailure:
                 continue
             versions.append(root.name)
-        return tuple(versions)
+        return tuple(dict.fromkeys([*versions, *external]))
 
     def remove_installed(self, package_id: str, version: str, *, missing_ok: bool = False) -> None:
         """Delete one version directory inside the install store.
@@ -323,6 +410,15 @@ class PackageManager:
         """
         self._guard_mutation(package_id)
         target = self.version_dir(package_id, version)
+        if self.is_managed_root(target):
+            # Bundle members are owned (and deleted) by their container layer.
+            return
+        if has_manifest(target):
+            try:
+                if load_manifest(target, require_domain=False).is_bundle:
+                    return
+            except ExtensionFailure:
+                pass
         store = self.store.resolve()
         original = self.store / package_id / version
         unsafe_components = any(
@@ -392,6 +488,14 @@ class PackageManager:
                 StatusCode.EXTENSION_INSTALL_COPY_FAILED,
                 reason="managed package directory is not a directory",
             )
+        for child in package_dir.iterdir():
+            if not child.is_dir() or not has_manifest(child):
+                continue
+            try:
+                if load_manifest(child, require_domain=False).is_bundle:
+                    return
+            except ExtensionFailure:
+                continue
         _assert_no_symlinks(package_dir)
         try:
             with (self.install_report.file_operation_scope(package_id)
@@ -406,6 +510,9 @@ class PackageManager:
 
     def version_dir(self, package_id: str, version: str) -> Path:
         """Return the resolved install path; deletion validates its containment."""
+        managed = self._managed_roots.get((package_id, version))
+        if managed is not None:
+            return managed
         return (self.store / package_id / version).resolve()
 
     def _open_zip(self, source: Path) -> OpenedSource:

@@ -5,7 +5,7 @@
 | 项 | 说明 |
 | --- | --- |
 | 类型 | 已实现架构概览；EV-01～EV-04 已落地，真实业务接入与联合验收尚未完成 |
-| 最近一次修订日期 | 2026-10-21 |
+| 最近一次修订日期 | 2026-11-24 |
 | 维护责任 | Events 模块维护者；具体负责人待认领 |
 | 所属模块 | `agent-core/openjiuwen/core/events/` |
 | 详细设计 | [事件机制详细架构](events-architecture.md)；展开机制细节和历史设计，尚需按当前实现同步 |
@@ -130,13 +130,15 @@ Ops 按 `namespace.method` 动态组织平台能力，例如 `session.cwd`。运
 
 ### 3.1 注册与显式构建 Ops 能力目录
 
-构造 ExtensionEventBus 时，`bootstrap.py` 按 `event_types → handler_ops → event_handlers` 的顺序注册 Core builtins；当前 Core 内置事件含 `ops.build`、`fs.*` 与 `mcp.*`。平台随后登记业务 EventType、匹配函数和 CORE Handler，再为已有事件登记 BUILTIN / USER Handler。`register_event_handler()` 的默认层级为 USER，`package_metadata` 是关键字参数并随注册记录保存。
+构造 ExtensionEventBus 时，`bootstrap.py` 按 `event_types → handler_ops → event_handlers` 的顺序注册 Core builtins；当前 Core 内置事件含 `ops.build`、`fs.*`、`mcp.*` 以及扩展模块登记的 `package.*` 管理与宿主生命周期事件。平台随后登记业务 EventType、匹配函数和 CORE Handler，再为已有事件登记 BUILTIN / USER Handler。`register_event_handler()` 的默认层级为 USER，`package_metadata` 是关键字参数并随注册记录保存。
 
 完成事件和 Build Handler 注册后，宿主必须在开放普通业务前显式触发一次 `ops.build`。Build CORE 创建空 Builder，各 Build Handler 可在下游返回后向同一个 Builder 添加 namespace 和 method。EventBus 只校验最终输出是 EventHandlerOpsBuilder，然后把它保存为 Bus 级能力目录。
 
 Build 成功前，普通事件会被拒绝。Build 成功后，再次触发 `ops.build` 会被拒绝，Build Handler 也不再允许注册或注销。Builder 当前没有公开 freeze 状态；一次性约束由 EventBus 的生命周期检查保证。
 
 `ops.build` 本身不依赖已有 Builder，不递归构建 Ops。命名空间和方法不允许重复。Build 失败或取消时，EventBus 不提交部分 Builder；宿主可以在首次成功前修正配置并重新触发 Build。
+
+扩展模块的 `package.install_finish` / `package.install_failed` 只转发当前 Bus 的宿主 outcome 回调，不进入普通 Handler 链；回调异常或非法返回值转成失败事件。
 
 Build Handler 只组装能力定义；共享服务、连接池及其关闭顺序由平台独立管理。当前实现没有 Build 锁，宿主必须串行完成启动期注册和 Build，避免并发构建或边构建边修改注册表。
 
