@@ -142,6 +142,26 @@ def test_context_window_without_valid_usage_counts_messages_and_tools():
     token_counter.count_tools.assert_called_once_with(window.tools)
 
 
+def test_context_window_without_usage_uses_context_scale_factor():
+    """压缩写回后 usage 失效，触发判定沿用上下文级校准因子。"""
+    token_counter = MagicMock()
+    token_counter.count_messages.return_value = 50
+    token_counter.count_tools.return_value = 10
+    context = MagicMock()
+    context.token_counter.return_value = token_counter
+    context.token_scale_factor.return_value = 0.5
+    compressor = DialogueCompressor(DialogueCompressorConfig())
+    window = ContextWindow(
+        context_messages=[UserMessage(content="hello")],
+        tools=[ToolInfo(name="read_file", description="Read a file", parameters={})],
+    )
+
+    result, source = compressor._count_context_window_tokens_with_source(window, context)
+
+    assert result == 30
+    assert source == "tokenizer-calibrated"
+
+
 def test_context_window_with_valid_usage_does_not_double_count_tools():
     token_counter = MagicMock()
     context = MagicMock()
