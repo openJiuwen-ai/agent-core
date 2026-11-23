@@ -66,6 +66,18 @@ from openjiuwen.core.single_agent.kv_cache import kv_cache_child_session
 # Ability type definition
 Ability = Union[ToolCard, WorkflowCard, AgentCard, McpServerConfig]
 
+# Tag namespace for ability-owned tool domain sweeps. Must stay distinct from
+# the card.id tag domain: DeepAgent MCP registration tags the MCP server and
+# every one of its tools with ``self.card.id``, and the default ability owner
+# id is also ``card.id``, so a bare owner tag in teardown_tools would sweep
+# shared/cross-cycle MCP tools out of the registry (dev-review CR-001).
+_ABILITY_OWNER_TAG_PREFIX = "ability-owner:"
+
+
+def _ability_owner_tag(owner_id: str) -> str:
+    """Build the namespaced tag isolating ability-owner sweeps from card.id."""
+    return f"{_ABILITY_OWNER_TAG_PREFIX}{owner_id}"
+
 
 @dataclass
 class AddAbilityResult:
@@ -915,7 +927,10 @@ class AbilityManager:
             ``f"{card.name}_{owner_id}"`` (derived from the name so a
             pre-qualified id is idempotently normalized) and the instance is
             (re)bound in the resource manager with ``refresh=True`` so a later
-            owner of the same id wins.
+            owner of the same id wins. When ``owner_id`` is set the registration
+            is also tagged ``ability-owner:{owner_id}`` so
+            :meth:`teardown_tools` can sweep the whole owner domain, including
+            session-suffixed ids that never left through exact-id removal.
         - Stateless (``card.stateless`` is True): the tool is a shared
             module-level singleton. The bare id is kept and the resource-manager
             add is an idempotent ``skip_if_exists`` no-op.
@@ -936,7 +951,13 @@ class AbilityManager:
 
         if self._owner_id:
             card.id = self.qualify_tool_id(card, self._owner_id)
-        Runner.resource_mgr.add_tool(resource, refresh=True)
+            # Never the bare owner id: that equals card.id by default, which is
+            # also the MCP registration tag domain (CR-001).
+            Runner.resource_mgr.add_tool(
+                resource, refresh=True, tag=_ability_owner_tag(self._owner_id)
+            )
+        else:
+            Runner.resource_mgr.add_tool(resource, refresh=True)
         return self.add(card)
 
     def remove_ability(self, name: Union[str, List[str]]) -> None:
@@ -966,20 +987,48 @@ class AbilityManager:
         and re-registers every tool over the stale id, and :meth:`add_ability`'s
         refresh path then logs a warning per residual id.
 
-        Only tools this manager qualified with its own owner id
-        (``card.id == f"{name}_{owner_id}"``) are removed; stateless shared
-        singletons and externally-scoped tools (e.g. MCP server-scoped ids) are
-        left in place for other agents still using them.
+        Exact-id removal covers tools this manager still lists
+        (``card.id == f"{name}_{owner_id}"``). A namespaced
+        ``ability-owner:{owner_id}`` tag sweep is the backstop for entries
+        registered with this owner's tag but not through this manager's
+        exact-id form (session-suffixed ids that otherwise never leave the
+        process-global registry). Stateless shared singletons and the
+        ``card.id`` tag domain used by MCP registration are left in place.
         """
         from openjiuwen.core.runner import Runner
 
         if not self._owner_id:
             return
+
+        def _warn_remove_failures(result: Any, *, what: str) -> None:
+            items = result if isinstance(result, list) else [result]
+            for item in items:
+                is_err = getattr(item, "is_err", None)
+                if not callable(is_err) or not is_err():
+                    continue
+                detail = getattr(item, "msg", None)
+                err = detail() if callable(detail) else item
+                logger.warning(
+                    "AbilityManager teardown: remove_tool failed for %s: %s",
+                    what,
+                    err,
+                )
+
         for name, card in list(self._tools.items()):
             if card.stateless or card.id != f"{name}_{self._owner_id}":
                 continue
             self.remove(name)
-            Runner.resource_mgr.remove_tool(card.id)
+            _warn_remove_failures(
+                Runner.resource_mgr.remove_tool(card.id),
+                what=card.id,
+            )
+        owner_tag = _ability_owner_tag(self._owner_id)
+        _warn_remove_failures(
+            Runner.resource_mgr.remove_tool(
+                tag=owner_tag, skip_if_tag_not_exists=True
+            ),
+            what=f"tag={owner_tag}",
+        )
 
     def remove(self, name: Union[str, List[str]]) -> Union[None, Ability, List[Ability]]:
         """Remove an ability by name

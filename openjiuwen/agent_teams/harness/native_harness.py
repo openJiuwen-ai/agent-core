@@ -528,10 +528,33 @@ class NativeHarness(DeepAgent):
             self.ability_manager.teardown_tools()
         except Exception:
             logger.exception("[NativeHarness] tool teardown failed during stop")
+        # Round-end also drops instance-namespaced callbacks: the native is
+        # rebuilt next cycle with a new instance id, and without this the old
+        # registrations stay pinned in Runner.callback_framework (issue#5240).
+        # Rails dual-write ``_BRIDGE_EVENTS`` onto the inner ``_react_agent``
+        # namespace, so that manager must be cleared too — otherwise each
+        # TeamHarness rebuild leaves a react-agent namespace behind and RSS
+        # still grows linearly across rounds.
+        try:
+            await self._agent_callback_manager.clear()
+        except Exception:
+            logger.exception("[NativeHarness] callback clear failed during stop")
+        react_agent = self._react_agent
+        if react_agent is not None and react_agent is not self:
+            react_callbacks = getattr(react_agent, "agent_callback_manager", None) or getattr(
+                react_agent, "_agent_callback_manager", None
+            )
+            if react_callbacks is not None:
+                try:
+                    await react_callbacks.clear()
+                except Exception:
+                    logger.exception(
+                        "[NativeHarness] react agent callback clear failed during stop"
+                    )
         logger.info("[NativeHarness] stopped session=%s", self.session_id)
 
     async def dispose(self) -> None:
-        """Permanently destroy this native: stop it, then release its resources.
+        """Permanently destroy this native: aclose it, then release its resources.
 
         Distinct from :meth:`stop`, which is round-end teardown — the native is
         rebuilt next cycle on the same session, so its ``sys_operation`` (id
@@ -543,15 +566,18 @@ class NativeHarness(DeepAgent):
         individually — only ``Runner.stop`` would otherwise clear it at process
         exit.
 
-        The supervisor is stopped first because the permanent-teardown path does
-        not always run round-end ``finalize_round`` beforehand (e.g. an external
-        ``stop_team`` or a session switch): the native may still be alive with
-        its ``ContextEngine`` reading/writing through ``sys_operation``, so
-        removing it under a live supervisor would yank a resource still in use.
-        ``stop`` is idempotent, so this is a no-op when ``finalize_round`` already
-        stopped the native. Idempotent overall and safe to call more than once.
+        ``aclose`` (which calls ``stop``) is used instead of ``stop`` alone so
+        callbacks, tools, react agent, and subagent controls are released in one
+        place. The supervisor is stopped first because the permanent-teardown
+        path does not always run round-end ``finalize_round`` beforehand (e.g. an
+        external ``stop_team`` or a session switch): the native may still be
+        alive with its ``ContextEngine`` reading/writing through
+        ``sys_operation``, so removing it under a live supervisor would yank a
+        resource still in use. ``aclose``/``stop`` are idempotent, so this is a
+        no-op when ``finalize_round`` already stopped the native. Idempotent
+        overall and safe to call more than once.
         """
-        await self.stop()
+        await self.aclose()
 
         from openjiuwen.core.runner import Runner
 
