@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/rails/` |
-| 最近一次修订日期 | 2026-11-21 |
+| 最近一次修订日期 | 2026-11-23 |
 | 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_21_cua-desktop-subagent.md`、`F_22_cli-jiuwen-memory-rail-mount-and-switch.md` |
 
 ## 范围 / 边界
@@ -175,6 +175,12 @@ author_email: yangzequ1@huawei.com
     - 暂存不进入 checkpoint；Work 的 `end_session()` 和 `uninit()` 清空其缓冲；
       Coding 的 `uninit(agent)` 仅清空对应 Agent 的缓冲，其余使用者继续运行。
       既有超时、失败处理及 provider 接口不变，不承诺外部写入成功或重启续接。
+
+16. **演进轨迹持有采集到的 GenAI 序列**。采集时直接持有 observability 登记的序列头，pending、窗口和快照
+    随对应记录持有该头。快照可在 observability 注册表清空后继续读取。合并、裁剪、事件链重建
+    和元数据投影保留紧凑表示。消费者可读取所需属性，`Trajectory.to_otlp()` 导出完整、自包含的
+    标准属性。采集时已失效的序列使用既有缺失占位。查找与容量契约见
+    [S_14](../agent_teams/S_14_monitor-and-observability.md) 不变量 19。
 
 ## 接口契约
 
