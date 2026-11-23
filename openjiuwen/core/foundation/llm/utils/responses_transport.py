@@ -57,7 +57,9 @@ class OpenAIAccountResponsesTransport:
         self._verify = verify
         self._proxy = proxy
         self._max_retries = max(0, int(max_retries or 0))
-        self._request_fallback = request_fallback or RequestParameterFallback("OpenAI", "OpenAI Responses")
+        self._request_fallback = request_fallback or RequestParameterFallback(
+            "OpenAI", "OpenAI Responses", retry_without_stop=True,
+        )
         self._client: Optional[httpx.AsyncClient] = None
 
     async def create_response(
