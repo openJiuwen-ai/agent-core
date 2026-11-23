@@ -13,6 +13,8 @@ from xml.etree import ElementTree
 import httpx
 import pytest
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.context_engine.token.string_length_counter import StringLengthCounter
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.llm.schema.config import LLMApiMode
@@ -87,10 +89,6 @@ def primary(provider="OpenAI", api_mode=None):
 @pytest.mark.parametrize(
     "configured, overrides, expected",
     [
-        ({"thinking": {"type": "enabled", "budget_tokens": 2000}}, {}, 3024),
-        ({"reasoning": {"mode": "enabled", "budget_tokens": 2000}}, {}, 3024),
-        ({}, {"thinking": {"type": "enabled", "budget_tokens": 2000}}, 3024),
-        ({}, {"reasoning": {"mode": "enabled", "budget_tokens": 2000}}, 3024),
         ({}, {"thinking": {"type": "enabled", "budget_tokens": 2000}, "max_tokens": 4000}, 4000),
         (
             {"thinking": {"type": "enabled", "budget_tokens": 2000}},
@@ -123,6 +121,41 @@ def test_anthropic_output_reserve_matches_actual_adapter(configured, overrides, 
     )
     wire = {**params, **params.get("extra_body", {})}
     assert wire["max_tokens"] == _output_tokens(model, overrides) == expected
+    assert overrides == original
+
+
+@pytest.mark.parametrize(
+    "configured, overrides",
+    [
+        ({"thinking": {"type": "enabled", "budget_tokens": 2000}}, {}),
+        ({"reasoning": {"mode": "enabled", "budget_tokens": 2000}}, {}),
+        ({}, {"thinking": {"type": "enabled", "budget_tokens": 2000}}),
+        ({}, {"reasoning": {"mode": "enabled", "budget_tokens": 2000}}),
+    ],
+)
+def test_anthropic_output_reserve_rejects_incompatible_thinking_budget(configured, overrides):
+    model = primary(provider="Anthropic")
+    for name, value in configured.items():
+        setattr(model.model_config, name, value)
+    original = deepcopy(overrides)
+    call_options = dict(overrides)
+    max_tokens = call_options.pop("max_tokens", None)
+
+    with pytest.raises(BaseError, match="max_tokens must be greater than thinking.budget_tokens") as exc_info:
+        model._client._build_anthropic_params(
+            messages=[UserMessage(content="task")],
+            tools=None,
+            temperature=None,
+            top_p=None,
+            model=None,
+            stop=None,
+            max_tokens=max_tokens,
+            stream=False,
+            **call_options,
+        )
+
+    assert exc_info.value.status is StatusCode.MODEL_CONFIG_ERROR
+    assert _output_tokens(model, overrides) is None
     assert overrides == original
 
 
@@ -216,6 +249,7 @@ def test_responses_output_reserve_matches_body_override_precedence(configured, o
 @pytest.mark.asyncio
 async def test_anthropic_thinking_ceiling_prevents_proposal_that_would_overfill_context():
     model = primary(provider="Anthropic")
+    model.model_config.max_tokens = 3024
     model.model_config.reasoning = {"mode": "enabled", "budget_tokens": 2000}
     response = SimpleNamespace(
         content=[SimpleNamespace(type="text", text="ok")],

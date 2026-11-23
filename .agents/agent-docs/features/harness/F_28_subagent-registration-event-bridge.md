@@ -1,3 +1,16 @@
+---
+title: agent.register 启动 SubAgent 登记桥接
+author: null
+author_note: 历史作者待确认；缺少原 owner 和可靠创建署名
+id: F_28_subagent-registration-event-bridge
+type: F
+modules:
+- openjiuwen/harness
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+---
+
 # agent.register 启动 SubAgent 登记桥接
 
 ## 元信息

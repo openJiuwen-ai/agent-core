@@ -19,18 +19,22 @@ generated: true
 | [core/context_engine](#module-core-context_engine) |
 | [core/controller](#module-core-controller) |
 | [core/foundation/llm](#module-core-foundation-llm) |
+| [core/foundation/llm/model_clients](#module-core-foundation-llm-model_clients) |
 | [core/runner/drunner/dmessage_queue](#module-core-runner-drunner-dmessage_queue) |
 | [core/session](#module-core-session) |
 | [core/session/tracer](#module-core-session-tracer) |
+| [core/single_agent](#module-core-single_agent) |
 | [core/sys_operation](#module-core-sys_operation) |
 | [core/workflow](#module-core-workflow) |
 | [extensions/a2a](#module-extensions-a2a) |
 | [extensions/observability](#module-extensions-observability) |
 | [extensions/tracer_otel](#module-extensions-tracer_otel) |
 | [harness](#module-harness) |
+| [harness/moa](#module-harness-moa) |
 | [harness/subagents](#module-harness-subagents) |
 | [harness/tools/browser_move/decision](#module-harness-tools-browser_move-decision) |
 | [harness/tools/subagent](#module-harness-tools-subagent) |
+| [symphony/shared/fingerprint](#module-symphony-shared-fingerprint) |
 
 <a id="module-agent_teams"></a>
 
@@ -55,7 +59,9 @@ generated: true
 | [B_20261104_2030_cancellation-cause-lifecycle](core_runtime/B_20261104_2030_cancellation-cause-lifecycle.md) | B | 压缩取消一律误报 failed 及标记生命周期残留窗口缺陷 | CharlesWang2030 | 无独立 D：c4e52b7c 引入 cancellation cause 注册表属于常规缺陷修复，未归档独立设计；本次为对该提交检视发现的标记生命周期缺陷的后续修复，沿用注册表现有契约（TTL、非消费式 resolve、前缀继承）。 |
 | [B_20261104_2054_recovered-context-seed-and-execution-environment](agent_teams/B_20261104_2054_recovered-context-seed-and-execution-environment.md) | B | 冷恢复后成员策略 seed 与执行环境传递修复 | alan_cheng | 无独立 D：无独立 D；修复 F_20261104_1720_tool-execution-environment / F_20261104_1721_session-execution-settings 在冷恢复与远程调用路径上的遗漏。 |
 | [B_20261105_0911_swarmflow-thirdparty-trajectory](agent_teams/B_20261105_0911_swarmflow-thirdparty-trajectory.md) | B | Swarmflow 三方 Agent 轨迹未绑定成员身份 | wangcan103 | 无独立 D：小范围补齐既有 HarnessTrajectoryRecorder 的 Swarmflow 接线，不新增协议或公开 API。 |
+| [B_20261117_1240_swarmflow-fork-round-boundary-attachment](agent_teams/B_20261117_1240_swarmflow-fork-round-boundary-attachment.md) | B | Swarmflow fork 轮数边界被运行时附件消息整体前移一轮 | chenchunzhou | [SDD-0014](../designs/active/SDD-0014-swarmflow-session-fork/design.md) |
 | [B_20261117_1626_directed-assignment-notice-dropped](agent_teams/B_20261117_1626_directed-assignment-notice-dropped.md) | B | 定向指派/改派的通知被接收端 pending 判据丢弃，新 owner 永不唤醒 | xiajing | 无独立 D：缺陷修复只改消费端投递判据，不新增契约与机制；依据见 S_03（TASK_CLAIMED 定向投递）与 jiuwenswarm 问题 |
+| [B_20261118_1142_shared-templates-name-leader-only-tools](agent_teams/B_20261118_1142_shared-templates-name-leader-only-tools.md) | B | 全员共享提示词模板点名 leader 专属工具误导 teammate | zhanglongmin | 无独立 D：日常文案修复，无独立设计文档；行为依据 F_76（提示词分层与渐进式披露）、F_122（framework 建队的 <team-policy> 投递）与 prompts/AGENTS.md 编辑规则 2。 |
 
 <a id="module-agent_teams-workflow"></a>
 
@@ -90,6 +96,17 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261105_1628_llm-usage-model-name-response-first](core_runtime/B_20261105_1628_llm-usage-model-name-response-first.md) | B | LLM usage.model_name 改为响应体 model 优先 | yidaaichixia | 无独立 D：语义纠错类修复；依据 GenAI 语义约定对 gen_ai.response.model 的定义（生成响应的模型名）与同文件 response_model 既有响应体优先取法，无独立方案取舍需要设计文档。 |
+| [B_20261110_2112_anthropic-disabled-thinking-fallback](core_runtime/B_20261110_2112_anthropic-disabled-thinking-fallback.md) | B | Anthropic Messages 支持图谱关闭思考失败后的回退 | lin-xiaoyu | 无独立 D：补齐已有请求级关闭思考回退在 Anthropic 非流式调用中的接入。 |
+| [B_20261116_1636_glm53-flash-reasoning-levels](core_runtime/B_20261116_1636_glm53-flash-reasoning-levels.md) | B | GLM-5.3-Flash 推理强度与禁用编码修复 | lizhiyuan | 无独立 D：用户已确认继续采用端点/模型族静态能力表；本次仅补齐既有 Zhipu 配置的一个模型族，无独立设计。 |
+| [B_20261116_1708_symphony-temperature-fallback](core_runtime/B_20261116_1708_symphony-temperature-fallback.md) | B | Symphony 构图在模型拒绝温度参数后恢复 | lin-xiaoyu | 无独立 D：按已确认的发布线补丁方案扩展已有请求参数回退。 |
+
+<a id="module-core-foundation-llm-model_clients"></a>
+
+## core/foundation/llm/model_clients
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261117_1727_anthropic-output-limit-errors](openjiuwen/core/B_20261117_1727_anthropic-output-limit-errors.md) | B | 模型输出上限截断可见错误修复 | lizhiyuan | 无独立 D：用户在本轮会话确认的 Anthropic 输出上限错误处理范围，未形成独立设计文档。 |
 
 <a id="module-core-runner-drunner-dmessage_queue"></a>
 
@@ -114,6 +131,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261108_2028_llm-span-model-display-name](core_runtime/B_20261108_2028_llm-span-model-display-name.md) | B | llm span 的 gen_ai.request.model 与 span 名显示网关服务 ID 而非模型名缺陷 | yidaaichixia | 无独立 D：常规缺陷修复（遥测展示层纯增量可选字段），无方案取舍与公开契约变更，未归档独立设计。 |
+
+<a id="module-core-single_agent"></a>
+
+## core/single_agent
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261117_1727_anthropic-output-limit-errors](openjiuwen/core/B_20261117_1727_anthropic-output-limit-errors.md) | B | 模型输出上限截断可见错误修复 | lizhiyuan | 无独立 D：用户在本轮会话确认的 Anthropic 输出上限错误处理范围，未形成独立设计文档。 |
 
 <a id="module-core-sys_operation"></a>
 
@@ -164,6 +189,14 @@ generated: true
 | [B_20261104_2030_cancellation-cause-lifecycle](core_runtime/B_20261104_2030_cancellation-cause-lifecycle.md) | B | 压缩取消一律误报 failed 及标记生命周期残留窗口缺陷 | CharlesWang2030 | 无独立 D：c4e52b7c 引入 cancellation cause 注册表属于常规缺陷修复，未归档独立设计；本次为对该提交检视发现的标记生命周期缺陷的后续修复，沿用注册表现有契约（TTL、非消费式 resolve、前缀继承）。 |
 | [B_20261114_1107_interactive-memory-turn](harness/B_20261114_1107_interactive-memory-turn.md) | B | 交互式中断恢复后记忆丢失修复 | robin1217 | 无独立 D：本次按对话中确认的 D3 收敛方案修复，未建立独立 D 文档；外部 F08 的 D3 是决策编号，不是设计资产标识。 |
 
+<a id="module-harness-moa"></a>
+
+## harness/moa
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261117_1727_anthropic-output-limit-errors](openjiuwen/core/B_20261117_1727_anthropic-output-limit-errors.md) | B | 模型输出上限截断可见错误修复 | lizhiyuan | 无独立 D：用户在本轮会话确认的 Anthropic 输出上限错误处理范围，未形成独立设计文档。 |
+
 <a id="module-harness-subagents"></a>
 
 ## harness/subagents
@@ -187,3 +220,11 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261102_1733_browser-pr-contract-review](harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
+
+<a id="module-symphony-shared-fingerprint"></a>
+
+## symphony/shared/fingerprint
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261109_1721_symphony-hidden-skill-scan](openjiuwen/symphony/B_20261109_1721_symphony-hidden-skill-scan.md) | B | Symphony 忽略技能归档和隐藏资产 | lin-xiaoyu | 无独立 D：技能文件夹扫描的局部修复。 |

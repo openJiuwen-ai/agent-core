@@ -1,4 +1,4 @@
-﻿# ExtensionEventBus 事件机制详细架构设计
+# ExtensionEventBus 事件机制详细架构设计
 
 | 项 | 内容 |
 | --- | --- |

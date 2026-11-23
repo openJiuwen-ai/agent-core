@@ -323,7 +323,9 @@ generated: true
 | [F_26_browser-fact-handoff-and-stream-diagnostics](harness/F_26_browser-fact-handoff-and-stream-diagnostics.md) | F | Browser fact handoff and stream diagnostics | ShowHsiang | 待核实 |
 | [F_26_prompt-attachment-event-agent-loop](harness/F_26_prompt-attachment-event-agent-loop.md) | F | Prompt Attachment Agent Loop 事件接入 | yangzequ | 待核实 |
 | [F_27_browser-local-intent-and-reader-decisions](harness/F_27_browser-local-intent-and-reader-decisions.md) | F | Browser local intent continuity and reader decisions | ShowHsiang | 待核实 |
+| [F_27_tool-registration-event-bridge](harness/F_27_tool-registration-event-bridge.md) | F | tool.register 启动工具登记桥接 | 待确认 | 待核实 |
 | [F_28_browser-source-and-local-continuity](harness/F_28_browser-source-and-local-continuity.md) | F | Browser source retention and local continuity after develop integration | ShowHsiang | 待核实 |
+| [F_28_subagent-registration-event-bridge](harness/F_28_subagent-registration-event-bridge.md) | F | agent.register 启动 SubAgent 登记桥接 | 待确认 | 待核实 |
 | [F_29_browser-shared-state-and-source-delivery](harness/F_29_browser-shared-state-and-source-delivery.md) | F | Browser shared-state lifecycle and complete retained-source delivery | ShowHsiang | 待核实 |
 | [F_30_browser-output-and-dispatch-contracts](F_30_browser-output-and-dispatch-contracts.md) | F | Browser output limits and local dispatch contracts | ShowHsiang | 无独立 D：Implements the approved multiversion analysis section 19 using existing browser contracts. |
 

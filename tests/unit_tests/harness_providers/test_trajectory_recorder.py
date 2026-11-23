@@ -15,6 +15,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import StatusCode
 
 from openjiuwen.extensions.observability.config import ObservabilityConfig
+from openjiuwen.extensions.observability.sequence_registry import materialize_stated_value
 from openjiuwen.extensions.observability.semconv import (
     GEN_AI_CONVERSATION_ID,
     GEN_AI_INPUT_MESSAGES,
@@ -267,8 +268,8 @@ def test_model_request_becomes_inference_with_window_commit(exporter: InMemorySp
     assert first.start_time == 100_500_000_000
     assert first.end_time == 102_000_000_000
     assert first.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 40
-    assert json.loads(first.attributes[GEN_AI_SYSTEM_INSTRUCTIONS])[0]["content"] == "you are coder"
-    assert json.loads(first.attributes[GEN_AI_INPUT_MESSAGES]) == [
+    assert json.loads(materialize_stated_value(first.attributes[GEN_AI_SYSTEM_INSTRUCTIONS]))[0]["content"] == "you are coder"
+    assert json.loads(materialize_stated_value(first.attributes[GEN_AI_INPUT_MESSAGES])) == [
         {"role": "user", "parts": [{"type": "text", "content": "list the files"}]},
     ]
     output_parts = json.loads(first.attributes[GEN_AI_OUTPUT_MESSAGES])[0]["parts"]
@@ -400,7 +401,7 @@ def test_multi_block_text_messages_are_stated_as_one_body(exporter: InMemorySpan
     # A reader reads one body, so the blocks are joined rather than stated as
     # a JSON array of parts.
     assert window[-1]["content"] == "<reminder>stay terse</reminder>\n\nlist files"
-    assert json.loads(inference.attributes[GEN_AI_INPUT_MESSAGES]) == [
+    assert json.loads(materialize_stated_value(inference.attributes[GEN_AI_INPUT_MESSAGES])) == [
         {"role": "user", "parts": [{"type": "text", "content": "<reminder>stay terse</reminder>\n\nlist files"}]},
     ]
 

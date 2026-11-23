@@ -477,6 +477,33 @@ async def test_add_graph_auto_generates_missing_task_ids(task_manager):
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_add_graph_task_created_event_carries_assignee(task_manager, message_bus):
+    """Created events state the assignee from creation time (B_20261116).
+
+    Scheduled dispatch seeds every task PENDING with an assignee; the
+    TaskCreatedEvent's member_name carries it so trajectory lane grouping can
+    attribute a pending task to its owner before the scheduler starts it.
+    Unassigned creations keep member_name unset.
+    """
+    result = await task_manager.add_graph(
+        [
+            TaskGraphSpec(title="Owned", content="c", task_id="t-owned", assignee="member1"),
+            TaskGraphSpec(title="Pool", content="c", task_id="t-pool"),
+        ]
+    )
+    assert result.ok, result.reason
+
+    created_payloads = {
+        call.kwargs["message"].payload["task_id"]: call.kwargs["message"].payload
+        for call in message_bus.publish.call_args_list
+        if getattr(call.kwargs.get("message"), "event_type", None) == TeamEvent.TASK_CREATED
+    }
+    assert created_payloads["t-owned"]["member_name"] == "member1"
+    assert created_payloads["t-pool"].get("member_name") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_add_graph_empty_specs(task_manager):
     """An empty batch is a no-op success."""
     result = await task_manager.add_graph([])

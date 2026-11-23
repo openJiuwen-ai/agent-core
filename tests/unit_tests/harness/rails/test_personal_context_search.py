@@ -57,6 +57,46 @@ def _registered_tool(agent):
     return tool
 
 
+@pytest.mark.asyncio
+async def test_pcs_read_returns_body_and_records_usage_with_existing_search(search_agent, tmp_path):
+    from openjiuwen.harness.personal_context.context_usage import _load_usage
+
+    agent, rail = search_agent
+    root = _write_pages(tmp_path)
+    hit = (await _registered_tool(agent).invoke({"query": "容量研究"}))["results"][0]
+    card = agent.ability_manager.get("pcs_read")
+    assert card is not None
+    read = Runner.resource_mgr.get_tool(card.id)
+    path = "技术/资料0.md"
+    result = await read.invoke({"path": path})
+    assert result["markdown"] == (root / path).read_bytes().decode("utf-8")
+    assert result["context_root"] == str(root)
+    assert _load_usage(tmp_path)["pages"][path]["last_read_at"] is not None
+    assert hit["path"]
+    rail.uninit(agent)
+    with pytest.raises(BaseError):
+        await read.invoke({"path": path})
+
+
+@pytest.mark.asyncio
+async def test_pcs_read_switch_and_foreign_card_ownership(search_agent, tmp_path):
+    agent, rail = search_agent
+    _write_pages(tmp_path)
+    original = Runner.resource_mgr.get_tool(agent.ability_manager.get("pcs_read").id)
+    _switch(tmp_path, False)
+    await rail.before_invoke(SimpleNamespace())
+    assert agent.ability_manager.get("pcs_read") is None
+    with pytest.raises(BaseError):
+        await original.invoke({"path": "技术/资料0.md"})
+    foreign = ToolCard(id="foreign-read", name="pcs_read")
+    tool = LocalFunction(card=foreign, func=lambda path: path)
+    assert agent.ability_manager.add_ability(foreign, tool).added
+    _switch(tmp_path, True)
+    await rail.before_invoke(SimpleNamespace())
+    rail.uninit(agent)
+    assert agent.ability_manager.get("pcs_read") is foreign
+
+
 def _write_pages(home: Path, count: int = 1) -> Path:
     root = home / "workspace" / "context"
     topic = root / "技术"
@@ -299,3 +339,21 @@ async def test_inflight_search_cannot_return_after_disable_or_detach(search_agen
     else:
         with pytest.raises(BaseError, match="disabled"):
             await tool.invoke({"query": "容量"})
+
+
+@pytest.mark.asyncio
+async def test_read_rechecks_switch_after_worker_returns(search_agent, tmp_path, monkeypatch):
+    from openjiuwen.harness.personal_context import context_usage
+
+    agent, _rail = search_agent
+    card = agent.ability_manager.get("pcs_read")
+    tool = Runner.resource_mgr.get_tool(card.id)
+
+    def read(_home, _path, *, allowed):
+        assert allowed()
+        _switch(tmp_path, False)
+        return {"markdown": "must not be delivered"}
+
+    monkeypatch.setattr(context_usage, "read_with_usage", read)
+    with pytest.raises(BaseError, match="disabled"):
+        await tool.invoke({"path": "topic/page.md"})

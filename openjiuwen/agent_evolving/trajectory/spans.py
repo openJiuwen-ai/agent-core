@@ -3,10 +3,9 @@
 """Stateless accessors and transformations for canonical OTLP trajectories.
 
 The online trajectory path receives ordinary OTLP JSON dictionaries from the
-observability processor.  This module deliberately does not own a window,
-registry, or subscription.  Functions return detached dictionaries/lists and
-transformations create a new :class:`Trajectory` value through
-``Trajectory.from_otlp``.
+observability processor. Internal payload helpers also operate on canonical
+spans shared with the online window. Public transformations return detached
+data or a new :class:`Trajectory`.
 
 Attributes are read only under the current observability conventions; there
 is no fallback to keys that earlier producers wrote.
@@ -236,15 +235,21 @@ def _payload_spans(payload: Mapping[str, Any]) -> Iterator[tuple[int, int, int, 
                 continue
             for span_index, span in enumerate(scope_span.get("spans") or []):
                 if isinstance(span, Mapping):
-                    yield resource_index, scope_index, span_index, normalize_span(span)
+                    yield resource_index, scope_index, span_index, span
+
+
+def iter_payload_spans(payload: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
+    """Traverse a caller-owned OTLP payload without copying or normalizing spans."""
+
+    for _, _, _, span in _payload_spans(payload):
+        yield span
 
 
 def iter_spans(value: Any) -> Iterator[Span]:
     """Yield detached spans from every OTLP resource/scope group."""
 
-    payload = _payload_for(value)
-    for _, _, _, span in _payload_spans(payload):
-        yield span
+    for span in iter_payload_spans(_payload_for(value)):
+        yield normalize_span(span)
 
 
 def span_attributes(span: Mapping[str, Any]) -> dict[str, Any]:
@@ -294,6 +299,14 @@ def span_identity(span: Mapping[str, Any]) -> SpanIdentity | None:
     return trace_text, span_text
 
 
+def _normalized_span_identity(span: Mapping[str, Any]) -> SpanIdentity | None:
+    # Native OTLP IDs are strings. Match the normalized representation for
+    # other inputs without converting the rest of a replayed span.
+    if all(isinstance(span.get(key), str) for key in ("traceId", "spanId")):
+        return span_identity(span)
+    return span_identity({key: to_json_compatible(span.get(key)) for key in ("traceId", "spanId")})
+
+
 def _id_text(value: Any) -> str:
     if isinstance(value, bytes):
         return value.hex()
@@ -327,65 +340,88 @@ def _scope_bucket_key(scope_span: Mapping[str, Any]) -> tuple[Any, ...]:
     return tuple(sorted((str(k), repr(v)) for k, v in scope.items()))
 
 
-def _sort_payload_spans(payload: dict[str, Any]) -> None:
-    for resource_span in payload.get("resourceSpans") or []:
-        for scope_span in resource_span.get("scopeSpans") or []:
-            spans = scope_span.get("spans") or []
-            scope_span["spans"] = sorted(spans, key=span_sort_key)
+def _append_scope_spans(
+    scopes: dict[tuple[Any, ...], dict[str, Any]],
+    payloads: Iterable[Mapping[str, Any]],
+    admit: Callable[[Span], Span | None],
+) -> None:
+    """Bucket incoming spans by scope and sort only groups that gained spans."""
+
+    additions: dict[tuple[Any, ...], list[Span]] = {}
+    for payload in payloads:
+        for resource in payload.get("resourceSpans") or []:
+            if not isinstance(resource, Mapping):
+                continue
+            for source in resource.get("scopeSpans") or []:
+                if not isinstance(source, Mapping):
+                    continue
+                scope = dict(to_json_compatible(source.get("scope") or {}))
+                key = _scope_bucket_key({"scope": scope})
+                scopes.setdefault(key, {"scope": scope, "spans": []})
+                for span in source.get("spans") or []:
+                    if not isinstance(span, Mapping):
+                        continue
+                    accepted = admit(span)
+                    if accepted is not None:
+                        additions.setdefault(key, []).append(accepted)
+
+    for key, spans in additions.items():
+        group = scopes[key]
+        existing = group["spans"]
+        spans.sort(key=span_sort_key)
+        combined = [*existing, *spans]
+        if existing and span_sort_key(existing[-1]) > span_sort_key(spans[0]):
+            combined.sort(key=span_sort_key)
+        scopes[key] = {**group, "spans": combined}
+
+
+def _merge_payload_groups(
+    first: Mapping[str, Any],
+    scopes: Iterable[dict[str, Any]],
+    payloads: Iterable[Mapping[str, Any]],
+    admit: Callable[[Span], Span | None],
+) -> dict[str, Any]:
+    """Build the logical resource, sharing untouched canonical groups."""
+
+    resources = first.get("resourceSpans") or []
+    resource = (resources[0].get("resource") or {}) if resources else {}
+    buckets = {_scope_bucket_key(group): group for group in scopes}
+    _append_scope_spans(buckets, payloads, admit)
+    return {"resourceSpans": [{"resource": resource, "scopeSpans": list(buckets.values())}]}
+
+
+def _merge_normalized_payloads(
+    payloads: Sequence[Mapping[str, Any]],
+    *,
+    normalize_again: bool = False,
+) -> dict[str, Any]:
+    if not payloads:
+        return {"resourceSpans": []}
+
+    seen: set[SpanIdentity] = set()
+
+    def admit(span: Span) -> Span | None:
+        if normalize_again:
+            span = normalize_span(span)
+        identity = span_identity(span)
+        if identity is not None:
+            if identity in seen:
+                return None
+            seen.add(identity)
+        return span
+
+    return _merge_payload_groups(payloads[0], (), payloads, admit)
 
 
 def merge_payloads(*values: Any) -> dict[str, Any]:
     """Merge OTLP payloads into one logical resource, de-duplicating identities.
 
     The first payload owns resource metadata (including trajectory/session
-    identity).  Native span trace/span IDs from all inputs are retained; later
-    resource-level identity attributes are not copied into a second resource
-    record, which would otherwise make a merged window appear to have multiple
-    trajectories.
+    identity). Native span trace/span IDs from all inputs are retained.
     """
 
     payloads = [normalize_otlp(_payload_for(value)) for value in values if value is not None]
-    if not payloads:
-        return {"resourceSpans": []}
-    first = deepcopy(payloads[0])
-    first_resources = first.get("resourceSpans") or []
-    first_resource = first_resources[0] if first_resources else {}
-    logical_resource: dict[str, Any] = {
-        "resource": deepcopy(first_resource.get("resource") or {}) if isinstance(first_resource, Mapping) else {},
-        "scopeSpans": [],
-    }
-    result: dict[str, Any] = {"resourceSpans": [logical_resource]}
-    seen: set[SpanIdentity] = set()
-    for payload in payloads:
-        for incoming_resource in payload.get("resourceSpans") or []:
-            if not isinstance(incoming_resource, Mapping):
-                continue
-            for incoming_scope in incoming_resource.get("scopeSpans") or []:
-                if not isinstance(incoming_scope, Mapping):
-                    continue
-                matching_scope = None
-                scope_key = _scope_bucket_key(incoming_scope)
-                for existing_scope in logical_resource["scopeSpans"]:
-                    if _scope_bucket_key(existing_scope) == scope_key:
-                        matching_scope = existing_scope
-                        break
-                if matching_scope is None:
-                    matching_scope = {
-                        "scope": deepcopy(incoming_scope.get("scope") or {}),
-                        "spans": [],
-                    }
-                    logical_resource["scopeSpans"].append(matching_scope)
-                existing_spans = matching_scope.setdefault("spans", [])
-                for incoming_span in incoming_scope.get("spans") or []:
-                    normalized = normalize_span(incoming_span)
-                    identity = span_identity(normalized)
-                    if identity is not None and identity in seen:
-                        continue
-                    existing_spans.append(normalized)
-                    if identity is not None:
-                        seen.add(identity)
-    _sort_payload_spans(result)
-    return normalize_otlp(result)
+    return normalize_otlp(_merge_normalized_payloads(payloads, normalize_again=True))
 
 
 def merge_trajectories(*values: Any) -> Any:
@@ -472,9 +508,23 @@ def trim_trajectory(
     """
 
     payload = normalize_otlp(_payload_for(value))
-    if max_spans is None and start_time is None and end_time is None:
-        return _trajectory_from_payload(payload)
+    return _trajectory_from_payload(
+        _trim_payload(payload, max_spans, start_time=start_time, end_time=end_time, uncounted=uncounted)
+    )
 
+
+def _trim_payload(
+    payload: dict[str, Any],
+    max_spans: int | None,
+    *,
+    start_time: int | None = None,
+    end_time: int | None = None,
+    uncounted: Callable[[Mapping[str, Any]], bool] | None = None,
+) -> dict[str, Any]:
+    """Select canonical spans while preserving their original groups."""
+
+    if max_spans is None and start_time is None and end_time is None:
+        return payload
     entries = list(_payload_spans(payload))
     selected = _trim_span_indices(
         [span for _, _, _, span in entries],
@@ -483,17 +533,15 @@ def trim_trajectory(
         end_time=end_time,
         uncounted=uncounted,
     )
-    result = deepcopy(payload)
-    for resource_span in result.get("resourceSpans") or []:
-        for scope_span in resource_span.get("scopeSpans") or []:
-            scope_span["spans"] = []
 
-    # Keep empty groups and their metadata; selected positions identify the original
-    # source even when different groups contain identical trace/span IDs.
+    resources = [
+        {**resource, "scopeSpans": [{**group, "spans": []} for group in resource["scopeSpans"]]}
+        for resource in payload["resourceSpans"]
+    ]
     for index in selected:
         resource_index, scope_index, _, span = entries[index]
-        result["resourceSpans"][resource_index]["scopeSpans"][scope_index]["spans"].append(span)
-    return _trajectory_from_payload(result)
+        resources[resource_index]["scopeSpans"][scope_index]["spans"].append(span)
+    return {**payload, "resourceSpans": resources}
 
 
 def crop_trajectory(value: Any, *args: Any, **kwargs: Any) -> Any:
