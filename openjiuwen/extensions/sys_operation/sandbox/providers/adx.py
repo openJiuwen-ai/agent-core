@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""YuanRong sandbox providers (shell / code / fs).
+"""ADX sandbox providers (shell / code / fs).
 
 Talks only to the ADX HTTP API on ``PreDeployLauncherConfig.base_url``:
 
@@ -17,16 +17,23 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
+import posixpath
 import shlex
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, ClassVar, Dict, List, Literal, Optional, Tuple, TypeVar
+
+import aiohttp
+from yarl import URL
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
@@ -72,8 +79,8 @@ from openjiuwen.core.sys_operation.sandbox.sandbox_registry import SandboxRegist
 
 DEFAULT_DOCKER_CPU = 1000
 DEFAULT_DOCKER_MEMORY = 1024
-YUANRONG_RECREATE_RETRIES = 5
-YUANRONG_RECREATE_SLEEP_SECONDS = 1
+ADX_RECREATE_RETRIES = 5
+ADX_RECREATE_SLEEP_SECONDS = 1
 _SDK_LIST_DEPTH = 20
 _ADX_ENVIRONMENTS = "/api/environment/v1/environments"
 _ADX_INVOKE = "/direct"
@@ -316,8 +323,24 @@ class AdxHttpError(RuntimeError):
         self.status = status
 
 
+def _local_rootfs(extra: dict[str, Any]) -> dict[str, str] | None:
+    rootfs = extra.get("rootfs")
+    if isinstance(rootfs, str) and rootfs.lstrip().startswith("{"):
+        rootfs = json.loads(rootfs)
+    if not isinstance(rootfs, dict) or rootfs.get("type") != "local":
+        return None
+    path = rootfs.get("path")
+    if not isinstance(path, str) or not path.startswith("/"):
+        raise ValueError("ADX Local rootfs requires an absolute node path")
+    if any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in path) or any(
+        part in (".", "..") for part in path.split("/")
+    ):
+        raise ValueError("ADX Local rootfs cannot contain traversal or control characters")
+    return {"type": "local", "path": path}
+
+
 def _normalize_rootfs(extra: dict[str, Any]) -> str:
-    """Build the rootfs JSON the YuanRong create path always sent.
+    """Build the rootfs JSON for the ADX create request.
 
     A string is kept. A dict aliases ``image`` to ``imageurl``. Otherwise
     ``image`` / ``workdir`` / ``mounts`` are assembled into one document.
@@ -330,14 +353,13 @@ def _normalize_rootfs(extra: dict[str, Any]) -> str:
         if "imageurl" not in payload and "image" in payload:
             payload["imageurl"] = payload.pop("image")
         return json.dumps(payload)
-    return json.dumps(
-        {
-            "type": "image",
-            "imageurl": extra.get("image"),
-            "workdir": extra.get("workdir"),
-            "mounts": extra.get("mounts"),
-        }
-    )
+    payload = {}
+    if extra.get("image"):
+        payload.update(type="image", imageurl=extra["image"])
+    for key in ("workdir", "mounts"):
+        if extra.get(key) is not None:
+            payload[key] = extra[key]
+    return json.dumps(payload)
 
 
 def _normalize_executor(value: Any) -> str:
@@ -351,20 +373,58 @@ def _normalize_executor(value: Any) -> str:
     return text
 
 
+def _adx_mount(mount: dict) -> dict:
+    if "source" not in mount:
+        if "host_path" in mount:
+            return {"type": "bind", **mount}
+        return mount
+    source = mount["source"]
+    return {
+        "type": "bind",
+        "host_path": source,
+        "target": mount.get("target") or source,
+        "options": ["ro" if mount.get("readonly") else "rw"],
+    }
+
+
 def _adx_create_body(extra: dict[str, Any], executor: str) -> dict[str, Any]:
-    """HTTP body for the same fields ``yr.sandbox.Sandbox`` used to receive."""
-    executor = _normalize_executor(executor)
+    """Build the native create fields while accepting legacy rootfs configuration."""
+    rootfs = _normalize_rootfs(extra)
+    rootfs_fields = json.loads(rootfs) if rootfs.lstrip().startswith("{") else {}
+    local_rootfs = _local_rootfs(extra)
     body: dict[str, Any] = {
-        "rootfs": _normalize_rootfs(extra),
+        "rootfs": local_rootfs if local_rootfs is not None else rootfs,
+        "runtime": extra.get("runtime") or rootfs_fields.get("runtime") or _normalize_executor(executor),
         "cpu": int(extra.get("cpu", DEFAULT_DOCKER_CPU)),
         "memory": int(extra.get("memory", DEFAULT_DOCKER_MEMORY)),
         "idleTimeoutSeconds": _idle_timeout_seconds(extra),
     }
-    if executor in {"supervisor", "docker", "conch"}:
-        body["runtime"] = executor
+    cwd = extra.get("workdir") or rootfs_fields.get("workdir")
+    if cwd:
+        body["cwd"] = cwd
+    mounts = extra.get("mounts") or rootfs_fields.get("mounts") or []
+    if mounts:
+        body["mounts"] = [_adx_mount(mount) for mount in mounts]
+    for key in ("cpu_limit", "mem_limit", "env", "network"):
+        if extra.get(key) is not None:
+            body[key] = extra[key]
+    for config_key, request_key in (
+        ("restart_policy", "restartPolicy"),
+        ("create_timeout", "createTimeoutSeconds"),
+        ("schedule_timeout", "scheduleTimeoutSeconds"),
+    ):
+        if extra.get(config_key) is not None:
+            body[request_key] = extra[config_key]
     user = extra.get("user")
-    if isinstance(user, str) and user.strip():
-        body["extra_config"] = {"user": user.strip()}
+    group = extra.get("group")
+    if user is not None and group is not None:
+        body.update(user=str(user), group=str(group))
+    elif isinstance(user, str) and user.strip():
+        user = user.strip()
+        body["extra_config"] = {"user": user}
+        uid, _, gid = user.partition(":")
+        if uid.isdecimal() and gid.isdecimal():
+            body.update(user=uid, group=gid)
     return body
 
 
@@ -445,15 +505,6 @@ def _decode_mgmt_data(body: Any) -> dict[str, Any]:
     raise RuntimeError("ADX management response has no data")
 
 
-def _log_payload(payload: Optional[dict[str, Any]]) -> str:
-    if payload is None:
-        return ""
-    text = json.dumps(payload, ensure_ascii=False, default=str)
-    if len(text) <= 2000:
-        return text
-    return text[:2000] + "...(truncated)"
-
-
 def _adx_request(
     method: str,
     url: str,
@@ -463,20 +514,20 @@ def _adx_request(
     timeout: float = 30,
 ) -> tuple[int, Any]:
     req_headers = {"Accept": "application/json"}
-    if headers:
-        req_headers.update(headers)
     data = None
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         req_headers["Content-Type"] = "application/json"
     logger.info(
-        "[yuanrong] request method=%s url=%s timeout=%s payload=%s",
+        "[adx] request method=%s url=%s timeout=%s action=%s",
         method,
         url,
         timeout,
-        _log_payload(payload),
+        payload.get("action") if payload else None,
     )
     request = urllib.request.Request(url, data=data, headers=req_headers, method=method)
+    for key, value in (headers or {}).items():
+        request.add_unredirected_header(key, value)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             status = response.status
@@ -486,7 +537,12 @@ def _adx_request(
         raw = exc.read()
     if not raw:
         return status, {}
-    return status, json.loads(raw.decode("utf-8"))
+    try:
+        return status, json.loads(raw)
+    except ValueError:
+        if status >= 400:
+            return status, {"message": raw.decode("utf-8", errors="replace")}
+        raise
 
 
 def _invoke_url(base_url: str, environment_id: str) -> str:
@@ -553,7 +609,7 @@ def _endpoint_value(endpoint: SandboxEndpoint, config: Optional[SandboxGatewayCo
     return getattr(launcher_config, attr, None)
 
 
-def build_yuanrong_shared_scope_key(base_url: str, isolation_key: Optional[str] = None) -> str:
+def build_adx_shared_scope_key(base_url: str, isolation_key: Optional[str] = None) -> str:
     """Build the provider shared-cache key for a base_url + optional isolation_key pair."""
     parts = [str(base_url).rstrip("/")]
     if isinstance(isolation_key, str) and isolation_key:
@@ -561,7 +617,7 @@ def build_yuanrong_shared_scope_key(base_url: str, isolation_key: Optional[str] 
     return "|".join(parts)
 
 
-class _YuanrongProviderMixin:
+class _AdxProviderMixin:
     """Shared ADX environment lifecycle for shell/code/fs providers."""
 
     _shared_lock: ClassVar[threading.Lock] = threading.Lock()
@@ -569,22 +625,27 @@ class _YuanrongProviderMixin:
     # shared_key -> RLock serializing create / invalidate / recreate for that key
     _lifecycle_locks: ClassVar[Dict[str, threading.RLock]] = {}
     # shared_key -> (environment_id, runtime)
-    _shared_instances: ClassVar[Dict[str, Tuple[str, str]]] = {}
+    _shared_instances: ClassVar[Dict[str, Tuple[str, str, Dict[str, str]]]] = {}
 
     _instance: Optional[str]
     _executor: str
     _timeout_seconds: int
 
-    def _init_yuanrong(self, endpoint: SandboxEndpoint, config: Optional[SandboxGatewayConfig]) -> None:
+    def _init_adx(self, endpoint: SandboxEndpoint, config: Optional[SandboxGatewayConfig]) -> None:
         self._instance = None
+        self._auth_headers = dict(getattr(config, "auth_headers", None) or {})
         self._timeout_seconds = int(getattr(config, "timeout_seconds", 30) or 30)
         extra = self._launcher_extra_params()
+        token_env = extra.get("token_env")
+        token = os.getenv(token_env) if token_env else None
+        if token:
+            self._auth_headers.setdefault("Authorization", f"Bearer {token}")
         self._executor = _normalize_executor(extra.get("executor"))
 
     def _base_url(self) -> str:
         base_url = _endpoint_value(self.endpoint, self.config, "base_url")
         if not isinstance(base_url, str) or not base_url.strip():
-            raise ValueError("YuanRong ADX base_url is required")
+            raise ValueError("ADX base_url is required")
         return base_url.rstrip("/")
 
     def _request_timeout(self, command_timeout: Optional[float] = None) -> float:
@@ -602,10 +663,14 @@ class _YuanrongProviderMixin:
 
     def _shared_scope_key(self) -> str:
         isolation_key = getattr(self.endpoint, "isolation_key", None)
-        return build_yuanrong_shared_scope_key(
+        key = build_adx_shared_scope_key(
             self._base_url(),
             isolation_key if isinstance(isolation_key, str) else None,
         )
+        rootfs = _local_rootfs(self._launcher_extra_params())
+        if rootfs is not None:
+            key += "|rootfs=" + hashlib.sha256(rootfs["path"].encode()).hexdigest()
+        return key
 
     @classmethod
     def _lifecycle_lock_for(cls, shared_key: str) -> threading.RLock:
@@ -622,7 +687,8 @@ class _YuanrongProviderMixin:
             "POST",
             f"{self._base_url()}{_ADX_ENVIRONMENTS}",
             payload=body,
-            timeout=self._request_timeout(),
+            headers=self._auth_headers,
+            timeout=self._request_timeout(body.get("createTimeoutSeconds")),
         )
         if status != 200:
             raise AdxHttpError(status, _http_error_message(response))
@@ -643,6 +709,7 @@ class _YuanrongProviderMixin:
             "POST",
             _invoke_url(self._base_url(), environment_id),
             payload={"action": action, "args": args},
+            headers=self._auth_headers,
             timeout=timeout,
         )
         if status == 429:
@@ -667,7 +734,7 @@ class _YuanrongProviderMixin:
                 if cached is not None:
                     return self._bind_instance(cached[0], cached[1])
             if sleep_before_create:
-                time.sleep(YUANRONG_RECREATE_SLEEP_SECONDS)
+                time.sleep(ADX_RECREATE_SLEEP_SECONDS)
                 with self._shared_lock:
                     cached = self._shared_instances.get(shared_key)
                     if cached is not None:
@@ -678,17 +745,17 @@ class _YuanrongProviderMixin:
                 cached = self._shared_instances.get(shared_key)
                 if cached is not None:
                     duplicate = environment_id
-                    environment_id, executor = cached
+                    environment_id, executor, _ = cached
                 else:
-                    self._shared_instances[shared_key] = (environment_id, executor)
+                    self._shared_instances[shared_key] = (environment_id, executor, self._auth_headers)
                     logger.info(
-                        "[yuanrong] created environment executor=%s shared_key=%s",
+                        "[adx] created environment executor=%s shared_key=%s",
                         executor,
                         shared_key,
                     )
             if duplicate is not None:
-                logger.info("[yuanrong] discarding duplicate environment shared_key=%s", shared_key)
-                _delete_environment(self._base_url(), duplicate)
+                logger.info("[adx] discarding duplicate environment shared_key=%s", shared_key)
+                _delete_environment(self._base_url(), duplicate, self._auth_headers)
             return self._bind_instance(environment_id, executor)
 
     def _get_instance(self) -> Tuple[str, str]:
@@ -697,25 +764,24 @@ class _YuanrongProviderMixin:
     def _invalidate_cached_instance(self, stale_environment_id: str) -> None:
         """Drop cache only when it still points at ``stale_environment_id``."""
         shared_key = self._shared_scope_key()
-        to_delete: Optional[str] = None
+        to_delete = None
         with self._lifecycle_lock_for(shared_key):
             with self._shared_lock:
                 cached = self._shared_instances.get(shared_key)
                 if cached is None:
                     self._instance = None
                 elif cached[0] == stale_environment_id:
-                    popped = self._shared_instances.pop(shared_key, None)
-                    to_delete = popped[0] if popped is not None else None
+                    to_delete = self._shared_instances.pop(shared_key)
                     self._instance = None
                 else:
                     self._bind_instance(cached[0], cached[1])
         if to_delete is not None:
-            _delete_environment(shared_key.split("|", 1)[0], to_delete)
+            _delete_environment(self._base_url(), to_delete[0], to_delete[2])
 
     def _call_with_recreate(self, fn: Callable[[str], _T]) -> _T:
         shared_key = self._shared_scope_key()
         last_exc: Optional[BaseException] = None
-        for attempt in range(YUANRONG_RECREATE_RETRIES):
+        for attempt in range(ADX_RECREATE_RETRIES):
             environment_id, _ = self._ensure_shared_instance(sleep_before_create=attempt > 0)
             try:
                 return fn(environment_id)
@@ -724,35 +790,28 @@ class _YuanrongProviderMixin:
                 if exc.status != 404:
                     raise
                 logger.warning(
-                    "[yuanrong] recreate status=404 attempt=%d/%d shared_key=%s",
+                    "[adx] recreate status=404 attempt=%d/%d shared_key=%s",
                     attempt + 1,
-                    YUANRONG_RECREATE_RETRIES,
+                    ADX_RECREATE_RETRIES,
                     shared_key,
                 )
                 self._invalidate_cached_instance(stale_environment_id=environment_id)
         if last_exc is not None:
             raise last_exc
-        raise RuntimeError("yuanrong sandbox recreate exhausted without an error")
+        raise RuntimeError("adx sandbox recreate exhausted without an error")
 
     @classmethod
-    def pop_cached_instance(cls, shared_key: str) -> Optional[Tuple[str, str]]:
-        with cls._lifecycle_lock_for(shared_key):
-            with cls._shared_lock:
-                return cls._shared_instances.pop(shared_key, None)
-
-    @classmethod
-    def clear_shared_for_base_url(cls, base_url: str) -> List[Tuple[str, str, str]]:
-        prefix = f"{str(base_url).rstrip('/')}|"
-        normalized = str(base_url).rstrip("/")
+    def clear_shared_for_scope(cls, scope: str, *, suffix_prefix: str = "|") -> List[Tuple[str, str, Dict[str, str]]]:
+        prefix = scope + suffix_prefix
         with cls._shared_lock:
-            keys = [k for k in cls._shared_instances if k == normalized or k.startswith(prefix)]
-        removed: List[Tuple[str, str, str]] = []
+            keys = [k for k in cls._shared_instances if k == scope or k.startswith(prefix)]
+        removed: List[Tuple[str, str, Dict[str, str]]] = []
         for key in sorted(keys):
             with cls._lifecycle_lock_for(key):
                 with cls._shared_lock:
                     cached = cls._shared_instances.pop(key, None)
                 if cached is not None:
-                    removed.append((key, cached[0], cached[1]))
+                    removed.append((key, cached[0], cached[2]))
         return removed
 
     def _exec_sync(
@@ -799,15 +858,21 @@ class _YuanrongProviderMixin:
 
         return self._call_with_recreate(_do)
 
-    def _fs_write_sync(self, path: str, data: Any, *, mode: str = "wb") -> None:
+    def _fs_write_sync(
+        self, path: str, data: Any, *, mode: str = "wb", create_if_not_exist: bool = True
+    ) -> None:
         binary = "b" in mode
-        payload = _write_file_data(data, binary=binary)
+        args = {"path": path, "data": _write_file_data(data, binary=binary), "binary": binary}
+        if "a" in mode:
+            args["append"] = True
+        if not create_if_not_exist:
+            args["create_if_missing"] = False
 
         def _do(environment_id: str) -> None:
             result = self._invoke(
                 environment_id,
                 "file.write",
-                {"path": path, "data": payload, "binary": binary, "append": "a" in mode},
+                args,
                 timeout=self._request_timeout(),
             )
             if isinstance(result, dict):
@@ -866,73 +931,89 @@ class _YuanrongProviderMixin:
 
         return self._call_with_recreate(_do)
 
-    def _fs_path_exists_sync(self, path: str) -> bool:
-        try:
-            self._fs_read_sync(path, mode="rb")
-            return True
-        except FileNotFoundError:
-            return False
-        except IsADirectoryError:
-            return True
-        except OSError as exc:
-            # Some runtimes raise ENOENT-style errors instead of FileNotFoundError.
-            if getattr(exc, "errno", None) == 2 or "No such file" in str(exc):
-                return False
-            raise
+    def _file_exists(self, environment_id: str, path: str) -> bool:
+        result = self._invoke(environment_id, "file.exists", {"path": path}, timeout=self._request_timeout())
+        if not isinstance(result, dict) or not isinstance(result.get("exists"), bool):
+            raise OSError("ADX file.exists returned no existence result")
+        return result["exists"]
+
+    @asynccontextmanager
+    async def _file_request(
+        self,
+        environment_id: str,
+        method: Literal["GET", "POST"],
+        path: str,
+        *,
+        data: AsyncIterator[bytes] | bytes | None = None,
+        size: int | None = None,
+    ) -> AsyncIterator[aiohttp.ClientResponse]:
+        action = "upload" if method == "POST" else "download"
+        query = urllib.parse.urlencode({"path": path, "type": "file"}, quote_via=urllib.parse.quote)
+        quoted = urllib.parse.quote(environment_id, safe="")
+        url = URL(f"{self._base_url()}{_ADX_INVOKE}/{quoted}/{action}?{query}", encoded=True)
+        headers = {"Accept-Encoding": "identity", **self._auth_headers}
+        if size is not None:
+            headers.update({"Content-Type": "application/octet-stream", "Content-Length": str(size)})
+        timeout = self._request_timeout()
+        limits = aiohttp.ClientTimeout(sock_connect=timeout, sock_read=timeout)
+        async with aiohttp.ClientSession(timeout=limits, auto_decompress=False) as session:
+            async with session.request(method, url, data=data, headers=headers, allow_redirects=False) as response:
+                if response.status == 404 and method == "GET":
+                    raise FileNotFoundError(f"ADX file not found: {path}")
+                if response.status != 200:
+                    raise AdxHttpError(response.status, f"ADX {action} returned HTTP {response.status}")
+                yield response
 
 
-def _delete_environment(base_url: str, environment_id: str) -> None:
+def _delete_environment(base_url: str, environment_id: str, headers: Dict[str, str]) -> None:
     try:
         status, body = _adx_request(
             "DELETE",
             _environment_url(base_url, environment_id),
+            headers=headers,
             timeout=30,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[yuanrong] delete environment failed: %s", exc)
+        logger.warning("[adx] delete environment failed: %s", exc)
         return
-    if status in (200, 404):
+    if status in (200, 204, 404):
         return
     logger.warning(
-        "[yuanrong] delete environment status=%s message=%s",
+        "[adx] delete environment status=%s message=%s",
         status,
         _http_error_message(body),
     )
 
 
-async def delete_yuanrong_sandbox(
+async def delete_adx_sandbox(
     *,
     shared_key: Optional[str] = None,
     base_url: Optional[str] = None,
     reason: str = "teardown",
 ) -> list[str]:
     """Delete cached ADX environments on sysoperation teardown."""
-    entries: List[Tuple[str, str]] = []
+    entries: List[Tuple[str, str, Dict[str, str]]] = []
     if shared_key:
-        popped = _YuanrongProviderMixin.pop_cached_instance(shared_key)
-        if popped is not None:
-            entries.append((shared_key, popped[0]))
+        entries.extend(_AdxProviderMixin.clear_shared_for_scope(shared_key, suffix_prefix="|rootfs="))
     elif base_url:
-        entries.extend(
-            (key, environment_id)
-            for key, environment_id, _runtime in _YuanrongProviderMixin.clear_shared_for_base_url(base_url)
-        )
+        entries.extend(_AdxProviderMixin.clear_shared_for_scope(base_url.rstrip("/")))
 
     deleted: list[str] = []
-    for key, environment_id in entries:
-        await asyncio.to_thread(_delete_environment, key.split("|", 1)[0], environment_id)
+    for key, environment_id, headers in entries:
+        await asyncio.to_thread(_delete_environment, key.split("|", 1)[0], environment_id, headers)
         deleted.append(key)
-        logger.info("[yuanrong] deleted environment shared_key=%s reason=%s", key, reason)
+        logger.info("[adx] deleted environment shared_key=%s reason=%s", key, reason)
     return deleted
 
 
+@SandboxRegistry.provider("adx-environment", "fs")
 @SandboxRegistry.provider("yuanrong", "fs")
-class YuanrongFSProvider(_YuanrongProviderMixin, BaseFSProvider):
-    """YuanRong FS provider via ADX ``file.read`` / ``file.write`` / ``file.list`` / ``file.search``."""
+class AdxFSProvider(_AdxProviderMixin, BaseFSProvider):
+    """ADX FS provider via ADX ``file.read`` / ``file.write`` / ``file.list`` / ``file.search``."""
 
     def __init__(self, endpoint: SandboxEndpoint, config: Optional[SandboxGatewayConfig] = None):
         super().__init__(endpoint, config)
-        self._init_yuanrong(endpoint, config)
+        self._init_adx(endpoint, config)
 
     async def read_file(self, path: str, mode: str = "text", **kwargs) -> ReadFileResult:
         head = kwargs.pop("head", None)
@@ -953,7 +1034,11 @@ class YuanrongFSProvider(_YuanrongProviderMixin, BaseFSProvider):
                     await asyncio.to_thread(self._fs_read_sync, path, mode="r"),
                     encoding=encoding,
                 )
-                lines, _ = _select_text_lines(text, head=head, tail=tail, line_range=line_range)
+                lines, invalid_selection = _select_text_lines(text, head=head, tail=tail, line_range=line_range)
+                if invalid_selection:
+                    return _build_fs_error_result(
+                        "read_file", "Invalid 'head', 'tail', or 'line_range'", ReadFileResult
+                    )
                 content = "".join(lines)
             return ReadFileResult(
                 code=StatusCode.SUCCESS.code,
@@ -981,6 +1066,28 @@ class YuanrongFSProvider(_YuanrongProviderMixin, BaseFSProvider):
             yield _build_fs_error_result("read_file_stream", validation_error, ReadFileStreamResult)
             return
 
+        if mode == "bytes":
+            try:
+                async with self._open_download(path) as response:
+                    chunks = response.content.iter_chunked(chunk_size if chunk_size > 0 else 8192)
+                    chunk = await anext(chunks, b"")
+                    index = 0
+                    while chunk:
+                        following = await anext(chunks, b"")
+                        yield ReadFileStreamResult(
+                            code=StatusCode.SUCCESS.code,
+                            message=StatusCode.SUCCESS.errmsg,
+                            data=ReadFileChunkData(
+                                path=path, chunk_content=chunk, mode="bytes", chunk_size=len(chunk),
+                                chunk_index=index, is_last_chunk=not following,
+                            ),
+                        )
+                        chunk = following
+                        index += 1
+            except Exception as exc:  # noqa: BLE001
+                yield _build_fs_error_result("read_file_stream", str(exc), ReadFileStreamResult)
+            return
+
         result = await self.read_file(
             path, mode=mode, head=head, tail=tail, line_range=line_range, encoding=encoding
         )
@@ -989,28 +1096,6 @@ class YuanrongFSProvider(_YuanrongProviderMixin, BaseFSProvider):
             return
 
         content = result.data.content
-        if mode == "bytes":
-            raw = content if isinstance(content, bytes) else str(content).encode(encoding)
-            if chunk_size <= 0:
-                chunk_size = 8192
-            if not raw:
-                return
-            pieces = [raw[start:start + chunk_size] for start in range(0, len(raw), max(chunk_size, 1))]
-            for index, piece in enumerate(pieces):
-                yield ReadFileStreamResult(
-                    code=StatusCode.SUCCESS.code,
-                    message=StatusCode.SUCCESS.errmsg,
-                    data=ReadFileChunkData(
-                        path=path,
-                        chunk_content=piece,
-                        mode="bytes",
-                        chunk_size=len(piece),
-                        chunk_index=index,
-                        is_last_chunk=index == len(pieces) - 1,
-                    ),
-                )
-            return
-
         text = content if isinstance(content, str) else content.decode(encoding)
         selected_lines = text.splitlines(keepends=True)
         if not selected_lines:
@@ -1036,11 +1121,9 @@ class YuanrongFSProvider(_YuanrongProviderMixin, BaseFSProvider):
         create_if_not_exist = kwargs.get("create_if_not_exist", True)
         encoding = kwargs.get("encoding", "utf-8")
         try:
-            if not create_if_not_exist:
-                exists = await asyncio.to_thread(self._fs_path_exists_sync, path)
-                if not exists:
-                    raise FileNotFoundError(f"File does not exist: {path}")
-
+            options = kwargs.get("options") or {}
+            if options.get("create_if_absent") or options.get("expected_content_sha256") is not None:
+                raise ValueError("ADX file.write does not support conditional writes")
             if mode == "bytes":
                 raw: str | bytes = content if isinstance(content, bytes) else bytes(content)
                 open_mode = "ab" if append else "wb"
@@ -1053,7 +1136,9 @@ class YuanrongFSProvider(_YuanrongProviderMixin, BaseFSProvider):
                 raw = text
                 open_mode = "a" if append else "w"
 
-            await asyncio.to_thread(self._fs_write_sync, path, raw, mode=open_mode)
+            await asyncio.to_thread(
+                self._fs_write_sync, path, raw, mode=open_mode, create_if_not_exist=create_if_not_exist
+            )
             size = len(raw) if isinstance(raw, bytes) else len(raw.encode(encoding))
             return WriteFileResult(
                 code=StatusCode.SUCCESS.code,
@@ -1062,6 +1147,29 @@ class YuanrongFSProvider(_YuanrongProviderMixin, BaseFSProvider):
             )
         except Exception as exc:  # noqa: BLE001
             return _build_fs_error_result("write_file", str(exc), WriteFileResult)
+
+    def _upload_target(self, path: str, *, overwrite: bool, create_parent_dirs: bool) -> str:
+        def select(environment_id: str) -> str:
+            if self._file_exists(environment_id, path) and not overwrite:
+                raise FileExistsError(f"File already exists: {path}")
+            if not create_parent_dirs:
+                parent = posixpath.dirname(path) or "."
+                if not self._file_exists(environment_id, parent):
+                    raise FileNotFoundError(f"Parent directory does not exist: {parent}")
+            return environment_id
+
+        return self._call_with_recreate(select)
+
+    @asynccontextmanager
+    async def _open_download(self, path: str) -> AsyncIterator[aiohttp.ClientResponse]:
+        def select(environment_id: str) -> str:
+            if not self._file_exists(environment_id, path):
+                raise FileNotFoundError(f"ADX file not found: {path}")
+            return environment_id
+
+        environment_id = await asyncio.to_thread(self._call_with_recreate, select)
+        async with self._file_request(environment_id, "GET", path) as response:
+            yield response
 
     async def upload_file(
         self,
@@ -1074,18 +1182,37 @@ class YuanrongFSProvider(_YuanrongProviderMixin, BaseFSProvider):
         chunk_size: int = 0,
         **kwargs,
     ) -> UploadFileResult:
-        del create_parent_dirs, preserve_permissions, chunk_size  # parents created by file.write
+        del preserve_permissions  # The ADX single-file route does not transmit source modes.
         try:
-            if not overwrite:
-                exists = await asyncio.to_thread(self._fs_path_exists_sync, target_path)
-                if exists:
-                    raise FileExistsError(f"File already exists: {target_path}")
-            raw = await asyncio.to_thread(Path(local_path).read_bytes)
-            await asyncio.to_thread(self._fs_write_sync, target_path, raw, mode="wb")
+            with Path(local_path).open("rb") as source:
+                size = os.fstat(source.fileno()).st_size
+                block_size = chunk_size if chunk_size > 0 else 65536
+
+                async def blocks() -> AsyncIterator[bytes]:
+                    remaining = size
+                    while remaining:
+                        data = source.read(min(block_size, remaining))
+                        if not data:
+                            raise OSError("Local source was truncated during upload")
+                        remaining -= len(data)
+                        yield data
+
+                environment_id = await asyncio.to_thread(
+                    self._upload_target, target_path, overwrite=overwrite, create_parent_dirs=create_parent_dirs
+                )
+                async with self._file_request(
+                    environment_id, "POST", target_path, data=blocks() if size else b"", size=size
+                ) as response:
+                    receipt = await response.json(content_type=None)
+                    if not isinstance(receipt, dict):
+                        raise OSError("ADX upload did not return a file receipt")
+                    error = _action_error_message(receipt)
+                    if error or receipt.get("bytes_written", receipt.get("size")) != size:
+                        raise OSError(error or "ADX upload did not confirm the expected byte count")
             return UploadFileResult(
                 code=StatusCode.SUCCESS.code,
                 message=StatusCode.SUCCESS.errmsg,
-                data=UploadFileData(local_path=local_path, target_path=target_path, size=len(raw)),
+                data=UploadFileData(local_path=local_path, target_path=target_path, size=size),
             )
         except Exception as exc:  # noqa: BLE001
             return _build_fs_error_result("upload_file", str(exc), UploadFileResult)
@@ -1099,20 +1226,16 @@ class YuanrongFSProvider(_YuanrongProviderMixin, BaseFSProvider):
         chunk_size: int = 1048576,
         **kwargs,
     ) -> AsyncIterator[UploadFileStreamResult]:
-        result = await self.upload_file(local_path, target_path, overwrite=overwrite)
+        result = await self.upload_file(local_path, target_path, overwrite=overwrite, chunk_size=chunk_size, **kwargs)
         if result.code != StatusCode.SUCCESS.code:
             yield UploadFileStreamResult(code=result.code, message=result.message, data=None)
             return
-        size = os.path.getsize(local_path)
         yield UploadFileStreamResult(
             code=StatusCode.SUCCESS.code,
             message=StatusCode.SUCCESS.errmsg,
             data=UploadFileChunkData(
-                local_path=local_path,
-                target_path=target_path,
-                chunk_size=size,
-                chunk_index=0,
-                is_last_chunk=True,
+                local_path=local_path, target_path=target_path, chunk_size=result.data.size,
+                chunk_index=0, is_last_chunk=True,
             ),
         )
 
@@ -1127,22 +1250,38 @@ class YuanrongFSProvider(_YuanrongProviderMixin, BaseFSProvider):
         chunk_size: int = 0,
         **kwargs,
     ) -> DownloadFileResult:
-        del preserve_permissions, chunk_size
+        del preserve_permissions  # The ADX single-file route does not transmit source modes.
+        temporary_path: Path | None = None
         try:
             target = Path(local_path)
-            if create_parent_dirs:
-                target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists() and not overwrite:
                 raise FileExistsError(f"File already exists: {local_path}")
-            raw = _coerce_bytes(await asyncio.to_thread(self._fs_read_sync, source_path, mode="rb"))
-            await asyncio.to_thread(target.write_bytes, raw)
+            if overwrite:
+                target = target.resolve()
+            if create_parent_dirs:
+                target.parent.mkdir(parents=True, exist_ok=True)
+            size = 0
+            async with self._open_download(source_path) as response:
+                with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as output:
+                    temporary_path = Path(output.name)
+                    async for chunk in response.content.iter_chunked(chunk_size if chunk_size > 0 else 65536):
+                        size += output.write(chunk)
+            if overwrite:
+                if target.is_file():
+                    temporary_path.chmod(target.stat().st_mode & 0o777)
+                temporary_path.replace(target)
+            else:
+                os.link(temporary_path, target)
             return DownloadFileResult(
                 code=StatusCode.SUCCESS.code,
                 message=StatusCode.SUCCESS.errmsg,
-                data=DownloadFileData(source_path=source_path, local_path=local_path, size=len(raw)),
+                data=DownloadFileData(source_path=source_path, local_path=local_path, size=size),
             )
         except Exception as exc:  # noqa: BLE001
             return _build_fs_error_result("download_file", str(exc), DownloadFileResult)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     async def download_file_stream(
         self,
@@ -1153,20 +1292,18 @@ class YuanrongFSProvider(_YuanrongProviderMixin, BaseFSProvider):
         chunk_size: int = 1048576,
         **kwargs,
     ) -> AsyncIterator[DownloadFileStreamResult]:
-        result = await self.download_file(source_path, local_path, overwrite=overwrite)
+        result = await self.download_file(
+            source_path, local_path, overwrite=overwrite, chunk_size=chunk_size, **kwargs
+        )
         if result.code != StatusCode.SUCCESS.code:
             yield DownloadFileStreamResult(code=result.code, message=result.message, data=None)
             return
-        size = os.path.getsize(local_path)
         yield DownloadFileStreamResult(
             code=StatusCode.SUCCESS.code,
             message=StatusCode.SUCCESS.errmsg,
             data=DownloadFileChunkData(
-                source_path=source_path,
-                local_path=local_path,
-                chunk_size=size,
-                chunk_index=0,
-                is_last_chunk=True,
+                source_path=source_path, local_path=local_path, chunk_size=result.data.size,
+                chunk_index=0, is_last_chunk=True,
             ),
         )
 
@@ -1271,11 +1408,12 @@ class YuanrongFSProvider(_YuanrongProviderMixin, BaseFSProvider):
             return _build_fs_error_result("search_files", str(exc), SearchFilesResult)
 
 
+@SandboxRegistry.provider("adx-environment", "shell")
 @SandboxRegistry.provider("yuanrong", "shell")
-class YuanrongShellProvider(_YuanrongProviderMixin, BaseShellProvider):
+class AdxShellProvider(_AdxProviderMixin, BaseShellProvider):
     def __init__(self, endpoint: SandboxEndpoint, config: Optional[SandboxGatewayConfig] = None):
         super().__init__(endpoint, config)
-        self._init_yuanrong(endpoint, config)
+        self._init_adx(endpoint, config)
 
     async def execute_cmd(
         self,
@@ -1362,12 +1500,13 @@ class YuanrongShellProvider(_YuanrongProviderMixin, BaseShellProvider):
         )
 
 
+@SandboxRegistry.provider("adx-environment", "code")
 @SandboxRegistry.provider("yuanrong", "code")
-class YuanrongCodeProvider(_YuanrongProviderMixin, BaseCodeProvider):
+class AdxCodeProvider(_AdxProviderMixin, BaseCodeProvider):
     def __init__(self, endpoint: SandboxEndpoint, config: Optional[SandboxGatewayConfig] = None):
         super().__init__(endpoint, config)
-        self._init_yuanrong(endpoint, config)
-        self._shell_provider = YuanrongShellProvider(endpoint, config)
+        self._init_adx(endpoint, config)
+        self._shell_provider = AdxShellProvider(endpoint, config)
 
     @staticmethod
     def _build_code_command(code: str, language: str, *, force_file: bool) -> Optional[str]:
@@ -1442,7 +1581,7 @@ class YuanrongCodeProvider(_YuanrongProviderMixin, BaseCodeProvider):
                 data=data,
             )
 
-        # Reuse shell provider so both share the same cached YuanRong instance.
+        # Reuse shell provider so both share the same cached ADX instance.
         self._shell_provider.endpoint = self.endpoint
         self._shell_provider.config = self.config
         shell_result = await self._shell_provider.execute_cmd(
@@ -1539,4 +1678,3 @@ class YuanrongCodeProvider(_YuanrongProviderMixin, BaseCodeProvider):
             message="Code executed successfully",
             data=ExecuteCodeChunkData(chunk_index=len(chunks), exit_code=result.data.exit_code),
         )
-

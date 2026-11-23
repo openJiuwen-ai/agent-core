@@ -85,10 +85,12 @@ class PreDeployLauncherConfig(SandboxLauncherConfig)
 **参数**：
 
 * **launcher_type**(Literal["pre_deploy"])：Launcher 类型，固定为 `"pre_deploy"`。
-* **sandbox_type**(str, 可选)：沙箱提供者类型。默认值：`"aio"`。
+* **sandbox_type**(str, 可选)：沙箱提供者类型。默认值：`"aio"`。 设为 `"adx-environment"` 时，通过 `base_url` 调用 ADX HTTP API。旧名称 `"yuanrong"` 仍指向同一个 provider。
 * **base_url**(str)：沙箱服务基础 URL（`http://` 或 `ws://`）。
 * **on_stop**(Literal["delete", "pause", "keep"], 可选)：沙箱停止时的行为策略。默认值：`"delete"`。
 * **idle_ttl_seconds**(int, 可选)：空闲超时时间（秒）。默认值：`None`。
+
+通过 ADX Ingress 访问时，在 `SandboxGatewayConfig.auth_headers` 中提供 `Authorization: Bearer …`。在 `extra_params` 中通过 `runtime` 指定运行时，如 `"runsc"`，并提供 `image` 或已准备好的节点本地 `rootfs`，例如 `{"type": "local", "path": "/objects/tool/rootfs"}`。本地路径须为执行节点可访问的绝对路径。`mounts` 和 `network` 支持 ADX 创建请求格式。文件上传、下载和字节流使用 ADX 原生二进制接口。单文件传输不复制源文件权限。追加时在 `file.write` 请求中传入 `append=true`。原子条件写入暂不支持。
 
 **样例**：
 
