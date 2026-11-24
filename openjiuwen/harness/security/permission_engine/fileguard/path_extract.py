@@ -14,7 +14,7 @@ import re
 import shlex
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any
 
 from openjiuwen.harness.security.literal_shell import (
     is_script_interpreter,
@@ -26,6 +26,8 @@ from openjiuwen.harness.security.permission_engine.fileguard.file_tool_specs imp
     FileToolSpec,
     lookup_file_tool_specs,
 )
+from openjiuwen.harness.security.permission_engine.fileguard.shell_paths import FileAction
+from openjiuwen.harness.security.permission_engine.shell_path_context import current_shell_path_analysis
 from openjiuwen.harness.security.permission_engine.toolguard.command_canonicalize import (
     canonicalize_shell_command_for_permission,
 )
@@ -33,8 +35,6 @@ from openjiuwen.harness.security.permission_engine.toolguard.shell_ast import pa
 from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import _PATH_TOOLS, _iter_path_strings
 
 logger = logging.getLogger(__name__)
-
-FileAction = Literal["read", "write", "exec"]
 
 _SEPARATOR_RESIDUE_RE = re.compile(r"[;|&]+$")
 
@@ -368,7 +368,8 @@ def _path_aware_one_segment(
         else:
             try:
                 home = Path.home().resolve()
-                results.append((home, "read"))
+                if include_cd_reads:
+                    results.append((home, "read"))
                 new_cwd = home
             except (OSError, RuntimeError):
                 pass
@@ -523,6 +524,8 @@ def extract_accesses_native(
     tool_args: Mapping[str, Any],
     workspace: Path,
     permission_config: Mapping[str, Any] | None = None,
+    *,
+    include_cd_reads: bool = True,
 ) -> list[tuple[Path, FileAction, str]]:
     """Native 抽取：``(path, action, source)``；source 为 ``tool_arg`` / ``shlex``。"""
     out: list[tuple[Path, FileAction, str]] = []
@@ -533,6 +536,16 @@ def extract_accesses_native(
     )
 
     if is_shell_tool(tool_name, shell_tools_from_config(permission_config)):
+        analysis = current_shell_path_analysis(tool_name, tool_args)
+        if analysis is not None:
+            candidates = dict.fromkeys(
+                (entry.path, entry.action, "shell_ast")
+                for entry in analysis.accesses
+                if include_cd_reads or entry.kind == "file_io"
+            )
+            out.extend(candidates)
+            if analysis.coverage == "complete":
+                return out
         workdir = tool_args.get("workdir", "")
         try:
             workdir_resolved = (workspace / str(workdir)).resolve() if workdir else workspace
@@ -549,8 +562,16 @@ def extract_accesses_native(
                 pass
         cmd = str(tool_args.get("command", "") or tool_args.get("cmd", ""))
         literal_enabled = literal_shell_enabled(permission_config, tool_name, tool_args)
-        for p, act in extract_shell_path_accesses(cmd, workdir_resolved, skill_authorization=literal_enabled):
+        for p, act in extract_shell_path_accesses(
+            cmd, workdir_resolved, include_cd_reads=include_cd_reads, skill_authorization=literal_enabled,
+        ):
             out.append((p, act, "shlex"))
+        if analysis is not None:
+            # Compatibility rules remain a floor during partial analysis.
+            unique = {}
+            for path, action, source in out:
+                unique.setdefault((path, action), source)
+            return [(path, action, source) for (path, action), source in unique.items()]
         return out
 
     specs = _specs_for_tool(tool_name)
