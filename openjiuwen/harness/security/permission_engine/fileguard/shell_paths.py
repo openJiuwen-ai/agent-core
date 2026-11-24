@@ -127,17 +127,22 @@ def _simple_command(
     if name == "cd":
         if words[:1] == ["--"]:
             words = words[1:]
-        if redirects or len(words) != 1 or not words[0] or (words[0].startswith("-") and words[0] != "-"):
+        if redirects or len(words) != 1:
             raise _UnsupportedSyntax
-        return _Command(directory=words[0])
+        target = words[0]
+        if not target or (target.startswith("-") and target != "-"):
+            raise _UnsupportedSyntax
+        return _Command(directory=target)
     if name == "mkdir" and words[:1] == ["-p"]:
         operands = words[2:] if words[1:2] == ["--"] else words[1:]
         if operands and all(word and not word.startswith("-") for word in operands):
             return _Command(accesses=redirects, mkdir_operands=tuple(operands))
-    if name == "echo" or (name == "pwd" and not words) or (
-        name == "printf" and words and not words[0].startswith("-") and _PRINTF_FORMAT.fullmatch(words[0])
-    ):
+    if name == "echo" or (name == "pwd" and not words):
         return _Command(accesses=redirects)
+    if name == "printf" and words:
+        fmt = words[0]
+        if not fmt.startswith("-") and _PRINTF_FORMAT.fullmatch(fmt):
+            return _Command(accesses=redirects)
     if name not in {"cat", "ls", "md5sum"}:
         raise _UnsupportedSyntax
     if name == "ls" and words and words[0] in {"-l", "-la"}:
@@ -147,7 +152,9 @@ def _simple_command(
         invalid = any(not word or word == "-" for word in words)
     else:
         invalid = any(not word or word.startswith("-") for word in words)
-    if invalid or (not words and (name != "cat" or not any(action == "read" for _, action in redirects))):
+    if invalid:
+        raise _UnsupportedSyntax
+    if not words and (name != "cat" or not any(action == "read" for _, action in redirects)):
         raise _UnsupportedSyntax
     return _Command(accesses=(*redirects, *((word, "read") for word in words)))
 

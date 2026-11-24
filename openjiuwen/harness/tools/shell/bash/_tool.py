@@ -161,24 +161,21 @@ class BashTool(Tool):
         from openjiuwen.core.sys_operation.local.shell_operation import ShellOperation
 
         operation = self._operation.shell()
-        if type(operation) is not ShellOperation:
+        # Subclasses can change execution semantics independently of this analyzer.
+        if not isinstance(operation, ShellOperation) or operation.__class__ is not ShellOperation:
+            return None
+        shell_type = inputs.get("shell_type", "auto")
+        if shell_type not in ("auto", "sh") or inputs.get("run_in_background"):
             return None
         command = inputs.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return None
         workdir = inputs.get("workdir")
-        shell_type = inputs.get("shell_type", "auto")
-        if (
-            not isinstance(command, str)
-            or not command.strip()
-            or not isinstance(workdir, str)
-            or not Path(workdir).is_absolute()
-            or shell_type not in ("auto", "sh")
-            or inputs.get("run_in_background")
-        ):
+        if not isinstance(workdir, str) or not Path(workdir).is_absolute():
             return None
 
-        return self._analyze_posix_context(
-            command, workdir, shell_type, operation._resolve_cwd(workdir), dict(os.environ),
-        )
+        cwd = Path(workdir).resolve()
+        return self._analyze_posix_context(command, workdir, shell_type, cwd, dict(os.environ))
 
     @staticmethod
     def _analyze_posix_context(

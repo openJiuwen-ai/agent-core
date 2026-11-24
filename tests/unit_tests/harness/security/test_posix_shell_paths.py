@@ -176,6 +176,36 @@ def test_windows_does_not_bind_local_posix_analysis(tmp_path, monkeypatch):
     assert tool.analyze_local_paths({"command": A44, "workdir": str(tmp_path)}) is None
 
 
+def test_local_path_analysis_resolves_workdir_and_rejects_custom_executor(tmp_path, monkeypatch):
+    from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode, SysOperation, SysOperationCard
+    from openjiuwen.core.sys_operation.local.shell_operation import ShellOperation
+    from openjiuwen.harness.tools.shell.bash._tool import BashTool
+
+    for name in ("CDPATH", "ENV", "BASH_ENV", "SHELLOPTS", "BASHOPTS", "PWD"):
+        monkeypatch.delenv(name, raising=False)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    link = tmp_path / "linked-work"
+    link.symlink_to(workdir, target_is_directory=True)
+    config = LocalWorkConfig(sandbox_root=[str(tmp_path)])
+    tool = BashTool(SysOperation(SysOperationCard(id="local-path-analysis", work_config=config)))
+    args = {"command": "cd sub && cat file.txt > output.txt", "workdir": str(link)}
+    result = tool.analyze_local_paths(args)
+    assert result is not None and result.coverage == "complete"
+    assert result.cwd == workdir.resolve()
+    assert {(entry.path, entry.action) for entry in result.accesses} == {
+        (workdir.resolve() / "sub", "read"),
+        (workdir.resolve() / "sub/file.txt", "read"),
+        (workdir.resolve() / "sub/output.txt", "write"),
+    }
+
+    class CustomShellOperation(ShellOperation):
+        pass
+
+    custom = CustomShellOperation("shell", OperationMode.LOCAL, "custom test executor", config)
+    assert BashTool(SimpleNamespace(shell=lambda: custom)).analyze_local_paths(args) is None
+
+
 def test_a44_root_write_deny_does_not_block_subdirectory_write(tmp_path):
     workspace = tmp_path.resolve() / "root"
     args = {"command": A44, "workdir": str(workspace)}

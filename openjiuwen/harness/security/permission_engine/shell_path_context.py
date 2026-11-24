@@ -30,10 +30,18 @@ class _ShellPathScope:
         self._closed = False
         self._bound = False
 
+    def is_owned(self) -> bool:
+        """Check that the current task still owns this open scope."""
+        return not self._closed and self._task is _current_task()
+
+    def close(self) -> None:
+        """End evidence access for this scope."""
+        self._closed = True
+
     def bind(self, tool: BashTool, args: dict[str, Any]) -> None:
         """Bind the trusted native tool after its execution arguments are written back."""
         scope, _ = _CURRENT.get()
-        if self._closed or scope is not self or self._task is not _current_task():
+        if scope is not self or not self.is_owned():
             raise RuntimeError("Shell paths require the active permission scope")
         if self._bound:
             raise RuntimeError("Shell paths are already bound in this permission scope")
@@ -58,16 +66,15 @@ def shell_path_call() -> Iterator[_ShellPathScope]:
     try:
         yield scope
     finally:
-        scope._closed = True
+        scope.close()
         _CURRENT.reset(token)
 
 
 def current_shell_path_analysis(tool_name: str, args: Mapping[str, Any]) -> ShellPathAnalysis | None:
     """Return the current evidence for matching native shell arguments."""
     scope, result = _CURRENT.get()
-    if (
-        scope is not None and not scope._closed and scope._task is _current_task() and result is not None
-    ):
-        if tool_name == "bash" and result.matches(args):
-            return result
+    if tool_name != "bash" or scope is None or result is None:
+        return None
+    if scope.is_owned() and result.matches(args):
+        return result
     return None
