@@ -24,8 +24,7 @@ from openjiuwen.harness.workspace.workspace import Workspace
 PLAN_AGENT_DESC: Dict[str, str] = {
     "cn": "架构设计专家。基于代码探索结果设计实现方案，生成详细的实现计划。",
     "en": (
-        "Architecture design specialist. Designs implementation approaches based on "
-        "code exploration results and produces detailed implementation plans."
+        'Design implementation approaches and detailed plans from exploration findings.'
     ),
 }
 

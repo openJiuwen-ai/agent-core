@@ -17,11 +17,10 @@ DESCRIPTION: Dict[str, str] = {
         "加载子技能请再次调用本工具，并设置 relative_file_path（如 designer/SKILL.md）。"
     ),
     "en": (
-        "Use this tool to view the skill contents of a certain skill. "
-        "On success it always includes an ASCII directory_tree of the skill root "
-        "and discovered_skill_names (relative paths of nested dirs that contain SKILL.md). "
-        "To load a nested skill, call again with relative_file_path "
-        "(e.g. designer/SKILL.md)."
+        "Use this tool to view the skill contents of a certain skill. On success it always includes "
+        "an ASCII directory_tree of the skill root and discovered_skill_names (relative paths of "
+        "nested dirs that contain SKILL.md). To load a nested skill, call again with "
+        "relative_file_path (e.g. designer/SKILL.md)."
     ),
 }
 
@@ -32,8 +31,7 @@ SKILL_TOOL_PARAMS: Dict[str, Dict[str, str]] = {
     },
     "relative_file_path": {
         "cn": "可选。查看技能目录中指定路径（relative_file_path）下的特定文件。留空则查看主 SKILL.md 文件。",
-        "en": "Optional. Views a specific file within the skill directory at the relative_file_path. "\
-              "Leave blank to view the main SKILL.md file.",
+        "en": "File relative to the skill root; omit for SKILL.md.",
     },
 }
 

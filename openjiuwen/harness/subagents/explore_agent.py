@@ -134,12 +134,10 @@ DEFAULT_EXPLORE_AGENT_SYSTEM_PROMPT: Dict[str, str] = {
 }
 
 DEFAULT_EXPLORE_AGENT_DESCRIPTION_EN = (
-    "Codebase navigation agent optimised for speed. Invoke when you need to locate files by glob "
-    'pattern (e.g. "src/components/**/*.tsx"), search source code for specific terms '
-    '(e.g. "API endpoints"), or answer structural questions about a repository '
-    '(e.g. "how do API endpoints work?"). Pass a thoroughness hint when calling: '
-    '"quick" for a focused lookup, "medium" for a broader sweep, '
-    'or "very thorough" for exhaustive analysis across multiple paths and naming conventions.'
+    (
+        'Locate files, search source and explain repository structure. Specify quick, medium or very '
+        'thorough exploration.'
+    )
 )
 
 DEFAULT_EXPLORE_AGENT_DESCRIPTION_CN = (

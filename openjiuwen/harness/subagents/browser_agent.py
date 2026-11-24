@@ -243,7 +243,7 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT: Dict[str, str] = {
 }
 
 DEFAULT_BROWSER_AGENT_DESCRIPTION_EN = (
-    "Dedicated browser subagent that directly controls the browser with Playwright MCP tools."
+    'Control the browser using Playwright; select the capabilities below.'
 )
 DEFAULT_BROWSER_AGENT_DESCRIPTION_CN = "专用浏览器子代理，直接使用 Playwright MCP 工具执行网页任务。"
 DEFAULT_BROWSER_AGENT_DESCRIPTION: Dict[str, str] = {

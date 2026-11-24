@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-11-05 |
+| 最近一次修订日期 | 2026-11-24 |
 | 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md`、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_21_cua-desktop-subagent、F_23_progressive-tool-discovery-metadata、F_20261104_1720_tool-execution-environment |
 
 ## 范围 / 边界
@@ -848,3 +848,9 @@ See F_27 for replay boundaries and validation results.
    传输保留变量名大小写及覆盖顺序；只有实际 Windows 执行端合并基础环境时按大小写不敏感处理。
 5. 通用执行层不认识 Git 身份；平台通过 resolver 提供策略，不改共享工具实例和 os.environ。
 6. 进程级环境、外部服务或不经过此调用链的独立 CLI 不会被自动配置。
+
+## 内置英文工具说明的维护
+
+内置说明和参数注释由各工具的 ToolMetadataProvider 直接提供。注册卡片、BM25 目录和模型声明使用同一来源，不在模型调用前按旧文本指纹替换。英文简写同步适用于各宿主；不改变工具名称、参数类型、必填项、枚举、执行校验或权限策略。外部 MCP 和注册的自定义 provider 仍拥有自己的说明。
+
+动态 Agent 目录来自当前配置。内置类型向英文父 Agent 展示用途与浏览器能力约束，省略重复的子工具清单；显式配置的工具和自定义类型仍展示工具信息。

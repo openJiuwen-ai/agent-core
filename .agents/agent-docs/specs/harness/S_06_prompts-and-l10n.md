@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/prompts/`（67 文件） |
-| 最近一次修订日期 | 2026-11-07 |
+| 最近一次修订日期 | 2026-11-24 |
 | 关联 feature | [F_26 Prompt Attachment Agent Loop 事件接入](../features/F_26_prompt-attachment-event-agent-loop.md) |
 
 ## 范围 / 边界
@@ -160,3 +160,9 @@ attachment 内容计算，因此改写不会制造新的 delta。异常 attachme
 - `resolve_language` 在 `factory.py` / `extension_resolver` 中消费 —— `S_01` / `S_13`。
 - session 工具 section（`session_tools.py`）与 `SessionToolkit` 配套 —— `S_05`。
 - 附件按 session 落库的 session 语义 —— `S_02`。
+
+## 共享英文规则的原地维护
+
+安全、工具发现、协作和上下文恢复等英文规则直接维护在原 section 模块；不存在额外的 brief 配置、构造开关或替换 Rail。已有 FULL / MINIMAL / NONE 仍只负责原来的 section 装配范围。各共享消费者采用同一套英文规则；中文规则和动态路径、目录更新、宿主 extension_content 及 section 的优先级保持原契约。
+
+工具描述由原 metadata provider 生成；模型视图不再维护第二套描述。调用方依旧通过语言参数选择中英文。首次目录和后续 snapshot / delta 均保留工具用途与限制，更新及卸载语义不变。

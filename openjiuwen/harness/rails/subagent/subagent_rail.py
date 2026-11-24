@@ -379,13 +379,24 @@ class SubagentRail(DeepAgentRail):
         lines = []
         for spec in subagents:
             agent_name, agent_desc = self._extract_agent_meta(spec)
-            tools_str = self._extract_agent_tools(spec, agent_name)
-            lines.append(f"- {agent_name}: {agent_desc} (Tools: {tools_str})")
+            concise_catalog = (
+                self.system_prompt_builder.language == "en"
+                and isinstance(spec, SubAgentConfig)
+                and not spec.tools
+                and agent_name in self._KNOWN_AGENT_TOOLS
+            )
+            if concise_catalog:
+                lines.append(f"- {agent_name}: {agent_desc}")
+            else:
+                tools_str = self._extract_agent_tools(spec, agent_name)
+                lines.append(f"- {agent_name}: {agent_desc} (Tools: {tools_str})")
             if agent_name == "browser_agent":
                 lines.append("  Available Playwright capabilities:")
                 for capability in DEFAULT_BROWSER_CAPABILITIES:
-                    tool_names = ", ".join(capability.tool_names)
-                    lines.append(f"    - {capability.name}: {capability.description} (Tools: {tool_names})")
+                    description = f"    - {capability.name}: {capability.description}"
+                    if self.system_prompt_builder.language != "en":
+                        description += f" (Tools: {', '.join(capability.tool_names)})"
+                    lines.append(description)
 
         return "\n".join(lines)
 

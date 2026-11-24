@@ -163,19 +163,11 @@ class FetchWebpageMetadataProvider(ToolMetadataProvider):
                 "更顺手的方式是用 shell 工具(bash 或 powershell)执行 `git clone` 拉到本地。"
             ),
             "en": (
-                "Fetch webpage text content from a URL and return status, title, and plain text. "
-                "Read relevant sources only as needed, usually after search discovers their URLs. "
-                "Do not reason only from snippets or guess article URLs; stop when evidence is sufficient. "
-                "Set max_chars=0 to disable clipping and "
-                "use a larger timeout_seconds for slow pages. "
-                "Best fit: documentation, blog posts, news, API references, and similar general web content. "
-                "Content status is distinct from HTTP status: challenges, authentication "
-                "and empty shells are not evidence. "
-                "Preserve source links and field associations; never fill missing fields with adjacent numbers "
-                "or present stale observations as live data. "
-                "Git repository URLs (GitHub/GitLab/Gitee/Gitcode/Bitbucket, etc.) are usually a poor fit - "
-                "the webpage only shows a rendered file tree, while reading source, history, or searching across "
-                "files is far easier after a local `git clone` via the shell tool (bash or powershell)."
+                "Fetch a known URL's status/title/text. Challenges, auth and empty shells are not "
+                "evidence; HTTP/content status differ. Read relevant sources fully; preserve links "
+                "and field associations. Never invent missing fields or substitute adjacent numbers "
+                "or present stale data as live. Stop when evidence suffices; prefer git clone for "
+                "repository sources."
             ),
         }[language]
 

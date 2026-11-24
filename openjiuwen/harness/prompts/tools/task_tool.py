@@ -33,89 +33,14 @@ GENERAL_PURPOSE_AGENT_DESC: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Tool description (bilingual) - for tool registration ONLY
 # ---------------------------------------------------------------------------
-TASK_TOOL_DESCRIPTION_EN = """\
-Launch a new subagent to handle complex, multi-step tasks autonomously.
-
-The task_tool launches specialized subagents that autonomously handle complex \
-tasks. Each subagent type has specific capabilities and tools available to it.
-
-Available subagent types and the tools they have access to:
-
-{available_agents}
-
-When using the task_tool, specify a subagent_type parameter to select which \
-subagent type to use. \
-The value must exactly match one of the names listed \
-above under "Available subagent types".
-When subagent_type is "browser_agent", you must also provide \
-browser_capabilities as a list of additional capability categories selected \
-from the browser capability catalog above. Use an empty list for a core-only \
-browser task. Do not provide browser_capabilities for other subagent types.
-
-When NOT to use the task_tool:
-
-- If you want to read a specific file path, use read_file or glob instead of \
-the task_tool, to find the match more quickly
-- If you are searching for a specific class definition like "class Foo", \
-use grep or glob instead, to find the match more quickly
-- If you are searching for code within a specific file or set of 2-3 files, \
-use read_file instead of the task_tool, to find the match more quickly
-- Other tasks that are not related to the subagent descriptions above
-
-Usage notes:
-
-- Provide a thorough task_description with full context — the subagent starts \
-with no memory of this conversation
-- When the subagent is done, it will return a single message back to you. \
-The result returned by the subagent is not visible to the user. To show the \
-user the result, you should send a text message back to the user with a \
-concise summary of the result.
-- Each task_tool invocation starts fresh by default — provide a complete task description. \
-Pass the returned resume_task_id only to explicitly continue or correct the same browser task \
-within its existing deadline, or to continue the same unfinished desktop (cua_agent) task.
-- If a cua_agent result comes back with status="timeout" and retryable=true, its desktop session is preserved: \
-continue it with the same resume_task_id and describe only what is still missing. Do not restart the task from scratch.
-- For browser_agent, preserve browser_result.status together with its summary, evidence and source observations. \
-Even a partial result can contain useful answers. Execution receipts describe dispatch/ACK; summary and completion \
-are worker judgments. Keep observations separate from inferred causes, respect source restrictions, and never treat \
-an empty blocker list as proof that the page has no obstacle. Do not repeat a lookup merely to fill field slots.
-- retryable=true permits, but does not require, at most one focused continuation with the same resume_task_id. \
-Continue only for genuinely unanswered user requirements; recommended_recovery is a hint, not a completion checklist. \
-If a completed worker answer leaves a concrete user requirement unanswered, explicitly request correction with \
-the same resume_task_id and a focused instruction; the original deadline and one-resume limit still apply. \
-Otherwise report the available result; do not restart satisfied work or add requirements.
-- The subagent's outputs should generally be trusted.
-- Clearly tell the subagent whether you expect it to write code or just to do \
-research (search, file reads, web fetches, etc.), since it is not aware of \
-the user's intent.
-- If the subagent description mentions that it should be used proactively, \
-then you should try your best to use it without the user having to ask for \
-it first. Use your judgement.
-- If the user specifies that they want you to run subagents "in parallel", \
-you MUST send a single message with multiple task_tool calls. \
-For example, if you need to launch both a build-validator subagent and a \
-test-runner subagent in parallel, send a single message with both tool calls.
-
-## Writing the prompt
-
-Brief the subagent like a smart colleague who just walked into the room — it \
-hasn't seen this conversation, doesn't know what you've tried, doesn't \
-understand why this task matters.
-- Explain what you're trying to accomplish and why.
-- Describe what you've already learned or ruled out.
-- Give enough context about the surrounding problem that the subagent can make \
-judgment calls rather than just following a narrow instruction.
-- If you need a short response, say so ("report in under 200 words").
-- Lookups: hand over the exact command. Investigations: hand over the question \
-— prescribed steps become dead weight when the premise is wrong.
-
-Terse command-style prompts produce shallow, generic work.
-
-**Never delegate understanding.** Don't write "based on your findings, fix the \
-bug" or "based on the research, implement it." Those phrases push synthesis \
-onto the subagent instead of doing it yourself. Write prompts that prove you \
-understood: include file paths, line numbers, what specifically to change.
-"""
+TASK_TOOL_DESCRIPTION_EN = (
+    "Synchronously run a fresh subagent. Give full objective/context/constraints/findings and "
+    "expected output; the child has no conversation history. Verify and synthesize its result. Use "
+    "resume_task_id only for the same unfinished/corrected browser task within the original deadline "
+    "and one-resume limit; a preserved cua_agent timeout session continues only missing work. For "
+    "browser_agent, supply browser_capabilities ([] for core-only); omit it for other types. Follow "
+    "system routing/evidence/recovery rules. Available types and capabilities:\n{available_agents}"
+)
 
 TASK_TOOL_DESCRIPTION_CN = """\
 启动新的子代理，自主处理复杂、多步骤任务。
@@ -203,9 +128,7 @@ TASK_TOOL_PARAMS: Dict[str, Dict[str, str]] = {
     "subagent_type": {
         "cn": "子代理类型（必填，须与上方「可用代理类型」列表中的名称完全一致；"
               "不要使用列表中未出现的名称）",
-        "en": "Required subagent type; must exactly match a name from the "
-              "\"Available subagent types\" list above. Do not use any name "
-              "that is not listed there.",
+        "en": "Exact currently listed type; do not invent types.",
     },
     "task_description": {
         "cn": "任务描述（必填，需包含完整上下文）",
@@ -220,10 +143,7 @@ TASK_TOOL_PARAMS: Dict[str, Dict[str, str]] = {
             "仅在继续同一个未完成的浏览器或桌面（cua_agent）任务时，"
             "传入上一次 task_tool 返回的 resume_task_id；新任务不要传"
         ),
-        "en": (
-            "Only when continuing the same unfinished browser or desktop (cua_agent) task, pass "
-            "the resume_task_id returned by the previous task_tool call; omit it for a new task"
-        ),
+        "en": "Continue the same unfinished browser/preserved cua task; omit for new work.",
     },
 }
 

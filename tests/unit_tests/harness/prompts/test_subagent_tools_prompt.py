@@ -23,10 +23,9 @@ def test_subagent_system_prompt_includes_spawn_trigger_rules_cn() -> None:
 def test_subagent_system_prompt_includes_spawn_trigger_rules_en() -> None:
     prompt = build_subagent_tools_system_prompt("en")
 
-    assert "When to delegate" in prompt
     assert "critical-path" in prompt
-    assert "Call subagent_wait in the same turn after spawn" in prompt
-    assert "never authorize spawning by themselves" in prompt
+    assert "wait on all ids in the same turn" in prompt
+    assert "Depth/research alone or an available type is not authorization" in prompt
 
 
 def test_spawn_description_states_delegation_authorization_cn() -> None:
@@ -41,7 +40,8 @@ def test_spawn_description_states_delegation_authorization_cn() -> None:
 def test_spawn_description_states_delegation_authorization_en() -> None:
     desc = SUBAGENT_SPAWN_DESCRIPTION["en"]
 
-    assert "AGENTS.md" in desc
-    assert "does not authorize spawning alone" in desc
-    assert "same turn" in desc
-    assert "critical-path" in desc
+    assert "authorized persistent independent task" in desc
+    assert "selection, not authorization" in desc
+    prompt = build_subagent_tools_system_prompt("en")
+    assert "user/AGENTS.md/skill explicitly requests" in prompt
+    assert "critical-path" in prompt

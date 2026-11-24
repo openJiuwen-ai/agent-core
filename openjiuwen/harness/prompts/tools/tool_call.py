@@ -17,14 +17,8 @@ DESCRIPTION: Dict[str, str] = {
         "如果当前目录后来显示该工具已删除，之前的搜索结果和授权立即失效，不能继续调用，也不能改用 task_tool 或子代理间接调用。"
     ),
     "en": (
-        "Execute a deferred tool returned by tool_search. "
-        "The name must exactly match a tool name returned by the latest tool_search, "
-        "and args must conform to that result's complete parameters schema. "
-        "Search-result tools are not added to the top-level tools list; do not call a result tool by its own name "
-        "or guess a tool name. An unchanged tool may reuse a previous result; if a later "
-        "directory update changes its schema, search again, and if it marks the tool as "
-        "removed, the previous result and authorization are invalid; do not invoke it "
-        "through task_tool or a subagent."
+        "Execute a current tool_search result with exact name/schema-compatible args. Re-search "
+        "changed contracts; removed tools cannot run by any route."
     ),
 }
 
@@ -36,10 +30,7 @@ TOOL_CALL_PARAMS: Dict[str, Dict[str, str]] = {
     },
     "args": {
         "cn": "按照 tool_search 返回的完整 parameters schema 填写工具参数；无参数工具使用空对象",
-        "en": (
-            "Arguments matching the complete parameters schema returned by tool_search; "
-            "use an empty object for no-argument tools"
-        ),
+        "en": "Arguments matching the searched schema; {} for no-argument tools.",
     },
 }
 

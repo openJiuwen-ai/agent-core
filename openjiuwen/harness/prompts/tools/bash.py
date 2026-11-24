@@ -85,104 +85,12 @@ DESCRIPTION: Dict[str, str] = {
         "   - 如必须 sleep，保持短时间（1-5 秒）"
     ),
     "en": (
-        "Executes a given bash command and returns its output.\n"
-        "\n"
-        "The working directory persists between commands, but shell state "
-        "(variables, functions, aliases) does not. The shell environment "
-        "is initialized from the user's profile (bash or zsh).\n"
-        "\n"
-        "Windows note: `cmd`/PowerShell `mkdir` **does not support `-p`**; do not use "
-        "`mkdir -p` in cmd/PowerShell. POSIX `mkdir -p` is appropriate only when "
-        "the runtime environment information shows Git Bash or a non-WSL-stub PATH bash "
-        "is available and you are actually using bash/Git Bash. Otherwise, use "
-        "PowerShell `New-Item ... -Force` or create each level with cmd `mkdir`.\n"
-        "\n"
-        "IMPORTANT: Avoid using this tool to run `find`, `grep`, `cat`, "
-        "`head`, `tail`, `sed`, `awk`, or `echo` commands, unless "
-        "explicitly instructed or after you have verified that a dedicated "
-        "tool cannot accomplish your task. Instead, use the appropriate "
-        "dedicated tool as this will provide a much better experience "
-        "for the user:\n"
-        "\n"
-        " - File search: Use glob tool (NOT find or ls)\n"
-        " - Content search: Use grep tool (NOT grep or rg)\n"
-        " - Read files: Use read_file tool (NOT cat/head/tail)\n"
-        " - Edit files: Use edit_file tool (NOT sed/awk)\n"
-        " - Write files: Use write_file tool (NOT echo >/cat <<EOF)\n"
-        " - Communication: Output text directly (NOT echo/printf)\n"
-        "While the bash tool can do similar things, it is better to use "
-        "the built-in tools as they provide a better user experience and "
-        "make it easier to review tool calls and give permission.\n"
-        "\n"
-        "# Instructions\n"
-        " - If your command will create new directories or files, first "
-        "use this tool to run `ls` to verify the parent directory exists "
-        "and is the correct location.\n"
-        " - Always quote file paths that contain spaces with double "
-        "quotes in your command "
-        "(e.g., cd \"path with spaces/file.txt\").\n"
-        " - Try to maintain your current working directory throughout the "
-        "session by using absolute paths and avoiding usage of `cd`. "
-        "You may use `cd` if the user explicitly requests it.\n"
-        " - You may specify an optional timeout in seconds (up to 3600s / 60 minutes). "
-        "By default, your command will timeout after 300s.\n"
-        " - You can use the `run_in_background` parameter to run the "
-        "command in the background. Only use this if you don't need the "
-        "result immediately and are OK being notified when the command "
-        "completes later. You do not need to use '&' at the end of the "
-        "command when using this parameter.\n"
-        " - When issuing multiple commands:\n"
-        "   - If the commands are independent and can run in parallel, "
-        "make multiple bash tool calls in a single message. Example: if "
-        "you need to run \"git status\" and \"git diff\", send a single "
-        "message with two bash tool calls in parallel.\n"
-        "   - If the commands depend on each other and must run "
-        "sequentially, use a single bash call with '&&' to chain them "
-        "together.\n"
-        "   - Use ';' only when you need to run commands sequentially "
-        "but don't care if earlier commands fail.\n"
-        "   - DO NOT use newlines to separate commands (newlines are ok "
-        "in quoted strings).\n"
-        " - For git commands:\n"
-        "   - Prefer to create a new commit rather than amending an "
-        "existing commit.\n"
-        "   - Before running destructive operations (e.g., git reset "
-        "--hard, git push --force, git checkout --), consider whether "
-        "there is a safer alternative that achieves the same goal. Only "
-        "use destructive operations when they are truly the best "
-        "approach.\n"
-        "   - Never skip hooks (--no-verify) or bypass signing "
-        "(--no-gpg-sign) unless the user has explicitly asked for it. "
-        "If a hook fails, investigate and fix the underlying issue.\n"
-        "   - When a user shares a repo URL and asks you to 'look at' "
-        "or 'analyze' it, the natural first step is "
-        "`git clone <url> <local_path>`; after cloning, use "
-        "read_file/grep/glob on the working tree - it gives you far "
-        "more than the rendered repository page would.\n"
-        "   - When creating a worktree with `git worktree add`, the "
-        "target path MUST live under `.worktrees/<name>` inside the "
-        "current project directory, e.g. "
-        "`git worktree add .worktrees/feature-x -b feature-x HEAD`. "
-        "NEVER use `../` or any path outside the current project "
-        "directory as the worktree target; the project's sibling "
-        "directory is out of bounds and pollutes space outside the "
-        "project. When the base branch is unspecified, use the current "
-        "branch (`HEAD`); do not assume `main`.\n"
-        " - Avoid unnecessary `sleep` commands:\n"
-        "   - Do not sleep between commands that can run immediately "
-        "-- just run them.\n"
-        "   - If your command is long running and you would like to be "
-        "notified when it finishes -- use `run_in_background: true`. "
-        "No sleep needed.\n"
-        "   - Do not retry failing commands in a sleep loop -- diagnose "
-        "the root cause.\n"
-        "   - If waiting for a background task you started with "
-        "`run_in_background: true`, you will be notified when it "
-        "completes -- do not poll.\n"
-        "   - If you must poll an external process, use a check command "
-        "(e.g. `gh run view`) rather than sleeping first.\n"
-        "   - If you must sleep, keep the duration short (1-5 seconds) "
-        "to avoid blocking the user."
+        "Run commands under runtime shell/sequencing/Git rules. CWD persists, "
+        "variables/functions/aliases do not; each shell loads its profile. Inspect parent before "
+        "creating paths; quote spaces, prefer absolute paths. Clone repositories for source analysis."
+        " Worktrees use project/.worktrees/<name>, base HEAD unless specified. Background work uses "
+        "run_in_background, never trailing &; await notification without polling. Do not sleep before"
+        " status checks; necessary sleeps 1–5 seconds."
     ),
 }
 
@@ -207,26 +115,6 @@ _DESCRIPTION_PARAM_CN = (
     "\"从 URL 获取 JSON 并提取 data 数组元素\""
 )
 
-_DESCRIPTION_PARAM_EN = (
-    "Clear, concise description of what this command does in active "
-    "voice. Never use words like \"complex\" or \"risk\" in the "
-    "description - just describe what it does.\n"
-    "\n"
-    "For simple commands (git, npm, standard CLI tools), keep it brief "
-    "(5-10 words):\n"
-    "- ls -> \"List files in current directory\"\n"
-    "- git status -> \"Show working tree status\"\n"
-    "- npm install -> \"Install package dependencies\"\n"
-    "\n"
-    "For commands that are harder to parse at a glance (piped commands, "
-    "obscure flags, etc.), add enough context to clarify what it does:\n"
-    "- find . -name \"*.tmp\" -exec rm {} \\; -> "
-    "\"Find and delete all .tmp files recursively\"\n"
-    "- git reset --hard origin/main -> "
-    "\"Discard all local changes and match remote main\"\n"
-    "- curl -s url | jq '.data[]' -> "
-    "\"Fetch JSON from URL and extract data array elements\""
-)
 
 BASH_PARAMS: Dict[str, Dict[str, str]] = {
     "command": {
@@ -235,12 +123,14 @@ BASH_PARAMS: Dict[str, Dict[str, str]] = {
     },
     "timeout": {
         "cn": "可选超时时间（秒），默认 300，上限 3600。对于长时间运行的任务，建议适当增大该值以避免任务被提前中断",
-        "en": "Optional timeout in seconds, default 300, max 3600. For long-running tasks, it is recommended to "
-              "increase this value to avoid premature termination"
+        "en": "Seconds: default 300, max 3600; increase for long work."
     },
     "description": {
         "cn": _DESCRIPTION_PARAM_CN,
-        "en": _DESCRIPTION_PARAM_EN,
+        "en": (
+            "Brief active-voice purpose: 5–10 words for simple commands, extra context for opaque "
+            "commands."
+        ),
     },
     "run_in_background": {
         "cn": (
@@ -248,9 +138,8 @@ BASH_PARAMS: Dict[str, Dict[str, str]] = {
             "仅在不需要立即获取结果时使用，命令完成后会收到通知"
         ),
         "en": (
-            "Set to true to run this command in the background. "
-            "Only use this if you don't need the result immediately "
-            "and are OK being notified when the command completes later"
+            "Only when output is not needed immediately and later completion notification is "
+            "acceptable."
         ),
     },
     "workdir": {
@@ -262,22 +151,14 @@ BASH_PARAMS: Dict[str, Dict[str, str]] = {
     },
     "max_output_chars": {
         "cn": "最大输出字符数，默认 20000：超出部分会被截断并写入临时文件（结果中会给出文件路径，可按需读取），防止超大输出撑爆上下文；显式传 0 表示不限制（谨慎使用）",
-        "en": (
-            "Max output characters; defaults to 20000: output beyond this is truncated and the full "
-            "content is written to a temp file (its path is returned in the result for on-demand reading), "
-            "preventing oversized output from flooding context. Pass 0 explicitly to disable the limit (use with care)"
-        ),
+        "en": "Output cap (default 20000); overflow path returned. 0=unlimited; use carefully.",
     },
     "shell_type": {
         "cn": (
             "指定 Shell 类型，可选值：auto/cmd/powershell/bash/sh，默认 auto。cmd/PowerShell 不支持 `mkdir -p`；"
             "只有环境信息显示 Git Bash 或非 WSL stub 的 PATH bash 可用时，才对 POSIX 语法使用 auto/bash/sh。"
         ),
-        "en": (
-            "Shell to use: auto/cmd/powershell/bash/sh, default auto. cmd/PowerShell do not support `mkdir -p`; "
-            "use auto/bash/sh for POSIX syntax only when the environment information shows Git Bash or a "
-            "non-WSL-stub PATH bash is available."
-        ),
+        "en": "Default auto. POSIX needs Git Bash/non-WSL-stub bash, never cmd/PowerShell.",
     },
 }
 

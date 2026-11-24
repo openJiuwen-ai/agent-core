@@ -34,7 +34,7 @@ PROGRESSIVE_TOOL_NAVIGATION_EMPTY: Dict[str, str] = {
 
 PROGRESSIVE_TOOL_RULES_HEADER: Dict[str, str] = {
     "cn": "# 渐进式工具使用规则\n",
-    "en": "# Progressive Tool Usage Rules\n",
+    "en": '# Progressive Tool Usage Rules\n',
 }
 
 PROGRESSIVE_TOOL_RULES_BODY: Dict[str, str] = {
@@ -67,44 +67,21 @@ PROGRESSIVE_TOOL_RULES_BODY: Dict[str, str] = {
         "必要时调用 `ask_user`，否则说明当前没有合适工具。\n"
     ),
     "en": (
-        "Progressive tool loading is enabled. Tools are divided into two categories:\n"
-        "- Direct tools: can be called directly.\n"
-        "- Deferred tools: registered and available, but must first be found through `tool_search`. "
-        "The search result provides the complete schema, but result tools are not added to the top-level `tools`; "
-        "execute them through the fixed `tool_call` tool in the next turn.\n\n"
-        "The initial deferred-tool directory for this session is listed at the end of this stable section. "
-        "Later additions, updates, and removals do not rewrite this system prompt; they are delivered as new system "
-        "attachments. Apply directory updates in order and use the latest content. "
-        "\n"
-        "## Dynamic Tool State Priority\n"
-        "- The deferred-tool directory at session startup is only an initial snapshot; "
-        "it does not mean those tools remain available forever.\n"
-        "- A `deferred-tool directory update` attachment is the latest tool state for this request. "
-        "Even if it appears after the current user message in the serialized message sequence, "
-        "apply it before answering.\n"
-        "- The latest directory overrides the initial directory, historical messages, "
-        "historical tool_search results, historical toolResults, and tool names described "
-        "by task_tool or subagents.\n"
-        "- Once a tool is marked as removed, it is unavailable. Do not claim that it is "
-        "supported, reuse its old result, or invoke it through `tool_call`, `task_tool`, "
-        "or a subagent.\n"
-        "- A historical result may be reused only while the tool remains registered and "
-        "unchanged; if its description or schema changed, search again.\n\n"
-        "## tool_search usage rules\n"
-        "1. First identify the actual operation the user wants to complete.\n"
-        "2. If a direct tool clearly supports the operation, call it directly.\n"
-        "3. If no direct tool matches, you must call `tool_search`; do not guess deferred tool names.\n"
-        "4. Use the user's intent and required capability as the `query`.\n"
-        "5. `tool_search` uses BM25 to match tool names, descriptions, and parameter information.\n"
-        "6. Search results contain the complete `parameters` schema. Result tools are not "
-        "added to the top-level `tools`; in the next turn call the fixed `tool_call` "
-        "with the exact result name in `name` and schema-compatible arguments in `args`. "
-        "Do not call the result tool by its own name.\n"
-        "7. Do not use `bash` or another direct tool to execute a search result.\n"
-        "8. Do not repeat the same or a similar search for the same user intent. "
-        "If the results are not suitable, "
-        "do not guess a tool name; call `ask_user` when necessary, otherwise explain "
-        "that no suitable tool is available.\n"
+        (
+            (
+                '- Call direct tools directly. Otherwise use tool_search with intent/capability (BM25),'
+                ' never guessed names. Results include full schemas but are not added to top-level '
+                'tools: in the next turn invoke fixed tool_call with the exact name and '
+                'schema-compatible args. Never call a result name directly or execute it through '
+                'bash/another direct tool.\n- The initial directory is a snapshot. Apply subsequent '
+                'directory updates in order, including attachments serialized after the user message, '
+                'before answering. Latest state overrides initial directory, historical '
+                'searches/results and names mentioned by task_tool/subagents. Removed tools are '
+                'unavailable by every route. Reuse only unchanged registered results; re-search after '
+                'description/schema changes. Do not repeat equivalent searches for one intent; if '
+                'unsuitable, ask_user when necessary or explain unavailability rather than guess.\n\n'
+            )
+        )
     ),
 }
 

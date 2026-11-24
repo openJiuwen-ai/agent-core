@@ -25,11 +25,8 @@ READ_FILE_DESCRIPTION: Dict[str, str] = {
         "大文件请用 offset/limit 读取指定部分，或用 grep 搜索具体内容。"
     ),
     "en": (
-        "Read a file from the local filesystem. "
-        "file_path must be an absolute path. By default, reads up to 2000 lines "
-        "from the beginning and returns results with line numbers. "
-        "Supports images, PDFs, and Jupyter notebooks. Can read files only, not directories. "
-        "For large files, use offset/limit to read a specific portion, or use grep to search for specific content."
+        "Read an absolute file, not a directory (default 2000 numbered lines); supports "
+        "images/PDF/notebooks. Focus large files with offset/limit or grep."
     ),
 }
 
@@ -43,14 +40,8 @@ WRITE_FILE_DESCRIPTION: Dict[str, str] = {
         "- 除非用户明确要求，不要创建文档文件（*.md）或 README 文件。"
     ),
     "en": (
-        "Writes a file to the local filesystem.\n\n"
-        "Usage:\n"
-        "- This tool will overwrite the existing file if there is one at the provided path.\n"
-        "- If this is an existing file, you MUST use read_file first to read the file's contents. "
-        "This tool will fail if you did not read the file first.\n"
-        "- Prefer edit_file for modifying existing files; it only sends the diff. "
-        "Only use write_file to create new files or for complete rewrites.\n"
-        "- NEVER create documentation files (*.md) or README files unless explicitly requested by the User."
+        "Create/overwrite a complete file; existing content MUST be read first. Use edit_file for "
+        "targeted edits. Create docs/README only on request."
     ),
 }
 
@@ -68,11 +59,9 @@ EDIT_FILE_DESCRIPTION: Dict[str, str] = {
         "不支持编辑 .ipynb 文件。"
     ),
     "en": (
-        "Performs exact string replacements in files. "
-        "Existing files must be fully read with read_file before editing. "
-        "old_string must match exactly once; if multiple matches exist, provide more context or set replace_all=true. "
-        "Creates a new file when old_string is empty and the target file does not exist. "
-        "Does not support editing .ipynb files."
+        "Replace exact text after fully reading the file. old_string must match once unless "
+        "replace_all; add context if ambiguous. Empty old_string creates or empties a file. No .ipynb"
+        " edits."
     ),
 }
 
@@ -82,11 +71,7 @@ GLOB_DESCRIPTION: Dict[str, str] = {
         "支持 **/*.js、src/**/*.ts 等模式，返回按文件名排序的匹配路径。"
         "默认最多返回 100 个结果。需要按文件名模式找文件时使用本工具。"
     ),
-    "en": (
-        "Fast file pattern matching tool that works with any codebase size. "
-        "Supports glob patterns like **/*.js or src/**/*.ts and returns matching paths sorted by file name. "
-        "Returns up to 100 results by default. Use this tool when you need to find files by name patterns."
-    ),
+    "en": "Find glob-matched paths, filename-sorted; default max 100 results.",
 }
 
 LIST_DIR_DESCRIPTION: Dict[str, str] = {
@@ -103,11 +88,8 @@ GREP_DESCRIPTION: Dict[str, str] = {
         "content、files_with_matches、count。"
     ),
     "en": (
-        "A powerful search tool built on ripgrep. "
-        "ALWAYS use grep for search tasks. NEVER invoke `grep` or `rg` as a bash command. "
-        "The grep tool has been optimized for correct permissions and access. "
-        "Supports full regex syntax, glob/type filters, and output modes: "
-        "content, files_with_matches, count."
+        "Regex content search with glob/type filters and content/files_with_matches/count output; "
+        "never substitute shell grep/rg."
     ),
 }
 
@@ -124,28 +106,19 @@ READ_FILE_PARAMS: Dict[str, Dict[str, str]] = {
     "file_path": {"cn": "要读取的文件绝对路径", "en": "The absolute path to the file to read"},
     "offset": {
         "cn": "开始读取的行号。仅当文件太大、无法一次读取，或已知道要读取的位置时提供。",
-        "en": (
-            "The line number to start reading from. "
-            "Only provide if the file is too large to read at once or you already know the needed location."
-        ),
+        "en": "Start line; supply for large files or a known needed location.",
     },
     "limit": {
         "cn": "要读取的行数。仅当文件太大、无法一次读取，或只需要指定范围时提供。",
-        "en": (
-            "The number of lines to read. "
-            "Only provide if the file is too large to read at once or only a specific range is needed."
-        ),
+        "en": "Lines to read for large files or a known needed range.",
     },
     "pages": {
         "cn": "PDF 专属页码范围，例如 '1-5'、'3'、'10-20'。每次最多 20 页",
-        "en": "PDF-only page range, e.g. '1-5', '3', '10-20'. Maximum 20 pages per request",
+        "en": "PDF pages (e.g. 1-5); max 20 per call.",
     },
     "caption": {
         "cn": "可选。读取 skills/… 下的图片时，填入 SKILL.md 中的图片说明文字（Markdown alt），用于多模态用户提示。",
-        "en": (
-            "Optional. When reading an image under skills/, pass the figure caption "
-            "(markdown alt text from SKILL.md) for the multimodal user prompt."
-        ),
+        "en": "Skill image: use SKILL.md's figure alt text.",
     },
 }
 
@@ -172,13 +145,13 @@ EDIT_FILE_PARAMS: Dict[str, Dict[str, str]] = {
             "必须在文件中唯一匹配，否则须设置 replace_all=true 或提供更多上下文"
         ),
         "en": (
-            "The text to replace (empty string creates a new file or writes to an empty file). "
-            "Must match exactly once unless replace_all=true or more context is provided"
+            "Exact unique match unless replace_all; empty creates a missing file or writes an empty "
+            "one."
         ),
     },
     "new_string": {
         "cn": "替换后的文本，必须与 old_string 不同",
-        "en": "The replacement text, must differ from old_string",
+        "en": "Replacement text, different from old_string.",
     },
     "replace_all": {
         "cn": "是否替换文件中所有匹配项，默认 false",

@@ -23,24 +23,9 @@ DESCRIPTION: Dict[str, str] = {
         "对于同一用户意图，不要重复调用相同或相近的搜索；如果返回结果不适用，不要猜测工具名称。"
     ),
     "en": (
-        "Search registered and available deferred tools based on the user's intent. "
-        "Call this tool when no direct tool clearly supports the required capability "
-        "or when you are unsure which tool to use. "
-        "Search using the user's intent and required capability; do not guess tool names. "
-        "The search uses BM25 to match tool names, descriptions, and parameter information. "
-        "The results contain each matched tool's name, description, and complete parameters schema. "
-        "Search-result tools are not added to the top-level tools list; execute a result in the next turn "
-        "by calling the fixed tool_call with the exact returned name and schema-compatible arguments. "
-        "Only currently registered and available deferred tools are returned. The current "
-        "directory and registry are the only sources of truth; historical messages, "
-        "successful results, or names in another tool/subagent description cannot restore "
-        "a currently removed or changed tool. "
-        "A previous search result may be reused while its tool is unchanged; if its "
-        "description or schema changed, search again. If the latest directory says a tool "
-        "was removed, do not reuse its old result or authorization, and do not invoke it "
-        "through task_tool or a subagent. "
-        "Do not repeat the same or a similar search for the same user intent; "
-        "if the results are not suitable, do not guess a tool name."
+        "BM25-search current deferred tools by intent/capability when direct tools do not fit or "
+        "selection is uncertain. Returns exact names/full schemas; execute via tool_call next turn. "
+        "Latest catalog/schema overrides history."
     ),
 }
 

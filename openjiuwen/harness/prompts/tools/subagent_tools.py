@@ -19,15 +19,10 @@ SUBAGENT_SPAWN_DESCRIPTION: Dict[str, str] = {
         "\n\n可用子代理类型（仅用于选择 subagent_type，不能单凭此列表 spawn）：\n{available_agents}"
     ),
     "en": (
-        "Create a persistent subagent for a concrete, bounded, self-contained subtask; "
-        "returns subagent_id and task_id immediately. "
-        "Use only when the user or AGENTS.md/skill explicitly asks for delegation or parallel sub-agents; "
-        "depth, research, or codebase analysis alone is not permission. "
-        "spawn does not return output—you must subagent_wait in the same turn. "
-        "Always provide display_name (UI label) and role (this subtask's role). "
-        "Prefer parallel sidecar tasks; do not spawn blocking critical-path work and idle-wait."
-        "\n\nAvailable agent types (choose subagent_type only; does not authorize spawning alone):\n"
-        "{available_agents}"
+        "Start an authorized persistent independent task; returns subagent_id/task_id, not output. "
+        "Give display_name/role and full objective/context; wait in the same turn. Follow up on the "
+        "live instance rather than respawning. Browser work uses synchronous task_tool. Available "
+        "agent types (selection, not authorization):\n{available_agents}"
     ),
 }
 
@@ -40,12 +35,8 @@ SUBAGENT_WAIT_DESCRIPTION: Dict[str, str] = {
         "超长调研/编码可到上限 3600000。"
     ),
     "en": (
-        "Block until all listed subagent_ids reach a final status; returns statuses, "
-        "results, output_files, and timed_out. "
-        "output_files[subagent_id] is the absolute path to that subagent's full turn answer; "
-        "for long output or later reference, read_file that path instead of asking the subagent "
-        "to repeat it. Default timeout_ms is 1800000 (30 min); use 120000 (2 min) for "
-        "simple queries, and up to 3600000 for very long research or coding."
+        "Wait for all IDs: statuses/results/output_files/timed_out. Read output_files[id] for the "
+        "full answer; do not ask the child to repeat. Follow lifecycle rules."
     ),
 }
 
@@ -58,11 +49,8 @@ SUBAGENT_LIST_DESCRIPTION: Dict[str, str] = {
         "向用户汇报时须以本次返回为准，勿凭对话历史臆造列表。"
     ),
     "en": (
-        "List subagents and capacity for the parent session. "
-        "subagents / live_subagents are live instances (send_input eligible); "
-        "closed_subagents are closed instances restorable via subagent_resume; "
-        "summary provides live_count / closed_count. "
-        "Report only what this call returns—do not reconstruct the roster from chat history."
+        "List live_subagents (alias subagents), closed_subagents and live_count/closed_count. Report "
+        "actual records; send_input to live, resume closed."
     ),
 }
 
@@ -73,9 +61,8 @@ SUBAGENT_SEND_INPUT_DESCRIPTION: Dict[str, str] = {
         "实例已 close 或被淘汰时须先 subagent_resume。"
     ),
     "en": (
-        "Send follow-up input to an existing subagent_id; returns a new task_id immediately. "
-        "Use interrupt=true after a timed-out wait to cancel the current turn and redirect. "
-        "If the instance was closed or evicted, call subagent_resume first."
+        "Continue a live instance; returns task_id. interrupt=true redirects running work. Resume "
+        "closed/evicted instances first."
     ),
 }
 
@@ -88,14 +75,8 @@ SUBAGENT_CLOSE_DESCRIPTION: Dict[str, str] = {
         "RUNNING 实例会被拒绝，请先 subagent_wait 或 subagent_send_input(interrupt=true)。"
     ),
     "en": (
-        "Close a subagent when it is no longer needed and release its persistent slot; "
-        "returns the target's previous status before shutdown was requested. "
-        "Completed subagents remain open and count toward the capacity limit until closed—"
-        "don't keep instances around longer than necessary. "
-        "Keep an instance the user just asked to restore or that has follow-up input to send; "
-        "idle/completed alone is not a reason to close it. "
-        "Conversation history stays in checkpointer and can be restored with subagent_resume. "
-        "RUNNING instances are rejected—subagent_wait or subagent_send_input(interrupt=true) first."
+        "Release unneeded slots; returns previous status. RUNNING requires wait/interrupt first. Keep"
+        " pending follow-ups/restored idle instances. History remains resumable."
     ),
 }
 
@@ -108,13 +89,8 @@ SUBAGENT_RESUME_DESCRIPTION: Dict[str, str] = {
         "恢复后的 idle/completed 不代表新请求已执行，不要因此立即 close 或再次 resume。"
     ),
     "en": (
-        "Restore a status=closed (manual/evicted) subagent from checkpointer and reclaim a slot; "
-        "does not enqueue work. Live status=idle instances need subagent_send_input, not resume. "
-        "restored=false means the instance was already in memory, not a restore failure; do not close and retry. "
-        "If only restoration was requested, leave the instance idle. "
-        "For follow-up work, use subagent_send_input, then subagent_wait. "
-        "idle/completed after resume does not mean a new request was executed; "
-        "do not immediately close or resume again."
+        "Restore a closed checkpoint without starting work. restored=false means already live. "
+        "Restore-only leaves idle; new work requires send_input then wait."
     ),
 }
 
@@ -151,11 +127,11 @@ def get_subagent_spawn_input_params(language: str = "cn") -> Dict[str, Any]:
             },
             "display_name": {
                 "type": "string",
-                "description": "Short human-readable name shown in the UI (e.g. 'API Researcher').",
+                "description": "Short UI name.",
             },
             "role": {
                 "type": "string",
-                "description": "One-line role for this subtask (e.g. 'Review auth module changes').",
+                "description": "One-line role for this subtask.",
             },
             "browser_capabilities": {
                 "type": "array",
@@ -180,8 +156,8 @@ def get_subagent_wait_input_params(language: str = "cn") -> Dict[str, Any]:
             "timeout_ms": {
                 "type": "integer",
                 "description": (
-                    "Wait deadline in milliseconds. Default 1800000 (30 min); "
-                    "use 120000 for quick tasks, up to 3600000 for very long research/coding."
+                    "Milliseconds: default 1800000; quick 120000; max 3600000. Child turn cap remains"
+                    " 30 minutes."
                 ),
             },
         },

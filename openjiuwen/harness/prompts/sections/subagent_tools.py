@@ -48,42 +48,24 @@ SUBAGENT_SYSTEM_PROMPT_CN = """## 常驻子代理工具
 - 按 can_send_input / needs_resume 决定用 send_input 还是 resume。
 """
 
-SUBAGENT_SYSTEM_PROMPT_EN = """## Persistent subagent tools
-(subagent_spawn / subagent_wait / subagent_list / subagent_send_input / subagent_close / subagent_resume)
-
-### When to delegate
-
-- Plan first: separate **critical-path blockers** from **parallel sidecar** work; decide what you must do locally this turn before spawning.
-- Use subagent_spawn when the subtask is **concrete, bounded, self-contained**, can run **in parallel with useful local work**, and does **not block your immediate next local step**.
-- For independent research questions, disjoint code-edit slices, or parallel verification: spawn multiple agents in one turn, then subagent_wait on **all** ids at once.
-- The available agent types in the spawn tool description only help pick `subagent_type` **after** spawning is authorized—they never authorize spawning by themselves.
-
-**Do NOT spawn when:**
-
-- The user or AGENTS.md / skill did not explicitly ask for sub-agents, delegation, or parallel agent work (depth, thoroughness, research, or codebase analysis alone is **not** permission).
-- Your **very next local step** depends on that subtask (keep blocking critical-path work local).
-- The subtask is vague, duplicates main-task work, or is too tightly coupled to delegate well.
-- You would respawn the same unresolved sticky type—wait the live instance instead, or follow up with send_input when available.
-
-### Usage constraints
-
-- subagent_spawn returns subagent_id immediately and does **not** include the final output.
-- **Call subagent_wait in the same turn after spawn**; default timeout_ms 1800000 (30 min), 120000 for quick tasks, up to 3600000 for very long work. A subagent turn is also capped at 30 min; a longer wait does not extend that cap.
-- Instances stay alive after one turn completes (status=idle); do not respawn the same sticky type.
-- Follow up on the same instance with subagent_send_input instead of respawning the same intent.
-- status=idle means the instance is live—call subagent_send_input directly, **not** subagent_resume.
-- After a timed-out wait with the wrong direction, use subagent_send_input(interrupt=true), then wait again.
-- Call subagent_close when an instance is no longer needed; idle instances still occupy slots until closed.
-- LRU may evict when full (max 10)—use subagent_resume to bring it back.
-- Only when status=closed (manual/evicted/parent_ended) call subagent_resume;
-  follow with subagent_send_input + subagent_wait when there is follow-up input.
-- If the user only asks to restore, leave the instance idle without submitting work or immediately closing it.
-  idle/completed after resume does not mean a new request was completed and is not a reason to clean up the instance.
-  Send pending follow-up input directly; do not insert close / resume calls.
-- restored=false means the instance is already live, not a restore failure; do not retry through close → resume.
-- subagent_list separates live_subagents (live) from closed_subagents (closed, resumable); summary has live_count / closed_count. When reporting to the user, state both counts; only when both lists are empty is there no subagent record. Do not list subagents from chat history.
-- Follow can_send_input / needs_resume to choose send_input vs resume.
-"""
+SUBAGENT_SYSTEM_PROMPT_EN = (
+    "## Persistent subagent tools\n(subagent_spawn / subagent_wait / subagent_list / "
+    "subagent_send_input / subagent_close / subagent_resume)\n- Spawn only when user/AGENTS.md/skill "
+    "explicitly requests delegation/parallel agents. Depth/research alone or an available type is not"
+    " authorization. Keep immediate critical-path dependencies local; delegate only work "
+    "parallelizable with useful local work. Spawn independent tasks together and wait on all ids in "
+    "the same turn; do not duplicate their work.\n- spawn returns IDs, not output. wait uses "
+    "milliseconds: default 1800000, quick 120000, max 3600000; a child turn remains capped at 30 "
+    "minutes. Idle/completed instances are still live and occupy slots (max 10); follow up with "
+    "send_input rather than respawn/resume. After timed-out work going wrong, "
+    "send_input(interrupt=true), then wait.\n- Close only unneeded instances. Closed "
+    "(manual/evicted/parent_ended) instances need resume; LRU may evict at capacity. Follow resume "
+    "with send_input + wait for new work. If only restore was requested, leave idle; restored=false "
+    "means already live, not failure. Do not close/resume-loop or claim resumed idle/completed is new"
+    " work completion.\n- list reports actual live and closed records; state both counts, never "
+    "reconstruct from chat history. Only both empty means no records. Follow "
+    "can_send_input/needs_resume.\n"
+)
 
 SUBAGENT_SYSTEM_PROMPT: Dict[str, str] = {
     "cn": SUBAGENT_SYSTEM_PROMPT_CN,
