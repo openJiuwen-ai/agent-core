@@ -34,6 +34,9 @@ class SandboxGatewayClient:
         provider = await self._gateway.get_or_create_provider(
             config=self._config, isolation_key=self._isolation_key, op_type=op_type,
         )
+        reconcile = getattr(provider, "reconcile_deferred_acl_cleanup", None)
+        if reconcile is not None:
+            await reconcile()
         check = getattr(provider, "_assert_policy_ready", None)
         if check is not None:
             check()

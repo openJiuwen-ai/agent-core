@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.harness.rails.interrupt.interrupt_base import ApproveResult, InterruptResult
 from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
 from openjiuwen.harness.security.host import ToolPermissionHost
 from openjiuwen.harness.security.permission_engine.models import (
@@ -196,18 +197,78 @@ async def test_ordinary_policy_allow_does_not_become_a_child_command_approval(tm
     assert not rail.take_runtime_approval("s", "c", "bash", args, include_operation=True)
 
 
-@pytest.mark.parametrize("kind,scope", [("file", "parent"), ("url", "domain"), ("program", "exact")])
-@pytest.mark.parametrize("remember", [False, True])
-def test_runtime_and_tool_scope_defaults_share_normalization(tmp_path, kind, scope, remember):
-    subject = ({"kind": "file", "accesses": [(str(tmp_path / "A.txt"), "read")]} if kind == "file"
-               else {"kind": "url", "url": "https://www.example.com/a"} if kind == "url" else {"kind": "program"})
-    payload = PermissionConfirmResponse(approved=True, auto_confirm=remember, persist_allow=False)
+@pytest.mark.parametrize(("subject", "scope"), [
+    ({"kind": "file", "accesses": [("C:/data/A.txt", "write")]}, "parent"),
+    ({"kind": "url", "url": "https://www.example.com/a"}, "domain"),
+    ({"kind": "command", "command": "echo one && echo two", "shell_type": "bash"}, "subcommands"),
+    ({"kind": "program"}, "exact"),
+])
+@pytest.mark.parametrize("choice", ["once", "session", "permanent"])
+def test_runtime_and_tool_scope_defaults_share_normalization(subject, scope, choice):
+    payload = PermissionConfirmResponse(
+        approved=True, auto_confirm=choice != "once", persist_allow=choice == "permanent",
+    )
     normalized = PermissionInterruptRail.normalize_confirmation_scope(payload, subject)
-    assert normalized.authorization_scope == scope
-    assert normalized.authorization_mode == ("allow" if scope == "exact" else "allow_with_scope")
+    expected = "exact" if choice == "once" else scope
+    assert normalized.authorization_scope == expected
+    assert normalized.authorization_mode == ("allow" if expected == "exact" else "allow_with_scope")
     exact = PermissionInterruptRail.normalize_confirmation_scope(
         PermissionConfirmResponse(approved=True, authorization_mode="allow"), subject)
     assert exact.authorization_scope == "exact"
+
+    if choice == "once":
+        expanded = PermissionInterruptRail.normalize_confirmation_scope(
+            PermissionConfirmResponse(
+                approved=True, authorization_mode="allow_with_scope", authorization_scope=scope,
+            ), subject,
+        )
+        assert (expanded.authorization_mode, expanded.authorization_scope) == ("allow", "exact")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("permanent", [False, True], ids=["session", "permanent"])
+async def test_project_execution_config_remember_request_grants_only_exact_file(tmp_path, permanent):
+    persist_session = Mock(return_value=True)
+    persist_permanent = Mock(return_value=True)
+    rail = PermissionInterruptRail(
+        config={"enabled": True, "package_builtin_rules": False, "tools": {"write_file": "allow"}},
+        host=ToolPermissionHost(
+            resolve_workspace_dir=lambda: tmp_path,
+            persist_session_allow_rule=persist_session,
+            persist_allow_rule=persist_permanent,
+        ),
+    )
+    target = str((tmp_path / "package.json").resolve())
+    args = {"file_path": target, "content": "{}"}
+    call = ToolCall(id="config", type="function", name="write_file", arguments=json.dumps(args))
+    state = {}
+    ctx = SimpleNamespace(session=SimpleNamespace(
+        get_session_id=lambda: "s", get_state=state.get, update_state=state.update,
+    ))
+
+    interrupt = await rail.resolve_interrupt(ctx, call, None)
+    assert isinstance(interrupt, InterruptResult)
+    assert interrupt.request.metadata["matched_rule"] == "immutable_project_execution_config"
+
+    decision = await rail.resolve_interrupt(ctx, call, {
+        "approved": True,
+        "auto_confirm": True,
+        "persist_allow": permanent,
+        "authorization_mode": "allow_with_scope",
+        "authorization_scope": "parent",
+    })
+    assert isinstance(decision, ApproveResult)
+    approval = rail.take_runtime_approval("s", call.id, call.name, args, include_operation=True)
+    grants = approval["grants"]
+    assert sorted(grant["tools"] for grant in grants) == [["file_resource"], ["write_file"]]
+    for grant in grants:
+        assert grant["match_type"] == "exact_operation"
+        assert json.loads(grant["pattern"]) == {
+            "scope": "exact", "subject": {"kind": "file", "accesses": [[target, "write"]]},
+        }
+    assert state == {}
+    persist_session.assert_not_called()
+    persist_permanent.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -1196,6 +1196,36 @@ def test_first_unread_offset_finds_gap_then_tail():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("content", ["", "new content"])
+async def test_write_file_allows_overwrite_after_reading_empty_file(sys_op, tmp_path, content):
+    path = tmp_path / "empty.txt"
+    path.touch()
+    inputs = {"file_path": str(path)}
+
+    read = await ReadFileTool(sys_op).invoke(inputs)
+    assert read.success and read.data["line_count"] == 0
+
+    result = await WriteFileTool(sys_op).invoke({**inputs, "content": content})
+    assert result.success, result.error
+    assert path.read_text(encoding="utf-8") == content
+
+
+@pytest.mark.asyncio
+async def test_write_file_preserves_content_added_after_reading_empty_file(sys_op, tmp_path):
+    path = tmp_path / "empty.txt"
+    path.touch()
+    inputs = {"file_path": str(path)}
+    read = await ReadFileTool(sys_op).invoke(inputs)
+    assert read.success
+    path.write_text("externally added content", encoding="utf-8")
+
+    result = await WriteFileTool(sys_op).invoke({**inputs, "content": ""})
+    assert not result.success
+    assert "modified since read" in result.error
+    assert path.read_text(encoding="utf-8") == "externally added content"
+
+
+@pytest.mark.asyncio
 async def test_write_file_rejects_partial_read_with_resumable_hint(sys_op, temp_dir):
     # A single partial read covers only a window — overwrite must be refused,
     # and the error must tell the agent where to resume so it doesn't loop blindly.
@@ -1212,7 +1242,7 @@ async def test_write_file_rejects_partial_read_with_resumable_hint(sys_op, temp_
     res = await write_tool.invoke({"file_path": file_path, "content": "overwrite"})
     assert res.success is False
     assert "fully read" in res.error
-    assert "offset=" in res.error
+    assert "offset=1000" in res.error
     state = _FILE_READ_REGISTRY[file_path]
     assert state.total_lines == total_lines
     assert _first_unread_offset(state.read_ranges) == 1000
