@@ -206,6 +206,28 @@ mcp_config = McpServerConfig(
 )
 ```
 
+### 4.6 Tool Call Timeout Configuration
+
+MCP tool calls support two timeout layers. Understanding their relationship avoids "long calls are still cut off" confusion (issue #1976):
+
+| Layer | How to configure | Applies to | Default |
+|-------|------------------|------------|---------|
+| **Per-call timeout** | the client's `call_tool(..., timeout=seconds)` | A single tool call, via `asyncio.timeout` in the client | `NO_TIMEOUT` (-1): **no per-call ceiling** (matching Streamable HTTP and the MCP SDK default); stdio/playwright fall back to a configured `params["timeout_s"]` when present; SSE keeps a fixed 60s ceiling |
+| **Card-level timeout** | `ToolCard.properties["resilience"]["timeout_s"]` | The outer invocation budget for `tool.invoke` | `DEFAULT_TOOL_CALL_TIMEOUT` (300s, env-overridable); `timeout_s: null` exempts the tool (still bounded by `MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT`, 3600s) |
+
+**Resolution order**: when an MCP tool runs through `AbilityManager`, the card-level budget is resolved first and forwarded to the client's per-call wait, so the client raises a precise timeout error for the exact budget. The outer `fail_after` is a hard ceiling only: it exceeds the forwarded budget by a cleanup grace (10% of the budget, clamped to 5–60s), so the client-side wait reports its own timeout as long as the client's cleanup after it finishes within the grace; otherwise the outer scope ends the call with the generic text. The outer scope also still ends a client that ignores the `timeout` argument. The reported duration is always the card-level budget; a client with its own message (stdio, playwright) has it appended, e.g. `Tool 'solve' timed out after 300.0s (stdio call_tool 'solve' did not complete within 300s)`. A `TimeoutError` raised by the client is always read as the call budget expiring; other client failures keep their own error text. An exempt tool (`timeout_s: null`) gets no grace: `MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT` is absolute. Both execution paths (registered tools and the resource_mgr fallback) behave identically. For direct client usage, pass `timeout` to `call_tool` yourself.
+
+```python
+# Long-running tool example: minute-level simulation solves.
+# 1) Recommended: declare the budget on the card once (seconds).
+card.properties = {"resilience": {"timeout_s": 300}}
+
+# 2) Or pass a per-call timeout when invoking the client directly.
+result = await client.call_tool("solve_flowsheet", {"sim": "Sim 1"}, timeout=300.0)
+```
+
+**Recommendation**: for tools that legitimately run minutes (simulation solves, batch jobs, model inference), set `resilience.timeout_s` to cover the expected duration — short tools keep the default and fail fast, long tools get the configured budget instead of being cut off by the connect-level HTTP timeout.
+
 ---
 
 ## 5. Complete Demo: "Best Practices" for Enterprise Customers

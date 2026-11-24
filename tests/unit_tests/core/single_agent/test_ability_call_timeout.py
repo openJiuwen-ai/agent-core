@@ -345,3 +345,46 @@ def test_timeout_error_carries_tool_message_for_llm() -> None:
             await Runner.stop()
 
     _run_async(_run())
+
+
+def test_build_tool_invoke_kwargs_forwards_budget_to_mcp_tools() -> None:
+    """``_build_tool_invoke_kwargs`` is the single place both execution
+    branches share (issue #1976 review): an MCP tool gets the resolved call
+    timeout as the per-call ``timeout`` kwarg, ordinary tools keep their
+    contract (no extra kwarg), and the callback-context kwarg stays opt-in.
+    """
+    from openjiuwen.core.foundation.tool import McpToolCard
+    from openjiuwen.core.foundation.tool.mcp.base import MCPTool
+
+    class _FakeMcpClient:
+        async def call_tool(self, tool_name, arguments, **kwargs):
+            return "mcp-result"
+
+    mcp_card = McpToolCard(
+        name="solve",
+        description="",
+        input_params={"type": "object", "properties": {}},
+        server_name="sim-server",
+    )
+    mcp_tool = MCPTool(_FakeMcpClient(), mcp_card)
+
+    plain_tool = _make_fast_tool("plain", timeout_s=5.0)
+
+    # MCP tool: budget forwarded alongside the session kwarg.
+    kwargs = AbilityManager._build_tool_invoke_kwargs(mcp_tool, 120.0, None, None)
+    assert kwargs == {"session": None, "timeout": 120.0}
+
+    # Ordinary tool: no timeout kwarg leaks into its invoke signature.
+    kwargs = AbilityManager._build_tool_invoke_kwargs(plain_tool, 120.0, None, None)
+    assert kwargs == {"session": None}
+
+    # Callback context stays opt-in: only tools that accept it get the kwarg.
+    class _ContextConsumer:
+        accepts_tool_callback_context = True
+        card = mcp_card
+
+        async def invoke(self, inputs, **kwargs):  # noqa: ANN202
+            return "ok"
+
+    kwargs = AbilityManager._build_tool_invoke_kwargs(_ContextConsumer(), 60.0, "sess", "ctx")
+    assert kwargs == {"session": "sess", "timeout": 60.0, "_tool_callback_context": "ctx"}
