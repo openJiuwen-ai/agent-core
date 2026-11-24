@@ -133,12 +133,67 @@ def test_append_and_semicolon_keep_their_correct_cwd(tmp_path):
     assert (workspace / "sub/after", "read") in paths
 
 
-def test_partial_evidence_keeps_confirmed_prefix(tmp_path):
+@pytest.mark.parametrize("sub_exists", [True, False])
+def test_dynamic_cat_keeps_both_known_cwds_across_semicolon(tmp_path, sub_exists):
     workspace = tmp_path.resolve()
-    analysis = _analysis('cd sub && cat "$target"; cat after', workspace)
+    (workspace / "after.txt").write_text("root\n")
+    subdir = workspace / "sub"
+    if sub_exists:
+        subdir.mkdir()
+        (subdir / "input.txt").write_text("input\n")
+        (subdir / "after.txt").write_text("child\n")
+    command = 'cd sub && cat "$TARGET"; cat ./after.txt'
+    analysis = _analysis(command, workspace)
     assert analysis.coverage == "partial"
-    # The branch that skips the opaque command stays at the initial cwd.
-    assert {entry.path for entry in analysis.accesses} == {workspace / "sub", workspace / "after"}
+    assert {entry.path for entry in analysis.accesses if entry.kind == "file_io"} == {
+        workspace / "after.txt", subdir / "after.txt",
+    }
+    actual = subprocess.run(
+        ["/bin/sh", "-c", command], cwd=workspace, env={"PATH": os.defpath, "TARGET": "./input.txt"},
+        check=True, timeout=10, capture_output=True, text=True,
+    )
+    assert actual.stdout == ("input\nchild\n" if sub_exists else "root\n")
+
+    guarded = build_file_guard_checker({
+        "file_guard": {
+            "enabled": True,
+            "defaults": {"read": "allow"},
+            "paths": [{"path": str(subdir / "after.txt"), "read": "deny"}],
+        },
+    }, workspace_root=workspace)
+    args = {"command": command, "workdir": str(workspace)}
+    with shell_path_call() as scope:
+        scope.bind(SimpleNamespace(analyze_local_paths=lambda _: analysis), args)
+        result = guarded.evaluate("bash", args)
+    assert result.permission == PermissionLevel.DENY
+    assert result.external_paths == [str(subdir / "after.txt")]
+
+
+@pytest.mark.parametrize("operand", ["$TARGET", '"${TARGET}"'])
+def test_dynamic_cat_preserves_and_chain_and_literal_accesses(tmp_path, operand):
+    workspace = tmp_path.resolve()
+    analysis = _analysis(f"cd sub && cat {operand} known.txt > log && cat after.txt", workspace)
+    assert analysis.coverage == "partial"
+    assert {(entry.path, entry.action) for entry in analysis.accesses if entry.kind == "file_io"} == {
+        (workspace / "sub/known.txt", "read"),
+        (workspace / "sub/log", "write"),
+        (workspace / "sub/after.txt", "read"),
+    }
+
+
+@pytest.mark.parametrize("command", [
+    'cat "$(pwd)"',
+    'cat "${TARGET:=input}"',
+    'cat "$TARGET" > "$OUTPUT"',
+    "source settings.sh",
+])
+def test_other_opaque_steps_do_not_propagate_cwd(tmp_path, command):
+    workspace = tmp_path.resolve()
+    analysis = _analysis(f"cd sub && {command}; cat after.txt", workspace)
+    assert analysis.coverage == "partial"
+    assert {entry.path for entry in analysis.accesses if entry.kind == "file_io"} == {
+        workspace / "after.txt",
+    }
 
 
 def test_directory_lookup_and_file_access_keep_both_kinds(tmp_path):
