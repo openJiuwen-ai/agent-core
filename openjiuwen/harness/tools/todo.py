@@ -114,6 +114,10 @@ class TodoTool(Tool):
         """
         return os.path.join(self.workspace, f"./{session_id}/todo.json")
 
+    def get_file_path(self, session_id: str) -> str:
+        """Expose the todo file path to coordination helpers."""
+        return self._get_file_path(session_id)
+
     async def load_todos(self, session_id: str) -> List[TodoItem]:
         """Load todo items from session-specific JSON file.
 

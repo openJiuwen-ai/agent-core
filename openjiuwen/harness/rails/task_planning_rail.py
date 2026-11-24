@@ -3,7 +3,6 @@
 """TaskPlanningRail — registers todo tools on DeepAgent."""
 from __future__ import annotations
 
-import json
 import os
 from typing import Dict, Optional, List
 
@@ -316,7 +315,7 @@ class TaskPlanningRail(DeepAgentRail):
         if tool is None:
             return
         session_id = ctx.session.get_session_id()
-        path = os.path.abspath(tool._get_file_path(session_id))
+        path = os.path.abspath(tool.get_file_path(session_id))
         snapshot = await self._read_todo_file(tool, path)
         if snapshot is None:
             logger.debug(
@@ -353,7 +352,7 @@ class TaskPlanningRail(DeepAgentRail):
         if tool is None:
             return
         session_id = ctx.session.get_session_id()
-        path = os.path.abspath(tool._get_file_path(session_id))
+        path = os.path.abspath(tool.get_file_path(session_id))
         content = snapshot.get("content") or ""
 
         current = await self._read_todo_file(tool, path)
