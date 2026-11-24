@@ -78,12 +78,21 @@ class RequestParameterFallback:
     ``stop`` is also retried without it on every request: some Responses endpoints
     (OpenAI) reject the field while others (e.g. Qwen and DeepSeek via OpenRouter)
     honour it, so it is sent as configured and dropped only after a refusal.
+    ``retry_without_temperature`` does the same for a refused ``temperature``.
     """
 
-    def __init__(self, provider: str, api_label: str, *, retry_without_stop: bool = False) -> None:
+    def __init__(
+        self,
+        provider: str,
+        api_label: str,
+        *,
+        retry_without_stop: bool = False,
+        retry_without_temperature: bool = False,
+    ) -> None:
         self._provider = provider
         self._api_label = api_label
         self._retry_without_stop = retry_without_stop
+        self._retry_without_temperature = retry_without_temperature
         self._models_rejecting_disabled_thinking: set[str] = set()
         self._models_rejecting_stop: OrderedDict[str, None] = OrderedDict()
         self._rejected_temperatures: OrderedDict[tuple[str, str], None] = OrderedDict()
@@ -91,12 +100,13 @@ class RequestParameterFallback:
     def apply_cached(self, params: dict[str, Any]) -> dict[str, Any]:
         if self._retry_without_stop and "stop" in params and self._model_key(params) in self._models_rejecting_stop:
             params = self._without_stop(params)
-        if not is_disabled_thinking_fallback_allowed():
-            return params
-        model_key = self._model_key(params)
-        if model_key in self._models_rejecting_disabled_thinking and self._has_disabled_thinking_params(params):
-            params = self._without_disabled_thinking_params(params)
-        if self._temperature_cache_key(params) in self._rejected_temperatures:
+        scoped = is_disabled_thinking_fallback_allowed()
+        if scoped:
+            model_key = self._model_key(params)
+            if model_key in self._models_rejecting_disabled_thinking and self._has_disabled_thinking_params(params):
+                params = self._without_disabled_thinking_params(params)
+        retry_temperature = scoped or self._retry_without_temperature
+        if retry_temperature and self._temperature_cache_key(params) in self._rejected_temperatures:
             params = self._without_temperature(params)
         return params
 
@@ -108,7 +118,8 @@ class RequestParameterFallback:
         is_stream: bool,
     ) -> Any:
         scoped = is_disabled_thinking_fallback_allowed()
-        if not scoped and not self._retry_without_stop:
+        retry_temperature = scoped or self._retry_without_temperature
+        if not retry_temperature and not self._retry_without_stop:
             return await create(**params)
 
         request_params = self.apply_cached(params)
@@ -124,14 +135,14 @@ class RequestParameterFallback:
                     request_params = self._without_stop(request_params)
                     rejected_stop = True
                     rejected_option = "stop"
-                elif not scoped:
-                    raise exc
-                elif self._rejects_temperature(exc):
+                elif retry_temperature and self._rejects_temperature(exc):
                     if self._exception_status_code(exc) != 400 or not self._has_temperature(request_params):
                         raise exc
                     rejected_temperature = self._temperature_cache_key(request_params)
                     request_params = self._without_temperature(request_params)
                     rejected_option = "temperature"
+                elif not scoped:
+                    raise exc
                 elif self._has_disabled_thinking_params(request_params) and self._is_disabled_thinking_rejection(exc):
                     request_params = self._without_disabled_thinking_params(request_params)
                     if model_key:

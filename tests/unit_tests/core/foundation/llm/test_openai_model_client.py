@@ -1158,7 +1158,8 @@ class TestOpenAIResponsesApiKeyMode:
             await client.invoke("hello", temperature=0.3, top_p=0.9)
 
         assert seen_body["temperature"] == 0.3
-        assert seen_body["top_p"] == 0.9
+        # api.openai.com takes only one of temperature/top_p.
+        assert "top_p" not in seen_body
 
     @pytest.mark.asyncio
     async def test_stream_routes_to_responses_endpoint_with_api_key(self):

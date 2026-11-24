@@ -15,7 +15,9 @@ import httpx
 import pytest
 from openai import AsyncOpenAI, BadRequestError
 
-from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.foundation.llm.model_clients.openai_account_model_client import OpenAIAccountModelClient
+from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, SystemMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.schema.config import LLMApiMode
@@ -610,22 +612,38 @@ async def test_real_sdk_context_overflow_falls_back_to_original_wire_messages(st
 
 
 @pytest.mark.parametrize(
-    "provider, auth_mode, flag, expected_mode",
+    "provider, auth_mode, flag, expected_client",
     [
-        ("OpenAI", None, None, "known"),
-        ("OpenAI", None, False, "unspecified"),
-        ("OpenAI", "openai_account_oauth", None, "unspecified"),
-        ("OpenAI", "openai_account_oauth", True, "known"),
-        ("OpenAIAccount", None, None, "unspecified"),
+        ("OpenAI", None, None, OpenAIModelClient),
+        ("OpenAI", None, False, OpenAIModelClient),
+        ("OpenAI", "openai_account_oauth", None, OpenAIAccountModelClient),
+        ("OpenAI", "openai_account_oauth", True, OpenAIAccountModelClient),
+        ("OpenAIAccount", None, None, OpenAIAccountModelClient),
     ],
 )
-def test_responses_output_budget_follows_the_client_default(provider, auth_mode, flag, expected_mode):
-    model = primary(provider=provider, api_mode=LLMApiMode.Responses)
-    if auth_mode is not None:
-        model.model_client_config.auth_mode = auth_mode
+def test_responses_output_budget_matches_the_limit_the_client_sends(provider, auth_mode, flag, expected_client):
+    client_options = {} if auth_mode is None else {"auth_mode": auth_mode}
+    model = Model(
+        model_client_config=ModelClientConfig(
+            client_provider=provider, api_key="test", api_base="https://example.test/v1",
+            api_mode=LLMApiMode.Responses, verify_ssl=False, use_shared_llm_http_client=False, **client_options,
+        ),
+        model_config=ModelRequestConfig(model="test-model", max_tokens=777),
+    )
     kwargs = {} if flag is None else {"send_max_output_tokens": flag}
+    client = model._client
+    assert type(client) is expected_client
+    build_body = (
+        client._build_openai_account_request_body
+        if isinstance(client, OpenAIAccountModelClient)
+        else client._build_responses_request_body
+    )
+    body = build_body(
+        messages=[UserMessage(content="task")], tools=None, temperature=None,
+        top_p=None, model=None, stop=None, max_tokens=None, **kwargs,
+    )
 
     budget = _output_budget(model, kwargs)
 
-    assert budget.mode == expected_mode
-    assert budget.tokens == (777 if expected_mode == "known" else None)
+    assert budget.tokens == body.get("max_output_tokens")
+    assert budget.mode == ("known" if "max_output_tokens" in body else "unspecified")

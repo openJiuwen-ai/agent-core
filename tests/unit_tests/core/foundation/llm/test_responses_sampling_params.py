@@ -10,9 +10,17 @@ from typing import Any
 import httpx
 import pytest
 
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.foundation.llm.model_clients.openai_account_model_client import (
+    DEFAULT_OPENAI_ACCOUNT_BASE_URL,
+    OpenAIAccountModelClient,
+)
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
+from openjiuwen.core.foundation.llm.schema.config import ProviderType
+from openjiuwen.core.foundation.llm.utils.request_parameter_fallback import RequestParameterFallback
 from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
+from openjiuwen.core.foundation.llm.utils.responses_utils import OpenAIAccountResponsesError, build_request_body
 
 _RESPONSES_SSE = (
     "event: response.output_text.delta\n"
@@ -23,18 +31,21 @@ _RESPONSES_SSE = (
 ).encode()
 
 
-def _client_config() -> ModelClientConfig:
+_OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+
+
+def _client_config(api_base: str = _OPENROUTER_BASE) -> ModelClientConfig:
     return ModelClientConfig(
         client_provider="OpenAI",
         api_key="sk-test",
-        api_base="https://api.openai.com/v1",
+        api_base=api_base,
         api_mode="responses",
         verify_ssl=False,
     )
 
 
-def _body(config: ModelRequestConfig, **call_kwargs: Any) -> dict[str, Any]:
-    client = OpenAIModelClient(config, _client_config())
+def _body(config: ModelRequestConfig, api_base: str = _OPENROUTER_BASE, **call_kwargs: Any) -> dict[str, Any]:
+    client = OpenAIModelClient(config, _client_config(api_base))
     params: dict[str, Any] = {"temperature": None, "top_p": None, "max_tokens": None}
     params.update(call_kwargs)
     return client._build_responses_request_body(
@@ -110,6 +121,22 @@ def test_opt_out_flags_are_independent():
     assert "max_output_tokens" not in no_limit
 
 
+@pytest.mark.parametrize(
+    "temperature, top_p, expected",
+    [
+        (0.2, 0.8, {"temperature": 0.2}),
+        (None, 0.8, {"top_p": 0.8}),
+        (0.2, None, {"temperature": 0.2}),
+    ],
+)
+def test_openai_com_keeps_only_one_of_temperature_and_top_p(temperature, top_p, expected):
+    """Same rule as Chat mode for api.openai.com: temperature wins when both are set."""
+    config = ModelRequestConfig(model="gpt-5.6-luna")
+    body = _body(config, api_base="https://api.openai.com/v1", temperature=temperature, top_p=top_p)
+
+    assert {key: body[key] for key in ("temperature", "top_p") if key in body} == expected
+
+
 def test_raw_max_output_tokens_still_wins():
     body = _body(ModelRequestConfig(model="deepseek-v4.1-flash", max_tokens=512), max_output_tokens=128)
 
@@ -158,3 +185,116 @@ async def test_stream_sends_sampling_and_output_limit():
     assert sent_bodies[0]["temperature"] == 0.4
     assert sent_bodies[0]["top_p"] == 0.6
     assert sent_bodies[0]["max_output_tokens"] == 256
+
+
+_TEMPERATURE_ERROR = {
+    "error": {
+        "message": "Unsupported parameter: 'temperature' is not supported with this model.",
+        "type": "invalid_request_error",
+        "param": "temperature",
+        "code": "unsupported_parameter",
+    }
+}
+_TOP_P_ERROR = {
+    "error": {
+        "message": "Unsupported parameter: 'top_p' is not supported with this model.",
+        "type": "invalid_request_error",
+        "param": "top_p",
+        "code": "unsupported_parameter",
+    }
+}
+
+
+def _refusing_model(sent_bodies: list[dict], refused: str, error: dict) -> Model:
+    """A Responses-mode Model whose endpoint answers ``error`` to any request that carries ``refused``."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        sent_bodies.append(body)
+        if refused in body:
+            return httpx.Response(400, json=error)
+        return httpx.Response(200, content=_RESPONSES_SSE, headers={"content-type": "text/event-stream"})
+
+    model = Model(_client_config(), ModelRequestConfig(model="gpt-6.1-sol", temperature=0.7, top_p=0.9))
+    client = model._client
+    client._make_responses_transport = lambda **_: OpenAIAccountResponsesTransport(
+        transport=httpx.MockTransport(handler),
+        request_fallback=client._responses_request_fallback,
+    )
+    return model
+
+
+def test_only_the_api_key_responses_fallback_retries_without_temperature():
+    """Chat mode, the ChatGPT-login client and the transport default keep the opt-in scope."""
+    model = Model(_client_config(), ModelRequestConfig(model="gpt-6.1-sol"))
+    account_client = OpenAIAccountModelClient(
+        ModelRequestConfig(model="gpt-6.1-sol"),
+        ModelClientConfig(
+            client_provider=ProviderType.OpenAIAccount,
+            api_key="",
+            api_base=DEFAULT_OPENAI_ACCOUNT_BASE_URL,
+            verify_ssl=False,
+        ),
+    )
+
+    assert model._client._responses_request_fallback._retry_without_temperature is True
+    assert model._client._chat_request_fallback._retry_without_temperature is False
+    assert account_client._request_fallback._retry_without_temperature is False
+    assert OpenAIAccountResponsesTransport()._request_fallback._retry_without_temperature is False
+
+
+@pytest.mark.asyncio
+async def test_invoke_retries_without_a_refused_temperature_and_remembers_the_model():
+    """Outside ``disabled_thinking_fallback_scope``, the API-key Responses client retries a refused temperature."""
+    sent_bodies: list[dict] = []
+    model = _refusing_model(sent_bodies, "temperature", _TEMPERATURE_ERROR)
+
+    first = await model.invoke("hello")
+    second = await model.invoke("hello again")
+
+    assert first.content == "ok"
+    assert second.content == "ok"
+    assert ["temperature" in body for body in sent_bodies] == [True, False, False]
+    assert all(body["top_p"] == 0.9 for body in sent_bodies)
+
+
+@pytest.mark.asyncio
+async def test_stream_retries_without_a_refused_temperature():
+    sent_bodies: list[dict] = []
+    model = _refusing_model(sent_bodies, "temperature", _TEMPERATURE_ERROR)
+
+    chunks = [chunk async for chunk in model.stream("hello")]
+
+    assert "".join(chunk.content or "" for chunk in chunks) == "ok"
+    assert ["temperature" in body for body in sent_bodies] == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_other_refused_parameters_are_not_retried():
+    sent_bodies: list[dict] = []
+    model = _refusing_model(sent_bodies, "top_p", _TOP_P_ERROR)
+
+    with pytest.raises(BaseError, match="top_p"):
+        await model.invoke("hello")
+
+    assert len(sent_bodies) == 1
+
+
+@pytest.mark.asyncio
+async def test_fallback_without_the_option_does_not_retry_temperature_outside_the_scope():
+    sent_bodies: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        sent_bodies.append(json.loads(request.content.decode()))
+        return httpx.Response(400, json=_TEMPERATURE_ERROR)
+
+    transport = OpenAIAccountResponsesTransport(
+        transport=httpx.MockTransport(handler),
+        request_fallback=RequestParameterFallback("OpenAI", "OpenAI-compatible"),
+    )
+    body = build_request_body(model="gpt-6.1-sol", messages="hi", temperature=0.7)
+
+    with pytest.raises(OpenAIAccountResponsesError):
+        await transport.create_response(body=body, access_token="access-token")
+
+    assert len(sent_bodies) == 1

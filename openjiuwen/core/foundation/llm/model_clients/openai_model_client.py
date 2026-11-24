@@ -434,8 +434,13 @@ class OpenAIModelClient(BaseModelClient):
         self._chat_request_fallback = RequestParameterFallback(
             model_client_config.client_provider, "OpenAI-compatible",
         )
+        # Unlike Chat mode, a refused temperature is retried even outside disabled_thinking_fallback_scope:
+        # Responses mode used to drop temperature, so callers that set one must keep working.
         self._responses_request_fallback = RequestParameterFallback(
-            model_client_config.client_provider, "OpenAI Responses", retry_without_stop=True,
+            model_client_config.client_provider,
+            "OpenAI Responses",
+            retry_without_stop=True,
+            retry_without_temperature=True,
         )
 
     def _use_shared_client(self) -> bool:
@@ -1299,6 +1304,10 @@ class OpenAIModelClient(BaseModelClient):
             if send_sampling_params
             else None
         )
+        # For api.openai.com keep only one of temperature/top_p, and temperature wins.
+        api_base = (self.model_client_config.api_base or "").lower()
+        if "openai.com" in api_base and final_temperature is not None and final_top_p is not None:
+            final_top_p = None
         configured_max_tokens = max_tokens if max_tokens is not None else self.model_config.max_tokens
         final_stop = stop if stop is not None else self.model_config.stop
 
