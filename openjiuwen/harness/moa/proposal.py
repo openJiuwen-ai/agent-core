@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from openjiuwen.core.common.logging import agent_logger
 from openjiuwen.core.context_engine.context_engine import ContextEngine
+from openjiuwen.core.foundation.llm.model_clients import _implementation_provider
 from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import default_max_tokens
 from openjiuwen.core.foundation.llm.reasoning import (
     is_reasoning_config_intent,
@@ -154,7 +155,9 @@ def _output_budget(model: Any, kwargs: dict[str, Any]) -> _OutputBudget:
                 return _OutputBudget("known", tokens) if _valid_tokens(tokens) else _OutputBudget(
                     "unresolved", reason="invalid_output_tokens"
                 )
-            if bool(kwargs.get("send_max_output_tokens", False)) and requested is not None:
+            # The API-key client sends the limit unless told not to; the ChatGPT-login client only when told to.
+            sends_limit = _implementation_provider(normalized_client) == "OpenAI"
+            if bool(kwargs.get("send_max_output_tokens", sends_limit)) and requested is not None:
                 return _OutputBudget("known", requested)
             return _OutputBudget("unspecified")
 

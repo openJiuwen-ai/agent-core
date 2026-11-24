@@ -1286,8 +1286,8 @@ class OpenAIModelClient(BaseModelClient):
         if not final_model:
             raise build_error(StatusCode.MODEL_CONFIG_ERROR, error_msg="The model cannot be empty.")
 
-        send_sampling_params = bool(kwargs.pop("send_sampling_params", False))
-        send_max_output_tokens = bool(kwargs.pop("send_max_output_tokens", False))
+        send_sampling_params = bool(kwargs.pop("send_sampling_params", True))
+        send_max_output_tokens = bool(kwargs.pop("send_max_output_tokens", True))
 
         final_temperature = (
             (temperature if temperature is not None else self.model_config.temperature)

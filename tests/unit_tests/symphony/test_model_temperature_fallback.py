@@ -115,7 +115,7 @@ async def make_model(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route, sends_temperature", [
-    ("chat", True), ("responses", True), ("responses_account", True), ("messages", True), ("responses", False),
+    ("chat", True), ("responses", True), ("responses_account", True), ("messages", True), ("responses_account", False),
 ])
 async def test_graph_build_uses_model_defaults_after_temperature_rejection(
         tmp_path, make_model, route, sends_temperature,

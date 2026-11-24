@@ -607,3 +607,25 @@ async def test_real_sdk_context_overflow_falls_back_to_original_wire_messages(st
     assert all(not {"max_tokens", "max_output_tokens", "max_completion_tokens"}.intersection(body) for body in sent)
     assert [message.model_dump() for message in messages] == before
     assert model.model_config.max_tokens is None
+
+
+@pytest.mark.parametrize(
+    "provider, auth_mode, flag, expected_mode",
+    [
+        ("OpenAI", None, None, "known"),
+        ("OpenAI", None, False, "unspecified"),
+        ("OpenAI", "openai_account_oauth", None, "unspecified"),
+        ("OpenAI", "openai_account_oauth", True, "known"),
+        ("OpenAIAccount", None, None, "unspecified"),
+    ],
+)
+def test_responses_output_budget_follows_the_client_default(provider, auth_mode, flag, expected_mode):
+    model = primary(provider=provider, api_mode=LLMApiMode.Responses)
+    if auth_mode is not None:
+        model.model_client_config.auth_mode = auth_mode
+    kwargs = {} if flag is None else {"send_max_output_tokens": flag}
+
+    budget = _output_budget(model, kwargs)
+
+    assert budget.mode == expected_mode
+    assert budget.tokens == (777 if expected_mode == "known" else None)
