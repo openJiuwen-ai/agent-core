@@ -88,6 +88,7 @@ generated: true
 |---|---|---|---|---|
 | [D-20261110-1839-leader-external-harness](designs/active/D-20261110-1839-leader-external-harness/design.md) | D | Leader 三方 Harness 插拔设计方案 | alan_cheng | — |
 | [D-20261110-1903-team-goal-mode](designs/active/D-20261110-1903-team-goal-mode/design.md) | D | Team Leader 与成员 Goal 模式设计方案 | alan_cheng | — |
+| [D-20261121-0832-group-member-notification](designs/proposals/D-20261121-0832-group-member-notification/design.md) | D | 群聊成员通知入口设计方案 | weichenhao | — |
 | [SDD-0011](designs/archive/SDD-0011-evolvable-team-workspace/design.md) | D | 可演进 Team 工作区 | @xiajing | — |
 | [SDD-0015](designs/proposals/SDD-0015-agent-team-scheduled-dispatch/design.md) | D | AgentTeam 调度模式：任务图驱动的低通信协同与验证闭环 | @alan_cheng | — |
 | [SDD-0016](designs/archive/SDD-0016-third-party-agent-reliability/design.md) | D | 三方 Agent 可靠性设计 | @zhanglongmin | — |
@@ -160,6 +161,7 @@ generated: true
 | [F_20261110_1912_view-task-names-the-assignee-and-its-status](features/F_20261110_1912_view-task-names-the-assignee-and-its-status.md) | F | view_task 点名负责人及其成员状态 | alan_cheng | 无独立 D：小范围渲染与读取增强，方案在会话中与需求方确认，未单独立 D 文档 |
 | [F_20261110_1922_team-goal-mode](features/F_20261110_1922_team-goal-mode.md) | F | Team Leader 与成员 Goal 模式实施与决策归档 | alan_cheng | [D-20261110-1903-team-goal-mode](designs/active/D-20261110-1903-team-goal-mode/design.md) |
 | [F_20261117_1752_host-managed-group-member](features/F_20261117_1752_host-managed-group-member.md) | F | 宿主管理群成员角色 | weichenhao | jiuwenclaw/D-20261116-1201-colleague-swarmchat-membership（非本仓或待定位） |
+| [F_20261121_0906_group-member-notification](features/F_20261121_0906_group-member-notification.md) | F | 群聊成员通知入口实施记录 | weichenhao | [D-20261121-0832-group-member-notification](designs/proposals/D-20261121-0832-group-member-notification/design.md) |
 | [F_20_human-agent-mailbox-unread-flip](features/agent_teams/F_20_human-agent-mailbox-unread-flip.md) | F | Human-Agent Mailbox: Flip Auto-Read Off | alan_cheng | 待核实 |
 | [F_21_external-agent-access](features/agent_teams/F_21_external-agent-access.md) | F | External Agent Access: skill+cli / mcp Wrappers | alan_cheng | 待核实 |
 | [F_21_team-completion-auto-pause](features/agent_teams/F_21_team-completion-auto-pause.md) | F | Team Completion Auto-Pause | alan_cheng | 待核实 |

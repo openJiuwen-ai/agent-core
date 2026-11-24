@@ -32,6 +32,7 @@ from openjiuwen.agent_teams.tools.models import (
     TEAM_STATIC_LONG_TEXT_SPECS,
     TEAM_STATIC_TABLES_TO_CLEAR,
     TEAM_TASK_LONG_TEXT_SPECS,
+    _get_group_notification_model,
     _get_message_model,
     _get_message_read_status_model,
     _get_review_vote_model,
@@ -1243,6 +1244,7 @@ async def _ensure_session_tables(session: AsyncSession) -> None:
     message_model = _get_message_model()
     read_status_model = _get_message_read_status_model()
     review_vote_model = _get_review_vote_model()
+    notification_model = _get_group_notification_model()
     conn = await session.connection()
     # Snapshot which migration-candidate tables already exist *before* create
     # runs. ``create(checkfirst=True)`` leaves a pre-existing table untouched,
@@ -1250,7 +1252,9 @@ async def _ensure_session_tables(session: AsyncSession) -> None:
     # scheme and can be skipped without a single ``get_indexes`` PRAGMA call.
     candidates = _current_session_migration_tables()
     existing_before_create = await conn.run_sync(_snapshot_existing_tables, candidates)
-    for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
+    for model in (
+        task_model, dep_model, message_model, read_status_model, review_vote_model, notification_model,
+    ):
         await conn.run_sync(model.__table__.create, checkfirst=True)
     await conn.run_sync(_ensure_message_protocol_column)
     await conn.run_sync(_ensure_message_meta_column)
@@ -1328,10 +1332,13 @@ async def drop_cur_session_tables(sessions: DbSessions) -> None:
     message_model = _get_message_model()
     read_status_model = _get_message_read_status_model()
     review_vote_model = _get_review_vote_model()
+    notification_model = _get_group_notification_model()
 
     async with sessions.write() as session:
         conn = await session.connection()
-        for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
+        for model in (
+            task_model, dep_model, message_model, read_status_model, review_vote_model, notification_model,
+        ):
             await conn.run_sync(model.__table__.drop, checkfirst=True)
         await session.commit()
 
