@@ -54,6 +54,7 @@ dev-stable 与 develop 长期分叉，本记录是同一特性在 develop 的落
 2. **`ReActAgent` 按 develop 的钩子点手工落地**：develop 的 `_inner_invoke` 与 dev-stable 分叉较大，未整文件套用，而是在 `interruption_state` 之后取续跑点、在 `elif not resume_continuation` 之前插入续跑分支、在 `AFTER_REACT_ITERATION` 之后写增量、两条无 tool_calls 结束路径各写 `final`、`finally` 先关 step 再提交；abort 路径通过 `_handle_context_abort` 新增 `close_steps` 参数，在 commit 前关闭记录。
 3. **todo 快照适配 develop 的文件设施**：develop 没有 `todo_store`、`ToolSnapshot`/`missing_ok` 选项，改为"普通读 + 父目录列表探测"区分空文件与缺失文件；滚回用 `write_file(prepend_newline=False)`。
 4. **不引入代际重打**：develop 的 `TodoItem` 没有 `generation_token` 字段，也没有宿主侧代际过滤，因此不移植 dev-stable #10746 的续跑保代际逻辑；待 develop 侧未来引入代际体系时再评估。
+5. **按 issue 建议补开关 `ContextEngineConfig.enable_iteration_checkpoint`（默认关闭）**：关闭时 ReActAgent 不取续跑点、不写记录，TaskPlanningRail 也不做 todo 快照，基线行为与引入前一致；打开后每轮一次增量写。默认关闭意味着宿主需显式启用（dev-stable 侧无开关、默认生效，两分支存在差异）。
 5. **任务结束清理顺序**：先写全量 blob、成功后才删 step 键；序列化失败时保留增量，避免数据丢失。
 
 ## 与设计的偏差
