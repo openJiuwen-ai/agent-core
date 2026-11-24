@@ -286,7 +286,11 @@ class TeamContextEvolutionRail(ContextEvolutionRail):
         if isinstance(result, dict):
             result["memories_used"] = self.memories_used
 
-        if not (self.auto_summarize and self._current_query):
+        # A cancelled round (round timeout / user abort / team stop) fires this
+        # cleanup under a hard cancel; its caller is already moving on, so the
+        # multi-second summarize LLM calls must not run there.
+        cancelled = isinstance(result, dict) and result.get("stop_reason") == "cancelled"
+        if not (self.auto_summarize and self._current_query and not cancelled):
             return
 
         # task_status: prefer pre-configured value (set via set_task_status()) because

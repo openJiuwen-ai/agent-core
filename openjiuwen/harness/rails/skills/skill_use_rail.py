@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -46,6 +48,14 @@ _SKILL_SCAN_SKIP_DIRS: frozenset[str] = frozenset(
         "node_modules",
     }
 )
+
+
+def _read_skill_refresh_ttl() -> float:
+    """Seconds to reuse the last skill-directory scan. ``0`` disables the cache."""
+    try:
+        return max(0.0, float(os.environ.get("SKILL_REFRESH_TTL_SECONDS", "0") or 0))
+    except ValueError:
+        return 0.0
 
 
 class SkillUseRail(DeepAgentRail):
@@ -143,6 +153,15 @@ class SkillUseRail(DeepAgentRail):
 
         # Snapshot of visible skill directories and SKILL.md mtimes.
         self._skills_snapshot_signature: Optional[Tuple[Tuple[str, float], ...]] = None
+        # Directory-scan TTL. 0 keeps the existing per-invoke refresh. A
+        # performance-sensitive deploy opts in with SKILL_REFRESH_TTL_SECONDS
+        # (for example 30); within the window the last scan is reused, so a
+        # newly installed skill shows up at latest TTL seconds later.
+        # clear_skills() drops the stamp, so an explicit install/unmount still
+        # refreshes on the next invoke. Read once at construction: the value
+        # is a process deploy knob, not a per-request setting.
+        self._last_full_refresh_ts: Optional[float] = None
+        self._skill_refresh_ttl_s = _read_skill_refresh_ttl()
 
     @property
     def skills_meta(self) -> List[Skill]:
@@ -162,6 +181,7 @@ class SkillUseRail(DeepAgentRail):
         self._skill_order.clear()
         self.skills = []
         self._skills_snapshot_signature = None
+        self._last_full_refresh_ts = None
 
     def mount_skill_root(self, directory: str | Path) -> SkillRootMount:
         """Append a native discovery root and return its ownership handle."""
@@ -435,8 +455,25 @@ class SkillUseRail(DeepAgentRail):
         self._skills_snapshot_signature = self._build_skills_snapshot_signature()
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
-        """Prepare skills before invoke."""
-        await self.refresh_skill_prompt(ctx)
+        """Prepare skills before invoke.
+
+        The directory walk plus signature is on the order of a hundred
+        milliseconds per turn even when no skill changed. Skill installs are
+        rare, so a deploy can set ``SKILL_REFRESH_TTL_SECONDS`` and reuse the
+        last scan inside that window. The default ``0`` keeps a full refresh
+        every turn. A failed refresh does not stamp the window, so the next
+        turn retries immediately. The session baseline and prompt sync still
+        run on a cache hit; only the filesystem scan is skipped.
+        """
+        if not self._skill_refresh_within_ttl():
+            try:
+                await self.refresh_skill_prompt(ctx)
+            except Exception:
+                # Do not stamp the TTL: the next turn must scan again instead
+                # of serving whatever partial state the failure left behind.
+                self._last_full_refresh_ts = None
+                raise
+            self._last_full_refresh_ts = time.monotonic()
         self._ensure_session_baseline(ctx)
         if self.system_prompt_builder is not None:
             await self._sync_skill_prompt_and_attachment(ctx)
@@ -507,13 +544,43 @@ class SkillUseRail(DeepAgentRail):
             self.system_prompt_builder.remove_section(SectionName.SKILLS)
         await self._update_runtime_skill_attachment(ctx, baseline_skills)
 
+    def _skill_refresh_within_ttl(self) -> bool:
+        """Whether the last successful directory scan is still inside the TTL.
+
+        ``SKILL_REFRESH_TTL_SECONDS <= 0`` (the default) is always a miss, so
+        every invoke keeps today's full refresh. ``enable_cache=False`` also
+        forces a miss: that flag means every invoke must re-read the disk, and
+        a TTL hit would skip ``_prepare_skills`` entirely.
+        """
+        if not self.enable_cache:
+            return False
+        ttl = self._skill_refresh_ttl_s
+        if ttl <= 0 or self._last_full_refresh_ts is None:
+            return False
+        return (time.monotonic() - self._last_full_refresh_ts) < ttl
+
     async def _refresh_skill_prompt_if_changed(self, ctx: AgentCallbackContext) -> None:
-        """Refresh skills when visible skill directories or SKILL.md mtimes changed."""
+        """Refresh skills when visible skill directories or SKILL.md mtimes changed.
+
+        Inside an opted-in TTL window the signature walk is the same directory
+        scan ``before_invoke`` just skipped, so it is skipped here too.
+        ``before_model_call`` reaches this without a preceding ``before_invoke``
+        on some task-loop paths; a live window still reuses the last scan.
+        A successful refresh here stamps the TTL so those paths open the
+        window instead of rescanning every call.
+        """
+        if self._skill_refresh_within_ttl():
+            return
         current_signature = self._build_skills_snapshot_signature()
         if current_signature == self._skills_snapshot_signature:
             return
 
-        await self.refresh_skill_prompt(ctx)
+        try:
+            await self.refresh_skill_prompt(ctx)
+        except Exception:
+            self._last_full_refresh_ts = None
+            raise
+        self._last_full_refresh_ts = time.monotonic()
 
     def _build_skills_snapshot_signature(self) -> Tuple[Tuple[str, float], ...]:
         """Build the same incremental-refresh signature used by _prepare_skills."""

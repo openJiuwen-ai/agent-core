@@ -176,6 +176,7 @@ class TeamContextTracker:
         fork_source: str | None = None,
         policy_text: str | None = None,
     ) -> None:
+        self._policy_text: str | None = None
         self._team_backend = team_backend
         self._policy_text = policy_text
         self._member_name = member_name
@@ -195,12 +196,14 @@ class TeamContextTracker:
         # non-fork teams keep their KV prefix and prompt bytes untouched.
         # ``getattr`` keeps backends without the fork surface (test fakes,
         # external runtimes) on the off path.
-        self._fork_capable = bool(
-            team_backend and getattr(team_backend, "fork_enabled", lambda: False)()
-        )
+        self._fork_capable = bool(team_backend and getattr(team_backend, "fork_enabled", lambda: False)())
         # Baseline computed by the last pending_text call, held until the caller
         # confirms delivery. None means there is nothing awaiting a commit.
         self._uncommitted: dict[str, Any] | None = None
+
+    def set_policy_text(self, policy_text: str | None) -> None:
+        """Install framework policy after the asynchronous extension build."""
+        self._policy_text = policy_text
 
     async def snapshot_text(self) -> str | None:
         """Render this member's complete current team state, ignoring any baseline.
@@ -407,9 +410,7 @@ class TeamContextTracker:
             # Re-announce an evolved prompt without restating the constants.
             if self._team_backend is None or not self._member_name:
                 return None
-            mtime, present = await self._team_backend.get_member_updated_at_state(
-                self._member_name, "prompt"
-            )
+            mtime, present = await self._team_backend.get_member_updated_at_state(self._member_name, "prompt")
             if present:
                 # A stamped ``updated_at`` keeps the wall-clock comparison: only
                 # a moved mtime re-fires, and the baseline records the probe
@@ -427,9 +428,7 @@ class TeamContextTracker:
                 # ``present=True, mtime=T`` → ``T == baseline`` → no re-fire:
                 # a blank field forces exactly one re-delivery, never a loop.
                 baseline_mtime = get_current_time()
-                await self._team_backend.stamp_member_prompt_updated_at(
-                    self._member_name, baseline_mtime
-                )
+                await self._team_backend.stamp_member_prompt_updated_at(self._member_name, baseline_mtime)
             member = await self._team_backend.get_member(self._member_name)
             if member is None:
                 return None
@@ -448,9 +447,7 @@ class TeamContextTracker:
         # Record the prompt mtime so a later hand-evolve moves the probe and the
         # delta path above re-announces only the prompt subsection.
         if self._team_backend is not None and self._member_name:
-            mtime, _ = await self._team_backend.get_member_updated_at_state(
-                self._member_name, "prompt"
-            )
+            mtime, _ = await self._team_backend.get_member_updated_at_state(self._member_name, "prompt")
             updated[_MEMBER_PROMPT_MTIME] = mtime
         return body
 

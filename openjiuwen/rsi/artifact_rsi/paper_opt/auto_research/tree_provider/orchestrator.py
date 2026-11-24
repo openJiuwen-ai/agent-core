@@ -16,6 +16,7 @@ import contextlib
 import hashlib
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -165,6 +166,64 @@ def _has_paper(run_id: str) -> bool:
     return paper_tex_path(run_id).exists() or paper_output_path(run_id).exists()
 
 
+_OPERATIONAL_MARKERS = (
+    "traceback",
+    "timed out",
+    "timeout",
+    "rate limit",
+    "ratelimit",
+    "api key",
+    "apikey",
+    "unauthorized",
+    "connection refused",
+    "connection reset",
+    "connecterror",
+    "status code",
+    "httpx",
+    "openai",
+    "anthropic",
+    "orchestrator: unexpected",
+)
+
+
+def _technical_blob(terminal: TerminalReport | None) -> str:
+    if terminal is None:
+        return ""
+    parts = [
+        terminal.failure_reason or "",
+        terminal.abort_reason or "",
+        terminal.summary or "",
+    ]
+    return " ".join(part for part in parts if part).strip()
+
+
+def _looks_operational(text: str) -> bool:
+    """True when the failure looks like infra/LLM/runtime, not content quality."""
+    lowered = text.lower()
+    if any(marker in lowered for marker in _OPERATIONAL_MARKERS):
+        return True
+    # Class-style names (TimeoutError, APIConnectionError) without matching
+    # every English sentence that merely contains the word "error".
+    return bool(re.search(r"\b[\w]*Error\b|\b[\w]*Exception\b", text))
+
+
+def _short_technical_detail(text: str, *, max_chars: int = 160) -> str:
+    """Keep a short operator-visible summary; drop stack dumps."""
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.artifacts import (
+        bounded_text,
+    )
+
+    cleaned = " ".join((text or "").split())
+    lowered = cleaned.lower()
+    for sep in (" traceback", "; traceback", "traceback (most recent"):
+        idx = lowered.find(sep)
+        if idx >= 0:
+            cleaned = cleaned[:idx].rstrip(" ;:")
+            lowered = cleaned.lower()
+            break
+    return bounded_text(cleaned, max_chars)
+
+
 def _friendly_pruned_reason(
     *,
     terminal: TerminalReport | None = None,
@@ -173,13 +232,20 @@ def _friendly_pruned_reason(
 ) -> str:
     """Return a short, user-facing reason for a pruned paper node.
 
-    The manager's failure and abort fields are intentionally used only to
-    classify the phase.  Their raw contents can contain exception messages,
-    stack details, or model/tool wording that is not suitable for the tree
-    card.  Those details remain in the per-node manager workspace/logs.
+    Content/score failures keep a phase-level quality sentence so the tree
+    card stays calm.  Operational failures (timeouts, model/API exceptions)
+    keep a short technical summary so the UI can show why the run stopped;
+    full stacks remain in the per-node manager workspace/logs.
     """
+    technical = _technical_blob(terminal)
+    scoring = phase == "scoring" or failure_class == "scoring_error"
+    if technical and _looks_operational(technical):
+        detail = _short_technical_detail(technical)
+        if scoring:
+            return f"评分失败：{detail}" if detail else "评分失败，已剪枝。"
+        return f"执行失败：{detail}" if detail else "执行失败，已剪枝。"
 
-    if phase == "scoring" or failure_class == "scoring_error":
+    if scoring:
         return "评估结果未达到预期，已剪枝。"
 
     context_parts: list[str] = []
@@ -771,7 +837,12 @@ class PaperTreeOrchestrator:
                 # look successful merely because the loop ran to its budget.
                 if state.node_count > 0 and state.best_node_id is None:
                     state.status = "failed"
-                    state.error_message = "未生成可用的论文结果。"
+                    detail = (state.last_reason or "").strip()
+                    state.error_message = (
+                        f"未生成可用的论文结果。（详情：{detail}）"
+                        if detail
+                        else "未生成可用的论文结果。"
+                    )
                     self.storage.save_task_state(state)
                     await self._emit(EventStatus(status="failed"))
                     return

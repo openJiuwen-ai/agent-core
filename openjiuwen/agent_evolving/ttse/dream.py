@@ -22,7 +22,7 @@ import random
 import re
 import time
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -44,7 +44,7 @@ from .prompts import (
     dream_merge_prompt,
     dream_purge_prompt,
 )
-from .stores import TTSERecordStore, format_ts, parse_ts
+from .stores import TTSERecordStore, _norm, format_ts, parse_ts
 from .tip_parse import parse_tip
 
 
@@ -339,17 +339,15 @@ def reconcile_dream_clusters(
 def bump_dream_session_count(path: str, interval: int) -> Tuple[int, bool]:
     """Persist +1 non-follow-up iteration toward ``dream_interval``.
 
-    Returns ``(count_after_increment, interval_reached)``. When the interval
-    is reached the stored count is reset to 0 so the next rail instance does
-    not immediately fire again.
+    Returns ``(count_after_increment, interval_reached)``. Reaching the interval
+    only schedules a pass; skipped or failed passes must retain the count.
+    A completed pass resets it after the bank has been persisted.
     """
     interval = max(1, int(interval))
     state = load_dream_state(path)
     state.non_followup_count = max(0, int(state.non_followup_count or 0)) + 1
     count = state.non_followup_count
     reached = count >= interval
-    if reached:
-        state.non_followup_count = 0
     save_dream_state(path, state)
     return count, reached
 
@@ -996,6 +994,13 @@ async def _apply_merge_verdict(
             verdict.verdict.lower(),
             verdict.thinking,
         )
+    selected_ids = {id(record) for record in merge_records}
+    active = store.facts if track == "fact" else store.tips
+    merge_texts = {_norm(record.get("text") or "") for record in merge_records}
+    preserve_same_text = any(
+        id(record) not in selected_ids and _norm(record.get("text") or "") in merge_texts
+        for record in active
+    )
     for record in merge_records:
         logger.info(
             "[TTSERail] dream before_delete track=%s action=%s text=%s",
@@ -1003,7 +1008,12 @@ async def _apply_merge_verdict(
             reason,
             record.get("text", ""),
         )
-        await store.delete_record(record["text"], track, save=False)
+        if not preserve_same_text:
+            await store.delete_record(record["text"], track, save=False)
+    if preserve_same_text:
+        # A text-wide delete would also remove unselected occurrences/categories.
+        active[:] = [record for record in active if id(record) not in selected_ids]
+        store.index.align(store.facts, store.tips, store.record_category)
     merged_count = max(total_count, 1)
     await store.add_record_direct(track, canonical, count=merged_count, category=category, save=False)
     logger.info(
@@ -1036,14 +1046,13 @@ async def _apply_category_merge_result(
     added_items: List[Tuple[str, str]] = []
     tip_retries: List[CategoryMergeDecision] = []
     decisions = sorted(result.decisions, key=lambda d: -len(d.group_indices))
-    applied_texts: Set[str] = set()
+    applied_indices: Set[int] = set()
 
     for decision in decisions:
         cluster = [group_records[i] for i in decision.group_indices if 0 <= i < len(group_records)]
         if len(cluster) < 2:
             continue
-        texts = [str(r.get("text") or "") for r in cluster]
-        if any(t in applied_texts for t in texts):
+        if any(i in applied_indices for i in decision.group_indices):
             logger.info(
                 "[TTSERail] dream category_merge skip overlapping decision ids=%s",
                 decision.group_indices,
@@ -1071,11 +1080,9 @@ async def _apply_category_merge_result(
             tip_retries.append(decision)
             kept += 1
             continue
-        for t in texts:
-            applied_texts.add(t)
+        applied_indices.update(decision.group_indices)
         if added is not None:
             added_items.append(added)
-            applied_texts.add(added[0])
         if action in ("merge", "rewrite"):
             merged += 1
         else:
@@ -1300,8 +1307,25 @@ def _bank_text_set(store: TTSERecordStore, track: str) -> Set[str]:
     return {str(r.get("text") or "") for r in records if r.get("text")}
 
 
-def _text_to_record(records: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    return {str(r.get("text") or ""): r for r in records if r.get("text")}
+def _cluster_records(
+    clusters: Sequence[PersistedCluster],
+    records: Sequence[Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Resolve each cached text occurrence to a separate bank record."""
+    by_text: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        by_text[str(record.get("text") or "")].append(record)
+    offsets: Counter[str] = Counter()
+    resolved: Dict[str, List[Dict[str, Any]]] = {}
+    for cluster in clusters:
+        members = []
+        for text in cluster.member_texts:
+            offset = offsets[text]
+            if offset < len(by_text[text]):
+                members.append(by_text[text][offset])
+                offsets[text] += 1
+        resolved[cluster.id] = members
+    return resolved
 
 
 async def _dream_merge_llm(
@@ -1329,10 +1353,6 @@ async def _dream_merge_llm(
         clusters_all = cluster_store
 
     track_clusters = [c for c in clusters_all if c.track == track]
-    clustered_texts: Set[str] = set()
-    for c in track_clusters:
-        clustered_texts.update(c.member_texts)
-
     by_category: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for record in records:
         by_category[store.record_category(record)].append(record)
@@ -1352,7 +1372,28 @@ async def _dream_merge_llm(
                 continue
 
         existing = [c for c in track_clusters if c.category == cid]
-        unclustered = [r for r in group if str(r.get("text") or "") not in clustered_texts]
+        bank_counts = Counter(str(r.get("text") or "") for r in group)
+        cached_counts = Counter(t for c in existing for t in c.member_texts)
+        changed_texts = {t for t, count in cached_counts.items() if bank_counts[t] != count}
+        # Old caches may describe one unique text while the bank has multiple rows.
+        # Re-cluster those occurrences instead of hiding them behind that cache.
+        for c in existing:
+            members = [t for t in c.member_texts if t not in changed_texts]
+            if members != c.member_texts:
+                c.member_texts = members
+                c.dirty = True
+        clusters_all[:] = [c for c in clusters_all if c.member_texts]
+        track_clusters = [c for c in clusters_all if c.track == track]
+        existing = [c for c in track_clusters if c.category == cid]
+        records_by_cluster = _cluster_records(existing, group)
+        remaining = Counter(t for c in existing for t in c.member_texts)
+        unclustered = []
+        for record in group:
+            text = str(record.get("text") or "")
+            if remaining[text] > 0:
+                remaining[text] -= 1
+            else:
+                unclustered.append(record)
         work, omitted = _sample_rules(unclustered, max_rules)
         if omitted:
             logger.info(
@@ -1411,21 +1452,21 @@ async def _dream_merge_llm(
                     )
                     track_clusters.append(new_c)
                     clusters_all.append(new_c)
-                    clustered_texts.update(members)
+                    records_by_cluster[new_c.id] = [work[i] for i in idxs if work[i].get("text")]
                 by_id = {c.id: c for c in track_clusters}
                 for attach_id, idxs in partition.attaches:
                     target = by_id.get(attach_id)
                     if target is None:
                         continue
                     added = [str(work[i].get("text") or "") for i in idxs]
-                    added = [t for t in added if t and t not in target.member_texts]
+                    added = [t for t in added if t]
                     if not added:
                         continue
                     target.member_texts.extend(added)
+                    records_by_cluster[target.id].extend(work[i] for i in idxs if work[i].get("text"))
                     target.dirty = True
                     target.description = partition.reason or target.description
                     target.updated_at = now_ts
-                    clustered_texts.update(added)
 
         # Phase2 for dirty clusters in this category.
         dirty: List[PersistedCluster] = []
@@ -1438,19 +1479,9 @@ async def _dream_merge_llm(
         if not dirty:
             continue
 
-        text_map = _text_to_record(group)
-        # Build a Phase2 worklist: union of dirty members present in bank, capped.
-        dirty_records: List[Dict[str, Any]] = []
-        seen_text: Set[str] = set()
-        for c in sorted(dirty, key=lambda x: -len(x.member_texts)):
-            for t in c.member_texts:
-                if t in seen_text:
-                    continue
-                rec = text_map.get(t)
-                if rec is None:
-                    continue
-                seen_text.add(t)
-                dirty_records.append(rec)
+        dirty_record_ids = {id(r) for c in dirty for r in records_by_cluster[c.id]}
+        # Preserve bank rows and their order, even when both text and ID match.
+        dirty_records = [r for r in group if id(r) in dirty_record_ids]
         phase2_records, omitted2 = _sample_rules(dirty_records, max_rules)
         if omitted2:
             logger.info(
@@ -1460,11 +1491,11 @@ async def _dream_merge_llm(
                 len(phase2_records),
                 omitted2,
             )
-        text_to_idx = {str(r.get("text") or ""): i for i, r in enumerate(phase2_records)}
+        record_to_idx = {id(r): i for i, r in enumerate(phase2_records)}
         cluster_index_groups: List[List[int]] = []
         dirty_for_prompt: List[PersistedCluster] = []
         for c in dirty:
-            idxs = [text_to_idx[t] for t in c.member_texts if t in text_to_idx]
+            idxs = [record_to_idx[id(r)] for r in records_by_cluster[c.id] if id(r) in record_to_idx]
             if len(idxs) < config.dream_cluster_min_size:
                 continue
             cluster_index_groups.append(idxs)
@@ -1545,7 +1576,7 @@ async def _dream_merge_llm(
                     gidx = decision.group_indices[loc]
                     if 0 <= gidx < len(phase2_records):
                         t = str(phase2_records[gidx].get("text") or "")
-                        if t and t in bank_now and t not in members:
+                        if t and t in bank_now:
                             members.append(t)
                 if not members:
                     # Merge did not apply (e.g. invalid tip); keep surviving originals.
@@ -1603,10 +1634,6 @@ async def _dream_merge_llm(
             refreshed_others.append(c)
         clusters_all[:] = refreshed_others + rebuilt
         track_clusters = [c for c in clusters_all if c.track == track]
-        clustered_texts = set()
-        for c in track_clusters:
-            clustered_texts.update(c.member_texts)
-
         if tip_retries:
             retry_groups = [d.group_indices for d in tip_retries]
             # Remap to current phase2 indices still valid.
@@ -1956,8 +1983,9 @@ async def run_dream_pass(
             config=config,
         )
 
-    await store.save()
+    await store.save(strict=True)
 
+    dream_state.non_followup_count = 0
     dream_state.last_dream_at = ts
     dream_state.last_pruned = result.pruned_facts + result.pruned_tips
     dream_state.last_merged_clusters = result.merged_clusters

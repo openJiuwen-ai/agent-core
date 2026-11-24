@@ -36,7 +36,8 @@ class _IncrementalIndexBuildWorkflow(_IndexBuildWorkflow):
         *,
         item_paths: Sequence[str],
         output_dir: Path,
-        resolved_config,
+        config,
+        model=None,
         base_index_dir: Path,
         added_paths: Sequence[str],
         removed_paths: Sequence[str],
@@ -47,7 +48,8 @@ class _IncrementalIndexBuildWorkflow(_IndexBuildWorkflow):
         super().__init__(
             item_paths=item_paths,
             output_dir=output_dir,
-            resolved_config=resolved_config,
+            config=config,
+            model=model,
             item_type=item_type,
             manifest_item_paths=manifest_item_paths,
         )
@@ -90,7 +92,7 @@ class _IncrementalIndexBuildWorkflow(_IndexBuildWorkflow):
     def _should_full_rebuild(self, existing_catalog: Sequence[CatalogRecord]) -> bool:
         change_count = len(self._added_paths) + len(self._removed_paths)
         change_ratio = change_count / max(1, len(existing_catalog))
-        if change_count <= 0 or change_ratio <= self._config.incremental_max_change_ratio:
+        if change_count <= 0 or change_ratio <= self._config.incremental.max_change_ratio:
             return False
         LOGGER.info(
             "incremental build escalated to full rebuild | "
@@ -98,7 +100,7 @@ class _IncrementalIndexBuildWorkflow(_IndexBuildWorkflow):
             change_count,
             len(existing_catalog),
             change_ratio,
-            self._config.incremental_max_change_ratio,
+            self._config.incremental.max_change_ratio,
         )
         return True
 
@@ -139,8 +141,8 @@ class _IncrementalIndexBuildWorkflow(_IndexBuildWorkflow):
         nodes, placement_report = merge_added_skills_into_tree_with_report(
             nodes=existing_nodes,
             added_skills=scanned_added,
-            min_confidence=self._config.incremental_min_add_confidence,
-            min_margin=self._config.incremental_min_add_confidence_margin,
+            min_confidence=self._config.incremental.min_add_confidence,
+            min_margin=self._config.incremental.min_add_confidence_margin,
         )
         added_catalog = build_catalog_records_from_nodes(
             nodes=nodes,
@@ -187,14 +189,14 @@ class _IncrementalIndexBuildWorkflow(_IndexBuildWorkflow):
         records_by_worker: Dict[str, CatalogRecord],
     ) -> list[dict[str, object]]:
         subtree_rebuilder = None
-        if can_build_tree_with_llm(self._config):
-            subtree_rebuilder = IncrementalSubtreeRebuilder(self._config).rebuild
+        if can_build_tree_with_llm(self._model):
+            subtree_rebuilder = IncrementalSubtreeRebuilder(config=self._config, model=self._model).rebuild
         maintained_nodes, maintenance_report = apply_incremental_tree_maintenance(
             nodes=nodes,
             affected_branch_cids=affected_branch_cids,
             records_by_worker=records_by_worker,
-            max_direct_leaf_children=self._config.tree_branching_factor,
-            branch_imbalance_ratio=self._config.incremental_branch_imbalance_ratio,
+            max_direct_leaf_children=self._config.structure.branching_factor,
+            branch_imbalance_ratio=self._config.incremental.branch_imbalance_ratio,
             force_rebuild_branch_cids=force_rebuild_branch_cids,
             subtree_rebuilder=subtree_rebuilder,
         )
@@ -220,7 +222,7 @@ class _IncrementalIndexBuildWorkflow(_IndexBuildWorkflow):
             catalog_records=catalog_records,
             mode="incremental",
             item_type=self._item_type,
-            generate_tree_html=self._config.generate_tree_html,
+            generate_tree_html=self._config.output.generate_tree_html,
         )
 
     def _scan_added_skills(self) -> dict[str, dict]:

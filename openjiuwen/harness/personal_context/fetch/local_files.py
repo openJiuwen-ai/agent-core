@@ -7,8 +7,9 @@ import errno
 import hashlib
 import os
 import stat as stat_module
+import threading
 import zipfile
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -23,11 +24,16 @@ from openjiuwen.harness.personal_context.fetch.cursor_selection import (
     candidate_in_time_range,
     select_latest_candidates,
 )
+from openjiuwen.harness.personal_context.fetch.local_markdown import (
+    EXTENSIONS as _MARKDOWN_EXTENSIONS,
+    OFFICE_EXTENSIONS,
+    convert_document,
+)
 from openjiuwen.harness.personal_context.fetch.retry import classify_file_error, retry_provider_read
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
-_SUPPORTED_EXTENSIONS = {".md", ".txt", ".json", ".pdf", ".docx"}
+_SUPPORTED_EXTENSIONS = {".md", ".txt", ".json", ".pdf", ".docx"} | _MARKDOWN_EXTENSIONS
 _SKIPPED_DIRECTORIES = {".git", ".venv", "node_modules", "__pycache__", ".personal_context"}
 _BATCH_SIZE = 20
 _DEFAULT_MAX_ITEMS = 100
@@ -121,7 +127,7 @@ class LocalFilesFetchService(ContextFetchService):
                     item_ref = _candidate_item_ref(candidate, root=root)
                     try:
                         materialized = await retry_provider_read(
-                            partial(asyncio.to_thread, _materialize_candidate, candidate),
+                            partial(_materialize_async, candidate),
                             provider="local_files",
                             operation_name="file_read",
                             classify=classify_file_error,
@@ -295,6 +301,8 @@ def _max_size(extension: str) -> int:
         return _PDF_MAX_SIZE
     if normalized == ".docx":
         return _DOCX_MAX_SIZE
+    if normalized in OFFICE_EXTENSIONS:
+        return 20 * 1024 * 1024
     return _TEXT_MAX_SIZE
 
 
@@ -331,16 +339,36 @@ def _read_checked(path: Path, *, extension: str) -> bytes:
         raise _file_error("local file read failed", exc) from None
 
 
-def _materialize_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
+async def _materialize_async(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    if candidate["extension"] not in _MARKDOWN_EXTENSIONS:
+        return await asyncio.to_thread(_materialize_candidate, candidate)
+    cancelled = threading.Event()
+    try:
+        return await asyncio.to_thread(_materialize_candidate, candidate, cancelled=cancelled.is_set)
+    finally:
+        cancelled.set()
+
+
+def _materialize_candidate(
+    candidate: Mapping[str, Any], *, cancelled: Callable[[], bool] = lambda: False,
+) -> dict[str, Any]:
     path = Path(str(candidate["path"]))
     extension = str(candidate["extension"])
     try:
         raw_bytes = _read_checked(path, extension=extension)
         content_revision_id = _revision_id(raw_bytes)
+        conversion_metadata: dict[str, object] = {}
         if extension == ".pdf":
             content, content_truncated = _read_pdf(path)
         elif extension == ".docx":
             content, content_truncated = _read_docx(path)
+        elif extension in _MARKDOWN_EXTENSIONS:
+            converted = convert_document(path, extension, max_chars=_MAX_CONTENT_CHARS, cancelled=cancelled)
+            if converted["source_hash"] != content_revision_id:
+                raise ValueError("file changed during document conversion")
+            content = str(converted["content"])
+            content_truncated = bool(converted["content_truncated"])
+            conversion_metadata = dict(converted["conversion_metadata"])
         else:
             content = raw_bytes.decode("utf-8")
             content_truncated = len(content) > _MAX_CONTENT_CHARS
@@ -355,6 +383,7 @@ def _materialize_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
             "content": content,
             "raw_snapshot": raw_bytes if len(raw_bytes) <= _RAW_SNAPSHOT_MAX_SIZE else None,
             "content_truncated": content_truncated,
+            "conversion_metadata": conversion_metadata,
         }
     except asyncio.CancelledError:
         raise
@@ -470,6 +499,7 @@ def _change_item(root: Path, change: Mapping[str, object]) -> RawChangeItem:
         "raw_snapshot_available": change.get("raw_snapshot") is not None,
         "content_truncated": bool(change.get("content_truncated", False)),
     }
+    metadata.update(cast(dict[str, object], change.get("conversion_metadata", {})))
     try:
         raw_snapshot = cast(str | bytes | None, change.get("raw_snapshot"))
         return RawChangeItem(

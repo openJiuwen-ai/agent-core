@@ -2,8 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """JiuwenMemoryRail — AgentMemory 外接记忆 rail。
 
-行为基线 = 同目录的 ``ExternalMemoryRail``，差异只在与 AgentMemory
-（agent-memory 仓库的 ``jiuwen_memory`` 引擎）语义对齐的 4 处（见下）；
+行为基线 = 同目录的 ``ExternalMemoryRail``，与 AgentMemory
+（agent-memory 仓库的 ``jiuwen_memory`` 引擎）语义对齐的差异见下；
 provider 由宿主注入——典型为 agent-memory 适配包的
 ``AgentMemoryMemoryProvider``（``jiuwen_memory_adapter/jiuwenswarm/agent_memory_provider.py``，
 经 PYTHONPATH 以顶层模块引入），本 rail 只依赖 ``MemoryProvider`` ABC，
@@ -26,6 +26,9 @@ provider 由宿主注入——典型为 agent-memory 适配包的
    缺省空串让"跨会话共享"成为显式契约，要隔离时由宿主显式传入。
 4. **工具 id 前缀** ``jiuwen_memory_<tool_name>``（基线为
    ``external_memory_<provider.name>_<tool_name>``）。
+5. **交互轮次聚合**：按真实会话暂存原始请求和已接受的 ask_user 回答，
+   最终回复后提交一次 sync_turn；暂存最多 16,000 字符、128 个会话，
+   30 分钟未活动后在后续前台调用中淘汰，不持久化。
 
 部署：宿主自备 provider（agent-memory 适配包或任意 ``MemoryProvider`` 实现），
 ``JiuwenMemoryRail(provider, user_id=..., scope_id=..., session_id=...)`` 挂载。
@@ -50,6 +53,7 @@ from openjiuwen.harness.prompts.sections.external_memory import (
     build_external_memory_section,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.rails.memory.memory_turn import MemoryTurnBuffer
 
 EXTERNAL_MEMORY_PREFETCH_SECTION = "external_memory_prefetch"
 
@@ -114,6 +118,12 @@ class JiuwenMemoryRail(DeepAgentRail):
         # Project resolved from the current invoke context; injected into
         # provider tool calls (mem2_add/mem2_search) as routing coords.
         self._current_project: Optional[str] = None
+        self._turn_buffer = MemoryTurnBuffer(
+            resolve_user_text=self._resolve_user_text_for_memory,
+            extract_output=self._extract_assistant_output,
+            is_background=self._is_background_run,
+            unwrap_envelope=self._unwrap_jiuwenswarm_envelope,
+        )
 
     def init(self, agent) -> None:
         super().init(agent)
@@ -148,6 +158,7 @@ class JiuwenMemoryRail(DeepAgentRail):
                     self.system_prompt_builder.add_section(section)
 
     def uninit(self, agent) -> None:
+        self._turn_buffer.clear()
         # Unregister tools owned by this rail from the agent
         if hasattr(agent, "ability_manager"):
             for tool_name, tool_card in list(self._owned_tool_cards.items()):
@@ -209,6 +220,7 @@ class JiuwenMemoryRail(DeepAgentRail):
         与 ``session_end_extract`` 开关无关——开关只管 ``uninit`` 的隐式触发，
         这里是宿主的显式意图。provider 内部自捕获异常，失败不影响后续 shutdown。
         """
+        self._turn_buffer.clear()
         if not self._initialized:
             return
         try:
@@ -224,6 +236,8 @@ class JiuwenMemoryRail(DeepAgentRail):
 
         if not self._available:
             return
+
+        self._turn_buffer.begin(ctx)
 
         if not self._initialized:
             try:
@@ -310,23 +324,26 @@ class JiuwenMemoryRail(DeepAgentRail):
         except ValueError as exc:
             logger.warning("[JiuwenMemoryRail] skip clearing prefetch prompt attachment: %s", exc)
 
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Capture accepted ask_user results, after interrupt ownership routing."""
+        if self._initialized and self._available:
+            self._turn_buffer.capture_answer(ctx)
+
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         if not self._initialized or not self._available:
             return
-        if self._is_background_run(ctx):
+        completed = self._turn_buffer.finish(ctx)
+        if completed is None:
             return
+        query, output = completed
+        # Capture routing before awaiting the previous task: the host may
+        # refresh its project binding for the next invocation meanwhile.
+        project = self._resolve_project(ctx)
 
         if self._sync_consecutive_failures >= _SYNC_BREAKER_THRESHOLD:
             if time.monotonic() < self._sync_breaker_until:
                 return
             self._sync_consecutive_failures = 0
-
-        # Unified user-text resolution keeps prefetch and sync_turn consistent
-        query = self._resolve_user_text_for_memory(ctx)
-        output = self._extract_assistant_output(ctx)
-
-        if not query or not output:
-            return
 
         # Serialize: wait for previous sync_turn to complete
         if self._sync_task and not self._sync_task.done():
@@ -353,7 +370,7 @@ class JiuwenMemoryRail(DeepAgentRail):
                         scope_id=self._scope_id,
                         agent_id=self._agent_id,
                         session_id=self._session_id,
-                        project=self._resolve_project(ctx),
+                        project=project,
                     ),
                     timeout=_SYNC_TURN_TIMEOUT,
                 )
@@ -463,7 +480,7 @@ class JiuwenMemoryRail(DeepAgentRail):
             if callable(method) and method():
                 return True
 
-        run_kind = getattr(inputs, "run_kind", None)
+        run_kind = getattr(inputs, "run_kind", None) or getattr(ctx, "extra", {}).get("run_kind")
         if run_kind in (RunKind.HEARTBEAT, RunKind.CRON):
             return True
         if isinstance(run_kind, str):
@@ -685,6 +702,13 @@ class JiuwenMemoryRail(DeepAgentRail):
             f"{raw_context}\n"
             "</memory-context>"
         )
+
+    # Public context helpers shared by sibling memory rails; keep private names compatible.
+    resolve_user_text_for_memory = _resolve_user_text_for_memory
+    is_background_run = _is_background_run
+    build_memory_context_block = _build_memory_context_block
+    extract_assistant_output = _extract_assistant_output
+    unwrap_jiuwenswarm_envelope = _unwrap_jiuwenswarm_envelope
 
 
 __all__ = ["JiuwenMemoryRail"]

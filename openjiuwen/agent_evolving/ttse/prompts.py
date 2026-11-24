@@ -368,6 +368,8 @@ Omit ATTACH (or write ATTACH:\\nNONE) when no attachment applies.
     return f"""You are clustering {track_u} rules that already share business-scenario category `{category_id}`.
 
 Goal: group rules that are paraphrases / near-duplicates of the SAME idea.
+Each numbered rule is a separate stored record, even when its text is identical
+to another rule. Group identical records by their distinct indices as well.
 Do NOT put mutually exclusive conditions, different capabilities, or clearly
 different cases in the same cluster.
 
@@ -455,6 +457,8 @@ Previous CANONICAL was invalid for TIP shape; rewrite as a valid TIP
 These rules already share the same business-scenario category. A prior clustering
 step proposed the near-duplicate groups below. Your job:
 - For EACH proposed group with 2+ members: choose MERGE | KEEP_DISTINCT | REWRITE.
+- Different indices represent separate stored records, including identical text.
+  Identical text at different indices is redundancy, not a repeated reference.
 - Do NOT move indices across groups.
 - Do NOT create new groups that mix indices from different proposed groups.
 - You MAY KEEP_DISTINCT when a proposed group was over-merged.

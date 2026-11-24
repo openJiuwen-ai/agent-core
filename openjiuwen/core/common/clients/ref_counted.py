@@ -112,11 +112,17 @@ class BaseRefResourceMgr(ABC, Generic[ResourceType]):
             return resource, True
 
     async def release(self, config):
+        """
+        释放资源
+
+        对不存在或已关闭的资源静默返回，避免重复释放或
+        close_all/close 之后的清理路径抛出未捕获的 KeyError。
+        """
         key = self._get_resource_key(config)
 
         async with self._lock:
-            resource = self._resources[key]
-            if resource.closed:
+            resource = self._resources.get(key)
+            if resource is None or resource.closed:
                 return
             should_close = resource.decrement_ref()
 

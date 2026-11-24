@@ -43,7 +43,8 @@ from opentelemetry.trace import (
 )
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.common.run_context import normalize_run_context
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind
 from openjiuwen.extensions.observability.redaction import (
     redact_completion,
     redact_error_summary,
@@ -93,6 +94,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TRAJECTORY_RECORD_KIND,
     OJ_TURN_ID,
     OJ_TURN_NUMBER,
+    OJ_GOAL_ID, OJ_GOAL_ATTEMPT_NUMBER,
 )
 from openjiuwen.harness.execution_subject import current_execution_subject
 # Imported as a module, never by name: the run-root fallback installs itself by
@@ -536,6 +538,15 @@ class AgentObservabilityRail(DeepAgentRail):
             )
             span.set_attribute(DA_TASK_ITERATION, iteration)
             span.set_attribute(DA_TASK_IS_FOLLOW_UP, is_follow_up)
+            if getattr(inputs, "run_kind", None) in (RunKind.GOAL, "goal"):
+                run_context = normalize_run_context(getattr(inputs, "run_context", None))
+                goal_id = run_context.extra.get("goal_id") if run_context is not None else None
+                if goal_id:
+                    span.set_attribute(OJ_GOAL_ID, str(goal_id))
+                manager = getattr(agent, "goal_manager", None)
+                record = manager.peek() if manager is not None else None
+                if record is not None:
+                    span.set_attribute(OJ_GOAL_ATTEMPT_NUMBER, record.attempt_count)
 
             query = getattr(inputs, "query", "") or ""
             if query:
@@ -1204,6 +1215,11 @@ class AgentObservabilityRail(DeepAgentRail):
                     span.set_attribute(key, value)
         if scope_parent is not None and scope_parent.attributes.get(OJ_TURN_ID) is not None:
             for key in (OJ_TURN_ID, OJ_TURN_NUMBER):
+                value = scope_parent.attributes.get(key)
+                if value is not None:
+                    span.set_attribute(key, value)
+        if scope_parent is not None:
+            for key in (OJ_GOAL_ID, OJ_GOAL_ATTEMPT_NUMBER):
                 value = scope_parent.attributes.get(key)
                 if value is not None:
                     span.set_attribute(key, value)

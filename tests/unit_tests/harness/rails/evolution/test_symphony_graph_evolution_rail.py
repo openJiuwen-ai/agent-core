@@ -57,6 +57,7 @@ def _span(
     parent_span_id: int | None = None,
     attributes: dict | None = None,
     scope_name: str = "test",
+    events=(),
 ) -> ReadableSpan:
     parent = None
     if parent_span_id is not None:
@@ -81,6 +82,7 @@ def _span(
         resource=Resource.create({"producer": "test"}),
         kind=SpanKind.INTERNAL,
         attributes=attributes or {},
+        events=events,
         status=Status(StatusCode.OK),
         start_time=span_id,
         end_time=span_id + 1,
@@ -2216,6 +2218,7 @@ def test_edge_summary_errors_stay_within_ten_standard_events() -> None:
                     {
                         semconv.GEN_AI_TOOL_NAME: "execute",
                         semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"value": span_id},
+                        semconv.GEN_AI_TOOL_CALL_RESULT: {"success": True},
                     }
                 ),
             }
@@ -2964,3 +2967,46 @@ def test_public_exports_are_available() -> None:
 
     assert PublicRail is SymphonyGraphEvolutionRail
     assert PublicTeamRail is TeamSymphonyGraphEvolutionRail
+
+
+def test_symphony_structure_uses_compact_model_span_without_reading_prompt(monkeypatch):
+    from openjiuwen.extensions.observability.content_addressing import SequenceHead, build_sequence, sequence_reference
+    from openjiuwen.extensions.observability.sequence_registry import register_sequence
+
+    processor = TrajectorySpanProcessor()
+    subscription = processor.subscribe(include_span_categories=["agent", "llm", "tool"])
+    processor.on_end(_span("agent.worker", 1, attributes={semconv.AT_MEMBER_NAME: "worker"}))
+    for span_id, skill in enumerate(("alpha", "beta"), start=2):
+        processor.on_end(_span("tool.skill_tool", span_id, parent_span_id=1, attributes={
+            semconv.GEN_AI_TOOL_NAME: "skill_tool",
+            semconv.GEN_AI_TOOL_CALL_ARGUMENTS: json.dumps({"skill_name": skill, "relative_file_path": "SKILL.md"}),
+            semconv.GEN_AI_TOOL_CALL_RESULT: '{"success":true}',
+        }))
+    key = semconv.GEN_AI_INPUT_MESSAGES
+    sequence = build_sequence(key, '[{"role":"user","content":"hello"}]')
+    assert register_sequence(sequence)
+    processor.on_end(_span("llm.call", 4, parent_span_id=1, attributes={key: sequence_reference(sequence.seq_hash, sequence.depth)}))
+    trajectory, issues = processor.drain(subscription)
+    processor.unsubscribe(subscription)
+    assert trajectory is not None and not issues
+
+    def unexpected_read(head):
+        pytest.fail("building Symphony graph structure decoded a model prompt")
+
+    monkeypatch.setattr(SequenceHead, "materialize", unexpected_read)
+    continuities = [(0, trajectory)]
+    fragments = rail_module.project_symphony_execution_fragments(continuities)
+    assert [fragment.capability_name for fragment in fragments] == ["alpha", "beta"]
+    members = rail_module.project_symphony_execution_fragments(continuities, team_members_only=True)
+    assert [fragment.capability_name for fragment in members] == ["worker"]
+    candidates = rail_module.build_symphony_edge_candidates(fragments, continuities)
+    assert len(candidates) == 1
+    assert candidates[0].candidate_id in rail_module._build_edge_summaries(candidates, continuities)
+
+
+def test_empty_edge_summary_does_not_visit_any_continuity():
+    class UnreadableContinuities:
+        def __iter__(self):
+            pytest.fail("empty candidates must not read continuities")
+
+    assert rail_module._build_edge_summaries((), UnreadableContinuities()) == {}

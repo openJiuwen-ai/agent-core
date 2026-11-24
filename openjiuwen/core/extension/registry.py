@@ -1,0 +1,356 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
+
+"""The management entry point business code calls.
+
+``init`` receives an EventBus that already has the nine management events.
+It registers only the host callbacks. The install directory and host version
+are passed afterwards, through ``open_install_dir``, which does not install.
+The convenience methods then trigger the matching root event.
+"""
+
+import asyncio
+from collections.abc import Callable, Collection, Sequence
+from dataclasses import replace
+from pathlib import Path
+
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
+from openjiuwen.core.events.types import OPS_BUILD_EVENT_TYPE, Event
+from openjiuwen.core.extension.data import JsonState, JsonStore, StateDependencies
+from openjiuwen.core.extension.errors import ExtensionFailure
+from openjiuwen.core.extension.install_report import PackageInstallReport
+from openjiuwen.core.extension.management import (
+    PACKAGE_INSTALL_EVENT,
+    PACKAGE_RELOAD_EVENT,
+    PACKAGE_UNINSTALL_EVENT,
+    InstallRequest,
+    ManagementContext,
+    PackageOperationResult,
+    ReloadRequest,
+    UninstallRequest,
+    bind_context,
+    replace_context,
+    set_package_enabled,
+    unbind_context,
+)
+from openjiuwen.core.extension.orchestrator import Orchestrator
+from openjiuwen.core.extension.package_manager import PackageManager
+from openjiuwen.core.extension.runtime import PackageResourceCleanup, Runtime
+from openjiuwen.core.extension.schema.records import ActivationReport
+
+
+class Registry:
+    """One EventBus, one install directory, one set of active packages."""
+
+    def __init__(self) -> None:
+        self._context: ManagementContext | None = None
+        self._startup_lock = asyncio.Lock()
+        self._operations: set[asyncio.Task] = set()
+        self._closing = False
+
+    @property
+    def is_ready(self) -> bool:
+        """True once ``init`` has bound this Registry to a bus."""
+        return self._context is not None
+
+    @property
+    def context(self) -> ManagementContext:
+        """The components bound at ``init``.
+
+        Raises:
+            ExtensionFailure: ``init`` has not run yet.
+        """
+        return self._require_ready()
+
+    @property
+    def runtime(self) -> Runtime:
+        """The Runtime that holds the active records of this Registry."""
+        return self._require_ready().runtime
+
+    @property
+    def package_manager(self) -> PackageManager:
+        """The install store of this Registry."""
+        manager = self._require_store().package_manager
+        if manager is None:
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_LOAD_FAILED,
+                reason="install directory has not been provided",
+            )
+        return manager
+
+    async def init(
+        self,
+        event_bus: ExtensionEventBusProtocol,
+        *,
+        host_event_types: Callable[[ExtensionEventBusProtocol], None] | None = None,
+        host_handlers: Callable[[ExtensionEventBusProtocol], None] | None = None,
+        store: JsonStore | None = None,
+        states: JsonState | None = None,
+        state_dependencies: StateDependencies | None = None,
+        cleanup_callbacks: Sequence[PackageResourceCleanup] = (),
+    ) -> None:
+        """Bind one EventBus and register the host's own events and handlers.
+
+        The nine package-management events are already on the bus. This method
+        does not register them again, read a manifest, or install a package.
+        After the host callbacks return, it triggers ``ops.build`` once so
+        later management events are accepted. The caller does not trigger it.
+        ``store`` has an explicit host-selected directory. Resource cleanup
+        callbacks run in order before Core deletes package store/state data.
+        ``states`` and ``state_dependencies`` bind durable state and opaque
+        build dependencies before capability construction.
+
+        Raises:
+            ExtensionFailure: This Registry is already initialized, or the bus
+                already serves another Registry.
+        """
+        if self._context is not None:
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_LOAD_FAILED,
+                reason="registry is already initialized",
+            )
+        callbacks = tuple(cleanup_callbacks)
+        dependencies = state_dependencies if state_dependencies is not None else StateDependencies()
+        if states is not None:
+
+            async def cleanup_state(package_id: str, generation: int, reason: str) -> None:
+                del generation
+                await states.cleanup_package(package_id, reason=reason)
+                if reason == "uninstall":
+                    dependencies.drop_package(package_id)
+
+            callbacks = (*callbacks, cleanup_state)
+        if store is not None:
+
+            async def cleanup_store(package_id: str, generation: int, reason: str) -> None:
+                del generation
+                await store.cleanup_package(package_id, reason=reason)
+
+            callbacks = (*callbacks, cleanup_store)
+        runtime = Runtime(cleanup_callbacks=callbacks)
+        context = ManagementContext(
+            bus=event_bus,
+            package_manager=None,
+            orchestrator=Orchestrator(),
+            runtime=runtime,
+        )
+        bind_context(context)
+        store_bound = False
+        state_bound = False
+        # Imported lazily: ops_impl.store imports extension.data, and this module
+        # is loaded while openjiuwen.core.extension.__init__ is still running.
+        from openjiuwen.core.events.ops_impl.state import configure_state, unconfigure_state
+        from openjiuwen.core.events.ops_impl.store import configure_store, unconfigure_store
+
+        try:
+            if states is not None:
+                configure_state(
+                    event_bus, states, dependencies=dependencies,
+                    begin_calls=runtime.begin_calls, end_calls=runtime.end_calls,
+                )
+                state_bound = True
+            if store is not None:
+                configure_store(event_bus, store, begin_calls=runtime.begin_calls, end_calls=runtime.end_calls)
+                store_bound = True
+            if host_event_types is not None:
+                host_event_types(event_bus)
+            if host_handlers is not None:
+                host_handlers(event_bus)
+            await event_bus.trigger(Event(OPS_BUILD_EVENT_TYPE, None))
+        except BaseException:
+            if state_bound:
+                unconfigure_state(event_bus)
+            if store_bound:
+                unconfigure_store(event_bus)
+            unbind_context(event_bus)
+            raise
+        self._context = context
+
+    async def open_install_dir(
+        self, install_dir: Path, *, report_path: Path, host_version: str | None = None,
+        domain: str | None = None, allowed_domains: Collection[str] | None = None,
+        poll_interval: float = 0.5, dependency_timeout: float = 300.0, lock_timeout: float = 5.0,
+    ) -> None:
+        """Bind an installation root and a mandatory cross-process YAML report."""
+        context = self._require_ready()
+        if context.package_manager is not None:
+            raise ExtensionFailure(StatusCode.EXTENSION_LOAD_FAILED, reason="install directory is already set")
+        if domain is not None and (not isinstance(domain, str) or not domain.strip()):
+            raise ExtensionFailure(StatusCode.EXTENSION_MANIFEST_INVALID, reason="domain must be a nonempty string")
+        if allowed_domains is not None:
+            invalid_collection = isinstance(allowed_domains, str) or not allowed_domains
+            invalid_value = any(
+                not isinstance(value, str) or not value.strip()
+                for value in allowed_domains
+            )
+            missing_domain = domain is not None and domain not in allowed_domains
+            if invalid_collection or invalid_value or missing_domain:
+                raise ExtensionFailure(StatusCode.EXTENSION_MANIFEST_INVALID, reason="invalid allowed_domains")
+        manager = PackageManager(Path(install_dir), domain=domain, allowed_domains=allowed_domains)
+        report = PackageInstallReport(report_path, poll_interval=poll_interval,
+                                      dependency_timeout=dependency_timeout, lock_timeout=lock_timeout)
+        await report.open(manager.store, domain=domain)
+        manager.install_report = report
+        self._context = replace(context, package_manager=manager, install_report=report, host_version=host_version)
+        replace_context(self._context)
+
+    async def load_installed(
+        self,
+        roots: Sequence[Path | str] | None = None,
+    ) -> tuple[ActivationReport, ...]:
+        """Activate one startup snapshot, or discover the complete store by default."""
+        task = asyncio.current_task()
+        self._operations.add(task)
+        try:
+            async with self._startup_lock:
+                normalized_roots = None if roots is None else _as_paths(roots)
+                return await self._load_installed(normalized_roots)
+        finally:
+            self._operations.discard(task)
+
+    async def _load_installed(
+        self,
+        roots: Sequence[Path] | None = None,
+    ) -> tuple[ActivationReport, ...]:
+        """Discover and order the complete root, then activate this scope's queue."""
+        context = self._require_store()
+        if self._closing:
+            raise ExtensionFailure(StatusCode.EXTENSION_PACKAGE_BUSY, package_id="*", reason="registry is stopping")
+        service = context.install_report
+        plan = await service.prepare_startup(context.package_manager, roots)
+        reports = [ActivationReport("", item.package_id, "install", "FAILED", None, None, item.error)
+                   for item in plan.rejected]
+        try:
+            for manifest in plan.ordered:
+                if context.package_manager.domain is not None and manifest.domain != context.package_manager.domain:
+                    continue
+                if context.runtime.get_active(manifest.package_id) is not None:
+                    continue
+                root = context.package_manager.version_dir(manifest.package_id, manifest.version)
+                result = await self._trigger(
+                    PACKAGE_INSTALL_EVENT, InstallRequest(bus=context.bus, paths=(root,), startup=True),
+                )
+                reports.extend(result.reports)
+        finally:
+            if not self._closing:
+                await service.mark_started()
+        return tuple(reports)
+
+    async def begin_shutdown(self) -> None:
+        """Stop new admissions and let cancelled management operations finish their file work."""
+        self._closing = True
+        context = self._require_ready()
+        if context.install_report is not None:
+            await context.install_report.mark_stopping()
+        current = asyncio.current_task()
+        tasks = [task for task in self._operations if task is not current]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def close(self) -> None:
+        """Release report ownership after local handlers and resources have stopped."""
+        context = self._require_ready()
+        if context.runtime.active_packages():
+            raise ExtensionFailure(StatusCode.EXTENSION_PACKAGE_BUSY, package_id="*", reason="active handlers remain")
+        if context.install_report is not None:
+            await context.install_report.close()
+
+    async def install(
+        self,
+        source: Path | str | Sequence[Path | str],
+    ) -> tuple[ActivationReport, ...]:
+        """Trigger ``package.install`` for one source or a batch of sources."""
+        context = self._require_store()
+        result = await self._trigger(
+            PACKAGE_INSTALL_EVENT,
+            InstallRequest(bus=context.bus, paths=_as_paths(source)),
+        )
+        return result.reports
+
+    async def uninstall(self, package_id: str) -> ActivationReport:
+        """Trigger ``package.uninstall`` for one active package."""
+        context = self._require_store()
+        result = await self._trigger(
+            PACKAGE_UNINSTALL_EVENT,
+            UninstallRequest(bus=context.bus, package_id=package_id),
+        )
+        return _one_report(result)
+
+    async def reload(self, package_id: str) -> ActivationReport:
+        """Reload one installed package without changing its requested enabled state.
+
+        A disabled managed copy has no active handlers to hot-switch. Its reload
+        therefore succeeds without importing the package or changing ``enable``.
+        """
+        context = self._require_store()
+        result = await self._trigger(
+            PACKAGE_RELOAD_EVENT,
+            ReloadRequest(bus=context.bus, package_id=package_id),
+        )
+        return _one_report(result)
+
+    async def set_enabled(self, package_id: str, enabled: bool) -> ActivationReport:
+        """Keep an installed package while changing whether this Registry loads it."""
+        context = self._require_store()
+        if self._closing:
+            raise ExtensionFailure(StatusCode.EXTENSION_PACKAGE_BUSY, package_id="*", reason="registry is stopping")
+        task = asyncio.current_task()
+        self._operations.add(task)
+        try:
+            return await set_package_enabled(context, context.bus, package_id, enabled)
+        finally:
+            self._operations.discard(task)
+
+    async def _trigger(self, event_type: str, request: object) -> PackageOperationResult:
+        context = self._require_ready()
+        if self._closing:
+            raise ExtensionFailure(StatusCode.EXTENSION_PACKAGE_BUSY, package_id="*", reason="registry is stopping")
+        task = asyncio.current_task()
+        already_tracked = task in self._operations
+        self._operations.add(task)
+        try:
+            result = await context.bus.trigger(Event(event_type, request))
+        finally:
+            if not already_tracked:
+                self._operations.discard(task)
+        if not isinstance(result, PackageOperationResult):
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_LOAD_FAILED,
+                reason=f"{event_type} returned no package operation result",
+            )
+        return result
+
+    def _require_ready(self) -> ManagementContext:
+        if self._context is None:
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_LOAD_FAILED,
+                reason="registry is not initialized",
+            )
+        return self._context
+
+    def _require_store(self) -> ManagementContext:
+        context = self._require_ready()
+        if context.package_manager is None or context.install_report is None:
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_LOAD_FAILED,
+                reason="install directory has not been provided",
+            )
+        return context
+
+
+def _as_paths(source: Path | str | Sequence[Path | str]) -> tuple[Path, ...]:
+    if isinstance(source, (str, Path)):
+        return (Path(source),)
+    return tuple(Path(item) for item in source)
+
+
+def _one_report(result: PackageOperationResult) -> ActivationReport:
+    if len(result.reports) != 1:
+        raise ExtensionFailure(
+            StatusCode.EXTENSION_LOAD_FAILED,
+            reason="management event did not return one activation report",
+        )
+    return result.reports[0]

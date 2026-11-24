@@ -9,6 +9,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    Literal,
     Optional,
 )
 
@@ -22,6 +23,7 @@ from openjiuwen.core.foundation.llm import (
 )
 from openjiuwen.core.foundation.tool import (
     McpServerConfig,
+    Tool,
     ToolCard,
 )
 from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
@@ -35,6 +37,7 @@ from openjiuwen.core.sys_operation.sys_operation import SysOperation, SysOperati
 from openjiuwen.harness.schema.build_context import (
     PARENT_SYS_OPERATION_EXTRAS_KEY,
     BuildContext,
+    extension_bus as get_extension_bus,
 )
 from openjiuwen.harness.schema.config import (
     DEFAULT_ACR_BASE_URL,
@@ -329,10 +332,7 @@ class BuiltinToolSpec(BaseModel):
         ensure_builtin_elements_registered()
         factory = _TOOL_PROVIDER_REGISTRY.get(self.type)
         if factory is None:
-            raise ValueError(
-                f"Unknown tool type '{self.type}'. "
-                f"Registered types: {list(_TOOL_PROVIDER_REGISTRY)}"
-            )
+            raise ValueError(f"Unknown tool type '{self.type}'. Registered types: {list(_TOOL_PROVIDER_REGISTRY)}")
         if context is None:
             context = BuildContext(language=language)
         return factory(dict(self.params), context)
@@ -440,6 +440,21 @@ class DeepAgentSpec(BaseModel):
 
     model: Optional[TeamModelConfig] = None
     card: Optional[AgentCard] = None
+    tool_registration_mode: Literal["legacy", "event"] = "legacy"
+    event_tool_types: Optional[list[str]] = None
+    """Provider types whose concrete tools use the event path in event mode.
+
+    ``None`` keeps the direct factory behavior of routing every concrete tool.
+    Hosts that mix event-supported core providers with legacy platform
+    providers can list the supported provider types explicitly.
+    """
+    subagent_registration_mode: Literal["legacy", "event"] = "legacy"
+    event_subagent_types: Optional[list[str]] = None
+    """Sub-agent card names whose configs use ``agent.register`` in event mode.
+
+    ``None`` selects every resolved ``SubAgentConfig``; an empty list keeps
+    all resolved sub-agents on the legacy static path.
+    """
     system_prompt: Optional[str] = None
     tools: Optional[list[ToolCard | BuiltinToolSpec]] = None
     mcps: Optional[list[McpServerConfig]] = None
@@ -508,18 +523,25 @@ class DeepAgentSpec(BaseModel):
         language: str,
         tool_id_prefix: str | None = None,
         context: "BuildContext | None" = None,
-    ) -> list | None:
+    ) -> tuple[list | None, list[Tool] | None]:
         """Resolve tools list: BuiltinToolSpec → Tool instance, ToolCard passes through."""
         if not self.tools:
-            return None
+            return None, None
         resolved: list = []
+        event_tools: list[Tool] = []
+        selected_event_types = set(self.event_tool_types or ())
         for item in self.tools:
             if isinstance(item, BuiltinToolSpec):
                 tid = f"{tool_id_prefix}.{item.type}" if tool_id_prefix else None
-                resolved.extend(_as_built_list(item.build(language=language, tool_id=tid, context=context)))
+                built = _as_built_list(item.build(language=language, tool_id=tid, context=context))
+                resolved.extend(built)
+                if self.tool_registration_mode == "event" and (
+                    self.event_tool_types is None or item.type in selected_event_types
+                ):
+                    event_tools.extend(tool for tool in built if isinstance(tool, Tool))
             else:
                 resolved.append(item)
-        return resolved or None
+        return resolved or None, event_tools if self.event_tool_types is not None else None
 
     def resolve_parts(self, context: "BuildContext | None" = None) -> Any:
         """Assemble this spec's DeepAgent parts without creating an instance.
@@ -586,21 +608,52 @@ class DeepAgentSpec(BaseModel):
                     _as_built_list(rail_spec.build(language=language, workspace=workspace, context=build_ctx)),
                 )
         subagents = None
+        event_subagent_configs = None
         if self.subagents:
-            subagents = []
+            resolved_subagents = []
             for subagent_spec in self.subagents:
-                subagents.extend(
+                resolved_subagents.extend(
                     _as_built_list(
                         subagent_spec.build(parent_model=llm_model, language=language, context=build_ctx),
                     ),
                 )
+            if self.subagent_registration_mode == "event":
+                selected_event_types = set(self.event_subagent_types or ())
+                event_subagent_configs = []
+                for item in resolved_subagents:
+                    if not isinstance(item, SubAgentConfig):
+                        continue
+                    if (
+                        self.event_subagent_types is not None
+                        and item.agent_card.name not in selected_event_types
+                    ):
+                        continue
+                    event_subagent_configs.append(item)
+                event_subagent_ids = {id(item) for item in event_subagent_configs}
+                subagents = [
+                    item for item in resolved_subagents
+                    if id(item) not in event_subagent_ids
+                ]
+            else:
+                subagents = resolved_subagents
+
+        resolved_tools, event_tool_instances = self._resolve_tools(
+            language,
+            self.card.id if self.card else None,
+            context=build_ctx,
+        )
 
         return resolve_deep_agent_parts(
             llm_model,
             card=self.card,
             tool_owner_id=build_ctx.tool_owner_id,
+            tool_registration_mode=self.tool_registration_mode,
+            subagent_registration_mode=self.subagent_registration_mode,
+            event_tool_instances=event_tool_instances,
+            event_subagent_configs=event_subagent_configs,
+            extension_bus=get_extension_bus(build_ctx),
             system_prompt=self.system_prompt,
-            tools=self._resolve_tools(language, self.card.id if self.card else None, context=build_ctx),
+            tools=resolved_tools,
             mcps=self.mcps,
             subagents=subagents,
             rails=rails,

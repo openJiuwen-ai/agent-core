@@ -458,6 +458,47 @@ async def test_goal_interrupt_skips_assessment() -> None:
     assert record.status is GoalStatus.ACTIVE
 
 
+@pytest.mark.asyncio
+async def test_cancelled_goal_round_does_not_block_goal() -> None:
+    """The cancellation cleanup callback must not assess a goal attempt."""
+    import asyncio
+    from openjiuwen.harness.goal.schema import GoalStatus
+
+    record = GoalRecord.create(session_id="s1", objective="ship it")
+    assessments: list[GoalAssessment] = []
+
+    class _Store:
+        def load(self):
+            return record
+
+    class _Manager:
+        def get_store(self, session_id=None):
+            return _Store()
+
+        async def apply_assessment(self, *, goal_id, revision, assessment):
+            assessments.append(assessment)
+            return record
+
+    rail = TaskCompletionRail()
+    rail.set_goal_manager(_Manager())
+    rail._is_goal_round = True
+    rail._current_goal_id = record.goal_id
+    rail._current_revision = record.revision
+    rail._current_session_id = record.session_id
+
+    inputs = SimpleNamespace(
+        result={"result_type": "error", "stop_reason": "cancelled", "error": "cancelled"},
+        run_context={"goal_id": record.goal_id, "revision": record.revision, "session_id": record.session_id},
+    )
+    ctx = AgentCallbackContext(agent=object(), inputs=inputs)
+    ctx.exception = asyncio.CancelledError()
+
+    await rail.after_task_iteration(ctx)
+
+    assert assessments == []
+    assert record.status is GoalStatus.ACTIVE
+
+
 def test_extract_goal_round_error_requires_thrown_exception() -> None:
     ctx_exc = AgentCallbackContext(agent=object(), inputs=SimpleNamespace(result=None))
     ctx_exc.exception = ValueError("token rejected")
@@ -637,3 +678,28 @@ async def test_completion_claim_is_trusted_under_agent_report() -> None:
     verdict = await rail.assess_completion_claim(ctx, "已完成")
 
     assert verdict.status is GoalAssessmentStatus.COMPLETE
+
+
+@pytest.mark.asyncio
+async def test_transcript_assessor_scopes_purpose_and_keeps_metadata_off_transport() -> None:
+    from openjiuwen.core.foundation.llm.call_scope import current_llm_observation_context
+    from openjiuwen.extensions.observability.semconv import OJ_GOAL_ID, OJ_GOAL_ATTEMPT_NUMBER
+    seen = []
+
+    async def invoke(messages: list, *, tools: list, temperature: float, top_p: float) -> SimpleNamespace:
+        context = current_llm_observation_context()
+        seen.append(context)
+        assert tools == []
+        assert len(messages) == 2
+        return SimpleNamespace(content='{"status":"complete","evidence":"files checked"}')
+
+    rail = TaskCompletionRail()
+    record = GoalRecord.create(session_id="s1", objective="deliver files")
+    record.attempt_count = 2
+    ctx = AgentCallbackContext(agent=SimpleNamespace(deep_config=SimpleNamespace(model=SimpleNamespace(invoke=invoke))))
+    result = await rail._invoke_transcript_assessor(record, ctx)
+    assert '"complete"' in result
+    assert seen[0].purpose == "goal_assessment"
+    assert seen[0].attributes[OJ_GOAL_ID] == record.goal_id
+    assert seen[0].attributes[OJ_GOAL_ATTEMPT_NUMBER] == 2
+    assert current_llm_observation_context() is None

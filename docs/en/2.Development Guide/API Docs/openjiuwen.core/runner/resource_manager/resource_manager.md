@@ -25,7 +25,7 @@ For A2A-backed agents, the caller must provide a concrete `AgentCard`; the resou
 
 **Returns:**
 
-**Result[[AgentCard](../single_agent/single_agent.md), Exception]**, Result object containing the added agent card or an exception.
+**Result[[AgentCard](../../single_agent/single_agent.md), Exception]**, Result object containing the added agent card or an exception.
 
 **Example:**
 
@@ -60,7 +60,7 @@ Batch add multiple agents.
 
 **Returns:**
 
-**Result[[AgentCard](../single_agent/single_agent.md), Exception]|list[Result[[AgentCard](../single_agent/single_agent.md), Exception]]**, Result object or list containing the added agent cards or exceptions.
+**Result[[AgentCard](../../single_agent/single_agent.md), Exception]|list[Result[[AgentCard](../../single_agent/single_agent.md), Exception]]**, Result object or list containing the added agent cards or exceptions.
 
 **Example:**
 
@@ -99,7 +99,7 @@ Remove an agent by ID or tag.
 
 **Returns:**
 
-**Result**[Optional[[AgentCard](../single_agent/single_agent.md)], Exception]|list[Result[Optional[[AgentCard](../single_agent/single_agent.md)], Exception]], Result object or list containing the removed agent cards or exceptions.
+**Result**[Optional[[AgentCard](../../single_agent/single_agent.md)], Exception]|list[Result[Optional[[AgentCard](../../single_agent/single_agent.md)], Exception]], Result object or list containing the removed agent cards or exceptions.
 
 **Example:**
 
@@ -131,7 +131,7 @@ Get an agent instance by ID or tag.
 
 **Returns:**
 
-**[BaseAgent](../single_agent/single_agent.md)|list[[BaseAgent](../single_agent/single_agent.md)]**, agent instance if found, otherwise None.
+**[BaseAgent](../../single_agent/single_agent.md)|list[[BaseAgent](../../single_agent/single_agent.md)]**, agent instance if found, otherwise None.
 
 **Example:**
 
@@ -161,7 +161,7 @@ Add a single workflow to the resource manager.
 
 **Returns:**
 
-**Result**[[WorkflowCard](../workflow/workflow.md), Exception], Result object containing the added workflow card or an exception.
+**Result**[[WorkflowCard](../../workflow/workflow.md), Exception], Result object containing the added workflow card or an exception.
 
 **Example:**
 
@@ -193,7 +193,7 @@ Batch add multiple workflows.
 
 **Returns:**
 
-**Result**[[WorkflowCard](../workflow/workflow.md), Exception]|list[Result[[WorkflowCard](../workflow/workflow.md), Exception]], Result object or list containing the added workflow cards or exceptions.
+**Result**[[WorkflowCard](../../workflow/workflow.md), Exception]|list[Result[[WorkflowCard](../../workflow/workflow.md), Exception]], Result object or list containing the added workflow cards or exceptions.
 
 **Example:**
 
@@ -228,7 +228,7 @@ Remove a workflow by ID or tag.
 
 **Returns:**
 
-**Result**[Optional[[WorkflowCard](../workflow/workflow.md)], Exception]|list[Result[Optional[[WorkflowCard](../workflow/workflow.md)], Exception]], Result object or list containing the removed workflow cards or exceptions.
+**Result**[Optional[[WorkflowCard](../../workflow/workflow.md)], Exception]|list[Result[Optional[[WorkflowCard](../../workflow/workflow.md)], Exception]], Result object or list containing the removed workflow cards or exceptions.
 
 **Example:**
 
@@ -288,7 +288,7 @@ Add a tool to the resource manager.
 
 **Returns:**
 
-**Result**[[ToolCard](../foundation/tool/tool.md), Exception]|list[Result[[ToolCard](../foundation/tool/tool.md), Exception]], Result object or list containing the added tool cards or exceptions.
+**Result**[[ToolCard](../../foundation/tool/tool.md), Exception]|list[Result[[ToolCard](../../foundation/tool/tool.md), Exception]], Result object or list containing the added tool cards or exceptions.
 
 **Example:**
 
@@ -355,7 +355,7 @@ Remove a tool by ID or tag.
 
 **Returns:**
 
-**Result**[Optional[[ToolCard](../foundation/tool/tool.md)], Exception]|list[Result[Optional[[ToolCard](../foundation/tool/tool.md)], Exception]], Result object or list containing the removed tool cards or exceptions.
+**Result**[Optional[[ToolCard](../../foundation/tool/tool.md)], Exception]|list[Result[Optional[[ToolCard](../../foundation/tool/tool.md)], Exception]], Result object or list containing the removed tool cards or exceptions.
 
 **Example:**
 
@@ -607,7 +607,7 @@ Get a prompt template by ID or tag.
 
 **Returns:**
 
-**[PromptTemplate](../foundation/prompt/template.md)|list[[PromptTemplate](../foundation/prompt/template.md)]**, prompt template instance if found, otherwise None.
+**[PromptTemplate](../../foundation/prompt/template.md)|list[[PromptTemplate](../../foundation/prompt/template.md)]**, prompt template instance if found, otherwise None.
 
 **Example:**
 
@@ -635,7 +635,7 @@ Add a system operation via SysOperationCard (optional tags). Supports batch addi
 
 **Returns:**
 
-**Result**[[SysOperationCard](../sys_operation/sys_operation.md), Exception] | List[Result[[SysOperationCard](../sys_operation/sys_operation.md), Exception]], single result object or list of result objects containing the successfully added card(s) or error(s).
+**Result**[[SysOperationCard](../../sys_operation/sys_operation.md), Exception] | List[Result[[SysOperationCard](../../sys_operation/sys_operation.md), Exception]], single result object or list of result objects containing the successfully added card(s) or error(s).
 
 **Example:**
 
@@ -677,7 +677,7 @@ Remove a system operation by ID/tag (supports batch). When removing a system ope
 
 **Returns:**
 
-**Result**[Optional[[SysOperationCard](../sys_operation/sys_operation.md)], Exception] | List[Result[Optional[[SysOperationCard](../sys_operation/sys_operation.md)], Exception]], single result object or list of result objects containing the removed card(s) or error(s).
+**Result**[Optional[[SysOperationCard](../../sys_operation/sys_operation.md)], Exception] | List[Result[Optional[[SysOperationCard](../../sys_operation/sys_operation.md)], Exception]], single result object or list of result objects containing the removed card(s) or error(s).
 
 **Example:**
 
@@ -715,7 +715,7 @@ Get a system operation instance by ID/tag.
 
 **Returns:**
 
-**SysOperation | List[[SysOperation](../sys_operation/sys_operation.md)]**, single system operation instance or list of instances, returns None if not found.
+**SysOperation | List[[SysOperation](../../sys_operation/sys_operation.md)]**, single system operation instance or list of instances, returns None if not found.
 
 **Example:**
 
@@ -751,7 +751,7 @@ Get tool cards from a system operation.
 
 **Returns:**
 
-**[ToolCard](../foundation/tool/tool.md) | List[[ToolCard](../foundation/tool/tool.md)] | None**, Tool card(s) matching the criteria.
+**[ToolCard](../../foundation/tool/tool.md) | List[[ToolCard](../../foundation/tool/tool.md)] | None**, Tool card(s) matching the criteria.
 
 **Raises:**
 
@@ -801,7 +801,7 @@ Get tool information/metadata by ID, type, or tag.
 
 **Returns:**
 
-**[ToolInfo](../foundation/tool/tool.md)|list[[ToolInfo](../foundation/tool/tool.md)]**, tool information instance if found, otherwise None.
+**[ToolInfo](../../foundation/tool/tool.md)|list[[ToolInfo](../../foundation/tool/tool.md)]**, tool information instance if found, otherwise None.
 
 **Example:**
 
@@ -982,7 +982,7 @@ Get MCP tool information/metadata by name and server.
 
 **Returns:**
 
-**[ToolInfo](../foundation/tool/tool.md)|list[[ToolInfo](../foundation/tool/tool.md)]**, MCP tool information instance if found, otherwise None.
+**[ToolInfo](../../foundation/tool/tool.md)|list[[ToolInfo](../../foundation/tool/tool.md)]**, MCP tool information instance if found, otherwise None.
 
 **Example:**
 

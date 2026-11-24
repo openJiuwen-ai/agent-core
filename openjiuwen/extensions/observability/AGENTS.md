@@ -75,6 +75,10 @@ The relationship between the two packages is fixed:
 - `span_record_processor.py` / `otlp_codec.py` / `content_addressing.py`:
   non-blocking fan-out of ended spans as canonical OTLP records, with
   content-addressed sequences for the storage path.
+- `sequence_registry.py`: process-wide lookup, TTL and capacity for immutable
+  sequence heads. The discoverability and charging contract is in
+  [S_14](../../../.agents/agent-docs/specs/agent_teams/S_14_monitor-and-observability.md)
+  invariant 19.
 - `trajectory_events.py` / `context_compression_handler.py`: trajectory v2
   record emission.
 - `tool_outcome.py` / `error_reporting.py`: one reading of how a call ended and

@@ -60,15 +60,12 @@ def completion_state(
     )
     missing_experience_evolution = bool(marked_experience) and runtime.experience_evolution is None
 
-    missing_trajectory_summary = not str(getattr(runtime, "trajectory_summary", None) or "").strip()
-
     all_done = not (
         reward_pending
         or skill_cause_pending
         or experience_cause_pending
         or missing_skill_globals
         or missing_experience_evolution
-        or missing_trajectory_summary
     )
     return {
         "all_done": all_done,
@@ -77,7 +74,6 @@ def completion_state(
         "pending_experience_cause_signal_ids": experience_cause_pending,
         "missing_skill_globals": missing_skill_globals,
         "missing_experience_evolution": missing_experience_evolution,
-        "missing_trajectory_summary": missing_trajectory_summary,
     }
 
 

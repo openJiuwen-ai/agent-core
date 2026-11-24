@@ -13,8 +13,17 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from openjiuwen.core.events.builtins.event_types.turn import (
+    TURN_COMPLETE,
+    TURN_START,
+    TurnCompleteInput,
+    TurnCompleteOutput,
+    TurnStartInput,
+    TurnStartOutput,
+)
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.config import DeepAgentConfig
@@ -841,7 +850,7 @@ async def test_run_one_round_uses_single_round_path_for_interrupt_resume(
         inputs={"query": interactive_input},
         reset_loop=False,
     )
-    session = MagicMock()
+    session = Session(session_id="resume-1")
     coordinator = MagicMock()
     controller = MagicMock()
     controller.submit_round = AsyncMock()
@@ -853,6 +862,7 @@ async def test_run_one_round_uses_single_round_path_for_interrupt_resume(
     build_next_work = MagicMock(return_value=None)
 
     monkeypatch.setattr(agent, "_ensure_initialized", AsyncMock())
+    monkeypatch.setattr(agent, "_sync_expert_role_attachment", AsyncMock())
     monkeypatch.setattr(
         agent,
         "prepare_interaction_task_loop",
@@ -874,6 +884,121 @@ async def test_run_one_round_uses_single_round_path_for_interrupt_resume(
     build_next_work.assert_not_called()
     write_result.assert_awaited_once_with(result, session)
     assert outcome.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_run_one_round_starts_new_turn_and_resume_preserves_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    session = Session(session_id="round-turn")
+    coordinator = MagicMock()
+    controller = MagicMock()
+    controller.submit_round = AsyncMock()
+    controller.wait_round_completion = AsyncMock(
+        return_value={"result_type": "answer", "output": "done"}
+    )
+    react_agent = MagicMock()
+    react_agent.invoke = AsyncMock(
+        return_value={"result_type": "answer", "output": "resumed"}
+    )
+    agent._react_agent = react_agent
+    starts: list[TurnStartInput] = []
+    completes: list[TurnCompleteInput] = []
+
+    async def trigger(event, event_session):
+        assert event_session is session
+        if event.event_type == TURN_START:
+            persisted = agent.load_state(session).turn_state
+            assert persisted is not None
+            assert event.event_input.turn_id == persisted.turn_id
+            controller.submit_round.assert_not_awaited()
+            starts.append(event.event_input)
+            return TurnStartOutput(turn_id=event.event_input.turn_id)
+        assert event.event_type == TURN_COMPLETE
+        completes.append(event.event_input)
+        return TurnCompleteOutput(
+            text=f"normalized-{len(completes)}",
+            usage={"total_tokens": len(completes)},
+        )
+
+    bus = MagicMock()
+    bus.trigger = trigger
+    monkeypatch.setattr(
+        Runner,
+        "get_extension_bus",
+        classmethod(lambda cls: bus),
+    )
+    write_result = AsyncMock()
+    build_next_work = MagicMock(return_value=None)
+    monkeypatch.setattr(agent, "_ensure_initialized", AsyncMock())
+    monkeypatch.setattr(agent, "_sync_expert_role_attachment", AsyncMock())
+    monkeypatch.setattr(
+        agent,
+        "prepare_interaction_task_loop",
+        AsyncMock(return_value=(coordinator, controller)),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_write_round_result_to_stream",
+        write_result,
+    )
+    monkeypatch.setattr(
+        agent,
+        "_build_interaction_next_work",
+        build_next_work,
+    )
+
+    await agent.run_one_round(
+        RoundWorkItem.user(
+            request_id="new-1",
+            inputs={"query": "new work"},
+        ),
+        "task-1",
+        session,
+    )
+    started = agent.load_state(session).turn_state
+    assert started is not None
+    assert started.step_index == 0
+    assert starts == [TurnStartInput(turn_id=started.turn_id, text="new work")]
+    first_result = {
+        "result_type": "answer",
+        "output": "normalized-1",
+        "usage": {"total_tokens": 1},
+    }
+    assert completes == [
+        TurnCompleteInput(
+            turn_id=started.turn_id,
+            reason="completed",
+            answer="done",
+        )
+    ]
+    write_result.assert_awaited_once_with(first_result, session)
+    assert build_next_work.call_args.kwargs["result"] == first_result
+
+    resume = InteractiveInput()
+    resume.update("call-1", {"action": "allow_once"})
+    await agent.run_one_round(
+        RoundWorkItem.user(
+            request_id="resume-1",
+            inputs={"query": resume},
+            reset_loop=False,
+        ),
+        "task-2",
+        session,
+    )
+
+    assert agent.load_state(session).turn_state == started
+    assert starts == [TurnStartInput(turn_id=started.turn_id, text="new work")]
+    assert completes[-1].turn_id == started.turn_id
+    assert write_result.await_args_list[-1].args == (
+        {
+            "result_type": "answer",
+            "output": "normalized-2",
+            "usage": {"total_tokens": 2},
+        },
+        session,
+    )
 
 
 @pytest.mark.asyncio
@@ -965,3 +1090,95 @@ async def test_interaction_timeout_is_visible_and_cancels_real_executor() -> Non
     finally:
         await agent.stop()
         await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_timed_out_round_closes_observability_spans_before_trace_flush() -> None:
+    """A cancelled model call must end with its round, before run finalization."""
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
+    from openjiuwen.extensions.observability import span_context
+    from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
+    from openjiuwen.extensions.observability.config import ObservabilityConfig
+    from openjiuwen.extensions.observability.semconv import (
+        GEN_AI_CONVERSATION_ID,
+        OJ_SPAN_FORCED_CLOSE_REASON,
+        OJ_TRACE_ROOT,
+    )
+    from openjiuwen.harness.observability.rail import AgentObservabilityRail
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracker = span_context.ActiveSpanTracker()
+    provider.add_span_processor(tracker)
+    span_context.set_active_span_tracker(tracker)
+    tracer = provider.get_tracer("timeout-observability-test")
+    span_context.reset_state()
+    root = tracer.start_span("run.root")
+    root.set_attribute(OJ_TRACE_ROOT, True)
+    root.set_attribute(GEN_AI_CONVERSATION_ID, "timeout-observability")
+    span_context.set_root_span(root)
+    handler = OtelCallbackHandler(ObservabilityConfig(enabled=True), tracer=tracer)
+
+    class WaitingModel(FakeReactAgent):
+        async def invoke(self, inputs, session, **kwargs):
+            request = handler._open_llm_span({"messages": [], "model": "fake"})
+            assert request is not None
+            self.invoke_running.set()
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                self.cancelled_count += 1
+                raise
+            finally:
+                self.invoke_running.clear()
+
+    await Runner.start()
+    agent = DeepAgent(AgentCard(name="timeout-observability", description="test"))
+    agent.configure(DeepAgentConfig(enable_task_loop=True, completion_timeout=0.05))
+    fake = WaitingModel(agent.card)
+    agent.set_react_agent(fake, initialized=True)
+
+    class TestObservabilityRail(AgentObservabilityRail):
+        async def before_task_iteration(self, ctx):
+            span_context.set_root_span(root)
+            await super().before_task_iteration(ctx)
+
+    observer = TestObservabilityRail(tracer=tracer)
+
+    try:
+        await agent.start()
+        await agent.register_rail(observer)
+        assert agent.agent_callback_manager.has_hooks(AgentCallbackEvent.BEFORE_TASK_ITERATION)
+        stream = await agent.attach_output()
+        assert stream is not None
+        await agent.send_input(SendInputRequest(
+            request_id="timeout-observability",
+            inputs={"query": "wait for cancellation"},
+        ))
+        chunks = [chunk async for chunk in stream]
+        assert any(getattr(chunk, "type", None) == "answer" for chunk in chunks)
+        assert fake.cancelled_count == 1
+
+        finished = exporter.get_finished_spans()
+        rounds = [span for span in finished if ".task_iteration." in span.name]
+        models = [span for span in finished if span.name == "chat fake"]
+        assert len(rounds) == 1
+        assert len(models) == 1
+        assert root.is_recording()
+        assert span_context.flush_child_spans(trace_id=root.context.trace_id) == 0
+        assert all(
+            span.attributes.get(OJ_SPAN_FORCED_CLOSE_REASON) != "trace_safety_flush"
+            for span in (*rounds, *models)
+        )
+    finally:
+        await agent.stop()
+        root.end()
+        await Runner.stop()
+        provider.shutdown()
+        span_context.reset_state()
+        span_context.set_active_span_tracker(None)

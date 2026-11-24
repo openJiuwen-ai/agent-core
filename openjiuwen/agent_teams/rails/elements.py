@@ -25,6 +25,7 @@ cached. State that must survive a rebuild lives in a reused object injected on
 the build context (e.g. ``reliability_components``) and passed into the fresh
 rail's constructor. Returning ``None`` gates the rail out for this member.
 """
+
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -36,11 +37,7 @@ from openjiuwen.agent_teams.harness.manifest import (
     harness_element,
     param_field,
 )
-from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
-from openjiuwen.harness.manifest.builtin_elements import (
-    OBSERVABILITY,
-    observability_dependency_installed,
-)
+from openjiuwen.agent_teams.rails import team_context as team_context_handles
 from openjiuwen.agent_teams.rails.team_context import (
     get_expert_binding,
     get_expert_catalog,
@@ -54,6 +51,11 @@ from openjiuwen.agent_teams.rails.team_context import (
     get_task_event_tracker,
     get_team_backend,
     get_workspace_manager,
+)
+from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
+from openjiuwen.harness.manifest.builtin_elements import (
+    OBSERVABILITY,
+    observability_dependency_installed,
 )
 
 # Element names (the RailSpec ``type`` values). The team rails live under the
@@ -93,7 +95,7 @@ class TeamToolInput(ConstructionInput):
     team_name: str = param_field(default="default", description="Team name.")
     team_permissions_enabled: bool = param_field(
         default=False,
-        description="Team permission toggle (enable_permissions from TeamAgentSpec).",
+        description="Keep Leader approval replies for team permissions or legacy member requests.",
     )
 
 
@@ -113,6 +115,7 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
     inp = TeamToolInput.resolve(params, context)
     return TeamToolRail(
         team_backend=backend,
+        extension_bus=team_context_handles.get_extension_bus(context),
         role=inp.role,
         teammate_mode=inp.teammate_mode,
         dispatch_mode=inp.dispatch_mode,
@@ -198,6 +201,7 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
     backend = get_team_backend(context)
     return TeamPolicyRail(
         role=TeamRole(inp.role),
+        extension_bus=team_context_handles.get_extension_bus(context),
         member_prompt=inp.prompt,
         member_name=inp.member_name or None,
         display_name=inp.display_name,
