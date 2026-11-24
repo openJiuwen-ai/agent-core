@@ -45,14 +45,14 @@ files:
 
 ## 开关
 
-`ContextEngineConfig.enable_iteration_checkpoint`（默认 `False`）控制本能力。关闭时：
+`ContextEngineConfig.enable_iteration_checkpoint`（默认 `True`）控制本能力。关闭时：
 
 - `ReActAgent` 不取续跑点、不写任何 step 记录，也不关闭记录；循环行为与引入本特性前一致；
 - `TaskPlanningRail` 不做 todo.json 快照；滚回只在存在待续跑点时动作，关闭状态下自然不触发；
 - 全量 blob 的提交/恢复路径不变。
 - 开关只约束“写”：此前打开时已写入、尚未清理的记录仍会在 `pre_agent_execute` 回放，并在任务正常结束时由 `post_agent_execute` 清理；关闭开关不会跳过这部分已落盘进度。
 
-打开后每完成一轮完整迭代产生一次 KV 写入。内部方法（`Session`/`Checkpointer` 上的四个方法）在
+默认开启，每完成一轮完整迭代产生一次 KV 写入；宿主可显式关闭以回到引入前的循环行为。内部方法（`Session`/`Checkpointer` 上的四个方法）在
 两种状态下都存在，基类默认空操作。宿主按部署形态决定是否启用。
 
 ## 增量语义

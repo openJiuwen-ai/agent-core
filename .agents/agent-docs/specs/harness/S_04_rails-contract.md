@@ -185,7 +185,7 @@ author_email: yangzequ1@huawei.com
 17. **TaskPlanningRail 的 step 快照与滚回只在续跑边界生效**。`after_react_iteration` 在每轮
     完整迭代后读取 `{workspace}/{session_id}/todo.json`，把整张列表的原文写入 session 状态
     `__step_todo_snapshot__`（`{"exists", "content"}`，缺失时内容为空串），随 step 增量落盘；
-    `before_invoke` 仅在 `peek_agent_step_resume()` 非空时把文件滚回该快照。快照仅在 agent 配置`context_engine_config.enable_iteration_checkpoint` 打开时发生；关闭时 rail 不做文件读写。快照记录时文件不存在
+    `before_invoke` 仅在 `peek_agent_step_resume()` 非空时把文件滚回该快照。快照仅在 agent 配置`context_engine_config.enable_iteration_checkpoint` 开启时发生（默认开启）；显式关闭时 rail 不做文件读写。快照记录时文件不存在
     则不写文件（fs 无删除接口），由重跑那一轮的 `todo_create` 整表覆盖。读取失败、后端无法判定
     存在性时只记日志，不写状态、不阻断主链路。契约与 step 落盘的其余部分见
     [S_02](../../core_runtime/S_02_session-step-checkpoints.md)。
