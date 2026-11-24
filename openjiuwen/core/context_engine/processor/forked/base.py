@@ -51,6 +51,10 @@ class ContextProcessor(metaclass=MetaContextProcessor):
     re-entrant for concurrent contexts.
     """
 
+    # Keep rule-based offload/fold state out of client streams while retaining
+    # logs, callbacks and recorder history (see the core processor base).
+    suppress_stream_state_events: bool = False
+
     def __init__(self, config: BaseModel):
         """
         Store the processor-specific configuration.
