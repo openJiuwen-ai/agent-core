@@ -107,12 +107,14 @@ def _reap_worker(home: Path, worker: dict) -> concurrent.futures.Future | None:
                         # Retry termination off-loop after each short wait.
                         with contextlib.suppress(OSError):
                             process.kill()
+            while not _forget_worker(home, worker):
+                time.sleep(0.01)  # A short registry collision cannot strand a dead worker.
+            if process is not None:
+                # The process can no longer hold a write lock; pipe cleanup may take longer.
                 for stream in (process.stdin, process.stdout):
                     if stream is not None:
                         with contextlib.suppress(OSError, ValueError):
                             stream.close()
-            while not _forget_worker(home, worker):
-                time.sleep(0.01)  # A short registry collision cannot strand a dead worker.
         except OSError as exc:
             logger.warning("PersonalContext capacity cleanup failed (%s)", type(exc).__name__)
         finally:

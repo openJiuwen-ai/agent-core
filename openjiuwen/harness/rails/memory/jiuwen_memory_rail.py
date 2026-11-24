@@ -26,7 +26,9 @@ provider 由宿主注入——典型为 agent-memory 适配包的
    缺省空串让"跨会话共享"成为显式契约，要隔离时由宿主显式传入。
 4. **工具 id 前缀** ``jiuwen_memory_<tool_name>``（基线为
    ``external_memory_<provider.name>_<tool_name>``）。
-5. **交互轮次聚合**：按真实会话暂存原始请求和已接受的 ask_user 回答，
+5. **可选经验同步**：宿主传入 ``sync_experience`` 后，同一 Rail 采集工具证据、
+   处理等待/完成状态并异步提交轨迹；不传时不注册状态工具、不采集轨迹。
+6. **交互轮次聚合**：按真实会话暂存原始请求和已接受的 ask_user 回答，
    最终回复后提交一次 sync_turn；暂存最多 16,000 字符、128 个会话，
    30 分钟未活动后在后续前台调用中淘汰，不持久化。
 
@@ -34,11 +36,13 @@ provider 由宿主注入——典型为 agent-memory 适配包的
 ``JiuwenMemoryRail(provider, user_id=..., scope_id=..., session_id=...)`` 挂载。
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import os
 import time
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.base import ToolCard
@@ -53,6 +57,9 @@ from openjiuwen.harness.prompts.sections.external_memory import (
     build_external_memory_section,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.rails.memory.experience_capture import (
+    STATUS_TOOL, ExperienceCapture, ExperienceSync, drain_experience_writes, register_status_tool,
+)
 from openjiuwen.harness.rails.memory.memory_turn import MemoryTurnBuffer
 
 EXTERNAL_MEMORY_PREFETCH_SECTION = "external_memory_prefetch"
@@ -75,6 +82,8 @@ class JiuwenMemoryRail(DeepAgentRail):
             下发（scope 隔离）。
         agent_id: 当前 deepagent 的 agent 标识，缺省 ``""`` = 不按 agent 隔离。
         session_id: 缺省 ``""`` = 跨会话共享（见差异 3）；显式传值才按会话隔离。
+        sync_experience: Optional async callback receiving completed task trajectories.
+            None keeps experience capture and the task-status tool disabled.
         session_end_extract: ``uninit`` 时是否触发 ``provider.on_session_end``
             批量 EXTRACT（见差异 1，缺省 False）。
     """
@@ -91,8 +100,18 @@ class JiuwenMemoryRail(DeepAgentRail):
         agent_id: str = "",
         session_id: str = "",
         session_end_extract: bool = False,
+        sync_experience: ExperienceSync | None = None,
     ):
         super().__init__()
+        self._sync_experience = sync_experience
+        self._experience_writes: set[asyncio.Task[None]] = set()
+        self._experience = ExperienceCapture(
+            sync_experience,
+            self._experience_writes,
+            resolve_user_text=self._resolve_user_text_for_memory,
+            extract_output=self._extract_assistant_output,
+            is_background=self._is_background_run,
+        ) if sync_experience is not None else None
         self._provider = provider
         self._user_id = user_id
         self._scope_id = scope_id
@@ -113,6 +132,7 @@ class JiuwenMemoryRail(DeepAgentRail):
         self._prefetch_invoke_id: Optional[int] = None
         # Serialized sync_turn + circuit breaker
         self._sync_task: Optional[asyncio.Task] = None
+        self._shutdown_task: asyncio.Task[None] | None = None
         self._sync_consecutive_failures: int = 0
         self._sync_breaker_until: float = 0.0
         # Project resolved from the current invoke context; injected into
@@ -148,6 +168,13 @@ class JiuwenMemoryRail(DeepAgentRail):
             return
 
         self._register_provider_tools(agent)
+        if self._experience is not None:
+            try:
+                card = register_status_tool(agent)
+                if card is not None:
+                    self._owned_tool_cards[card.name] = card
+            except Exception as exc:
+                logger.warning("Experience status tool registration failed: %s", type(exc).__name__)
         # Inject provider's static system prompt block
         if self.system_prompt_builder:
             prompt_block = self._provider.system_prompt_block()
@@ -158,6 +185,8 @@ class JiuwenMemoryRail(DeepAgentRail):
                     self.system_prompt_builder.add_section(section)
 
     def uninit(self, agent) -> None:
+        if self._experience is not None:
+            self._experience.clear()
         self._turn_buffer.clear()
         # Unregister tools owned by this rail from the agent
         if hasattr(agent, "ability_manager"):
@@ -180,39 +209,31 @@ class JiuwenMemoryRail(DeepAgentRail):
             self.system_prompt_builder = None
         self.attachment_manager = None
 
-        # 差异 1：撤销前触发会话末批量 EXTRACT（可选；provider 内部自捕获异常）。
-        async def _session_end_if_enabled() -> None:
-            if self._session_end_extract and self._initialized:
+        if self._shutdown_task is not None and not self._shutdown_task.done():
+            return
+        extract_on_close = self._session_end_extract and self._initialized
+        self._initialized = False
+
+        async def shutdown() -> None:
+            await self.drain_experience()
+            if extract_on_close:
                 try:
                     await self._provider.on_session_end([])
                 except Exception as exc:
                     logger.warning(f"[JiuwenMemoryRail] on_session_end failed: {exc}")
+            try:
+                await asyncio.wait_for(self._provider.shutdown(), timeout=10.0)
+            except TimeoutError:
+                logger.warning("[JiuwenMemoryRail] provider shutdown timed out")
+            except Exception as exc:
+                logger.warning(f"[JiuwenMemoryRail] provider shutdown error: {exc}")
 
-        # Async shutdown via LspRail pattern
         try:
             loop = asyncio.get_running_loop()
-
-            async def _shutdown_with_timeout():
-                await _session_end_if_enabled()
-                try:
-                    await asyncio.wait_for(self._provider.shutdown(), timeout=10.0)
-                except asyncio.TimeoutError:
-                    logger.warning("[JiuwenMemoryRail] provider shutdown timed out")
-                except Exception as e:
-                    logger.warning(f"[JiuwenMemoryRail] provider shutdown error: {e}")
-
-            future = asyncio.run_coroutine_threadsafe(_shutdown_with_timeout(), loop)
-            future.result(timeout=15.0)
         except RuntimeError:
-            try:
-                asyncio.run(_session_end_if_enabled())
-                asyncio.run(self._provider.shutdown())
-            except Exception as exc:
-                logger.warning(f"[JiuwenMemoryRail] shutdown failed: {exc}")
-        except Exception as exc:
-            logger.warning(f"[JiuwenMemoryRail] shutdown failed: {exc}")
-
-        self._initialized = False
+            asyncio.run(shutdown())
+        else:
+            self._shutdown_task = loop.create_task(shutdown())
 
     async def end_session(self, messages=None) -> None:
         """会话正常关闭时由宿主显式调用的批量 EXTRACT 入口（差异 1）。
@@ -237,6 +258,8 @@ class JiuwenMemoryRail(DeepAgentRail):
         if not self._available:
             return
 
+        if self._shutdown_task is not None:
+            await asyncio.shield(self._shutdown_task)
         self._turn_buffer.begin(ctx)
 
         if not self._initialized:
@@ -252,6 +275,11 @@ class JiuwenMemoryRail(DeepAgentRail):
             except Exception as e:
                 logger.error(f"[JiuwenMemoryRail] Provider initialize failed: {e}")
         await self.before_model_call(ctx)
+        if self._initialized and self._experience is not None:
+            try:
+                self._experience.begin(ctx)
+            except Exception as exc:
+                logger.warning("Agent experience capture failed: %s", type(exc).__name__)
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         if not self._initialized or not self._available:
@@ -328,10 +356,20 @@ class JiuwenMemoryRail(DeepAgentRail):
         """Capture accepted ask_user results, after interrupt ownership routing."""
         if self._initialized and self._available:
             self._turn_buffer.capture_answer(ctx)
+            if self._experience is not None:
+                try:
+                    self._experience.capture_tool(ctx, owns_status_tool=STATUS_TOOL in self._owned_tool_cards)
+                except Exception as exc:
+                    logger.warning("Agent experience capture failed: %s", type(exc).__name__)
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         if not self._initialized or not self._available:
             return
+        if self._experience is not None:
+            try:
+                self._experience.finish(ctx)
+            except Exception as exc:
+                logger.warning("Single Agent experience capture failed: %s", type(exc).__name__)
         completed = self._turn_buffer.finish(ctx)
         if completed is None:
             return
@@ -385,6 +423,10 @@ class JiuwenMemoryRail(DeepAgentRail):
                 self._record_sync_failure(str(e))
 
         self._sync_task = asyncio.create_task(_serialized_sync())
+
+    async def drain_experience(self) -> None:
+        """Finish pending writes before the host closes the shared provider."""
+        await drain_experience_writes(self._experience_writes)
 
     def _record_sync_failure(self, reason: str) -> None:
         """累加失败计数，连续超阈值时开启熔断（复用原 after_invoke 内联逻辑）。"""

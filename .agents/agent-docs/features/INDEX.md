@@ -29,6 +29,7 @@ generated: true
 | [harness](#module-harness) |
 | [harness/rails](#module-harness-rails) |
 | [harness/rails/evolution](#module-harness-rails-evolution) |
+| [harness/rails/memory](#module-harness-rails-memory) |
 | [harness/subagents](#module-harness-subagents) |
 | [harness/tools/browser_move](#module-harness-tools-browser_move) |
 | [harness_providers](#module-harness_providers) |
@@ -366,6 +367,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [F_20261123_1139_trajectory-sequence-store](F_20261123_1139_trajectory-sequence-store.md) | F | 演进轨迹消息序列共享 | zhangzhongteng | 无独立 D：依据用户在本次任务中提供并要求执行的方案，无独立 D 文件。 |
+
+<a id="module-harness-rails-memory"></a>
+
+## harness/rails/memory
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261118_2106_provider-backed-experience-rail](F_20261118_2106_provider-backed-experience-rail.md) | F | Provider 驱动的经验记忆 Rail | wanghanru | 无独立 D：复用普通记忆 Rail 与 Provider 边界的方案在本次开发前由用户确认。 |
 
 <a id="module-harness-subagents"></a>
 

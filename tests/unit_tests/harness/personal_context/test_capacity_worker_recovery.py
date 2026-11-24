@@ -501,21 +501,27 @@ async def test_dead_worker_identity_is_cleared_even_when_handle_cleanup_is_delay
     _tree(tmp_path)
     worker = await ready_worker(tmp_path)
     process = worker["process"]
-    original_wait = process.wait
+    closing_pipe = threading.Event()
+    release_pipe = threading.Event()
+    original_close = process.stdin.close
 
-    def slow_cleanup(*args, **kwargs):
-        result = original_wait(*args, **kwargs)
-        time.sleep(0.25)
-        return result
+    def delayed_close():
+        closing_pipe.set()
+        release_pipe.wait(15)
+        original_close()
 
-    monkeypatch.setattr(process, "wait", slow_cleanup)
+    monkeypatch.setattr(process.stdin, "close", delayed_close)
     try:
         await capacity._close_capacity_worker(tmp_path)
+        await until(closing_pipe.is_set)
         assert process.poll() is not None
         assert tmp_path not in capacity._CAPACITY_WORKERS
+        assert not process.stdin.closed
         new_pid = await _recover_and_reclaim(tmp_path)
         assert new_pid != process.pid
     finally:
+        release_pipe.set()
+        await until(lambda: process.stdin.closed and process.stdout.closed)
         await capacity._close_capacity_worker(tmp_path)
 
 

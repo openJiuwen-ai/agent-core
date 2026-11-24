@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/rails/` |
-| 最近一次修订日期 | 2026-11-23 |
+| 最近一次修订日期 | 2026-11-24 |
 | 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_21_cua-desktop-subagent.md`、`F_22_cli-jiuwen-memory-rail-mount-and-switch.md` |
 
 ## 范围 / 边界
@@ -44,6 +44,14 @@ author_email: yangzequ1@huawei.com
 - 挂载生命周期：`init` 由 core `init_rail` 调用，`uninit` 撤销；rail 按对象身份管理。
 - 两套平行拦截体系（`BaseInterruptRail` vs `BaseSecurityRail`）与决策类型。
 - `rails/__init__.py` 的公开导出面（`__all__`）。
+
+### 经验记忆 Rail
+
+1. 宿主通过 `JiuwenMemoryRail` 或 `JiuwenMemoryCodingRail` 的 `sync_experience` 参数开启可选经验同步；省略回调时不注册任务状态工具、不采集或提交经验，普通检索与 sync_turn 行为不变。
+2. `set_task_status` 只标记当前执行。Rail 记录实际工具调用和结果，沿结构化中断恢复接续同一执行，等待中的执行须在完成标记后正常结束才能提交。
+3. Core 通过宿主提供的异步 `sync_experience` 交付轨迹 ID、用户请求、最终输出、工具证据与会话 ID。共享空间、鉴权和持久化由宿主及 Provider 决定。
+4. 经验采集或同步失败不得阻断工具回调和普通 sync_turn 保存；不开启经验时不要求 Provider 实现经验回调。
+5. Work Rail 可由宿主显式等待在途提交，卸载时也会在关闭 Provider 前等待已提交的任务。Coding Rail 按挂载的 Agent 分开维护任务状态，并在 `drain()` 中等待经验提交和对话写入，最后一个 Agent 卸载后才关闭共享 Provider。未完成的任务状态保留在内存中。
 
 不在本规约范围内：
 - 具体 rail 的内部实现 —— 见各 rail 的 docstring 与 `rails/AGENTS.md`。
@@ -275,7 +283,7 @@ class BaseSecurityRail(AgentRail):
 
 ## Coding 文档记忆
 
-`JiuwenMemoryCodingRail(provider, *, user_id="__default__", scope_id="__default__", agent_id="jiuwenswarm", session_id="")` 从 `openjiuwen.harness.rails` 导出。
+`JiuwenMemoryCodingRail(provider, *, user_id="__default__", scope_id="__default__", agent_id="jiuwenswarm", session_id="", sync_experience=None)` 从 `openjiuwen.harness.rails` 导出。
 
 - init 注册 Provider 工具和静态提示词；首次 before_invoke 初始化 Provider，普通调用 prefetch(top_k=5)，后台调用传 background=True。
 - 同一轮只召回一次；before_model_call 向对应 Agent 的 PromptAttachmentManager 写入记忆来源上下文，整体召回预算 6 秒。
