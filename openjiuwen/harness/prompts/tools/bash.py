@@ -90,7 +90,9 @@ DESCRIPTION: Dict[str, str] = {
         "creating paths; quote spaces, prefer absolute paths. Clone repositories for source analysis."
         " Worktrees use project/.worktrees/<name>, base HEAD unless specified. Background work uses "
         "run_in_background, never trailing &; await notification without polling. Do not sleep before"
-        " status checks; necessary sleeps 1–5 seconds."
+        " status checks; necessary sleeps 1–5 seconds. Prefer new commits over amend and safer "
+        "alternatives to destructive Git commands. Never bypass hooks (--no-verify) or signing "
+        "(--no-gpg-sign) without explicit user authorization; diagnose hook failures instead."
     ),
 }
 

@@ -60,8 +60,8 @@ EDIT_FILE_DESCRIPTION: Dict[str, str] = {
     ),
     "en": (
         "Replace exact text after fully reading the file. old_string must match once unless "
-        "replace_all; add context if ambiguous. Empty old_string creates or empties a file. No .ipynb"
-        " edits."
+        "replace_all; add context if ambiguous. Empty old_string creates a missing file or writes to "
+        "an empty file; it cannot clear a non-empty file. No .ipynb edits."
     ),
 }
 
