@@ -595,6 +595,7 @@ class AgentConfigurator:
             # manager (no second attach path).
             resolved_language = self._blueprint.language if self._blueprint else "cn"
             self._attach_workspace_cache(spec, ctx, resolved_language)
+            self._bind_external_execution_environment(spec, ctx, member_runtime, resolved_language)
             return member_runtime
 
         agent_spec = self.resolve_agent_spec(
@@ -1484,6 +1485,37 @@ class AgentConfigurator:
         # manager's resident instance.
         if self.team_backend is not None:
             self.team_backend.attach_workspace_manager(self.workspace_manager)
+
+    def _bind_external_execution_environment(
+        self,
+        spec: TeamAgentSpec,
+        ctx: TeamRuntimeContext,
+        member_runtime: "MemberRuntime",
+        language: str,
+    ) -> None:
+        """Give an external harness member the same environment policy as a native one.
+
+        A native member's ``BuildContext.resolve_execution_environment`` is
+        bound to its ``AbilityManager``; a third-party harness has none, so the
+        same per-member resolver is handed to the runtime and applied to the
+        provider process on every start. Without a platform build context
+        there is no policy to resolve.
+        """
+        bind = getattr(member_runtime, "bind_execution_environment", None)
+        if bind is None or spec.build_context is None:
+            return
+        from openjiuwen.agent_teams.rails.team_context import inject_team_handles
+
+        member_build_context = spec.build_context.derive(
+            member_name=ctx.member_name or "",
+            role=ctx.role.value,
+            language=language,
+            member_card_id=self._card.id,
+        )
+        # Per-member extras, as for a native member: never share the base dict.
+        member_build_context.extras = dict(member_build_context.extras)
+        inject_team_handles(member_build_context.extras, team_backend=self.team_backend)
+        bind(member_build_context.resolve_execution_environment)
 
     def _prepare_external_cli_workspace(
         self,
