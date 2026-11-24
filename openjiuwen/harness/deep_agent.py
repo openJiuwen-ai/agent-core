@@ -3177,7 +3177,9 @@ class DeepAgent(BaseAgent):
             # save_contexts 导致池/state 分裂的场景；显式传入 session 也避开
             # rewind 对 session_ref 的劫持。
             try:
-                await self._react_agent.context_engine.save_contexts(session)
+                _context_engine = getattr(self._react_agent, "context_engine", None)
+                if _context_engine is not None:
+                    await _context_engine.save_contexts(session)
             except Exception:
                 logger.warning(
                     "[DeepAgent] round-end save_contexts failed for task_id=%s",
