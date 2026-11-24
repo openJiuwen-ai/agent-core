@@ -457,6 +457,12 @@ config = ReActAgentConfig(max_iterations=3, on_max_iterations="final_answer")
 调用方必须检查最终结果，不能仅凭已输出文本判断收尾成功。rail 要求继续模型步骤或收尾期间有新用户输入时，
 也会回退到保留证据的错误结果，不突破工具迭代上限。
 
+`invoke` 的每个返回结果、以及流式路径写出的每个终结帧，还携带 `termination_reason`，
+取值为 `text_termination`、`max_iterations`、`force_finish`、`tool_interrupt`、`model_error`、
+`error`、`cancelled` 之一。取值集合是可扩展的线协议，调用方必须忽略未知取值，结果类别仍看
+`result_type`。取消的运行以 `result_type="cancelled"` 与 `termination_reason="cancelled"` 交付。
+例外一处：流式路径下，不属于模型错误族的框架错误仍以无终结帧的方式结束，原因由抛出的异常携带。
+
 中断或 continuation 恢复时，从持久化上下文提取当前轮仍可用的工具证据，不包含更早用户轮次。
 已被上下文压缩或保留策略删除的证据无法重建。`iterations_used` 沿用现有 ReAct 循环计数，
 Harness continuation 的预算语义保持不变。取消仍向外传播，rail 显式结束或中断的结果优先。

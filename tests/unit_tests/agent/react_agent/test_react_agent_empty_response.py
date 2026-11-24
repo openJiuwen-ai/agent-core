@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -8,39 +8,14 @@ from openjiuwen.core.foundation.llm import (
     UsageMetadata,
     UserMessage,
 )
-from openjiuwen.core.single_agent.agents.react_agent import (
-    EMPTY_RESPONSE_MSG,
-    ReActAgent,
-    ReActAgentConfig,
-)
-from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.single_agent.agents.react_agent import EMPTY_RESPONSE_MSG
+from tests.unit_tests.agent.react_agent._rig import build_react_agent_rig
 
 
 def _agent_with_model(*responses: AssistantMessage, max_iterations: int = 5):
-    agent = ReActAgent(card=AgentCard(name="empty-response-test"))
-    agent.configure(ReActAgentConfig(model_name="fake", max_iterations=max_iterations))
-    messages = []
-    context = MagicMock()
-    context.get_messages.side_effect = lambda **_: list(messages)
-    context.add_messages = AsyncMock(side_effect=lambda msg: messages.append(msg))
-
-    async def window(**kwargs):
-        return MagicMock(
-            get_messages=lambda: kwargs["system_messages"] + list(messages),
-            get_tools=lambda: kwargs["tools"],
-        )
-
-    context.get_context_window = AsyncMock(side_effect=window)
-    engine = MagicMock()
-    engine.create_context = AsyncMock(return_value=context)
-    engine.save_contexts = AsyncMock()
-    agent.context_engine = engine
-    session = MagicMock()
-    session.get_state.return_value = None
-    session.write_stream = AsyncMock()
-    model = MagicMock()
-    model.invoke = AsyncMock(side_effect=list(responses))
-    return agent, session, model, messages
+    return build_react_agent_rig(
+        *responses, card_name="empty-response-test", max_iterations=max_iterations
+    )
 
 
 def _empty(reasoning: str = "The table is ready: ...") -> AssistantMessage:

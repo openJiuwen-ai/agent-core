@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import uuid
 from typing import Any, Optional
+
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.utils.pydantic_compat import RestoreFieldDefaultsOnUnpickle
+from openjiuwen.core.single_agent.rail.base import AgentTerminationReason
 
 
 class InterruptKind:
@@ -125,9 +127,9 @@ class ToolCallInterruptRequest(InterruptRequest):
             tool_args=tool_call.arguments if hasattr(tool_call, "arguments") else None,
             index=tool_call.index if hasattr(tool_call, "index") else None,
         )
-        # FEAT-127 FR-06: the interrupt frame carries the reason in its declared
+        # The interrupt frame carries the reason in its declared
         # metadata field — merge, never overwrite a key the rail already wrote.
         metadata = dict(base_fields.get("metadata") or {})
-        metadata.setdefault("termination_reason", "tool_interrupt")
+        metadata.setdefault("termination_reason", AgentTerminationReason.TOOL_INTERRUPT.value)
         base_fields["metadata"] = metadata
         return cls.model_validate(base_fields)

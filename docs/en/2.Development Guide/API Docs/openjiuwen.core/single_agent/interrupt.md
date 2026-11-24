@@ -49,6 +49,9 @@ Creates a ToolCallInterruptRequest instance from an InterruptRequest and ToolCal
 
 When an interruption is triggered during Agent execution, the returned result structure is as follows:
 
+The interrupt result and the interrupt frame both carry `termination_reason="tool_interrupt"`
+(the frame keeps it under its declared `metadata`).
+
 ```python
 {
     'result_type': 'interrupt',

@@ -7,6 +7,7 @@ request-scoped carrier, the forceFinish declaration path, the AFTER_INVOKE
 fallback classification, each terminating branch of ReActAgent.invoke, the
 interrupt dict/frame carriers, and the stream terminal-frame guarantee.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -16,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import BaseError, ModelError, build_error
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.foundation.llm import AssistantMessage, UsageMetadata
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
@@ -35,48 +36,39 @@ from openjiuwen.core.single_agent.rail.base import (
     record_termination_reason,
     reset_termination_reason,
     restore_termination_scope,
+    terminal_frame_reason,
     termination_reason_of,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from tests.unit_tests.agent.react_agent._rig import build_react_agent_rig
 from tests.unit_tests.fixtures.mock_llm import MockLLMModel, create_text_response, create_tool_call_response
 
 # ---------------------------------------------------------------- helpers
 
+
 def _answer(text: str = "final answer") -> AssistantMessage:
-    return AssistantMessage(content=text, finish_reason="stop",
-                            usage_metadata=UsageMetadata(input_tokens=10, output_tokens=5, total_tokens=15))
+    return AssistantMessage(
+        content=text,
+        finish_reason="stop",
+        usage_metadata=UsageMetadata(input_tokens=10, output_tokens=5, total_tokens=15),
+    )
 
 
 def _empty() -> AssistantMessage:
-    return AssistantMessage(content="", finish_reason="stop",
-                            usage_metadata=UsageMetadata(input_tokens=10, output_tokens=0, total_tokens=10))
+    return AssistantMessage(
+        content="",
+        finish_reason="stop",
+        usage_metadata=UsageMetadata(input_tokens=10, output_tokens=0, total_tokens=10),
+    )
 
 
 def _agent(*responses: AssistantMessage, max_iterations: int = 5, on_max: str = "error"):
-    agent = ReActAgent(card=AgentCard(name="termination-reason-test"))
-    agent.configure(ReActAgentConfig(model_name="fake", max_iterations=max_iterations, on_max_iterations=on_max))
-    messages = []
-    context = MagicMock()
-    context.get_messages.side_effect = lambda **_: list(messages)
-    context.add_messages = AsyncMock(side_effect=lambda msg: messages.append(msg))
-
-    async def window(**kwargs):
-        return MagicMock(
-            get_messages=lambda: kwargs["system_messages"] + list(messages),
-            get_tools=lambda: kwargs["tools"],
-        )
-
-    context.get_context_window = AsyncMock(side_effect=window)
-    engine = MagicMock()
-    engine.create_context = AsyncMock(return_value=context)
-    engine.save_contexts = AsyncMock()
-    agent.context_engine = engine
-    session = MagicMock()
-    session.get_state.return_value = None
-    session.write_stream = AsyncMock()
-    model = MagicMock()
-    model.invoke = AsyncMock(side_effect=list(responses))
-    return agent, session, model, messages
+    return build_react_agent_rig(
+        *responses,
+        card_name="termination-reason-test",
+        max_iterations=max_iterations,
+        on_max_iterations=on_max,
+    )
 
 
 def _ctx() -> AgentCallbackContext:
@@ -86,6 +78,7 @@ def _ctx() -> AgentCallbackContext:
 
 
 # ---------------------------------------------------------------- carrier
+
 
 def test_record_first_wins_and_reset() -> None:
     reset_termination_reason()
@@ -105,17 +98,27 @@ def test_terminal_frame_claim_is_bound_to_the_result_object() -> None:
     assert claim_terminal_frame(second) is True  # a later run in the same task
 
 
+def test_terminal_frame_reason_maps_cancelled_and_defaults_to_error() -> None:
+    assert terminal_frame_reason({"result_type": "cancelled"}) is AgentTerminationReason.CANCELLED
+    assert terminal_frame_reason({"result_type": "answer"}) is AgentTerminationReason.TEXT_TERMINATION
+    assert terminal_frame_reason({"result_type": "interrupt"}) is AgentTerminationReason.TOOL_INTERRUPT
+    assert terminal_frame_reason({}) is AgentTerminationReason.ERROR
+
+
 def test_force_finish_reason_disambiguation() -> None:
     assert force_finish_reason({"output": "x"}) is AgentTerminationReason.FORCE_FINISH
     assert force_finish_reason({"result_type": "cancelled"}) is AgentTerminationReason.CANCELLED
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("exc,expected", [
-    (asyncio.CancelledError, AgentTerminationReason.CANCELLED),
-    (GeneratorExit, AgentTerminationReason.CANCELLED),
-    (RuntimeError, AgentTerminationReason.ERROR),
-])
+@pytest.mark.parametrize(
+    "exc,expected",
+    [
+        (asyncio.CancelledError, AgentTerminationReason.CANCELLED),
+        (GeneratorExit, AgentTerminationReason.CANCELLED),
+        (RuntimeError, AgentTerminationReason.ERROR),
+    ],
+)
 async def test_lifecycle_fallback_classifies_in_flight_exception(exc, expected) -> None:
     ctx = _ctx()
     with pytest.raises(BaseException):
@@ -173,6 +176,25 @@ def test_scope_restores_the_callers_reason() -> None:
     assert current_termination_reason() is AgentTerminationReason.FORCE_FINISH
 
 
+@pytest.mark.asyncio
+async def test_normal_run_inside_callers_except_block_is_not_misclassified() -> None:
+    """An invoke awaited from a caller's ``except`` block must not inherit it.
+
+    The fallback classification reads the exception that crossed the invoke
+    boundary; ``sys.exc_info()`` would report the caller's error instead.
+    """
+    reset_termination_reason()
+    ctx = _ctx()
+    try:
+        raise ValueError("caller's own error")
+    except ValueError as caller_error:
+        async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
+            pass
+        assert ctx.termination_reason is None
+        assert current_termination_reason() is None
+        assert termination_reason_of(caller_error) is None
+
+
 def test_raising_invoke_publishes_its_reason_on_the_exception() -> None:
     exc = RuntimeError("boom")
     assert termination_reason_of(exc) is None
@@ -196,6 +218,7 @@ def test_consume_force_finish_records_reason() -> None:
 
 # ---------------------------------------------------------------- invoke branches
 
+
 @pytest.mark.asyncio
 async def test_invoke_answer_carries_text_termination() -> None:
     agent, session, model, _ = _agent(_answer())
@@ -217,27 +240,36 @@ async def test_invoke_empty_response_carries_model_error() -> None:
 @pytest.mark.asyncio
 async def test_invoke_max_iterations_keeps_existing_fields() -> None:
     agent, session, model, _ = _agent(max_iterations=1)
-    model.invoke = AsyncMock(side_effect=[
-        create_tool_call_response("lookup", "{}", tool_call_id="c1"),
-        create_tool_call_response("lookup", "{}", tool_call_id="c2"),
-    ])
+    model.invoke = AsyncMock(
+        side_effect=[
+            create_tool_call_response("lookup", "{}", tool_call_id="c1"),
+            create_tool_call_response("lookup", "{}", tool_call_id="c2"),
+        ]
+    )
     agent.ability_manager.list_tool_info = AsyncMock(return_value=[])
     agent.ability_manager.execute = AsyncMock(return_value=[])
     with patch.object(agent, "_get_llm", return_value=model):
         result = await agent.invoke({"query": "hi"}, session=session)
     assert result["result_type"] == "error"
     assert result["termination_reason"] == "max_iterations"
-    for key in ("iterations_used", "truncated_by_max_iterations", "max_iterations",
-                "finalization_attempted", "finalization_succeeded"):
+    for key in (
+        "iterations_used",
+        "truncated_by_max_iterations",
+        "max_iterations",
+        "finalization_attempted",
+        "finalization_succeeded",
+    ):
         assert key in result
 
 
 @pytest.mark.asyncio
 async def test_invoke_model_error_records_model_error_and_raises() -> None:
     agent, session, model, _ = _agent()
-    model.invoke = AsyncMock(side_effect=ModelError(StatusCode.MODEL_CALL_FAILED, msg="down"))
+    # Production model errors are built with build_error, which yields a
+    # FrameworkError — not the ModelError subclass. Pin the classifier on that shape.
+    model.invoke = AsyncMock(side_effect=build_error(StatusCode.MODEL_CALL_FAILED, error_msg="down"))
     with patch.object(agent, "_get_llm", return_value=model):
-        with pytest.raises(ModelError) as excinfo:
+        with pytest.raises(BaseError) as excinfo:
             await agent.invoke({"query": "hi"}, session=session)
     # the run's scope is gone; the reason travels on the exception
     assert termination_reason_of(excinfo.value) is AgentTerminationReason.MODEL_ERROR
@@ -254,13 +286,23 @@ async def test_invoke_generic_error_records_error_and_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_invoke_force_finish_answer_and_cancelled_declarations() -> None:
-    from openjiuwen.core.single_agent.rail.base import AgentRail
+async def test_invoke_non_model_framework_error_is_a_plain_error() -> None:
+    """The counterpart of the model-error case: a non-model framework error is `error`."""
+    agent, session, model, _ = _agent()
+    model.invoke = AsyncMock(side_effect=build_error(StatusCode.CONTEXT_EXECUTION_ERROR, error_msg="ctx"))
+    with patch.object(agent, "_get_llm", return_value=model):
+        with pytest.raises(BaseError) as excinfo:
+            await agent.invoke({"query": "hi"}, session=session)
+    assert termination_reason_of(excinfo.value) is AgentTerminationReason.ERROR
 
+
+@pytest.mark.asyncio
+async def test_invoke_force_finish_answer_and_cancelled_declarations() -> None:
     for payload, expected in (
         ({"output": "intercepted", "result_type": "answer"}, "force_finish"),
         ({"output": "stop", "result_type": "cancelled"}, "cancelled"),
     ):
+
         class _Rail(AgentRail):
             async def before_model_call(self, ctx: AgentCallbackContext) -> None:
                 ctx.request_force_finish(payload)
@@ -279,9 +321,7 @@ async def test_non_model_framework_error_records_error_and_writes_no_frame() -> 
     agent, session, model, _ = _agent(_answer(), _answer())
     broken = MagicMock()
     broken.get_messages = MagicMock(return_value=[])
-    broken.get_context_window = AsyncMock(
-        side_effect=build_error(StatusCode.CONTEXT_EXECUTION_ERROR, error_msg="ctx")
-    )
+    broken.get_context_window = AsyncMock(side_effect=build_error(StatusCode.CONTEXT_EXECUTION_ERROR, error_msg="ctx"))
     broken.add_messages = AsyncMock()
     agent.context_engine.create_context = AsyncMock(return_value=broken)
     written: list = []
@@ -309,9 +349,7 @@ async def test_deep_agent_run_records_no_error_and_leaks_no_reason() -> None:
     reset_termination_reason()
     model = MockLLMModel()
     model.set_responses([create_text_response("deep answer")])
-    agent = DeepAgent(AgentCard(id="tr-deep")).configure(
-        DeepAgentConfig(model=model, enable_task_loop=False)
-    )
+    agent = DeepAgent(AgentCard(id="tr-deep")).configure(DeepAgentConfig(model=model, enable_task_loop=False))
     observed: list[str] = []
 
     class _Observer(AgentRail):
@@ -327,9 +365,7 @@ async def test_deep_agent_run_records_no_error_and_leaks_no_reason() -> None:
     try:
         with patch.object(agent.react_agent, "_get_llm", return_value=model):
             async for chunk in agent.stream({"query": "hi", "conversation_id": "tr-deep"}):
-                payload = getattr(chunk, "payload", None) or (
-                    chunk.get("payload") if isinstance(chunk, dict) else None
-                )
+                payload = getattr(chunk, "payload", None) or (chunk.get("payload") if isinstance(chunk, dict) else None)
                 if getattr(chunk, "type", None) == "answer" and isinstance(payload, dict):
                     frame_reasons.append(payload.get("termination_reason"))
     finally:
@@ -344,9 +380,11 @@ async def test_deep_agent_run_records_no_error_and_leaks_no_reason() -> None:
 async def test_force_finish_during_finalization_wins_over_max_iterations() -> None:
     """M-2: the exhaustion result is not delivered; the rail's finish is."""
     agent, session, model, _ = _agent(max_iterations=1, on_max="final_answer")
-    model.invoke = AsyncMock(side_effect=[
-        create_tool_call_response("lookup", "{}", tool_call_id="c1"),
-    ])
+    model.invoke = AsyncMock(
+        side_effect=[
+            create_tool_call_response("lookup", "{}", tool_call_id="c1"),
+        ]
+    )
     agent.ability_manager.list_tool_info = AsyncMock(return_value=[])
     agent.ability_manager.execute = AsyncMock(return_value=[])
 
@@ -366,9 +404,11 @@ async def test_force_finish_during_finalization_wins_over_max_iterations() -> No
 async def test_finalization_answer_dict_still_records_max_iterations() -> None:
     """J-09: an answer produced by exhaustion finalization keeps max_iterations."""
     agent, session, model, _ = _agent(max_iterations=1, on_max="final_answer")
-    model.invoke = AsyncMock(side_effect=[
-        create_tool_call_response("lookup", "{}", tool_call_id="c1"),
-    ])
+    model.invoke = AsyncMock(
+        side_effect=[
+            create_tool_call_response("lookup", "{}", tool_call_id="c1"),
+        ]
+    )
     agent.ability_manager.list_tool_info = AsyncMock(return_value=[])
     agent.ability_manager.execute = AsyncMock(return_value=[])
 
@@ -391,10 +431,13 @@ async def test_cancel_during_finalization_records_cancelled() -> None:
     """M-2: a cancellation inside finalization is cancelled, not max_iterations."""
     agent, session, model, _ = _agent(max_iterations=1, on_max="final_answer")
 
+    second_call_started = asyncio.Event()
+
     async def slow_second_call(messages, **kwargs):  # noqa: ANN001, ANN003
         if slow_second_call.calls == 0:
             slow_second_call.calls += 1
             return create_tool_call_response("lookup", "{}", tool_call_id="c1")
+        second_call_started.set()
         await asyncio.sleep(30)
         return create_tool_call_response("lookup", "{}", tool_call_id="c2")
 
@@ -405,14 +448,31 @@ async def test_cancel_during_finalization_records_cancelled() -> None:
 
     with patch.object(agent, "_get_llm", return_value=model):
         task = asyncio.create_task(agent.invoke({"query": "hi"}, session=session))
-        await asyncio.sleep(0.3)
+        await asyncio.wait_for(second_call_started.wait(), timeout=10)
         task.cancel()
         with pytest.raises(asyncio.CancelledError) as excinfo:
             await task
     assert termination_reason_of(excinfo.value) is AgentTerminationReason.CANCELLED
 
 
+@pytest.mark.asyncio
+async def test_cancellation_rail_declares_cancelled() -> None:
+    """The rail that really emits the cancelled declaration is covered end to end."""
+    from openjiuwen.rsi.harness_rsi.auto_harness.rails.cancellation_rail import CancellationRail
+
+    reset_termination_reason()
+    rail = CancellationRail()
+    rail.bind(SimpleNamespace(should_cancel=True))
+    ctx = _ctx()
+    await rail.before_tool_call(ctx)
+    request = ctx.consume_force_finish()
+    assert request is not None
+    assert request.result["result_type"] == "cancelled"
+    assert current_termination_reason() is AgentTerminationReason.CANCELLED
+
+
 # ---------------------------------------------------------------- interrupt carriers
+
 
 def test_hitl_interrupt_dict_and_frame_carry_reason() -> None:
     handler = ToolInterruptHandler(agent=MagicMock())
@@ -426,11 +486,12 @@ def test_hitl_interrupt_dict_and_frame_carry_reason() -> None:
 
 
 def test_from_tool_call_does_not_overwrite_existing_metadata() -> None:
-    request = InterruptRequest(metadata={"interrupt_kind": "approval"})
+    request = InterruptRequest(metadata={"interrupt_kind": "approval", "termination_reason": "custom"})
     tool_call = ToolCall(id="t1", type="function", name="x", arguments="{}")
     built = ToolCallInterruptRequest.from_tool_call(request, tool_call)
     assert built.metadata["interrupt_kind"] == "approval"
-    assert built.metadata["termination_reason"] == "tool_interrupt"
+    # a reason the caller already declared is kept, not overwritten
+    assert built.metadata["termination_reason"] == "custom"
 
 
 def test_workflow_interrupt_dict_carries_reason() -> None:
@@ -456,6 +517,7 @@ async def test_non_assistant_model_result_falls_back_to_model_error() -> None:
 
 
 # ---------------------------------------------------------------- nesting and concurrency
+
 
 @pytest.mark.asyncio
 async def test_nested_invoke_does_not_leak_reason_into_the_caller() -> None:
@@ -502,6 +564,7 @@ async def test_concurrent_invokes_keep_their_own_reason() -> None:
 
 # ---------------------------------------------------------------- stream frames
 
+
 async def _collect(agent, query="hi"):
     return [chunk async for chunk in agent.stream({"query": query, "conversation_id": agent.card.id})]
 
@@ -531,10 +594,10 @@ async def test_stream_model_error_writes_frame_then_raises() -> None:
 
     class _Failing(MockLLMModel):
         async def invoke(self, messages, **kwargs):  # noqa: ANN001, ANN003
-            raise ModelError(StatusCode.MODEL_CALL_FAILED, msg="down")
+            raise build_error(StatusCode.MODEL_CALL_FAILED, error_msg="down")
 
         async def stream(self, messages, **kwargs):  # noqa: ANN001, ANN003
-            raise ModelError(StatusCode.MODEL_CALL_FAILED, msg="down")
+            raise build_error(StatusCode.MODEL_CALL_FAILED, error_msg="down")
             yield  # pragma: no cover
 
     agent = ReActAgent(card=AgentCard(id="tr-stream-error"))
@@ -543,7 +606,7 @@ async def test_stream_model_error_writes_frame_then_raises() -> None:
     frames = []
     try:
         with patch.object(agent, "_get_llm", return_value=_Failing()):
-            with pytest.raises(ModelError):
+            with pytest.raises(BaseError):
                 async for chunk in agent.stream({"query": "hi", "conversation_id": agent.card.id}):
                     frames.append(chunk)
     finally:
@@ -558,12 +621,16 @@ async def test_stream_model_error_writes_frame_then_raises() -> None:
 async def test_stream_cancel_records_cancelled_and_keeps_cancelled_error() -> None:
     from openjiuwen.core.runner import Runner
 
+    slow_started = asyncio.Event()
+
     class _Slow(MockLLMModel):
         async def invoke(self, messages, **kwargs):  # noqa: ANN001, ANN003
+            slow_started.set()
             await asyncio.sleep(30)
             return create_text_response("late")
 
         async def stream(self, messages, **kwargs):  # noqa: ANN001, ANN003
+            slow_started.set()
             await asyncio.sleep(30)
             yield AssistantMessageChunk(content="late")
 
@@ -589,7 +656,7 @@ async def test_stream_cancel_records_cancelled_and_keeps_cancelled_error() -> No
         with patch.object(agent, "_get_llm", return_value=_Slow()):
             with patch.object(ReActAgent, "_write_invoke_result_to_stream", _spy):
                 task = asyncio.create_task(_collect(agent))
-                await asyncio.sleep(0.3)
+                await asyncio.wait_for(slow_started.wait(), timeout=10)
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await task

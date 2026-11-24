@@ -286,8 +286,8 @@ class ToolInterruptHandler:
             "result_type": "interrupt",
             "state": state_outputs,
             "interrupt_ids": interrupt_ids,
-            # FEAT-127 FR-06: the HITL interrupt dict carries the termination reason.
-            "termination_reason": "tool_interrupt",
+            # The HITL interrupt dict carries the termination reason.
+            "termination_reason": AgentTerminationReason.TOOL_INTERRUPT.value,
         }
 
     async def commit_interrupt(
@@ -299,7 +299,7 @@ class ToolInterruptHandler:
             sub_agent_outputs: list = None,
     ) -> Dict[str, object]:
         """Persist tool interruption state and return interrupt dict."""
-        # FEAT-127 FR-06: record the reason at the commit point.
+        # Record the reason at the commit point.
         record_termination_reason(AgentTerminationReason.TOOL_INTERRUPT)
         await self._agent.context_engine.save_contexts(session)
         self.save(state, session)

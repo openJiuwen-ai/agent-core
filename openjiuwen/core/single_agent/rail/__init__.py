@@ -18,7 +18,9 @@ from openjiuwen.core.single_agent.rail.base import (
     TaskIterationInputs,
     ToolCallInputs,
     UserMessageInputs,
+    current_termination_reason,
     rail,
+    termination_reason_of,
 )
 
 __all__ = [
@@ -38,5 +40,7 @@ __all__ = [
     "EventInputs",
     "ForceFinishRequest",
     "AgentTerminationReason",
+    "current_termination_reason",
     "rail",
+    "termination_reason_of",
 ]

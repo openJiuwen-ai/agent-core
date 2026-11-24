@@ -63,9 +63,6 @@ from openjiuwen.core.foundation.llm import (
     ToolMessage,
     UserMessage,
 )
-from openjiuwen.core.foundation.llm import (
-    ToolCall as ToolCall,
-)
 from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
     ModelRequestConfig,
@@ -118,6 +115,7 @@ from openjiuwen.core.single_agent.rail.base import (
     record_termination_reason,
     reset_usage_attribution,
     reset_usage_invocation_id,
+    terminal_frame_reason,
     termination_reason_of,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -125,7 +123,7 @@ from openjiuwen.core.single_agent.tool_call_events import react_tool_call_scope
 
 
 def _is_model_error(err: BaseError) -> bool:
-    """Whether a framework error belongs to the model error family (FEAT-127 J-05).
+    """Whether a framework error belongs to the model error family.
 
     Production model errors are built from ``StatusCode.MODEL_*`` (whose name
     carries the ``MODEL_`` prefix) and map to the generic ``FrameworkError``
@@ -2888,12 +2886,12 @@ class ReActAgent(BaseAgent):
     def _build_interrupt_result(self, state: InterruptionState) -> Dict[str, Any]:
         """Build the interrupt result dict returned to the caller."""
         pending_entry = state.interrupted_workflows[state.pending_workflow_id]
-        record_termination_reason(AgentTerminationReason.TOOL_INTERRUPT)  # FEAT-127 FR-06
+        record_termination_reason(AgentTerminationReason.TOOL_INTERRUPT)
         return {
             "result_type": "interrupt",
             "workflow_execution_state": pending_entry.workflow_execution_state,
             "component_ids": [state.pending_component_id],
-            "termination_reason": str(AgentTerminationReason.TOOL_INTERRUPT),
+            "termination_reason": AgentTerminationReason.TOOL_INTERRUPT.value,
         }
 
     async def _commit_interrupt(
@@ -3396,9 +3394,9 @@ class ReActAgent(BaseAgent):
                                 tools,
                             )
                         except BaseError as err:
-                            # FEAT-127 FR-04 / J-05: the model error family ends the
+                            # The model error family ends the
                             # run as model_error; any other framework error is a plain
-                            # error (its stream keeps today's frame-less shape). The
+                            # error and keeps the frame-less stream it has always had. The
                             # exception still propagates unchanged.
                             ctx.finish(
                                 AgentTerminationReason.MODEL_ERROR
@@ -3415,7 +3413,7 @@ class ReActAgent(BaseAgent):
 
                         if not isinstance(ai_message, AssistantMessage):
                             invoke_inputs.result = ai_message if isinstance(ai_message, dict) else {}
-                            # Java parity (DP-5): the non-AssistantMessage branch maps by
+                            # Java parity: the non-AssistantMessage branch maps by
                             # result_type with MODEL_ERROR as its fallback
                             # (agent-core-java ReActAgent#terminationReasonForResult call site).
                             record_termination_reason(
@@ -3478,7 +3476,7 @@ class ReActAgent(BaseAgent):
                                     "finish_reason": ai_message.finish_reason or "null",
                                     "reasoning_present": bool(ai_message.reasoning_content),
                                 }
-                                # FEAT-127 FR-04: no usable final answer from the model.
+                                # No usable final answer from the model.
                                 ctx.finish(AgentTerminationReason.MODEL_ERROR)
                                 break
                             await self.context_engine.save_contexts(session)
@@ -3544,11 +3542,9 @@ class ReActAgent(BaseAgent):
             # after_invoke rails have fired; return result (possibly adapted by rails via ctx.extra)
             final_result = ctx.extra.get("invoke_result", invoke_inputs.result)
             if isinstance(final_result, dict):
-                # FEAT-127: the invoke result carries the same reason as the
+                # The invoke result carries the same reason as the
                 # terminal frame (a dict a rail injected may lack the key).
-                reason = ctx.termination_reason or reason_for_result(
-                    final_result, AgentTerminationReason.ERROR
-                )
+                reason = ctx.termination_reason or reason_for_result(final_result, AgentTerminationReason.ERROR)
                 final_result = {**final_result, "termination_reason": str(reason)}
             return final_result
         except asyncio.CancelledError:
@@ -3584,7 +3580,7 @@ class ReActAgent(BaseAgent):
                     if not abort_persisted:
                         await session.commit()
             finally:
-                # FEAT-127: the invoke scope (reset, classification, exception
+                # The invoke scope (reset, classification, exception
                 # publication and restore) is owned by AgentCallbackContext.lifecycle.
                 reset_usage_attribution(attribution_token)
                 reset_usage_invocation_id(invocation_token)
@@ -3618,7 +3614,7 @@ class ReActAgent(BaseAgent):
         request cannot execute another tool. Cancellation still propagates through
         invoke's normal abort/persistence path.
 
-        FEAT-127: the exhaustion reason is recorded only on the returns that
+        The exhaustion reason is recorded only on the returns that
         actually deliver this result. The finalization call can end the run by
         itself — a rail's forceFinish (its consumption records ``force_finish``
         or ``cancelled``) or a cancellation (the AFTER_INVOKE fallback records
@@ -3627,7 +3623,7 @@ class ReActAgent(BaseAgent):
         result = {
             "output": "Max iterations reached without completion",
             "result_type": "error",
-            "termination_reason": "max_iterations",
+            "termination_reason": AgentTerminationReason.MAX_ITERATIONS.value,
             "iterations_used": int(ctx.extra.get("_react_iteration", 0)),
             "truncated_by_max_iterations": True,
             "max_iterations": ctx.extra.get("_iteration_limit", self._config.max_iterations),
@@ -3706,7 +3702,13 @@ class ReActAgent(BaseAgent):
         result: Dict[str, Any],
         session: Session,
     ) -> None:
-        """Public wrapper — delegates to the internal implementation."""
+        """Public wrapper — delegates to the internal implementation.
+
+        Each run's terminal frame is written at most once: writing the same
+        result object a second time is dropped (the next run has its own
+        result). The delivered ``termination_reason`` value set is an additive
+        wire contract; consumers must ignore unknown values.
+        """
         await self._write_invoke_result_to_stream(result, session)
 
     async def _write_invoke_result_to_stream(
@@ -3740,17 +3742,15 @@ class ReActAgent(BaseAgent):
                         await session.write_stream(schema)
         else:
             if not claim_terminal_frame(result):
-                # FEAT-127 design 4.2.1: at most one answer-class terminal frame per run.
+                # At most one answer-class terminal frame per run.
                 logger.debug("terminal frame already written; dropping duplicate result_type=%s", result_type)
                 return
             # The frame always describes the run the payload belongs to: the
             # reason invoke wrote into the payload wins, then a record still in
             # scope, then the payload's own result_type mapping.
             declared = result.get("termination_reason")
-            reason: Any = (
-                declared
-                if declared
-                else current_termination_reason() or reason_for_result(result, AgentTerminationReason.ERROR)
+            reason: Union[AgentTerminationReason, str] = (
+                declared if declared else current_termination_reason() or terminal_frame_reason(result)
             )
             await session.write_stream(
                 OutputSchema(
@@ -3771,17 +3771,17 @@ class ReActAgent(BaseAgent):
         session: Session,
         note: str,
     ) -> None:
-        """Write a terminal frame that is a courtesy, not a promise (FEAT-127 FR-04, FR-07).
+        """Write a terminal frame that is a courtesy, not a promise.
 
         A consumer that stopped reading must not change how the run ended: the
-        caller's cancellation or original error is what propagates, so nothing
-        written here may escape an exception. ``note`` labels the frame in the
-        debug line when delivery fails.
+        caller's error is what propagates, so a failed delivery is logged, not
+        raised. Cancellation is not swallowed here — it propagates as usual.
+        ``note`` labels the frame in the warning line when delivery fails.
         """
         try:
             await self._write_invoke_result_to_stream(result, session)
-        except (Exception, asyncio.CancelledError):  # noqa: BLE001 - never mask the caller's cause
-            logger.debug("%s frame not delivered", note, exc_info=True)
+        except Exception:  # noqa: BLE001 - the caller's cause must win
+            logger.warning("%s frame not delivered", note, exc_info=True)
 
     async def stream(
         self,
@@ -3858,11 +3858,11 @@ class ReActAgent(BaseAgent):
             except asyncio.CancelledError as cancelled:
                 if _background_task_lifecycle is not None:
                     _background_task_lifecycle.begin_finalization(asyncio.current_task())
-                # FEAT-127 FR-07: best-effort cancelled frame (the consumer may
+                # Best-effort cancelled frame (the consumer may
                 # already be gone; delivery is not a hard promise). The reason
                 # was recorded by the AFTER_INVOKE fallback inside invoke.
                 cancelled_reason = termination_reason_of(cancelled) or AgentTerminationReason.CANCELLED
-                # FEAT-127: a cancellation that lands while this run's own result is
+                # A cancellation that lands while this run's own result is
                 # being written must not add a second terminal frame — the run ended
                 # by delivering a result, the frame already describes it.
                 if not result_received:
@@ -3882,23 +3882,24 @@ class ReActAgent(BaseAgent):
                 )
                 raise
             except BaseError as err:
-                abort_persisted = await self._handle_context_abort(
-                    session,
-                    marker="[Request interrupted by an unexpected error]",
-                    commit_session=self.is_agent_session,
-                )
-                # FEAT-127 FR-04: only a model-class framework error gets a terminal
-                # frame (design J-05); other BaseError keep today's frame-less stream.
+                # Only a model-class framework error gets a terminal frame; other
+                # BaseError keep the frame-less stream they had before. The frame
+                # is written before the abort marker, matching the cancel branch.
                 if termination_reason_of(err) is AgentTerminationReason.MODEL_ERROR:
                     await self._write_best_effort_frame(
                         {
                             "output": str(err),
                             "result_type": "error",
-                            "termination_reason": str(AgentTerminationReason.MODEL_ERROR),
+                            "termination_reason": AgentTerminationReason.MODEL_ERROR.value,
                         },
                         session,
                         "model-error",
                     )
+                abort_persisted = await self._handle_context_abort(
+                    session,
+                    marker="[Request interrupted by an unexpected error]",
+                    commit_session=self.is_agent_session,
+                )
                 raise
             except Exception as e:
                 logger.error("ReActAgent stream error: %s", e, exc_info=True)

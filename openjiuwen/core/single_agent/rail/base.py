@@ -461,23 +461,26 @@ class ForceFinishRequest:
 
 
 class AgentTerminationReason(StrEnum):
-    """How one invoke ended (FEAT-127; semantics aligned with Java).
+    """How one invoke ended (semantics aligned with Java).
 
     Serialized value == member name in lowercase snake case. The first value,
     ``max_iterations``, is the pre-existing string carried by the
     iteration-limit result dict; the rest are new.
+
+    The value set is an additive wire contract: new members may be introduced
+    in a minor release, so consumers must ignore unknown values.
     """
 
-    TEXT_TERMINATION = "text_termination"   # model produced a final answer
-    MAX_ITERATIONS = "max_iterations"       # iteration budget exhausted
-    FORCE_FINISH = "force_finish"           # a rail requested immediate finish
-    TOOL_INTERRUPT = "tool_interrupt"       # paused waiting for external input
-    MODEL_ERROR = "model_error"             # model call failed / no usable answer
-    ERROR = "error"                         # any other exception finished the run
-    CANCELLED = "cancelled"                 # the caller cancelled this run
+    TEXT_TERMINATION = "text_termination"  # model produced a final answer
+    MAX_ITERATIONS = "max_iterations"  # iteration budget exhausted
+    FORCE_FINISH = "force_finish"  # a rail requested immediate finish
+    TOOL_INTERRUPT = "tool_interrupt"  # paused waiting for external input
+    MODEL_ERROR = "model_error"  # model call failed / no usable answer
+    ERROR = "error"  # any other exception finished the run
+    CANCELLED = "cancelled"  # the caller cancelled this run
 
 
-#: Request-scoped carrier (FEAT-127 design 4.1.2). ``AgentCallbackContext`` is a
+#: Request-scoped carrier. ``AgentCallbackContext`` is a
 #: local object of ``_inner_invoke``; the terminal-frame writer, the public
 #: wrapper ``write_invoke_result_to_stream`` (called by harness/deep_agent.py
 #: after invoke returns on the same task) and the cancel path must read the
@@ -562,7 +565,7 @@ def claim_terminal_frame(result: Any) -> bool:
 
 
 def force_finish_reason(result: Dict[str, Any]) -> AgentTerminationReason:
-    """Disambiguation for the forceFinish channel (design 2.3.2 "取消声明").
+    """Disambiguation for the forceFinish channel ("cancellation declaration").
 
     A rail declares a cancellation by carrying ``result_type == "cancelled"``
     in its own result; every other forceFinish delivery records FORCE_FINISH.
@@ -587,6 +590,20 @@ def reason_for_result(result: Any, fallback: AgentTerminationReason) -> AgentTer
     # Java's terminationReasonForResult has exactly these two mappings; a
     # "cancelled" declaration travels the forceFinish channel (force_finish_reason).
     return fallback
+
+
+def terminal_frame_reason(result: Any) -> AgentTerminationReason:
+    """Fallback reason for the single terminal-frame writer.
+
+    The writer's documented order is: the payload key, then the scope record,
+    then this mapping — ``answer`` → ``text_termination``, ``cancelled`` →
+    ``cancelled``, ``interrupt``/``external_tool_call_required`` →
+    ``tool_interrupt``, everything else → ``error``. ``cancelled`` is handled
+    here and not in :func:`reason_for_result`, whose two mappings mirror Java.
+    """
+    if isinstance(result, dict) and result.get("result_type") == "cancelled":
+        return AgentTerminationReason.CANCELLED
+    return reason_for_result(result, AgentTerminationReason.ERROR)
 
 
 #: Union type for all typed event inputs
@@ -794,7 +811,7 @@ class AgentCallbackContext:
 
         Consumption is terminal by construction (every consumer returns the
         carried result), so consuming records the termination reason here —
-        one place covers all forceFinish sites (design 4.1.1: "凡消费即记录").
+        one place covers all forceFinish sites ("record on consumption").
         A rail declares cancellation by carrying ``result_type == "cancelled"``.
         """
         request = self._force_finish_request
@@ -805,7 +822,7 @@ class AgentCallbackContext:
 
     @staticmethod
     def finish(reason: AgentTerminationReason) -> None:
-        """Record how this run ended (FEAT-127).
+        """Record how this run ended.
 
         Must be called (by exactly one terminal branch) before AFTER_INVOKE
         fires; the reason is then carried by the terminal frame and by the
@@ -1017,7 +1034,7 @@ class AgentCallbackContext:
             after: Event to fire on exit (always)
         """
         is_invoke_scope = before is AgentCallbackEvent.BEFORE_INVOKE and after is AgentCallbackEvent.AFTER_INVOKE
-        # FEAT-127: an invoke is one request scope. Opening it here covers every
+        # An invoke is one request scope. Opening it here covers every
         # agent that drives this lifecycle (ReActAgent, DeepAgent, agent teams),
         # and the restore hands the caller's scope back — a nested agent awaited
         # inside a tool runs on the caller's task and would otherwise leak.
@@ -1028,7 +1045,7 @@ class AgentCallbackContext:
         try:
             await self.fire(before)
         except BaseException as entry_exc:
-            # FEAT-127: the scope opened above must close even when the BEFORE
+            # The scope opened above must close even when the BEFORE
             # event itself fails (a guardrail can abort the invoke there); the
             # after event is not fired in that case, matching the old shape.
             if is_invoke_scope:
@@ -1037,23 +1054,31 @@ class AgentCallbackContext:
                 restore_termination_scope(scope_previous)
             raise
         exc_to_raise = None
+        crossing_exc: Optional[BaseException] = None
         try:
             yield self
         except Exception as exc:
             exc_to_raise = exc
+            crossing_exc = exc
             self.exception = exc
+            raise
+        except BaseException as exc:
+            # CancelledError / GeneratorExit are not Exception; they still crossed
+            # this boundary and are what the run's classification must see.
+            crossing_exc = exc
             raise
         finally:
             self.inputs = saved_inputs
-            # FEAT-127 fallback classification (design 4.1.1): a terminal branch
-            # should have recorded already; when none did, the in-flight exception
-            # decides. CancelledError / GeneratorExit inherit BaseException, so
-            # ``except Exception`` above never captured them — read them directly.
+            # Fallback classification: a terminal branch should have recorded
+            # already; when none did, the exception that crossed this boundary
+            # decides. ``sys.exc_info()`` is not used: it reports whatever the
+            # caller happens to be handling, so an invoke awaited inside a
+            # caller's ``except`` block would inherit that unrelated exception.
             # A run that ended without an exception and without a record is not
             # classified here: agents other than ReActAgent record no reason of
             # their own, and their frame writer derives it from the result.
             if is_invoke_scope:
-                self._publish_invoke_reason(sys.exc_info()[1])
+                self._publish_invoke_reason(crossing_exc)
             try:
                 await self.fire(after)
             except Exception as callback_exc:
