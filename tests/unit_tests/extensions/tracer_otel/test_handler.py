@@ -8,8 +8,10 @@ relationships, and error marking.
 """
 
 import json
+from datetime import datetime, timedelta
 
 import pytest
+from opentelemetry import context as otel_context
 from opentelemetry import trace
 
 from openjiuwen.core.common.exception.codes import StatusCode as OJStatusCode
@@ -70,11 +72,8 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_ERROR,
     OJ_GEN_AI_METADATA,
     OJ_GEN_AI_REASONING_DURATION_MS,
-    OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS,
+    OJ_GEN_AI_RESPONSE_TPOT_MS,
     OJ_GEN_AI_TRACE_NAME,
-    OJ_GEN_AI_USAGE_INPUT_COST,
-    OJ_GEN_AI_USAGE_OUTPUT_COST,
-    OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_GEN_AI_USER_ID,
     OJ_INVOKE_ID,
     OJ_LLM_PREV_MESSAGE_COUNT,
@@ -87,10 +86,14 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_STREAM_OUTPUTS,
     OJ_TRACE_ID,
     OJ_WORKFLOW_COMPONENT_ID,
+    OJ_WORKFLOW_COMPONENT_NAME,
     OJ_WORKFLOW_COMPONENT_TYPE,
     OJ_WORKFLOW_ERROR_MESSAGE,
     OJ_WORKFLOW_ID,
+    OJ_WORKFLOW_INPUTS,
     OJ_WORKFLOW_INVOKE_DATA,
+    OJ_WORKFLOW_NAME,
+    OJ_WORKFLOW_OUTPUTS,
 )
 from tests.conftest_otel import _EXPORTER, _OTEL_TRACER
 
@@ -221,7 +224,8 @@ class TestOtelAgentHandler:
         assert handler._span_manager.get(agent_span.invoke_id) is None
         s = finished[0]
         assert s.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 0
-        assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == 0.0
+        # Usage cost values stay business data only — never span attributes.
+        assert "openjiuwen.gen_ai.usage.total_cost" not in s.attributes
 
     async def test_agent_llm_end_skips_moment_shaped_first_token_time(self):
         """A numeric timestamp is a moment, not a duration, and must not become TTFT."""
@@ -348,6 +352,68 @@ class TestOtelAgentHandler:
         # Base attributes present
         assert OJ_INVOKE_ID in finished[0].attributes
         assert OJ_TRACE_ID in finished[0].attributes
+
+    async def test_drop_agent_span_ends_open_retriever_span(self):
+        """drop_agent_span closes a span whose end event was never delivered.
+
+        Emitter degradation path (studio retrieval tool): trigger() raised so
+        on_retriever_end never ran. The span must be closed with OK status
+        plus a drop marker instead of staying half-open.
+        """
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_retriever_start(
+            span=agent_span,
+            inputs={"query": "hello"},
+            instance_info={"class_name": "knowledge_retrieval_tool"},
+        )
+        assert len(_EXPORTER.get_finished_spans()) == 0  # still open
+
+        handler.drop_agent_span(agent_span.invoke_id)
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        # Retrieval span naming follows the GenAI operation convention
+        # (this line's deliberate rename; display names differ across
+        # release branches — locate by operation attribute, not by name).
+        assert s.name == "retrieval"
+        assert s.attributes[GEN_AI_OPERATION_NAME] == "retrieval"
+        # Business call outcome is unknown; dropped ≠ error
+        assert s.status.status_code == trace.StatusCode.OK
+        drop_events = [e for e in s.events if e.name == "oj.span.dropped"]
+        assert len(drop_events) == 1
+        assert drop_events[0].attributes["reason"] == "end event undelivered by emitter"
+
+    async def test_drop_agent_span_unknown_invoke_id_is_noop(self):
+        """Dropping an id the handler never saw (or already ended) never raises."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        handler.drop_agent_span("never-existed")
+        assert len(_EXPORTER.get_finished_spans()) == 0
+
+    async def test_drop_agent_span_after_normal_end_is_noop(self):
+        """A span already ended by on_retriever_end is gone; drop is a no-op."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        await handler.on_retriever_start(
+            span=agent_span,
+            inputs={"query": "hello"},
+            instance_info={"class_name": "knowledge_retrieval_tool"},
+        )
+        await handler.on_retriever_end(span=agent_span, outputs={"document_count": 1})
+        assert len(_EXPORTER.get_finished_spans()) == 1
+
+        handler.drop_agent_span(agent_span.invoke_id)  # no raise, no dup span
+        assert len(_EXPORTER.get_finished_spans()) == 1
 
     async def test_agent_llm_prompt_redaction(self):
         """When redaction_enabled=True, inputs are hashed."""
@@ -608,6 +674,227 @@ class TestOtelAgentHandler:
 # ---------------------------------------------------------------------------
 # OtelWorkflowHandler tests
 # ---------------------------------------------------------------------------
+
+
+class TestOtelAgentHandlerRetriever:
+    """Retrieval operation child spans emitted by tool bodies via TracerAgentUtils."""
+
+    async def test_retriever_span_nests_under_open_tool_span(self):
+        """The retrieval span emitted inside a tool call parents onto the
+        still-open execute_tool span via the ambient OTel context."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        tool_span = span_manager.create_agent_span(agent_span)
+
+        await handler.on_plugin_start(
+            span=tool_span,
+            inputs={"inputs": {"query": "什么是九问"}},
+            instance_info={"class_name": "retrieval", "type": "plugin"},
+        )
+
+        retrieval_span = span_manager.create_agent_span(None)
+        await handler.on_retriever_start(
+            span=retrieval_span,
+            inputs={"query": "什么是九问"},
+            instance_info={"class_name": "retrieval", "type": "retriever"},
+        )
+        await handler.on_retriever_end(
+            span=retrieval_span, outputs={"results": ["doc-a", "doc-b"]}
+        )
+        await handler.on_plugin_end(span=tool_span, outputs={"outputs": "ok"})
+
+        finished = _EXPORTER.get_finished_spans()
+        # Locate spans by operation attribute — display names differ across
+        # release branches (tool.<name> vs execute_tool <name>).
+        by_op = {s.attributes.get(GEN_AI_OPERATION_NAME): s for s in finished}
+        assert set(by_op) == {"execute_tool", "retrieval"}
+
+        retrieval = by_op["retrieval"]
+        tool = by_op["execute_tool"]
+        assert retrieval.name == "retrieval"
+        assert retrieval.kind == trace.SpanKind.INTERNAL
+        assert retrieval.attributes[GEN_AI_RETRIEVAL_QUERY_TEXT] == "什么是九问"
+        assert list(retrieval.attributes[GEN_AI_RETRIEVAL_DOCUMENTS]) == ["doc-a", "doc-b"]
+        # Child-of-tool parenting: the retrieval span ended before the tool
+        # span, so the tool span context was the ambient context at start.
+        assert retrieval.parent is not None
+        assert retrieval.parent.span_id == tool.context.span_id
+
+    async def test_retriever_error_marks_error_and_ends(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        retrieval_span = span_manager.create_agent_span(None)
+
+        await handler.on_retriever_start(
+            span=retrieval_span,
+            inputs=None,
+            instance_info={"class_name": "retrieval", "type": "retriever"},
+        )
+        await handler.on_retriever_error(span=retrieval_span, error=RuntimeError("kb down"))
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.name == "retrieval"
+        assert s.status.status_code == trace.StatusCode.ERROR
+        assert s.attributes[OJ_AGENT_ERROR_MESSAGE] == "kb down"
+        # No query inputs → no query attribute.
+        assert GEN_AI_RETRIEVAL_QUERY_TEXT not in s.attributes
+        assert handler._span_manager.get(retrieval_span.invoke_id) is None
+
+    async def test_retriever_done_without_documents_skips_attribute(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        retrieval_span = span_manager.create_agent_span(None)
+
+        await handler.on_retriever_start(
+            span=retrieval_span,
+            inputs={"query": "q"},
+            instance_info={"class_name": "retrieval", "type": "retriever"},
+        )
+        # Empty results list → extractor returns None → attribute absent.
+        await handler.on_retriever_end(span=retrieval_span, outputs={"results": []})
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.name == "retrieval"
+        assert s.attributes[GEN_AI_RETRIEVAL_QUERY_TEXT] == "q"
+        assert GEN_AI_RETRIEVAL_DOCUMENTS not in s.attributes
+        assert s.status.status_code == trace.StatusCode.OK
+
+    async def test_retriever_done_without_open_span_is_noop(self):
+        """A done/error event whose start never registered a span must not
+        raise nor fabricate a span."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        orphan = span_manager.create_agent_span(None)
+
+        await handler.on_retriever_end(span=orphan, outputs={"results": ["x"]})
+        await handler.on_retriever_error(span=orphan, error=RuntimeError("late"))
+
+        assert _EXPORTER.get_finished_spans() == []
+
+
+class TestExplicitParentContext:
+    """嵌入侧显式父 refs（parent_span_id/parent_trace_id）优先于逻辑父与环境回退。
+
+    嵌入侧（studio 双写桥）llm span 的逻辑父不在本 handler 的 span manager
+    表里，环境回退又被链路中的上下文污染破坏（部署实证：llm span 与 node
+    span 并列、误挂死根）。修复：identity 通道显式携带 node span 的
+    (trace_id, span_id[, trace_flags])，on_llm_start 据此构造 NonRecordingSpan
+    父上下文——显式 > 逻辑 > 环境三级顺序，refs 缺失/非法时逐位回退既有
+    解析，行为不变。
+    """
+
+    @staticmethod
+    def _hex_ids(otel_span):
+        ctx = otel_span.get_span_context()
+        return f"{ctx.trace_id:032x}", f"{ctx.span_id:016x}"
+
+    async def test_llm_span_parents_onto_explicit_refs(self):
+        """refs 齐全 → llm span 落到给定 (trace_id, span_id) 下、同 trace。"""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+        node_span = _OTEL_TRACER.start_span(name="component.node-llm")
+        try:
+            trace_hex, span_hex = self._hex_ids(node_span)
+            span_manager = SpanManager("test-trace-id")
+            agent_span = span_manager.create_agent_span()
+            await handler.on_llm_start(
+                span=agent_span,
+                inputs={"prompt": "hi"},
+                instance_info={
+                    "class_name": "TestModel",
+                    "parent_trace_id": trace_hex,
+                    "parent_span_id": span_hex,
+                },
+            )
+        finally:
+            node_span.end()
+        await handler.on_llm_end(span=agent_span, outputs="ok")
+
+        llm = next(s for s in _EXPORTER.get_finished_spans() if s.name == "chat TestModel")
+        assert llm.parent is not None
+        assert f"{llm.parent.span_id:016x}" == span_hex
+        # 同 trace 才是真嵌套（并列两个 root 不算）
+        assert f"{llm.context.trace_id:032x}" == trace_hex
+
+    async def test_llm_span_without_refs_keeps_existing_resolution(self):
+        """无 refs（存量调用方）→ 父级解析与修复前逐位一致（无逻辑父→无父）。"""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "TestModel"}
+        )
+        await handler.on_llm_end(span=agent_span, outputs="ok")
+
+        llm = next(s for s in _EXPORTER.get_finished_spans() if s.name == "chat TestModel")
+        assert llm.parent is None or llm.parent.span_id == 0
+
+    async def test_llm_span_ignores_garbage_refs(self):
+        """非法 refs（非 hex / 全零）→ 视同缺失，不打断、不误挂。"""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs=None,
+            instance_info={
+                "class_name": "TestModel",
+                "parent_trace_id": "zz-not-hex",
+                "parent_span_id": "0000000000000000",
+            },
+        )
+        await handler.on_llm_end(span=agent_span, outputs="ok")
+
+        llm = next(s for s in _EXPORTER.get_finished_spans() if s.name == "chat TestModel")
+        assert llm.parent is None or llm.parent.span_id == 0
+
+    async def test_explicit_refs_beat_logical_parent(self):
+        """refs 与逻辑父并存 → 显式优先（嵌入桥的 node span 不在本表，但顺序必须钉死）。"""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+        node_span = _OTEL_TRACER.start_span(name="component.node-llm")
+        try:
+            trace_hex, span_hex = self._hex_ids(node_span)
+            span_manager = SpanManager("test-trace-id")
+            logical_parent = span_manager.create_agent_span()
+            await handler.on_chain_start(
+                span=logical_parent, inputs=None, instance_info={"class_name": "LogicalParent"},
+            )
+            agent_span = span_manager.create_agent_span(logical_parent)
+            await handler.on_llm_start(
+                span=agent_span,
+                inputs=None,
+                instance_info={
+                    "class_name": "TestModel",
+                    "parent_trace_id": trace_hex,
+                    "parent_span_id": span_hex,
+                },
+            )
+        finally:
+            node_span.end()
+        await handler.on_llm_end(span=agent_span, outputs="ok")
+        await handler.on_chain_end(span=logical_parent, outputs="done")
+
+        llm = next(s for s in _EXPORTER.get_finished_spans() if s.name == "chat TestModel")
+        logical = next(s for s in _EXPORTER.get_finished_spans() if s.name == "chain.LogicalParent")
+        assert llm.parent is not None
+        assert llm.parent.span_id == int(span_hex, 16)
+        assert llm.parent.span_id != logical.context.span_id
 
 
 class TestOtelWorkflowHandler:
@@ -1409,6 +1696,117 @@ class TestWorkflowIsolation:
         assert len(finished) == 2
 
 
+class TestSessionRebindDuringLiveRun:
+    """Foreign session/trace rebind mid-run must not wipe the live run's maps.
+
+    部署实证缺陷③的结构性成因：嵌入侧每次模型调用都新建裸会话，其
+    Tracer.init() 向全局注册的 WF handler 扇出 set_trace_id/set_session_id；
+    原逻辑见到不同 id 即 _cleanup_stale_spans，清空 _layer_root_spans/
+    _component_spans 并强关在途 span——后续组件（end）逻辑父查找落空，落
+    环境回退误挂到 llm span 上。守卫语义：工作流仍有 span 在录制时忽略
+    外来重绑（缓存与映射不动），跑完后再按原语义重绑/清理。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup(self):
+        _EXPORTER.clear()
+        self.handler = OtelWorkflowHandler(_OTEL_TRACER, OtelTracerConfig())
+
+    async def test_foreign_rebind_keeps_end_parent(self):
+        """外来重绑打在运行中：end 组件仍须挂在 wf 根下，而非环境里的 llm span。"""
+        await self.handler.on_call_start(
+            invoke_id="wf_root",
+            metadata={"workflow_id": "wf-1", "workflow_name": "demo"},
+        )
+        await self.handler.on_call_start(
+            invoke_id="node_llm",
+            metadata={
+                "workflow_id": "wf-1",
+                "component_id": "node_llm",
+                "component_type": "llm",
+                "component_name": "llm-node",
+            },
+            parent_node_id="wf_root",
+        )
+        root_span = self.handler._layer_root_spans["wf_root"].span
+        llm_state = self.handler._component_spans["node_llm"]
+        # 部署形态：llm 组件 span 在途且是环境当前 span（组件执行期 attach）
+        token = otel_context.attach(trace.set_span_in_context(llm_state.span))
+        try:
+            # 嵌入裸会话 Tracer.init() 扇出：随机 trace id + 不同 session id
+            self.handler.set_trace_id("3f2a8c1d" * 4)
+            self.handler.set_session_id("embedded-bare-session")
+
+            # 多轮续链缓存也不得被外来重绑打掉
+            assert self.handler._cached_root_ctx is not None
+
+            await self.handler.on_call_start(
+                invoke_id="node_end",
+                metadata={
+                    "workflow_id": "wf-1",
+                    "component_id": "node_end",
+                    "component_type": "end",
+                    "component_name": "end-node",
+                },
+                parent_node_id="wf_root",
+            )
+        finally:
+            otel_context.detach(token)
+
+        end_span = self.handler._component_spans["node_end"].span
+        assert end_span.parent is not None
+        assert end_span.parent.span_id == root_span.context.span_id
+
+    async def test_foreign_rebind_defers_until_run_ends(self):
+        """守卫只延迟不吞掉：跑完后同一外来 session id 照常完成重绑。"""
+        await self.handler.on_call_start(
+            invoke_id="wf_root",
+            metadata={"workflow_id": "wf-1", "workflow_name": "demo"},
+        )
+        await self.handler.on_call_start(
+            invoke_id="node_llm",
+            metadata={
+                "workflow_id": "wf-1",
+                "component_id": "node_llm",
+                "component_type": "llm",
+            },
+            parent_node_id="wf_root",
+        )
+
+        self.handler.set_session_id("embedded-bare-session")
+        assert self.handler._cached_session_id != "embedded-bare-session"
+
+        await self.handler.on_call_done(invoke_id="node_llm", outputs={})
+        await self.handler.on_call_done(invoke_id="wf_root", outputs={})
+
+        self.handler.set_session_id("embedded-bare-session")
+        assert self.handler._cached_session_id == "embedded-bare-session"
+
+    async def test_drop_workflow_spans_unblocks_rebind(self):
+        """泄漏兜底：span 永不结束时守卫永久短路重绑；drop_workflow_spans
+        强关泄漏 span（带 drop 标记事件）并解锁后续重绑。"""
+        await self.handler.on_call_start(
+            invoke_id="wf_root",
+            metadata={"workflow_id": "wf-1", "workflow_name": "demo"},
+        )
+        leaked = self.handler._layer_root_spans["wf_root"].span
+
+        # 泄漏形态：end/on_call_done 永不到达，守卫把外来重绑永久短路
+        self.handler.set_session_id("embedded-bare-session")
+        assert self.handler._cached_session_id != "embedded-bare-session"
+
+        self.handler.drop_workflow_spans()
+
+        assert leaked.end_time is not None
+        assert "oj.span.dropped" in [e.name for e in leaked.events]
+        assert self.handler._layer_root_spans == {}
+        assert self.handler._component_spans == {}
+
+        # 解锁后同一外来 session id 照常完成重绑
+        self.handler.set_session_id("embedded-bare-session")
+        assert self.handler._cached_session_id == "embedded-bare-session"
+
+
 class TestMultiRoundConversationTraceContinuity:
     """Test multi-round conversation trace continuity (Problem B core fix).
 
@@ -1574,6 +1972,67 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[OJ_GEN_AI_USER_ID] == "u-9"
         assert json.loads(s.attributes[OJ_GEN_AI_METADATA]) == {"user_id": "u-9", "channel": "web"}
 
+    async def test_llm_start_sets_workflow_identity_attrs(self):
+        """Decorator-forwarded identity adds workflow_id/workflow_name;
+        component_* keys are deliberately excluded — the backend's shell
+        discriminator must not appear on inner llm spans."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs=None,
+            instance_info={
+                "class_name": "TestModel",
+                "workflow_id": "wf-7",
+                "workflow_name": "triage-flow",
+                "component_id": "comp-1",
+                "component_name": "llm-node",
+                "metadata": {"origin": "decorator"},
+            },
+        )
+        await handler.on_llm_end(span=agent_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[OJ_WORKFLOW_ID] == "wf-7"
+        assert s.attributes[OJ_WORKFLOW_NAME] == "triage-flow"
+        assert OJ_WORKFLOW_COMPONENT_ID not in s.attributes
+        assert json.loads(s.attributes[OJ_GEN_AI_METADATA]) == {"origin": "decorator"}
+
+    async def test_agent_identity_workflow_keys_and_metadata_first_writer_wins(self):
+        """workflow_id/workflow_name/metadata are write-if-absent: a second
+        identity forward must not clobber the start-time values."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span = _OTEL_TRACER.start_span(name="identity-probe")
+        span.set_attribute(OJ_WORKFLOW_ID, "wf-first")
+        span.set_attribute(OJ_GEN_AI_METADATA, json.dumps({"origin": "first"}))
+
+        handler._set_agent_identity_attrs(
+            span,
+            {
+                "workflow_id": "wf-second",
+                "workflow_name": "late-flow",
+                "metadata": {"origin": "second"},
+            },
+        )
+
+        assert span.attributes[OJ_WORKFLOW_ID] == "wf-first"
+        # Absent keys are still written.
+        assert span.attributes[OJ_WORKFLOW_NAME] == "late-flow"
+        assert json.loads(span.attributes[OJ_GEN_AI_METADATA]) == {"origin": "first"}
+        span.end()
+
+    async def test_llm_span_decorator_capability_constant(self):
+        """Embedding applications (agent-studio's trace-compat gate) probe
+        this constant to decide whether decorator-measured llm spans are safe
+        to emit; the attribute missing means an older handler build."""
+        assert OtelAgentHandler.LLM_SPAN_DECORATOR_CAPABILITY >= 1
+
     async def test_llm_start_without_params_sets_no_request_attrs(self):
         config = OtelTracerConfig(redaction_enabled=False)
         handler = OtelAgentHandler(_OTEL_TRACER, config)
@@ -1590,7 +2049,7 @@ class TestGenAiSemconvAttrs:
         assert GEN_AI_REQUEST_TEMPERATURE not in s.attributes
         assert OJ_LLM_PREV_MESSAGE_COUNT not in s.attributes
 
-    async def test_llm_end_extracts_response_usage_and_cost_attrs(self):
+    async def test_llm_end_extracts_response_usage_attrs(self):
         config = OtelTracerConfig(redaction_enabled=False)
         handler = OtelAgentHandler(_OTEL_TRACER, config)
 
@@ -1626,9 +2085,80 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] == 5
         assert s.attributes[GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS] == 7
         assert s.attributes[GEN_AI_USAGE_REASONING_OUTPUT_TOKENS] == 3
-        assert s.attributes[OJ_GEN_AI_USAGE_INPUT_COST] == pytest.approx(0.001)
-        assert s.attributes[OJ_GEN_AI_USAGE_OUTPUT_COST] == pytest.approx(0.002)
-        assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == pytest.approx(0.003)
+        # Usage cost values stay business data only — never span attributes.
+        for key in ("openjiuwen.gen_ai.usage.total_cost",
+                    "openjiuwen.gen_ai.usage.input_cost",
+                    "openjiuwen.gen_ai.usage.output_cost"):
+            assert key not in s.attributes
+
+    async def test_llm_end_reads_usage_sibling_of_chunk_list(self):
+        """Decorator-measured streams: usage rides the container next to
+        "outputs" as a sibling; the chunk list itself cannot carry usage and
+        must not abort the read (baseline gap: a non-dict unwrapped obj
+        early-returned before any usage extraction)."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        await handler.on_llm_end(
+            span=agent_span,
+            outputs={
+                "outputs": [{"content": "to"}, {"content": "ken"}],
+                "usage_metadata": {
+                    "model_name": "stream-test",
+                    "input_tokens": 4,
+                    "output_tokens": 2,
+                    "ttft_seconds": 0.42,
+                    "inter_token_latency_ms": 12.5,
+                },
+            },
+        )
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_RESPONSE_MODEL] == "stream-test"
+        assert s.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 4
+        assert s.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 2
+        assert s.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.42)
+        assert s.attributes[OJ_GEN_AI_RESPONSE_TPOT_MS] == pytest.approx(12.5)
+        # A chunk list carries no finish_reason — skipped, not fatal.
+        assert GEN_AI_RESPONSE_FINISH_REASONS not in s.attributes
+
+    async def test_llm_end_sibling_usage_takes_precedence_over_embedded(self):
+        """The sibling is the decorator's freshest snapshot; a usage embedded
+        on the message (stale or provider-reported) must not win."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        message = AssistantMessage(
+            content="answer",
+            finish_reason="stop",
+            usage_metadata=UsageMetadata(model_name="embedded", input_tokens=1, output_tokens=1),
+        )
+        await handler.on_llm_end(
+            span=agent_span,
+            outputs={
+                "outputs": message,
+                "usage_metadata": {"model_name": "sibling", "input_tokens": 9, "output_tokens": 8},
+            },
+        )
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_RESPONSE_MODEL] == "sibling"
+        assert s.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 9
+        assert s.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 8
+        # finish_reason still read off the message itself.
+        assert list(s.attributes[GEN_AI_RESPONSE_FINISH_REASONS]) == ["stop"]
 
     async def test_llm_end_unwraps_outputs_container_into_content(self):
         """The {"outputs": AssistantMessage} wrapper must not swallow content."""
@@ -1846,9 +2376,6 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 0
         assert s.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 0
         assert s.attributes[GEN_AI_RESPONSE_MODEL] == ""
-        assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == 0.0
-        assert s.attributes[OJ_GEN_AI_USAGE_INPUT_COST] == 0.0
-        assert s.attributes[OJ_GEN_AI_USAGE_OUTPUT_COST] == 0.0
 
     async def test_llm_end_sets_streaming_and_reasoning_latency(self):
         """first_token_time parses to time_to_first_chunk; the *_ms latency
@@ -1871,7 +2398,7 @@ class TestGenAiSemconvAttrs:
         s = _EXPORTER.get_finished_spans()[0]
         assert s.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.35)
         # Declared schema has no producer for these yet — absent, not zero.
-        assert OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS not in s.attributes
+        assert OJ_GEN_AI_RESPONSE_TPOT_MS not in s.attributes
         assert OJ_GEN_AI_REASONING_DURATION_MS not in s.attributes
 
         # Raw-dict callers (and future UsageMetadata fields) flow through.
@@ -1883,6 +2410,8 @@ class TestGenAiSemconvAttrs:
         raw = {
             "outputs": {
                 "usage_metadata": {
+                    # Legacy producer key (agent-studio usage payload) — the
+                    # attribute is the converged tpot_ms either way.
                     "inter_token_latency_ms": 12.5,
                     "reasoning_duration_ms": 300.0,
                 }
@@ -1891,8 +2420,20 @@ class TestGenAiSemconvAttrs:
         await handler.on_llm_end(span=agent_span2, outputs=raw)
 
         s2 = _EXPORTER.get_finished_spans()[0]
-        assert s2.attributes[OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS] == pytest.approx(12.5)
+        assert s2.attributes[OJ_GEN_AI_RESPONSE_TPOT_MS] == pytest.approx(12.5)
         assert s2.attributes[OJ_GEN_AI_REASONING_DURATION_MS] == pytest.approx(300.0)
+
+        # Canonical payload key writes the same single attribute.
+        _EXPORTER.clear()
+        agent_span3 = span_manager.create_agent_span()
+        await handler.on_llm_start(
+            span=agent_span3, inputs=None, instance_info={"class_name": "M"},
+        )
+        raw3 = {"outputs": {"usage_metadata": {"tpot_ms": 7.5}}}
+        await handler.on_llm_end(span=agent_span3, outputs=raw3)
+
+        s3 = _EXPORTER.get_finished_spans()[0]
+        assert s3.attributes[OJ_GEN_AI_RESPONSE_TPOT_MS] == pytest.approx(7.5)
 
     async def test_llm_end_malformed_latency_skips_attrs_not_finalization(self):
         """A malformed latency value (str / list off a raw-dict caller) must
@@ -1920,7 +2461,7 @@ class TestGenAiSemconvAttrs:
         await handler.on_llm_end(span=agent_span, outputs=raw)
 
         s = _EXPORTER.get_finished_spans()[0]
-        assert OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS not in s.attributes
+        assert OJ_GEN_AI_RESPONSE_TPOT_MS not in s.attributes
         assert OJ_GEN_AI_REASONING_DURATION_MS not in s.attributes
         # Finalization survived: end attrs set, span closed, manager drained.
         assert OJ_END_TIME in s.attributes
@@ -2182,3 +2723,294 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[ERROR_TYPE] == "RuntimeError"
 
 
+
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[ERROR_TYPE] == "RuntimeError"
+
+
+
+
+class TestOtelWorkflowHandlerDeferredEndNode:
+    """Stream-consumer end nodes: span opens at the finalize marker, not the first chunk.
+
+    Mix-mode end nodes fire on_call_start at the FIRST CHUNK (passive stream
+    consumption), which made the end-node span appear before downstream batch
+    nodes in the waterfall and inflated its duration by the whole streaming
+    window. The begin event now carries metadata.defer_span_start for
+    stream-path end nodes; the handler stashes it and opens the span at
+    on_call_finalize (emitted when the stream is fully consumed). Fallback:
+    if the marker never arrives, on_call_done materializes the span with the
+    stashed first-chunk timestamp, reproducing the old [begin, done] window.
+    """
+
+    _END_METADATA = {
+        "workflow_id": "wf1",
+        "component_id": "end1",
+        "component_name": "结束",
+        "component_type": "End",
+        "defer_span_start": True,
+    }
+
+    async def _start_deferred_end_node(self, handler):
+        await handler.on_call_start(
+            invoke_id="end1",
+            metadata=dict(self._END_METADATA),
+            parent_node_id="",
+            session_id="workflow-session-123",
+        )
+
+    async def test_end_node_span_deferred_until_finalize_marker(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        # No span yet: first chunk is passive consumption, not execution.
+        assert "end1" in handler._deferred_end_starts
+        assert handler._span_manager.get("end1") is None
+        assert len(_EXPORTER.get_finished_spans()) == 0
+
+        # Stream chunks during the deferral window are buffered, not dropped.
+        await handler.on_pre_stream("end1", {"payload": "chunk-1"})
+        await handler.on_pre_stream("end1", {"payload": "chunk-2"})
+        assert len(handler._deferred_end_starts["end1"]["stream_inputs"]) == 2
+
+        await handler.on_call_finalize("end1")
+        assert "end1" not in handler._deferred_end_starts
+        assert handler._span_manager.get("end1") is not None
+
+        await handler.on_call_done("end1", outputs={"answer": "done"})
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.name == "component.end1"
+        # Buffered stream inputs replayed onto the materialized span.
+        assert OJ_STREAM_INPUTS in s.attributes
+        assert "chunk-1" in s.attributes[OJ_STREAM_INPUTS]
+        assert "chunk-2" in s.attributes[OJ_STREAM_INPUTS]
+        assert s.attributes[OJ_WORKFLOW_COMPONENT_ID] == "end1"
+        assert s.attributes[OJ_SESSION_ID] == "workflow-session-123"
+
+    async def test_end_node_fallback_opens_span_with_begin_timestamp(self):
+        """Marker never arrived (stream error): on_call_done falls back to the
+        old [first-chunk, done] window via the stashed begin timestamp."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        stash = handler._deferred_end_starts["end1"]
+        begin_time = stash["begin_time"]
+
+        await handler.on_pre_stream("end1", {"payload": "chunk-1"})
+        # No on_call_finalize — straight to done (error path).
+        await handler.on_call_done("end1", outputs=None)
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.attributes[OJ_START_TIME] == str(begin_time)
+        assert "chunk-1" in s.attributes[OJ_STREAM_INPUTS]
+        assert "end1" not in handler._deferred_end_starts
+
+    async def test_error_path_materializes_deferred_end_node_span(self):
+        """End node failing before the finalize marker: on_invoke(exception)
+        materializes the stashed span so the error marking has a target.
+
+        On the error path core raises before both materializers (the finalize
+        marker in stream_call and on_call_done in call), so on_invoke is the
+        only remaining entry point — without it the end-node span disappears
+        and the stash leaks.
+        """
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        stash = handler._deferred_end_starts["end1"]
+        begin_time = stash["begin_time"]
+        await handler.on_pre_stream("end1", {"payload": "chunk-1"})
+
+        await handler.on_invoke(invoke_id="end1", exception=RuntimeError("end node failed"))
+
+        assert "end1" not in handler._deferred_end_starts
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        # Name policy differs across release lines (human-readable component
+        # name vs component id); pin the stable component-id attribute.
+        assert s.name.startswith("component.")
+        assert s.attributes[OJ_WORKFLOW_COMPONENT_ID] == "end1"
+        assert s.attributes[ERROR_TYPE] == "RuntimeError"
+        assert s.attributes[OJ_STATUS] == NodeStatus.ERROR.value
+        assert s.attributes[OJ_START_TIME] == str(begin_time)
+        # Buffered stream chunks replayed onto the materialized span.
+        assert "chunk-1" in s.attributes[OJ_STREAM_INPUTS]
+
+    async def test_interrupt_path_materializes_deferred_end_node_span(self):
+        """GraphInterrupt on a deferred end node: span materializes and is
+        marked interrupted (control-flow signal, no OTel error status), stash
+        popped."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        await handler.on_pre_stream("end1", {"payload": "chunk-1"})
+
+        await handler.on_invoke(
+            invoke_id="end1",
+            exception=GraphInterrupt(Interrupt({"wait_for": "user_input"})),
+        )
+
+        assert "end1" not in handler._deferred_end_starts
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.name.startswith("component.")
+        assert s.attributes[OJ_WORKFLOW_COMPONENT_ID] == "end1"
+        assert s.attributes[OJ_STATUS] == NodeStatus.INTERRUPTED.value
+        assert ERROR_TYPE not in s.attributes
+
+    async def test_deferred_window_batch_payload_replayed(self):
+        """Batch-invoke events inside the deferral window must not be dropped.
+
+        Mix-mode end nodes fire on_pre_invoke / on_post_invoke while the span
+        is still stashed (the stream begin won the single-fire guard).
+        on_post_invoke is the only source of the end node's final outputs,
+        so both payloads are buffered and replayed at materialization.
+        """
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        # Batch-side events inside the window (stream begin won the guard).
+        await handler.on_pre_invoke(
+            "end1",
+            inputs={"question": "q1"},
+            component_metadata={"component_id": "end1", "component_name": "结束"},
+        )
+        await handler.on_pre_stream("end1", {"payload": "chunk-1"})
+        await handler.on_post_invoke("end1", outputs={"answer": "final-answer"})
+        assert handler._deferred_end_starts["end1"]["inputs"] == {"question": "q1"}
+        assert handler._deferred_end_starts["end1"]["outputs"] == {"answer": "final-answer"}
+
+        await handler.on_call_finalize("end1")
+        await handler.on_call_done("end1", outputs=None)
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert "q1" in s.attributes[OJ_WORKFLOW_INPUTS]
+        assert "final-answer" in s.attributes[OJ_WORKFLOW_OUTPUTS]
+        assert "chunk-1" in s.attributes[OJ_STREAM_INPUTS]
+        assert s.attributes[OJ_WORKFLOW_COMPONENT_NAME] == "结束"
+
+    async def test_deferred_window_payload_survives_error_path(self):
+        """Payload buffered in the deferral window also lands on the error
+        span materialized by on_invoke(exception), matching the
+        pre-deferral behavior where the span already carried it."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        await handler.on_pre_invoke(
+            "end1",
+            inputs={"question": "q1"},
+            component_metadata={"component_id": "end1", "component_name": "结束"},
+        )
+        await handler.on_post_invoke("end1", outputs={"answer": "partial-answer"})
+
+        await handler.on_invoke(invoke_id="end1", exception=RuntimeError("boom"))
+
+        assert "end1" not in handler._deferred_end_starts
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert "q1" in s.attributes[OJ_WORKFLOW_INPUTS]
+        assert "partial-answer" in s.attributes[OJ_WORKFLOW_OUTPUTS]
+        assert s.attributes[ERROR_TYPE] == "RuntimeError"
+        assert s.attributes[OJ_STATUS] == NodeStatus.ERROR.value
+
+    async def test_finalize_marker_without_stash_is_ignored(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_finalize("unknown-end")
+        assert handler._span_manager.get("unknown-end") is None
+        assert len(_EXPORTER.get_finished_spans()) == 0
+
+    async def test_regular_component_untouched_by_deferral(self):
+        """Components without defer_span_start keep the immediate-span path."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="llm1",
+            metadata={
+                "workflow_id": "wf1",
+                "component_id": "llm1",
+                "component_name": "大模型",
+                "component_type": "LLM",
+            },
+            parent_node_id="",
+        )
+        assert handler._span_manager.get("llm1") is not None
+        assert handler._deferred_end_starts == {}
+
+
+class TestSpanTimestampsUseBusinessClock:
+    """OTel span start/end timestamps must carry the agent span's business
+    times, not the event-processing wall clock. Field reports showed every
+    span with a zero duration while openjiuwen.elapsedTime was correct:
+    start_span/end() were both stamped at processing time when events
+    flushed together."""
+
+    async def test_llm_span_duration_uses_business_times(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        start_dt = datetime.now() - timedelta(seconds=10)
+        end_dt = datetime.now() - timedelta(seconds=2)
+        span_manager.update_span(agent_span, {"start_time": start_dt})
+        span_manager.update_span(agent_span, {"end_time": end_dt})
+
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs={"prompt": "hello"},
+            instance_info={"class_name": "TestModel"},
+        )
+        await handler.on_llm_end(span=agent_span, outputs={"response": "world"})
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.start_time == int(start_dt.timestamp() * 1e9)
+        assert s.end_time == int(end_dt.timestamp() * 1e9)
+        # Real 8s duration, not the microseconds between the two handler calls
+        assert s.end_time - s.start_time >= 7 * 10**9
+
+    async def test_error_span_end_uses_business_end_time(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        start_dt = datetime.now() - timedelta(seconds=30)
+        end_dt = datetime.now() - timedelta(seconds=1)
+        span_manager.update_span(agent_span, {"start_time": start_dt})
+        span_manager.update_span(agent_span, {"end_time": end_dt})
+
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs={"prompt": "hello"},
+            instance_info={"class_name": "TestModel"},
+        )
+        await handler.on_llm_error(span=agent_span, error=ValueError("boom"))
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.status.status_code == trace.StatusCode.ERROR
+        assert s.start_time == int(start_dt.timestamp() * 1e9)
+        assert s.end_time == int(end_dt.timestamp() * 1e9)

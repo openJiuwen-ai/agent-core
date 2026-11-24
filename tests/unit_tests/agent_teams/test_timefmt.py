@@ -60,6 +60,17 @@ def test_format_time_context_minutes_ago_en(restore_language):
 
 
 @pytest.mark.level0
+def test_format_time_context_explicit_language_ignores_global(restore_language):
+    """Explicit language wins over the process-global default."""
+    set_language("cn")
+    out = format_time_context(_NOW_MS - 3 * _MINUTE, _NOW_MS, language="en")
+    assert "3m ago" in out
+    assert "分钟前" not in out
+    out_cn = format_time_context(_NOW_MS - 3 * _SECOND, _NOW_MS, language="cn")
+    assert "刚刚" in out_cn
+
+
+@pytest.mark.level0
 def test_format_time_context_hours_and_days(restore_language):
     """Hour and day buckets pick the right localized unit."""
     set_language("cn")

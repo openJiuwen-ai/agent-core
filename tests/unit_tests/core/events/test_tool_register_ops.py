@@ -26,6 +26,7 @@ from openjiuwen.core.events.builtins.event_types.tool_register import (
     ToolRegisterInput,
     ToolRegisterOutput,
     ToolRegisterSpec,
+    ToolRegisterTriggerContext,
     ToolRegisterValue,
 )
 from openjiuwen.core.events.builtins.event_types.tool_register import (
@@ -273,6 +274,39 @@ async def test_tool_register_event_requires_the_bound_runtime_agent() -> None:
 
     with pytest.raises(RuntimeError, match="not bound"):
         await bus.trigger(Event(TOOL_REGISTER, request), SessionContext("direct-event-session"))
+
+
+@pytest.mark.asyncio
+async def test_tool_register_event_accepts_internal_agent_context_without_session() -> None:
+    agent = _make_agent("internal-context-agent-session")
+    bus = await _build_bus()
+    tool = LocalFunction(
+        card=ToolCard(
+            id="internal_context_tool",
+            name="internal_context_tool",
+            description="Tool registered during agent construction.",
+        ),
+        func=lambda: "internal",
+    )
+    request = ToolRegisterInput(
+        source=tool,
+    )
+
+    await Runner.start()
+    try:
+        result = await bus.trigger(
+            Event(TOOL_REGISTER, request),
+            trigger_context=ToolRegisterTriggerContext(agent=agent),
+        )
+
+        assert isinstance(result, ToolRegisterOutput)
+        assert result.value is not None
+        assert result.value.tool == "internal_context_tool"
+        assert agent.ability_manager.get("internal_context_tool") is tool.card
+    finally:
+        agent.ability_manager.remove_ability("internal_context_tool")
+        get_agent_runtime().unbind("internal-context-agent-session", agent)
+        await Runner.stop()
 
 
 @pytest.mark.asyncio

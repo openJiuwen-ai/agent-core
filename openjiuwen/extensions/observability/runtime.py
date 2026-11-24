@@ -31,6 +31,7 @@ from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.context_compression_handler import (
     ContextCompressionObservabilityBridge,
 )
+from openjiuwen.extensions.observability.demand import is_export_enabled
 from openjiuwen.extensions.observability.exporters.langfuse import (
     LangfuseExporterConfig,
     build_langfuse_span_exporter,
@@ -38,6 +39,7 @@ from openjiuwen.extensions.observability.exporters.langfuse import (
 )
 from openjiuwen.extensions.observability.exporters.transforming import (
     TransformingSpanExporter,
+    materialize_span_references,
 )
 from openjiuwen.extensions.observability.file_exporter import TraceFileExporter
 from openjiuwen.extensions.observability.instrumentation import (
@@ -103,6 +105,45 @@ class SafeSpanProcessor(SpanProcessor):
             )
 
 
+class _ExportGate(SpanProcessor):
+    """Forward spans to the config-built exporter only while export is wanted.
+
+    A provider keeps the exporter it was created with (OTel allows no
+    processor removal), so a runtime that needs the provider only for span
+    capture — a trajectory store, or any capture-only consumer — must be able
+    to silence the exporter without tearing the provider down. The gate
+    consults the demand coordinator on every ended span; flush and shutdown
+    always pass through so provider teardown is never blocked by a closed
+    gate.
+    """
+
+    def __init__(self, inner: SpanProcessor) -> None:
+        self._inner = inner
+
+    def on_start(self, span: Any, parent_context: Any = None) -> None:
+        self._inner.on_start(span, parent_context=parent_context)
+
+    def on_end(self, span: Any) -> None:
+        try:
+            if is_export_enabled():
+                self._inner.on_end(span)
+        except Exception as exc:
+            # Fail open: a runtime that explicitly enabled observability must
+            # not lose data to a gate bug. The fallback is guarded too — this
+            # runs synchronously inside ``span.end``.
+            logger.warning("otel: export gate failed open - {}", exc)
+            try:
+                self._inner.on_end(span)
+            except Exception as inner_exc:
+                logger.warning("otel: export gate fallback failed - {}", inner_exc)
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return self._inner.force_flush(timeout_millis)
+
+    def shutdown(self) -> None:
+        self._inner.shutdown()
+
+
 class ObservabilityRuntime:
     """Own one configured ``TracerProvider`` and its processor lifecycle."""
 
@@ -135,9 +176,14 @@ class ObservabilityRuntime:
                 # JiuwenSwarm creates online rails through a no-arg plugin API,
                 # so `agent_evolving.agent_rl.online.core.rail_factory` may
                 # initialize this shared provider first. A later caller can
-                # still supply an exporter override that must not be dropped.
+                # still supply an exporter override that must not be dropped;
+                # resolve references for it exactly as the first-init path does.
                 if span_exporter_override is not None:
-                    self._provider.add_span_processor(SimpleSpanProcessor(span_exporter_override))
+                    self._provider.add_span_processor(
+                        SimpleSpanProcessor(
+                            TransformingSpanExporter(span_exporter_override, materialize_span_references)
+                        )
+                    )
                 self.add_span_processors(additional_span_processors)
                 return
             if self._initializing:
@@ -156,10 +202,29 @@ class ObservabilityRuntime:
                 provider.add_span_processor(tracker)
 
                 exporter = span_exporter_override or build_span_exporter(config)
-                if span_exporter_override is not None or isinstance(exporter, ConsoleSpanExporter):
+                # The console exporter is wrapped in a materializing transform
+                # (see build_span_exporter); see through the wrapper so console
+                # output stays on the synchronous SimpleSpanProcessor path.
+                unwrapped = getattr(exporter, "exporter", exporter)
+                if span_exporter_override is not None:
+                    # An injected exporter ships spans however its owner sees
+                    # fit, including off-process, so references are resolved for
+                    # it the same way the built-in exporters are (see
+                    # build_span_exporter); it is an explicit intent to export
+                    # and is never gated.
+                    exporter = TransformingSpanExporter(exporter, materialize_span_references)
                     provider.add_span_processor(SimpleSpanProcessor(exporter))
                 else:
-                    provider.add_span_processor(BatchSpanProcessor(exporter))
+                    # The config-built exporter goes through the export gate so
+                    # capture-only consumers (for example a trajectory store)
+                    # hold the provider up without exporting.
+                    provider.add_span_processor(
+                        _ExportGate(
+                            SimpleSpanProcessor(exporter)
+                            if isinstance(unwrapped, ConsoleSpanExporter)
+                            else BatchSpanProcessor(exporter)
+                        )
+                    )
 
                 self._register_span_processors(
                     provider,
@@ -406,10 +471,18 @@ class ObservabilityRuntime:
 
 
 def build_span_exporter(config: ObservabilityConfig) -> SpanExporter:
-    """Construct the exporter selected by the configuration."""
+    """Construct the exporter selected by the configuration.
+
+    Exporters that ship spans off-process (console, OTLP gRPC/HTTP) are
+    wrapped in a materializing transform: a restated attribute stated as a
+    sequence reference names content held by this process, so it must be
+    resolved before the span leaves. The file exporter resolves during its
+    per-line encode and is left unwrapped, keeping its batch memory free
+    of full-content copies.
+    """
     resolved = config.exporter
     if resolved == "console":
-        return ConsoleSpanExporter()
+        return TransformingSpanExporter(ConsoleSpanExporter(), materialize_span_references)
     if resolved == "file":
         # The file exporter is the file WAL for Langfuse ingestion: it is
         # wrapped in the same projection the ``langfuse`` exporter sends, so
@@ -426,17 +499,23 @@ def build_span_exporter(config: ObservabilityConfig) -> SpanExporter:
     if resolved == "otlp_grpc":
         from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 
-        return OTLPSpanExporter(
-            endpoint=config.endpoint,
-            insecure=True,
-            headers=build_auth_headers(config),
+        return TransformingSpanExporter(
+            OTLPSpanExporter(
+                endpoint=config.endpoint,
+                insecure=True,
+                headers=build_auth_headers(config),
+            ),
+            materialize_span_references,
         )
     if resolved == "otlp_http":
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
             OTLPSpanExporter as HttpExporter,
         )
 
-        return HttpExporter(endpoint=config.endpoint, headers=build_auth_headers(config))
+        return TransformingSpanExporter(
+            HttpExporter(endpoint=config.endpoint, headers=build_auth_headers(config)),
+            materialize_span_references,
+        )
     raise build_error(
         ErrStatusCode.PARAM_INVALID_ERROR,
         msg=f"unsupported observability exporter: {resolved}",

@@ -182,3 +182,93 @@ def test_initialization_failure_clears_runtime_state(monkeypatch: Any) -> None:
 
     assert not runtime.is_initialized()
     assert runtime.get_config() is None
+
+
+def _install_config_exporter(monkeypatch: Any, exporter: InMemorySpanExporter) -> None:
+    """Route the config-built exporter path to an in-memory exporter."""
+    import openjiuwen.extensions.observability.runtime as runtime_module
+
+    monkeypatch.setattr(
+        runtime_module, "build_span_exporter", lambda config: exporter
+    )
+
+
+def test_capture_only_demand_gates_the_config_exporter(monkeypatch: Any) -> None:
+    """A closed gate drops ended spans before they reach the config exporter."""
+    import openjiuwen.extensions.observability.runtime as runtime_module
+
+    exporter = InMemorySpanExporter()
+    _install_config_exporter(monkeypatch, exporter)
+    monkeypatch.setattr(runtime_module, "is_export_enabled", lambda: False)
+    runtime = ObservabilityRuntime()
+    try:
+        runtime.initialize(_config("gate-closed-test"))
+        with runtime.get_tracer("gate-closed-test").start_as_current_span("captured"):
+            pass
+
+        runtime.force_flush()
+
+        assert exporter.get_finished_spans() == ()
+    finally:
+        runtime.shutdown()
+
+
+def test_open_gate_reaches_the_config_exporter(monkeypatch: Any) -> None:
+    import openjiuwen.extensions.observability.runtime as runtime_module
+
+    exporter = InMemorySpanExporter()
+    _install_config_exporter(monkeypatch, exporter)
+    monkeypatch.setattr(runtime_module, "is_export_enabled", lambda: True)
+    runtime = ObservabilityRuntime()
+    try:
+        runtime.initialize(_config("gate-open-test"))
+        with runtime.get_tracer("gate-open-test").start_as_current_span("captured"):
+            pass
+
+        runtime.force_flush()
+
+        assert [span.name for span in exporter.get_finished_spans()] == ["captured"]
+    finally:
+        runtime.shutdown()
+
+
+def test_the_export_gate_fails_open_on_internal_error(monkeypatch: Any) -> None:
+    """A gate bug must not lose data for a runtime that explicitly enabled export."""
+    import openjiuwen.extensions.observability.runtime as runtime_module
+
+    def _explode() -> bool:
+        raise RuntimeError("gate check failed")
+
+    exporter = InMemorySpanExporter()
+    _install_config_exporter(monkeypatch, exporter)
+    monkeypatch.setattr(runtime_module, "is_export_enabled", _explode)
+    runtime = ObservabilityRuntime()
+    try:
+        runtime.initialize(_config("gate-failopen-test"))
+        with runtime.get_tracer("gate-failopen-test").start_as_current_span("captured"):
+            pass
+
+        runtime.force_flush()
+
+        assert [span.name for span in exporter.get_finished_spans()] == ["captured"]
+    finally:
+        runtime.shutdown()
+
+
+def test_an_override_exporter_is_never_gated(monkeypatch: Any) -> None:
+    """An explicit exporter is an explicit intent to export; the gate ignores it."""
+    import openjiuwen.extensions.observability.runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module, "is_export_enabled", lambda: False)
+    exporter = InMemorySpanExporter()
+    runtime = ObservabilityRuntime()
+    try:
+        runtime.initialize(
+            _config("override-gate-test"), span_exporter_override=exporter
+        )
+        with runtime.get_tracer("override-gate-test").start_as_current_span("captured"):
+            pass
+
+        assert [span.name for span in exporter.get_finished_spans()] == ["captured"]
+    finally:
+        runtime.shutdown()

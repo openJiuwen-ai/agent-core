@@ -252,7 +252,10 @@ def rewrite_markdown_prose(markdown: str, transform: Callable[[str], str]) -> st
             continue
         start = index = 0
         while index < len(text):
-            end = _code_end(text, index) if text[index] == "`" else index
+            index = text.find("`", index)
+            if index < 0:
+                break
+            end = _code_end(text, index)
             if end != index:
                 result.extend((transform(text[start:index]), text[index:end]))
                 start = index = end

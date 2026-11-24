@@ -23,7 +23,7 @@
 - 操作系统：兼容Windows、Linux、macOS。
 - Python 版本：Python的版本应高于或者等于Python 3.11版本，并小于Python 3.14。使用前请检查Python版本信息，我们建议使用3.11.4版本。
 
-**从PyPi安装**
+**从PyPI安装**
 
 ```bash
 pip install -U openjiuwen
@@ -49,7 +49,7 @@ os.environ.setdefault("API_BASE", "your_api_base")
 os.environ.setdefault("API_KEY", "your_api_key")
 os.environ.setdefault("MODEL_PROVIDER", "your_provider")
 os.environ.setdefault("MODEL_NAME", "your_model_name")
-os.environ.setdefault("LLM_SSL_VERIFY", "false")
+os.environ.setdefault("LLM_SSL_VERIFY", "true")
 
 # 创建大模型配置对象
 model_client_config = ModelClientConfig(

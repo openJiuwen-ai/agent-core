@@ -54,6 +54,8 @@ from openjiuwen.harness.rails.memory import (
     CodingMemoryRail,
     ExternalMemoryRail,
     JiuwenMemoryRail,
+    JiuwenMemoryCodingRail,
+    JiuwenTeamMemoryRail,
     MemoryRail,
 )
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
@@ -106,6 +108,8 @@ __all__ = [
     "ExternalMemoryRail",
     "HeartbeatRail",
     "JiuwenMemoryRail",
+    "JiuwenMemoryCodingRail",
+    "JiuwenTeamMemoryRail",
     "ModelAnomalyDetectionRail",
     "ToolLoopCompactConfig",
     "LspRail",

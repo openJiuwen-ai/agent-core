@@ -2,9 +2,36 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, Sequence
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class PlanningInput(BaseModel):
+    """Named task data. The host resolves file references for its own workspace."""
+
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, strict=True, str_strip_whitespace=True, hide_input_in_errors=True,
+    )
+
+    name: str = Field(min_length=1)
+    kind: Literal["text", "file"]
+    value: str = Field(min_length=1)
+    description: str | None = None
+
+    @classmethod
+    def validate_many(
+        cls, inputs: Sequence[PlanningInput | Mapping[str, Any]],
+    ) -> tuple[PlanningInput, ...]:
+        """Validate a planning input list and require unique names."""
+        if not isinstance(inputs, Sequence) or isinstance(inputs, (str, bytes)):
+            raise ValueError("inputs must be an array of named planning inputs")
+        items = tuple(cls.model_validate(item) for item in inputs)
+        if len({item.name for item in items}) != len(items):
+            raise ValueError("Planning input names must be unique")
+        return items
 
 
 @dataclass(frozen=True)
@@ -17,6 +44,10 @@ class GraphArtifactStatus:
     generated_at: str | None = None
     schema_version: str | None = None
     building: bool = False
+    enabled: bool = True
+    build_id: str = ""
+    counts: dict[str, int] = field(default_factory=dict)
+    diagnostics: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -26,6 +57,9 @@ class GraphBuildResult:
     version: str
     graph_path: Path
     generated_at: str
+    build_id: str = ""
+    counts: dict[str, int] = field(default_factory=dict)
+    diagnostics: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)

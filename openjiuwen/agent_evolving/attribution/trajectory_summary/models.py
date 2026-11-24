@@ -214,9 +214,12 @@ class SummaryLimits:
     concurrency: int = 8
     timeout_s: float = 180.0
     retries: int = 4
+    segment_batch_size: int = 8
 
     def __post_init__(self) -> None:
         if self.target_nodes < 1 or self.boundary_window < 0:
             raise ValueError("invalid summary limits")
         if self.concurrency < 1 or self.timeout_s <= 0 or self.retries < 0:
             raise ValueError("invalid summary limits")
+        if self.segment_batch_size < 1:
+            raise ValueError("invalid segment batch size")

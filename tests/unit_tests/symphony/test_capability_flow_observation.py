@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from openjiuwen.symphony import CombinationCandidate, EvolutionSubmitResult, SymphonyRuntime
+from openjiuwen.symphony import CombinationCandidate, EvolutionSubmitResult, SymphonyRuntime, SymphonyConfig
 from openjiuwen.symphony.flow import SkillPackAdapter, SymphonyFlowEngine
 from openjiuwen.symphony.observation import ObservationReceipt
 
@@ -104,10 +104,16 @@ def _execution_graph_with_capability_metadata() -> dict:
 
 
 def _runtime(graph_engine: object, flow_engine: object | None) -> SymphonyRuntime:
-    runtime = object.__new__(SymphonyRuntime)
-    runtime.graph_engine = graph_engine
-    runtime.flow_engine = flow_engine  # type: ignore[assignment]
-    runtime.graph_scope_id = "workspace:test"
+    runtime = SymphonyRuntime(None, SymphonyConfig(
+        capability={"sources": [{"type": "skill", "root": "unused-capabilities"}]},
+        storage={"artifact_root": "unused-artifacts"},
+        orchestration={"experience": {"enabled": True}},
+    ))
+    runtime.orchestration = graph_engine
+    if flow_engine is None:
+        flow_engine = SimpleNamespace(submit=AsyncMock(return_value=()), close=AsyncMock())
+    runtime.flow = flow_engine
+    runtime._graph_scope_id = "workspace:test"
     return runtime
 
 
@@ -218,7 +224,7 @@ async def test_runtime_accepts_capability_metadata_and_submits_to_flow() -> None
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("member_type", ["skill", "swarm_skill", "skillpack", "unknown"])
-async def test_runtime_keeps_host_member_type_for_flow_only(tmp_path, member_type) -> None:
+async def test_runtime_keeps_host_member_type_only_in_flow_evidence(tmp_path, member_type) -> None:
     receipt = ObservationReceipt(
         evidence_id="execution-1", graph_scope_id="workspace:test", sequence=1, status="accepted",
     )
@@ -435,7 +441,7 @@ async def test_runtime_aclose_closes_flow_before_graph_and_isolates_flow_failure
         order.append("flow")
         raise RuntimeError("private")
 
-    graph_engine = SimpleNamespace(close=Mock(side_effect=lambda: order.append("graph")))
+    graph_engine = SimpleNamespace(aclose=AsyncMock(side_effect=lambda: order.append("graph")))
     runtime = _runtime(graph_engine, SimpleNamespace(close=close_flow))
 
     await runtime.aclose()
@@ -445,14 +451,8 @@ async def test_runtime_aclose_closes_flow_before_graph_and_isolates_flow_failure
     assert "private" not in caplog.text
 
 
-def test_runtime_sync_close_requires_aclose_when_flow_is_configured() -> None:
-    graph_engine = SimpleNamespace(close=Mock())
-    runtime = _runtime(graph_engine, SimpleNamespace(close=AsyncMock()))
-
-    with pytest.raises(RuntimeError, match="aclose"):
-        runtime.close()
-
-    graph_engine.close.assert_not_called()
+def test_runtime_only_exposes_async_resource_closure() -> None:
+    assert not hasattr(SymphonyRuntime, "close")
 
 
 def test_runtime_exposes_invoke_start_snapshot_provider() -> None:

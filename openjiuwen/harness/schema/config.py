@@ -9,13 +9,10 @@ import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union
 
-from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm.model import Model
-
+from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard
+from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
 from openjiuwen.core.single_agent.rail.base import AgentRail
-
-from openjiuwen.core.foundation.tool import Tool, ToolCard, McpServerConfig
-
 from openjiuwen.core.single_agent.schema.agent_card import (
     AgentCard,
 )
@@ -192,6 +189,12 @@ class DeepAgentConfig:
         card: Agent identity card. Its id is a *persistence* identity: it is the
             entity segment of every checkpointer key, so it must stay stable
             across restarts for a session's state to be recoverable.
+        tool_registration_mode: Registration path for concrete startup tools.
+            ``legacy`` keeps direct AbilityManager registration; ``event``
+            routes the supported startup tools through ``tool.register``.
+        subagent_registration_mode: Registration path for startup sub-agent
+            configurations. ``legacy`` keeps direct static binding; ``event``
+            queues selected configurations for ``agent.register``.
         tool_owner_id: Owner id used to qualify this agent's stateful tool
             registrations in the process-global resource manager. Defaults to
             ``card.id``. Set it when several agents legitimately share one card
@@ -258,6 +261,7 @@ class DeepAgentConfig:
     model: Optional[Model] = None
     card: Optional[AgentCard] = None
     tool_owner_id: Optional[str] = None
+    tool_registration_mode: Literal["legacy", "event"] = "legacy"
     system_prompt: Optional[str] = None
     context_engine_config: Optional[Any] = None
     kv_cache_affinity_config: Optional[KVCacheAffinityConfig] = None
@@ -329,8 +333,16 @@ class DeepAgentConfig:
     on_max_iterations: Literal["error", "final_answer", "return_observations"] = "error"
     max_iterations_hard_limit: int | None = None
     invocation_log_dir: str | None = None
+    # Keep these additions after the existing fields so legacy positional
+    # construction retains its original argument order.
+    subagent_registration_mode: Literal["legacy", "event"] = "legacy"
+    event_subagent_configs: Optional[List["SubAgentConfig"]] = None
 
     def __post_init__(self) -> None:
+        if self.tool_registration_mode not in ("legacy", "event"):
+            raise ValueError("tool_registration_mode must be legacy or event")
+        if self.subagent_registration_mode not in ("legacy", "event"):
+            raise ValueError("subagent_registration_mode must be legacy or event")
         if self.on_max_iterations not in ("error", "final_answer", "return_observations"):
             raise ValueError("on_max_iterations must be error, final_answer, or return_observations")
         ceiling = self.max_iterations_hard_limit

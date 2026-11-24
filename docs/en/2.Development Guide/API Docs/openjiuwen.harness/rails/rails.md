@@ -14,7 +14,7 @@ Built-in guardrails that hook into the `DeepAgent` lifecycle. Rails are register
 | `JiuwenMemoryRail` | Integrates a host-provided memory provider and combines interrupted requests with user answers before syncing a turn. |
 | `ProgressiveToolRail` | Dynamically loads and unloads tools based on relevance to the current task. |
 | `SecurityRail` | Applies security policies such as command allowlists and path validation. |
-| `SkillUseRail` | Enables the agent to discover and invoke learned skills; it does not generate, approve, or persist evolution records. |
+| `SkillUseRail` | Discovers skills with lazy `auto_list` and `all` modes; supports directly configured ReActAgent instances, see [usage and example](../../Advanced%20Usage/Agent%20Skills.md#lazy-skill-loading-with-a-directly-configured-reactagent). |
 | `SkillEvolutionRail` | Evolves existing regular skills from trajectories or user requests, with optional approval before `EvolutionStore` persistence; active review runs through the rail-owned `evolve_review_task`. |
 | `SubagentRail` | Manages sub-agent spawning via `enable_async_subagent` flag — sync mode registers `TaskTool`, async mode registers `session` tools. |
 | `TaskCompletionRail` | Evaluates whether the current task is complete and triggers the stop condition. |
@@ -43,16 +43,17 @@ Rails are executed in registration order. A rail may short-circuit by returning 
 
 ## External Memory for Interactive Turns
 
-When mounted with `AskUserRail`, `JiuwenMemoryRail` combines the original request, user follow-ups,
+When mounted with `AskUserRail`, `JiuwenMemoryRail` or `JiuwenMemoryCodingRail` combines the original request, user follow-ups,
 and accepted answers into one logical turn. It submits one `sync_turn` after the final reply, buffering
 across intermediate interrupts. Resume with the same Session or `conversation_id`.
 New tasks do not inherit material from completed turns.
 
 Buffered user text is limited to 16,000 characters. Truncation retains the ends of the original request
-and recent complete answers that fit, with an explicit truncation marker. Each rail buffers up to
-128 sessions; entries inactive for 30 minutes are evicted on subsequent foreground invocations.
-Buffers are not persisted and cannot be recovered after rail reconstruction, process restart, or
-`end_session()`. Existing provider extraction, timeout, and failure handling still apply.
+and recent complete answers that fit, with an explicit truncation marker. Each Work rail or Coding
+agent buffers up to 128 sessions; entries inactive for 30 minutes are evicted on subsequent foreground invocations.
+Coding agents keep separate pending turns even when sharing a provider; unmounting clears only
+that agent’s buffer. Buffers are not persisted and cannot be recovered after rail reconstruction,
+process restart, or Work’s `end_session()`. Existing provider extraction, timeout, and failure handling still apply.
 
 ## Online Skill Evolution
 

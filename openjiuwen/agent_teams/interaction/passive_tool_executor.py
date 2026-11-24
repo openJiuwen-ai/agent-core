@@ -179,7 +179,7 @@ class PassiveToolExecutor:
 
         tools: dict[str, Tool] = {}
         if "view_task" in allowed:
-            tools["view_task"] = ViewTaskToolV2(task_manager, t)
+            tools["view_task"] = ViewTaskToolV2(task_manager, t, language=self._language)
         if "member_complete_task" in allowed:
             tools["member_complete_task"] = MemberCompleteTaskTool(
                 task_manager,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import getpass
 import os
 import re
@@ -9,7 +10,7 @@ from dataclasses import dataclass
 from hashlib import sha1
 from importlib import import_module
 from pathlib import Path
-from typing import Dict, Sequence
+from typing import Any, Callable, Dict, Sequence
 from urllib.parse import urlparse
 
 _SUPPORTED_SCHEMES = {"s3", "obs"}
@@ -19,6 +20,24 @@ _DEFAULT_DOWNLOAD_NAMES = (
     "catalog.jsonl",
     "tree_index.html",
 )
+
+
+async def run_artifact_io(function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Finish an owned filesystem worker before propagating cancellation."""
+    worker = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not worker.cancelled():
+            worker.exception()
+        raise
 
 
 @dataclass(frozen=True)

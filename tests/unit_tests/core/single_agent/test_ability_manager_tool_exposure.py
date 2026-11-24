@@ -4,8 +4,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from openjiuwen.core.foundation.tool import ToolCard, ToolExposure
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 
 def test_ability_manager_registration_preserves_card_exposure():
@@ -89,6 +92,30 @@ def test_tool_card_exposure_marker_uses_public_accessors():
     assert card.get_exposure_declared() is None
     card.set_exposure_declared(True)
     assert card.get_exposure_declared() is True
+
+
+@pytest.mark.asyncio
+async def test_hidden_agent_card_remains_registered_but_is_not_model_visible():
+    manager = AbilityManager(owner_id="hidden-agent-test")
+    card = AgentCard(id="subagent", name="subagent", description="delegate")
+
+    result = manager.add(card, expose_agent_cards=False)
+
+    assert result.added is True
+    assert manager.get("subagent") is card
+    assert card in manager.list()
+    assert all(tool.name != "subagent" for tool in await manager.list_tool_info())
+
+    visible_card = AgentCard(
+        id="visible-agent",
+        name="visible-agent",
+        description="callable",
+    )
+    assert manager.add(visible_card).added is True
+    assert any(tool.name == "visible-agent" for tool in await manager.list_tool_info())
+
+    assert manager.remove("subagent") is card
+    assert manager.get("subagent") is None
 
 
 def test_ability_manager_revision_changes_only_when_registry_changes():

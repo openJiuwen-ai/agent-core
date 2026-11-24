@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
-from collections.abc import Sequence
-from typing import Any, Callable
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import replace
+from pathlib import Path
+from typing import Any, Callable, Literal
 
 from openjiuwen.symphony.orchestration import (
     CapabilityGraph,
@@ -15,10 +19,13 @@ from openjiuwen.symphony.orchestration import (
     OrchestrationPlan,
     OrchestrationProgress,
     OrchestrationService,
+    PlanningInput,
     PrepareArtifactHook,
 )
 from openjiuwen.symphony.observation import GraphEvolutionInput, GraphSnapshot, ObservationReceipt
 from openjiuwen.symphony.observation.service import GraphObservationService
+
+from openjiuwen.symphony.orchestration.routing import PlanningContext
 
 ProgressCallback = Callable[[OrchestrationProgress], Any]
 LOGGER = logging.getLogger(__name__)
@@ -32,63 +39,158 @@ class SymphonyGraphEngine:
     and future observation-layer operations can share revision semantics.
     """
 
-    def __init__(self, orchestration_service: OrchestrationService) -> None:
+    def __init__(
+        self, orchestration_service: OrchestrationService, *, storage=None, inventory=None, unavailable_reason=None,
+    ) -> None:
         self._orchestration_service = orchestration_service
-        self._observation_service = GraphObservationService(orchestration_service.graph_artifact_root)
+        self._observation_service = None
+        self._storage = storage
+        self._inventory = inventory
+        self._unavailable_reason = unavailable_reason
+        self._closed = False
+        self._build_id = ""
+        self._operations: set[asyncio.Task] = set()
+        self._scope_id = storage.scope_id if storage is not None else "default"
+
+    @contextmanager
+    def _track_operation(self) -> Iterator[None]:
+        task = asyncio.current_task()
+        already_owned = task in self._operations
+        self._operations.add(task)
+        try:
+            yield
+        finally:
+            if not already_owned:
+                self._operations.discard(task)
+
+    def _check(self, *, write: bool = False, require_experience: bool = False, require_graph: bool = True) -> None:
+        if self._closed:
+            raise RuntimeError("Symphony runtime is closed")
+        config = self._orchestration_service.config
+        if not config.enabled:
+            raise RuntimeError("Symphony orchestration is disabled")
+        if require_graph and self._unavailable_reason:
+            raise ValueError(self._unavailable_reason)
+        if require_experience and not config.experience_enabled:
+            raise RuntimeError("Symphony experience is disabled")
+        if self._storage is not None:
+            self._storage.check(write=write)
+
+    @property
+    def _observations(self) -> GraphObservationService:
+        self._check()
+        if self._observation_service is None:
+            self._observation_service = GraphObservationService(self._orchestration_service.graph_artifact_root)
+        return self._observation_service
 
     def status(self, *, expected_snapshot: dict[str, Any] | None = None) -> GraphArtifactStatus:
-        return self._orchestration_service.status(expected_snapshot=expected_snapshot)
+        if not self._orchestration_service.config.enabled:
+            return GraphArtifactStatus(exists=False, fresh=False, enabled=False)
+        self._check()
+        counts = {}
+        diagnostics = ()
+        if self._inventory is not None:
+            scan = self._inventory.scan()
+            expected_snapshot = {
+                **dict(self._orchestration_service.source_snapshot or {}),
+                **scan.source_snapshot.model_dump(mode="json", exclude_none=True),
+            }
+            scans = [scan]
+            expert_inventory = self._orchestration_service.expert_inventory
+            if expert_inventory is not None:
+                expert_scan = expert_inventory.scan()
+                scans.append(expert_scan)
+                expected_snapshot["expert_layer"] = self._orchestration_service.expert_layer_snapshot(
+                    expert_scan.source_snapshot,
+                )
+            current = {
+                (item.capability_type, item.capability_id): item.content_hash
+                for layer_scan in scans for item in layer_scan.capabilities
+            }
+            try:
+                published = self.read()
+                previous = published.get("capabilities", ())
+                if self._orchestration_service.model is None:
+                    published_snapshot = published.get("source_snapshot", {})
+                    expected_snapshot["fingerprint_model_sha256"] = published_snapshot.get(
+                        "fingerprint_model_sha256", ""
+                    )
+            except FileNotFoundError:
+                previous = ()
+            old = {
+                (item.get("capability_type", item.get("type", "skill")), item.get("capability_id", item.get("id"))):
+                item.get("content_hash") for item in previous
+            }
+            counts = {
+                "capability_count": len(current),
+                "added_count": len(current.keys() - old.keys()),
+                "removed_count": len(old.keys() - current.keys()),
+                "changed_count": sum(current[key] != old[key] for key in current.keys() & old.keys()),
+                "reused_count": sum(current[key] == old[key] for key in current.keys() & old.keys()),
+            }
+            if expert_inventory is not None:
+                counts.update(skill_count=len(scan.capabilities), expert_count=len(expert_scan.capabilities))
+            diagnostics = tuple(item.to_dict() for layer_scan in scans for item in layer_scan.diagnostics)
+        status = self._orchestration_service.status(expected_snapshot=expected_snapshot)
+        return replace(status, counts=counts, diagnostics=diagnostics)
 
     def read(self, version: str | None = None) -> CapabilityGraph:
+        self._check()
         return self._orchestration_service.read(version)
 
-    async def add_skills(
+    async def add_capabilities(
         self,
-        changed_skill_ids: Sequence[str],
+        changed_capability_ids: Sequence[str],
         *,
         request_id: str,
         source_revision: str,
     ) -> GraphMutationResult:
-        result = await self._orchestration_service.apply_skill_graph_mutation(
-            "add",
-            changed_skill_ids,
-            request_id=request_id,
-            source_revision=source_revision,
-        )
-        await self._reproject_observations()
-        return result
+        with self._track_operation():
+            self._check(write=True)
+            result = await self._orchestration_service.apply_skill_graph_mutation(
+                "add",
+                changed_capability_ids,
+                request_id=request_id,
+                source_revision=source_revision,
+            )
+            await self._reproject_observations()
+            return result
 
-    async def update_skills(
+    async def update_capabilities(
         self,
-        changed_skill_ids: Sequence[str],
+        changed_capability_ids: Sequence[str],
         *,
         request_id: str,
         source_revision: str,
     ) -> GraphMutationResult:
-        result = await self._orchestration_service.apply_skill_graph_mutation(
-            "update",
-            changed_skill_ids,
-            request_id=request_id,
-            source_revision=source_revision,
-        )
-        await self._reproject_observations()
-        return result
+        with self._track_operation():
+            self._check(write=True)
+            result = await self._orchestration_service.apply_skill_graph_mutation(
+                "update",
+                changed_capability_ids,
+                request_id=request_id,
+                source_revision=source_revision,
+            )
+            await self._reproject_observations()
+            return result
 
-    async def delete_skills(
+    async def delete_capabilities(
         self,
-        changed_skill_ids: Sequence[str],
+        changed_capability_ids: Sequence[str],
         *,
         request_id: str,
         source_revision: str,
     ) -> GraphMutationResult:
-        result = await self._orchestration_service.apply_skill_graph_mutation(
-            "delete",
-            changed_skill_ids,
-            request_id=request_id,
-            source_revision=source_revision,
-        )
-        await self._reproject_observations()
-        return result
+        with self._track_operation():
+            self._check(write=True)
+            result = await self._orchestration_service.apply_skill_graph_mutation(
+                "delete",
+                changed_capability_ids,
+                request_id=request_id,
+                source_revision=source_revision,
+            )
+            await self._reproject_observations()
+            return result
 
     async def build(
         self,
@@ -98,19 +200,138 @@ class SymphonyGraphEngine:
         progress_callback: ProgressCallback | None = None,
         prepare_artifact: PrepareArtifactHook | None = None,
     ) -> GraphBuildResult:
-        result = await self._orchestration_service.build(
-            force,
-            progress=progress,
-            progress_callback=progress_callback,
-            prepare_artifact=prepare_artifact,
-        )
-        await self._reproject_observations()
-        return result
+        with self._track_operation():
+            self._check(write=True)
+            build_task = self._orchestration_service.build_task
+            if build_task is not None and not build_task.done():
+                raise RuntimeError("A Symphony graph build is already running")
+            before = self.status()
+            result = await self._orchestration_service.build(
+                force,
+                progress=progress,
+                progress_callback=progress_callback,
+                prepare_artifact=prepare_artifact,
+            )
+            await self._reproject_observations()
+            payload = self.read(result.version)
+            counts = dict(getattr(self._orchestration_service.fingerprint_service, "last_build_counts", {}))
+            expert_service = self._orchestration_service.expert_fingerprint_service
+            if expert_service is not None:
+                counts["skill_count"] = counts.get("capability_count", 0)
+                counts["expert_count"] = expert_service.last_build_counts.get("capability_count", 0)
+                for key, value in expert_service.last_build_counts.items():
+                    counts[key] = counts.get(key, 0) + value
+            counts["edge_count"] = len(payload.get("edges", ()))
+            config = payload.get("config", {})
+            relations = [layer.get("llm", {}).get("relation_cache", {}) for layer in (config, config.get("expert", {}))]
+            counts["relation_reused_count"] = sum(item.get("reused_count", 0) for item in relations)
+            counts["relation_resolved_count"] = sum(item.get("resolved_count", 0) for item in relations)
+            counts["graph_reused_count"] = 0
+            counts.update(result.counts)
+            self._build_id = result.build_id
+            counts.update({
+                key: value for key, value in before.counts.items()
+                if key in {"added_count", "changed_count", "removed_count"}
+            })
+            return replace(
+                result,
+                build_id=self._build_id,
+                counts=counts,
+                diagnostics=tuple(payload.get("diagnostics", ())),
+            )
 
     async def cancel_build(self) -> GraphArtifactStatus:
-        return await self._orchestration_service.cancel_build()
+        self._check()
+        task = self._orchestration_service.build_task
+        await self._orchestration_service.cancel_build()
+        if task is not None and task is not asyncio.current_task():
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        return self.status()
 
     async def plan(
+        self,
+        query: str,
+        candidate_ids: Sequence[str] | None = None,
+        *,
+        type: Literal["auto", "skill", "expert"] = "auto",  # pylint: disable=redefined-builtin
+        expert_manifest_paths: Sequence[Path] | None = None,
+        language: str = "cn",
+        progress: ProgressCallback | None = None,
+        disabled_capability_ids: Sequence[str] | None = None,
+        graph_scope_id: str | None = None,
+        merged_revision: str | None = None,
+        task_cluster_id: str | None = None,
+        progress_callback: ProgressCallback | None = None,
+        mode: str | None = None,
+        inputs: Sequence[PlanningInput | Mapping[str, Any]] = (),
+        context: PlanningContext | Mapping[str, Any] | None = None,
+        prepare_skill_graph: Callable[[], Any] | None = None,
+    ) -> OrchestrationPlan:
+        """Route automatically, or prepare context for an explicitly selected planner."""
+        if type not in {"auto", "skill", "expert"}:
+            raise ValueError(f"Unsupported orchestration type: {type}")
+        if type != "skill" and (graph_scope_id is not None or merged_revision is not None):
+            raise ValueError("Skill graph revisions require type=skill.")
+        if type != "skill" and task_cluster_id is not None:
+            raise ValueError("Skill graph options require type=skill.")
+        with self._track_operation():
+            self._check(require_graph=False)
+
+            async def prepare_context(route: Any) -> dict[str, Any]:
+                if route.strategy != "capability_workflow" or route.tool_ids:
+                    return {}
+                return await self._skill_plan_context(
+                    graph_scope_id, merged_revision, task_cluster_id, prepare_skill_graph,
+                )
+
+            options = (await self._skill_plan_context(
+                graph_scope_id, merged_revision, task_cluster_id, prepare_skill_graph,
+            )) if type == "skill" else {}
+            return await self._orchestration_service.plan(
+                query,
+                candidate_ids,
+                type=type,
+                expert_manifest_paths=expert_manifest_paths,
+                language=language,
+                progress=progress,
+                disabled_capability_ids=disabled_capability_ids,
+                progress_callback=progress_callback,
+                mode=mode,
+                inputs=inputs,
+                context=context,
+                _prepare_context=prepare_context,
+                dynamic_overlay=options.get("dynamic_overlay"), graph_revision=options.get("graph_revision"),
+                graph_snapshot=options.get("graph_snapshot"), task_cluster_id=options.get("task_cluster_id"),
+            )
+
+    async def _skill_plan_context(
+        self, scope: str | None, revision: str | None, cluster: str | None, prepare: Callable[[], Any] | None,
+    ) -> dict[str, Any]:
+        if prepare is not None:
+            result = prepare()
+            if inspect.isawaitable(result):
+                await result
+        self._check()
+        options = {"task_cluster_id": cluster}
+        if not self._orchestration_service.config.plan.dynamic_graph_enabled:
+            return options
+        try:
+            snapshot = await asyncio.to_thread(self._observations.get_snapshot, scope or self._scope_id, revision)
+        except Exception as exc:
+            if revision is not None:
+                raise
+            LOGGER.warning("Symphony observation snapshot unavailable; using the static graph.", exc_info=exc)
+            return options
+        options.update(
+            dynamic_overlay=snapshot.overlay, graph_revision=snapshot.static_revision,
+            graph_snapshot=snapshot.model_dump(exclude={"overlay"}),
+        )
+        return options
+
+    async def plan_skill_graph(
         self,
         query: str,
         candidate_ids: Sequence[str] | None = None,
@@ -118,69 +339,96 @@ class SymphonyGraphEngine:
         language: str = "cn",
         progress: ProgressCallback | None = None,
         disabled_capability_ids: Sequence[str] | None = None,
-        graph_scope_id: str = "default",
+        graph_scope_id: str | None = None,
         merged_revision: str | None = None,
         task_cluster_id: str | None = None,
         progress_callback: ProgressCallback | None = None,
         mode: str | None = None,
+        inputs: Sequence[PlanningInput | Mapping[str, Any]] = (),
     ) -> OrchestrationPlan:
-        snapshot = None
-        if self._orchestration_service.config.dynamic_graph_enabled:
-            try:
-                snapshot = await asyncio.to_thread(
-                    self._observation_service.get_snapshot,
-                    graph_scope_id,
-                    merged_revision,
-                )
-            except Exception as exc:
-                if merged_revision is not None:
-                    raise
-                LOGGER.warning(
-                    "Symphony observation snapshot is unavailable; planning with the current static graph.",
-                    exc_info=exc,
-                )
-        return await self._orchestration_service.plan(
+        """Plan a Skill workflow with the same runtime checks as the unified entrypoint."""
+        return await self.plan(
             query,
             candidate_ids,
+            type="skill",
             language=language,
             progress=progress,
             disabled_capability_ids=disabled_capability_ids,
-            dynamic_overlay=snapshot.overlay if snapshot is not None else None,
-            graph_revision=snapshot.static_revision if snapshot is not None else None,
-            graph_snapshot=snapshot.model_dump(exclude={"overlay"}) if snapshot is not None else None,
+            graph_scope_id=graph_scope_id,
+            merged_revision=merged_revision,
             task_cluster_id=task_cluster_id,
             progress_callback=progress_callback,
             mode=mode,
+            inputs=inputs,
+        )
+
+    async def plan_subagent_graph(
+        self,
+        query: str,
+        candidate_ids: Sequence[str] | None = None,
+        *,
+        expert_manifest_paths: Sequence[Path] | None = None,
+        language: str = "cn",
+        progress: ProgressCallback | None = None,
+        mode: str | None = None,
+        inputs: Sequence[PlanningInput | Mapping[str, Any]] = (),
+    ) -> OrchestrationPlan:
+        """Plan installed expert tasks and inline roles using any published expert evidence."""
+        return await self.plan(
+            query,
+            candidate_ids,
+            type="expert",
+            expert_manifest_paths=expert_manifest_paths,
+            language=language,
+            progress=progress,
+            mode=mode,
+            inputs=inputs,
         )
 
     def submit_observation(self, value: GraphEvolutionInput) -> ObservationReceipt:
         """Append one canonical execution observation for asynchronous learning."""
 
-        return self._observation_service.submit(value)
+        self._check(write=True, require_experience=True)
+        return self._observations.submit(value)
 
     def get_snapshot(
         self,
-        graph_scope_id: str = "default",
+        graph_scope_id: str | None = None,
         merged_revision: str | None = None,
     ) -> GraphSnapshot:
         """Return one immutable static-plus-observation planner snapshot."""
 
-        return self._observation_service.get_snapshot(graph_scope_id, merged_revision)
+        return self._observations.get_snapshot(graph_scope_id or self._scope_id, merged_revision)
 
     def flush_observations(self, timeout: float | None = 30.0) -> None:
         """Wait for submitted observations to become visible to later plans."""
 
-        self._observation_service.flush(timeout)
+        if self._observation_service is not None:
+            self._observation_service.flush(timeout)
 
     def close(self) -> None:
         """Drain and stop the observation worker owned by this engine."""
 
-        self._observation_service.close()
+        self._closed = True
+        if self._observation_service is not None:
+            self._observation_service.close()
+
+    async def aclose(self) -> None:
+        self._closed = True
+        tasks = {task for task in self._operations if task is not asyncio.current_task() and not task.done()}
+        build_task = self._orchestration_service.build_task
+        if build_task is not None and build_task is not asyncio.current_task() and not build_task.done():
+            tasks.add(build_task)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.to_thread(self.close)
 
     async def _reproject_observations(self) -> None:
-        if self._orchestration_service.config.dynamic_graph_enabled:
+        if self._orchestration_service.config.plan.dynamic_graph_enabled:
             try:
-                await asyncio.to_thread(self._observation_service.reproject_all_safely)
+                await asyncio.to_thread(self._observations.reproject_all_safely)
             except Exception as exc:
                 LOGGER.warning(
                     "Symphony observation reprojection failed; the published static graph remains active.",

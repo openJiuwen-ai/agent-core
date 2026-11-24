@@ -17,7 +17,6 @@ from openjiuwen.symphony import (
     GraphArtifactStatus,
     GraphBuildResult,
     FingerprintService,
-    FingerprintSettings,
     OrchestrationConfig,
     OrchestrationPlan,
     OrchestrationProgress,
@@ -25,8 +24,10 @@ from openjiuwen.symphony import (
     ParameterSpec,
     SourceSnapshot,
     SymphonyRuntime,
+    SymphonyConfig,
 )
-from openjiuwen.symphony.orchestration.artifacts import load_graph_artifacts
+from openjiuwen.symphony.config import FingerprintPolicyConfig
+from openjiuwen.symphony.orchestration.artifacts import GraphArtifacts, load_graph_artifacts
 from openjiuwen.symphony.orchestration.planned_graph import build_planned_graph
 from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline
 from openjiuwen.symphony.orchestration.graph.matcher.ontology import OntologyMatcher
@@ -145,6 +146,56 @@ class _FailingFastPlanLLM(_PlanLLM):
                 }
             )
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["fast", "beam"])
+@pytest.mark.parametrize("entrypoint", ["skill", "plan_skill_graph"])
+async def test_skill_planners_use_named_inputs_without_changing_the_task(monkeypatch, tmp_path, mode, entrypoint):
+    requests = []
+    skills = [{
+        "id": "summarize", "name": "Summarize", "description": "Summarize text",
+        "inputs": [{"name": "source", "type": "text"}],
+    }]
+    artifacts = GraphArtifacts(tmp_path, {}, skills, {"edges": []}, {})
+    monkeypatch.setattr("openjiuwen.symphony.orchestration.service.load_graph_artifacts", lambda *a, **k: artifacts)
+
+    class Model:
+        @staticmethod
+        async def invoke(messages, **kwargs):
+            requests.append(json.loads(messages[-1]["content"]))
+            if mode == "fast":
+                response = {
+                    "status": "needs_input",
+                    "steps": [{"skill_id": "summarize"}],
+                    "missing_inputs": [{"skill_id": "summarize", "name": "source", "type": "text"}],
+                }
+            else:
+                response = {"selected_plan_index": 1}
+            return SimpleNamespace(content=json.dumps(response))
+
+    service = OrchestrationService(
+        graph_artifact_root=tmp_path, capability_provider=[], model=Model(),
+        config=OrchestrationConfig(enabled=True),
+    )
+    query = "Summarize the source."
+    source = {"name": "source", "kind": "text", "value": "A confirmed observation."}
+    plan = service.plan if entrypoint != "plan_skill_graph" else service.plan_skill_graph
+    options = {"type": "skill"} if entrypoint == "skill" else {}
+    empty = await plan(query, candidate_ids=["summarize"], mode=mode, **options)
+    supplied = await plan(query, candidate_ids=["summarize"], mode=mode, inputs=[source], **options)
+
+    graph = empty["planned_graph"]["graph"]
+    assert graph["metadata"]["status"] == "ready"
+    assert graph["metadata"]["missing_inputs"] == ["source"]
+    assert graph["nodes"]["summarize"]["metadata"]["missing_inputs"] == ["source"]
+    assert graph["nodes"]["summarize"]["metadata"]["inputs"] == [
+        {"name": "source", "type": "text"},
+    ]
+    assert "missing_inputs" not in supplied["planned_graph"]["graph"]["nodes"]["summarize"]["metadata"]
+    assert supplied["planned_graph"]["graph"]["metadata"]["status"] == "ready"
+    assert requests[-1]["query"] == query
+    assert requests[-1]["inputs"] == [source]
 
 
 @pytest.mark.asyncio
@@ -349,12 +400,12 @@ async def test_dynamic_overlay_respects_config(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
         model=_PlanLLM(),
-        config=OrchestrationConfig(dynamic_graph_enabled=enabled),
+        config=OrchestrationConfig(plan={'dynamic_graph_enabled': enabled}),
     )
     await service.build()
     overlay = {"edges": {"extract->summarize:can_feed": {"runtime_weight": 2}}}
 
-    result = await service.plan("query", dynamic_overlay=overlay)
+    result = await service.plan("query", type="skill", dynamic_overlay=overlay)
 
     assert captured == [overlay if enabled else {}]
     assert result == {
@@ -389,11 +440,11 @@ async def test_dynamic_graph_enabled_reports_config_without_overlay(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
         model=_PlanLLM(),
-        config=OrchestrationConfig(dynamic_graph_enabled=True),
+        config=OrchestrationConfig(plan={'dynamic_graph_enabled': True}),
     )
     await service.build()
 
-    result = await service.plan("query")
+    result = await service.plan("query", type="skill")
 
     assert set(result) == {"planned_graph"}
     assert result["planned_graph"]["graph"]["metadata"] == {"status": "no_plan"}
@@ -424,52 +475,69 @@ async def test_beam_planner_receives_same_dynamic_overlay_as_fast(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
         model=_PlanLLM(),
-        config=OrchestrationConfig(dynamic_graph_enabled=True),
+        config=OrchestrationConfig(plan={'dynamic_graph_enabled': True}),
     )
     await service.build()
     overlay = {"edges": {"edge-1": {"runtime_weight": 1.2}}}
 
-    await service.plan("query", dynamic_overlay=overlay, mode="beam")
+    await service.plan("query", type="skill", dynamic_overlay=overlay, mode="beam")
 
     assert captured == [overlay]
 
 
-@pytest.mark.asyncio
-async def test_graph_engine_plan_pins_merged_snapshot(tmp_path: Path) -> None:
-    runtime = SymphonyRuntime(
-        graph_artifact_root=tmp_path,
-        capability_provider=_inventory,
-        model=_PlanLLM(),
-        orchestration_config=OrchestrationConfig(dynamic_graph_enabled=True),
-    )
-    await runtime.graph_engine.build()
+def _directory_runtime(root, *, model, orchestration_config=None):
+    for capability in _inventory():
+        directory = root / "capabilities" / capability.capability_id
+        directory.mkdir(parents=True, exist_ok=True)
+        metadata = {"name": capability.capability_id, "description": capability.description,
+                    "inputs": [item.model_dump(mode="json") for item in capability.inputs],
+                    "outputs": [item.model_dump(mode="json") for item in capability.outputs]}
+        (directory / "SKILL.md").write_text("---\n" + json.dumps(metadata) + "\n---\nCapability instructions.")
+    return SymphonyRuntime(model, SymphonyConfig(
+        capability={"sources": [{"type": "skill", "root": str(root / "capabilities")}]},
+        storage={"artifact_root": str(root / "runtime")},
+        orchestration=orchestration_config or OrchestrationConfig(),
+    ))
 
-    snapshot = runtime.graph_engine.get_snapshot()
-    result = await runtime.graph_engine.plan("query", merged_revision=snapshot.merged_revision)
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ["plan", "plan_skill_graph"])
+async def test_graph_engine_plan_pins_merged_snapshot(tmp_path: Path, entrypoint: str) -> None:
+    runtime = _directory_runtime(
+        tmp_path,
+        model=_PlanLLM(),
+        orchestration_config=OrchestrationConfig(plan={'dynamic_graph_enabled': True}),
+    )
+    await runtime.orchestration.build()
+
+    snapshot = runtime.orchestration.get_snapshot()
+    if entrypoint == "plan":
+        result = await runtime.orchestration.plan("query", type="skill", merged_revision=snapshot.merged_revision)
+    else:
+        result = await runtime.orchestration.plan_skill_graph("query", merged_revision=snapshot.merged_revision)
 
     graph_snapshot = result["planned_graph"]["graph_snapshot"]
     assert graph_snapshot["static_revision"] == snapshot.static_revision
     assert graph_snapshot["observation_revision"] == snapshot.observation_revision
     assert graph_snapshot["merged_revision"] == snapshot.merged_revision
     assert set(result) == {"planned_graph"}
-    runtime.graph_engine.close()
+    await runtime.aclose()
 
 
 @pytest.mark.asyncio
 async def test_graph_engine_does_not_materialize_observation_snapshot_when_disabled(tmp_path: Path) -> None:
-    runtime = SymphonyRuntime(
-        graph_artifact_root=tmp_path,
-        capability_provider=_inventory,
+    runtime = _directory_runtime(
+        tmp_path,
         model=_PlanLLM(),
-        orchestration_config=OrchestrationConfig(dynamic_graph_enabled=False),
+        orchestration_config=OrchestrationConfig(plan={'dynamic_graph_enabled': False}),
     )
-    await runtime.graph_engine.build()
+    await runtime.orchestration.build()
 
-    result = await runtime.graph_engine.plan("query")
+    result = await runtime.orchestration.plan("query", type="skill")
 
     assert "graph_snapshot" not in result["planned_graph"]
-    assert not (tmp_path / "evolution").exists()
-    runtime.close()
+    assert not (tmp_path / "runtime" / "graph" / "evolution").exists()
+    await runtime.aclose()
 
 
 @pytest.mark.asyncio
@@ -477,38 +545,36 @@ async def test_graph_engine_falls_back_to_static_graph_when_current_observation_
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runtime = SymphonyRuntime(
-        graph_artifact_root=tmp_path,
-        capability_provider=_inventory,
+    runtime = _directory_runtime(
+        tmp_path,
         model=_PlanLLM(),
-        orchestration_config=OrchestrationConfig(dynamic_graph_enabled=True),
+        orchestration_config=OrchestrationConfig(plan={'dynamic_graph_enabled': True}),
     )
-    await runtime.graph_engine.build()
+    await runtime.orchestration.build()
 
     def fail_snapshot(*args, **kwargs):
         del args, kwargs
         raise OSError("observation store unavailable")
 
-    monkeypatch.setattr(runtime.graph_engine._observation_service, "get_snapshot", fail_snapshot)
-    result = await runtime.graph_engine.plan("query")
+    monkeypatch.setattr(runtime.orchestration._observation_service, "get_snapshot", fail_snapshot)
+    result = await runtime.orchestration.plan("query", type="skill")
 
     assert "graph_snapshot" not in result["planned_graph"]
-    runtime.close()
+    await runtime.aclose()
 
 
 @pytest.mark.asyncio
 async def test_graph_engine_does_not_fallback_when_a_pinned_revision_is_missing(tmp_path: Path) -> None:
-    runtime = SymphonyRuntime(
-        graph_artifact_root=tmp_path,
-        capability_provider=_inventory,
+    runtime = _directory_runtime(
+        tmp_path,
         model=_PlanLLM(),
-        orchestration_config=OrchestrationConfig(dynamic_graph_enabled=True),
+        orchestration_config=OrchestrationConfig(plan={'dynamic_graph_enabled': True}),
     )
-    await runtime.graph_engine.build()
+    await runtime.orchestration.build()
 
     with pytest.raises(FileNotFoundError, match="Unknown Symphony merged revision"):
-        await runtime.graph_engine.plan("query", merged_revision="merged-missing")
-    runtime.close()
+        await runtime.orchestration.plan("query", type="skill", merged_revision="merged-missing")
+    await runtime.aclose()
 
 
 class _MixedPlanLLM:
@@ -566,17 +632,22 @@ async def test_mixed_capability_types_survive_plan_projection(tmp_path: Path, mo
         graph_artifact_root=tmp_path,
         capability_provider=inventory,
         model=_MixedPlanLLM(),
-        config=OrchestrationConfig(mode=mode, max_depth=2),
+        config=OrchestrationConfig(plan={'mode': mode, 'max_depth': 2}),
     )
     await service.build()
 
-    result = await service.plan("skill:query must stay", candidate_ids=["extract"])
+    result = await service.plan("skill:query must stay", type="skill", candidate_ids=["extract"])
 
     assert set(result) == {"planned_graph"}
     graph = result["planned_graph"]["graph"]
     assert graph["nodes"] == {
-        "extract": {"label": "extract", "metadata": {"type": "skill"}},
-        "summarize": {"label": "summarize", "metadata": {"type": "agent"}},
+        "extract": {
+            "label": "extract", "metadata": {"type": "skill", "outputs": [{"name": "text", "type": "text"}]},
+        },
+        "summarize": {
+            "label": "summarize",
+            "metadata": {"type": "agent", "inputs": [{"name": "text", "type": "text", "required": True}]},
+        },
     }
     assert graph["edges"] == [
         {"source": "extract", "target": "summarize", "relation": "can_feed"},
@@ -667,7 +738,7 @@ async def test_public_service_contracts_accept_planned_call_shapes(tmp_path: Pat
     graph = service.read()
     plan = await service.plan(
         "summarize text",
-        ["extract", "summarize"],
+        ["extract", "summarize"], type="skill",
         language="en",
         progress=progress_events.append,
     )
@@ -700,8 +771,8 @@ async def test_early_build_failure_is_delivered_without_started_progress_worker(
         model=_PlanLLM(),
     )
 
-    async def fail_inventory(*, require_atomic: bool = False, force_fingerprint: bool = False):
-        del require_atomic, force_fingerprint
+    async def fail_inventory(*, require_atomic: bool = False, force_fingerprint: bool = False, progress=None):
+        del require_atomic, force_fingerprint, progress
         raise error
 
     monkeypatch.setattr(service, "_load_inventory", fail_inventory)
@@ -746,7 +817,7 @@ async def test_truncated_fingerprint_response_preserves_current_graph(tmp_path: 
             provider,
             fingerprint_root,
             llm=TruncatedModel(),
-            settings=FingerprintSettings(enable_llm_extraction=True),
+            config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         ),
     )
     events = []
@@ -754,7 +825,7 @@ async def test_truncated_fingerprint_response_preserves_current_graph(tmp_path: 
         await service.build(force=True, progress=events.append)
 
     assert exc_info.value.status is StatusCode.MODEL_CALL_FAILED
-    assert [event.event for event in events] == ["build_failed"]
+    assert [event.event for event in events] == ["fingerprint.extract.progress", "build_failed"]
     assert (graph_root / "current.json").read_bytes() == previous_current
     assert built.graph_path.read_bytes() == previous_graph
     assert not (fingerprint_root / "fingerprint.json").exists()
@@ -774,12 +845,7 @@ async def test_graph_config_drives_default_matcher_candidates_and_progress(tmp_p
         graph_artifact_root=tmp_path,
         capability_provider=inventory,
         model=llm,
-        graph_config={
-            "batch_size": 1,
-            "workers": 3,
-            "require_consensus": False,
-            "max_candidates_per_skill_relation": 1,
-        },
+        config=OrchestrationConfig(build={'max_concurrency': 3, 'matching': {'batch_size': 1, 'require_consensus': False, 'max_candidates_per_capability_relation': 1}}),
     )
 
     await service.build(progress=events.append)
@@ -787,19 +853,7 @@ async def test_graph_config_drives_default_matcher_candidates_and_progress(tmp_p
 
     assert len(llm.calls) == 1
     llm_metadata = graph["config"]["llm"]
-    assert {
-        key: llm_metadata[key]
-        for key in (
-            "model",
-            "backend",
-            "temperature",
-            "prompt_version",
-            "batch_size",
-            "max_workers",
-            "require_consensus",
-            "consensus_runs",
-        )
-    } == {
+    expected = {
         "model": None,
         "backend": None,
         "temperature": None,
@@ -809,6 +863,7 @@ async def test_graph_config_drives_default_matcher_candidates_and_progress(tmp_p
         "require_consensus": False,
         "consensus_runs": 1,
     }
+    assert {key: llm_metadata[key] for key in expected} == expected
     assert llm_metadata["matcher_version"] == "Symphony-ontology-matcher-v2"
     assert llm_metadata["match_schema_version"] == "Symphony-ontology-match-schema-v1"
     assert llm_metadata["relation_cache"]["resolved_count"] == 1
@@ -847,8 +902,13 @@ async def test_planned_graph_is_minimal_and_never_falls_back_to_static_edges(tmp
             "directed": True,
             "metadata": {"status": "ready"},
             "nodes": {
-                "extract": {"label": "extract", "metadata": {"type": "skill"}},
-                "summarize": {"label": "summarize", "metadata": {"type": "skill"}},
+                "extract": {
+                    "label": "extract", "metadata": {"type": "skill", "outputs": [{"name": "text", "type": "text"}]},
+                },
+                "summarize": {
+                    "label": "summarize",
+                    "metadata": {"type": "skill", "inputs": [{"name": "text", "type": "text", "required": True}]},
+                },
             },
             "edges": [],
         }
@@ -861,11 +921,11 @@ async def test_planned_graph_is_minimal_and_never_falls_back_to_static_edges(tmp
     [
         ("ready", "", [], {"status": "ready"}),
         (
-            "needs_input",
+            "ready",
             "A source document is required.",
             [{"name": "source_document", "reason": "required"}],
             {
-                "status": "needs_input",
+                "status": "ready",
                 "reason": "A source document is required.",
                 "missing_inputs": ["source_document"],
             },
@@ -897,7 +957,7 @@ async def test_planned_graph_covers_all_public_statuses(
                 {
                     "status": status,
                     "reason": reason,
-                    "steps": [],
+                    "steps": [{"skill_id": "extract"}] if status == "ready" else [],
                     "missing_inputs": missing_inputs,
                     "can_feed_edges": [],
                 }
@@ -908,7 +968,7 @@ async def test_planned_graph_covers_all_public_statuses(
 
     graph = planned_graph["graph"]
     assert graph["metadata"] == expected_metadata
-    assert graph["nodes"] == {}
+    assert list(graph["nodes"]) == (["extract"] if status == "ready" else [])
     assert graph["edges"] == []
 
 
@@ -944,12 +1004,12 @@ async def test_service_rejects_fast_planner_failure_instead_of_projecting_no_pla
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
         model=_FailingFastPlanLLM(),
-        config=OrchestrationConfig(mode="fast"),
+        config=OrchestrationConfig(plan={'mode': 'fast'}),
     )
     await service.build()
 
     with pytest.raises(ValueError, match="Fast planner selected unknown skill IDs"):
-        await service.plan("extract and summarize")
+        await service.plan("extract and summarize", type="skill")
 
 
 @pytest.mark.asyncio
@@ -988,7 +1048,7 @@ async def test_async_build_progress_is_serial_and_completed_before_return(tmp_pa
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
         model=llm,
-        graph_config={"require_consensus": False},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False}}),
     )
 
     task = asyncio.create_task(service.build(progress=progress))
@@ -1118,14 +1178,12 @@ async def test_runtime_forwards_async_prepare_artifact_default(tmp_path: Path) -
         (version_dir / "graph_state.json").write_text("prepared", encoding="utf-8")
         hook_completed = True
 
-    runtime = SymphonyRuntime(
-        graph_artifact_root=tmp_path,
-        capability_provider=_inventory,
+    runtime = _directory_runtime(
+        tmp_path,
         model=_PlanLLM(),
-        prepare_artifact=prepare_artifact,
     )
 
-    built = await runtime.orchestration.build()
+    built = await runtime.orchestration.build(prepare_artifact=prepare_artifact)
 
     assert hook_completed is True
     assert (built.graph_path.parent / "graph_state.json").read_text(encoding="utf-8") == "prepared"

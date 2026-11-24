@@ -195,22 +195,30 @@ class Registry:
         self._context = replace(context, package_manager=manager, install_report=report, host_version=host_version)
         replace_context(self._context)
 
-    async def load_installed(self) -> tuple[ActivationReport, ...]:
+    async def load_installed(
+        self,
+        roots: Sequence[Path | str] | None = None,
+    ) -> tuple[ActivationReport, ...]:
+        """Activate one startup snapshot, or discover the complete store by default."""
         task = asyncio.current_task()
         self._operations.add(task)
         try:
             async with self._startup_lock:
-                return await self._load_installed()
+                normalized_roots = None if roots is None else _as_paths(roots)
+                return await self._load_installed(normalized_roots)
         finally:
             self._operations.discard(task)
 
-    async def _load_installed(self) -> tuple[ActivationReport, ...]:
+    async def _load_installed(
+        self,
+        roots: Sequence[Path] | None = None,
+    ) -> tuple[ActivationReport, ...]:
         """Discover and order the complete root, then activate this scope's queue."""
         context = self._require_store()
         if self._closing:
             raise ExtensionFailure(StatusCode.EXTENSION_PACKAGE_BUSY, package_id="*", reason="registry is stopping")
         service = context.install_report
-        plan = await service.prepare_startup(context.package_manager)
+        plan = await service.prepare_startup(context.package_manager, roots)
         reports = [ActivationReport("", item.package_id, "install", "FAILED", None, None, item.error)
                    for item in plan.rejected]
         try:

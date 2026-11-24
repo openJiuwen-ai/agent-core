@@ -607,6 +607,35 @@ class TestDisabledThinkingIntent:
         assert sdk_client.chat.completions.create.call_count == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Reasoning is mandatory for this endpoint and cannot be disabled.",
+            "Reasoning is mandatory for this endpoint and can't be disabled.",
+        ],
+    )
+    async def test_symphony_fallback_retries_passive_cannot_be_disabled_refusal(self, message):
+        client = _make_client()
+        sdk_client = _mock_sdk_client(
+            _OpenAIStyleError(
+                f"Error code: 400 - {{'error': {{'message': '{message}', 'code': 400}}}}",
+                status_code=400,
+                body={"error": {"message": message, "code": 400}},
+            ),
+            _response("retried"),
+        )
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            with disabled_thinking_fallback_scope():
+                result = await client.invoke("hello", **self._disabled_request_kwargs())
+
+        assert result.content == "retried"
+        sent_calls = [call.kwargs for call in sdk_client.chat.completions.create.call_args_list]
+        assert len(sent_calls) == 2
+        assert sent_calls[0]["reasoning_effort"] == "off"
+        assert "reasoning_effort" not in sent_calls[1]
+
+    @pytest.mark.asyncio
     async def test_symphony_fallback_does_not_retry_a_failed_retry(self):
         client = _make_client()
         sdk_client = _mock_sdk_client(
@@ -980,6 +1009,62 @@ async def test_parse_response_preserves_additive_provider_facts():
     assert message.completion_token_ids == [3, 4]
     assert message.usage_metadata.cache_tokens == 1
     assert message.usage_metadata.cache_creation_input_tokens == 1
+
+
+@pytest.mark.asyncio
+async def test_parse_response_usage_model_name_prefers_served_model():
+    response = _Obj(
+        id="resp-2",
+        model="qwen3-max-served",
+        usage=_Obj(prompt_tokens=3, completion_tokens=2, total_tokens=5),
+        choices=[_Obj(message=_Obj(content="answer"), finish_reason="stop")],
+    )
+
+    message = await _make_client()._parse_response(response, None)
+
+    assert message.usage_metadata is not None
+    assert message.usage_metadata.model_name == "qwen3-max-served"
+
+
+@pytest.mark.asyncio
+async def test_parse_response_usage_model_name_falls_back_to_request_config():
+    response = _Obj(
+        id="resp-3",
+        usage=_Obj(prompt_tokens=3, completion_tokens=2, total_tokens=5),
+        choices=[_Obj(message=_Obj(content="answer"), finish_reason="stop")],
+    )
+
+    message = await _make_client()._parse_response(response, None)
+
+    assert message.usage_metadata is not None
+    assert message.usage_metadata.model_name == "MiniMax-M3"
+
+
+def test_parse_stream_chunk_usage_model_name_prefers_served_model():
+    chunk = _Obj(
+        model="qwen3-max-served",
+        usage=_Obj(prompt_tokens=3, completion_tokens=2, total_tokens=5),
+        choices=[],
+    )
+
+    parsed = _make_client()._parse_stream_chunk(chunk)
+
+    assert parsed is not None
+    assert parsed.usage_metadata is not None
+    assert parsed.usage_metadata.model_name == "qwen3-max-served"
+
+
+def test_parse_stream_chunk_usage_model_name_falls_back_to_request_config():
+    chunk = _Obj(
+        usage=_Obj(prompt_tokens=3, completion_tokens=2, total_tokens=5),
+        choices=[],
+    )
+
+    parsed = _make_client()._parse_stream_chunk(chunk)
+
+    assert parsed is not None
+    assert parsed.usage_metadata is not None
+    assert parsed.usage_metadata.model_name == "MiniMax-M3"
 
 
 class TestOpenAIResponsesApiKeyMode:

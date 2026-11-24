@@ -12,7 +12,7 @@
 | `spans.py` | canonical span 的无状态访问器与转换 |
 | `schema.py` | trajectory 自有的 scope、schema version 与 RL 字段名 |
 | `messages.py` | span 到 OpenAI-compatible messages 的唯一重建实现 |
-| `windows.py` | v2 `context.window.commit` 链重放：按 `message_id` 重建每次请求读到的窗口，与前端 reducer 同语义 |
+| `windows.py` | Rail 的增量 clean window，以及 v2 `context.window.commit` 链重放 |
 | `serialization.py` | OTLP 值的 JSON-compatible 归一化 |
 | `store.py` | 内存与 append-only JSONL 归档 |
 | `team.py` | Team root-trace scope 辅助 |
@@ -31,6 +31,8 @@ subscribe(scope) → on_end(span) → drain(scope) → clean Trajectory
 - clean window、detached prepared input 和执行归档是三个不同生命周期。异步执行前必须复制
   callback 期间仍有效的数据，不能在后台继续读取可变 session/context。
 - `EvolutionRail.get_trajectory()` 只返回当前 clean view；`TrajectoryStore` 是显式归档边界。
+- 进程内序列持有和对外导出的契约见 [S_04](../../../.agents/agent-docs/specs/harness/S_04_rails-contract.md)
+  不变量 16。轨迹内部直接持有 observability 登记的不可变序列头，公开 span 投影仍返回标准 OTLP 字段。
 
 ## Canonical 模型铁律
 
@@ -47,8 +49,11 @@ subscribe(scope) → on_end(span) → drain(scope) → clean Trajectory
   TTSE detect/induce 传 `invoke_local=True`：无窗口 prompt / 窗口从最后一条真实 `user`
   切开（跳过 `<system-reminder>` prompt-attachment user），后续 span 不再把整段 prompt
   追加进去；这是切片，不是 overlap merge。
-- 裁剪 clean window 用 `windows.trim_trajectory_window()`：事件 span 不占 `max_trajectory_spans`
-  配额，被裁断的提交链由 `trim_baseline` 重新给出可重放的链首。
+- `EvolutionRail` 通过 `windows.OnlineTrajectoryWindow` 按作用域累积已规范化 span，快照由
+  `Trajectory.from_otlp()` 复制并隔离。首批保留裁剪后的原有分组和重复身份，后续合并按作用域去重。
+  每次裁剪后从保留记录重建身份索引。
+- 裁剪窗口时，事件 span 不占 `max_trajectory_spans` 配额。被裁断的提交链由 `trim_baseline`
+  重新给出可重放的链首。
 - `TrajectoryBuilder` / `TrajectoryExtractor` 只属于 `trajectory.offline`。不要恢复旧顶层导出，
   也不要重新引入 step、snapshot 或第二套在线轨迹模型。
 - `FileTrajectoryStore` 保持 append-only JSONL，只读写 canonical OTLP 记录。

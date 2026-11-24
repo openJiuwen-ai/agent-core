@@ -4,7 +4,9 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -13,7 +15,7 @@ from typing import Any
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.env import load_project_dotenv
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.error_tree import python_error_tree
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import active_artifact_dir
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import active_artifact_dir, get_logger
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import (
     harness_failed,
     sanitize_diagnostic_payload,
@@ -33,6 +35,8 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_exec
 # and smoke-tested the code; running it for real is a deterministic subprocess
 # invocation (variant.invocation) plus reading back metrics.json, not a task
 # that benefits from an LLM/agent loop.
+
+logger = get_logger(__name__)
 
 _OUTPUT_FLAG = "--output"
 _ENV_DIAGNOSTIC_KEYS = (
@@ -387,13 +391,80 @@ def _selected_variants(
     return [available[name] for name in target_variants]
 
 
+_TASKKILL = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe")
+
+
+def _kill_process_tree(pid: int) -> None:
+    """Kill a process and all its descendants.
+
+    On Windows, ``Popen.kill()`` only terminates the direct child; grandchildren
+    (e.g. training workers spawned by an experiment script) survive as orphans
+    and keep consuming CPU.  ``taskkill /T`` kills the entire tree.  On Unix,
+    killing the process group (which ``start_new_session=True`` isolates)
+    achieves the same.
+    """
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                [_TASKKILL, "/T", "/F", "/PID", str(pid)],
+                capture_output=True,
+                timeout=15,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+    else:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
 class ExperimentExecutionAgent:
     """Runs an already-implemented, smoke-tested experiment codebase for real."""
 
     def __init__(self, config: dict[str, Any]):
         self.config = config
+        self._active_process: subprocess.Popen | None = None
+        self._cancel_generation: int = 0
+
+    def cancel(self) -> None:
+        """Signal the agent to abort and kill any running subprocess tree.
+
+        Thread-safe: designed to be called from the asyncio thread while
+        ``run()`` is executing inside ``asyncio.to_thread()``.  Uses a
+        monotonically increasing generation counter so that a cancel issued
+        before the worker thread enters ``run()`` is never lost.
+        """
+        self._cancel_generation += 1
+        self._cleanup_active_process()
+
+    def _cleanup_active_process(self) -> None:
+        """Kill the active subprocess tree if one is still running."""
+        proc = self._active_process
+        self._active_process = None
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                _kill_process_tree(proc.pid)
+                proc.wait(timeout=15)
+        except OSError:
+            logger.warning("process tree kill failed for pid=%s, falling back to proc.kill()", proc.pid, exc_info=True)
+            try:
+                proc.kill()
+                proc.wait()
+            except OSError:
+                logger.warning("fallback proc.kill() also failed for pid=%s", proc.pid, exc_info=True)
+        except subprocess.TimeoutExpired:
+            logger.warning("proc.wait() timed out for pid=%s after tree kill, forcing kill", proc.pid)
+            try:
+                proc.kill()
+                proc.wait()
+            except OSError:
+                logger.warning("fallback proc.kill() also failed for pid=%s", proc.pid, exc_info=True)
 
     def run(self, inputs: ExperimentExecutionInput) -> ExperimentExecutionOutput:
+        cancel_gen = self._cancel_generation
         load_project_dotenv()
         plan, implementation = inputs.plan, inputs.implementation
         if implementation.status != "ready":
@@ -435,29 +506,33 @@ class ExperimentExecutionAgent:
 
         variant_results: list[VariantResult] = []
         notes_parts: list[str] = []
-        for variant in selected:
-            result, run = self._run_variant(
-                variant,
-                code_dir=code_dir,
-                logs=logs,
-                results=results,
-                timeout=timeout,
-                max_transient_retries=max_transient_retries,
-                artifact_path=artifact_path,
-            )
-            result = result.model_copy(update={"code_commit": code_commit})
-            variant_results.append(result)
-            _mirror_artifact(
-                results / f"{variant.name}.metrics.json",
-                canonical_results / f"{variant.name}.metrics.json",
-            )
-            _mirror_artifact(logs / f"{variant.name}.log", canonical_logs / f"{variant.name}.log")
-            _mirror_artifact(
-                logs / f"{variant.name}.diagnostics.json",
-                canonical_logs / f"{variant.name}.diagnostics.json",
-            )
-            if run.failure_kind != "ok":
-                notes_parts.append(_variant_note(variant.name, run, result.attempts))
+        try:
+            for variant in selected:
+                result, run = self._run_variant(
+                    variant,
+                    code_dir=code_dir,
+                    logs=logs,
+                    results=results,
+                    timeout=timeout,
+                    max_transient_retries=max_transient_retries,
+                    artifact_path=artifact_path,
+                    cancel_generation=cancel_gen,
+                )
+                result = result.model_copy(update={"code_commit": code_commit})
+                variant_results.append(result)
+                _mirror_artifact(
+                    results / f"{variant.name}.metrics.json",
+                    canonical_results / f"{variant.name}.metrics.json",
+                )
+                _mirror_artifact(logs / f"{variant.name}.log", canonical_logs / f"{variant.name}.log")
+                _mirror_artifact(
+                    logs / f"{variant.name}.diagnostics.json",
+                    canonical_logs / f"{variant.name}.diagnostics.json",
+                )
+                if run.failure_kind != "ok":
+                    notes_parts.append(_variant_note(variant.name, run, result.attempts))
+        finally:
+            self._cleanup_active_process()
 
         process_complete = all(item.process_status == "completed" for item in variant_results)
         status = "completed" if process_complete else "failed"
@@ -474,8 +549,8 @@ class ExperimentExecutionAgent:
         )
         return ExperimentExecutionOutput(result=result)
 
-    @staticmethod
     def _execute_once(
+        self,
         command: list[str],
         *,
         code_dir: Path,
@@ -486,7 +561,12 @@ class ExperimentExecutionAgent:
     ) -> tuple[_VariantRun, str]:
         """One subprocess attempt. Returns (run, log_section) — the section
         is this attempt's own log text, not yet written to disk; the caller
-        accumulates sections across retries into a single log file."""
+        accumulates sections across retries into a single log file.
+
+        The subprocess is started in its own process group so that
+        ``_kill_process_tree`` can terminate the entire tree (including
+        grandchildren such as training workers) on timeout or task
+        cancellation."""
         stdout = ""
         stderr = ""
         timed_out = False
@@ -496,23 +576,41 @@ class ExperimentExecutionAgent:
 
         try:
             env = _variant_env(artifact_path)
-            proc = subprocess.run(
+            popen_kwargs: dict[str, Any] = {}
+            if sys.platform == "win32":
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                popen_kwargs["start_new_session"] = True
+            proc = subprocess.Popen(
                 command,
                 cwd=code_dir,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
-                check=False,
                 env=env,
+                **popen_kwargs,
             )
-            exit_code = proc.returncode
-            stdout = proc.stdout or ""
-            stderr = proc.stderr or ""
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            exit_code = -1
-            stdout = _decode_captured(exc.stdout)
-            stderr = _decode_captured(exc.stderr) or str(exc)
+            self._active_process = proc
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+                exit_code = proc.returncode
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                exit_code = -1
+                _kill_process_tree(proc.pid)
+                try:
+                    stdout, stderr = proc.communicate(timeout=15)
+                except (subprocess.TimeoutExpired, OSError):
+                    stdout, stderr = "", ""
+                    proc.kill()
+                    proc.wait()
+                if not stderr:
+                    stderr = f"subprocess exceeded timeout_seconds={timeout}"
+            except BaseException:
+                _kill_process_tree(proc.pid)
+                raise
+            finally:
+                self._active_process = None
         except OSError as exc:
             exit_code = -1
             launch_error = f"{type(exc).__name__}: {exc}"
@@ -562,9 +660,8 @@ class ExperimentExecutionAgent:
         )
         return run, log_section
 
-    @classmethod
     def _run_variant(
-        cls,
+        self,
         variant: ImplementedVariant,
         *,
         code_dir: Path,
@@ -573,6 +670,7 @@ class ExperimentExecutionAgent:
         timeout: int,
         max_transient_retries: int,
         artifact_path: str | None = None,
+        cancel_generation: int | None = None,
     ) -> tuple[VariantResult, _VariantRun]:
         """Runs variant.invocation, retrying only launch_error/timeout
         failures (see _TRANSIENT_FAILURE_KINDS) up to max_transient_retries
@@ -589,9 +687,11 @@ class ExperimentExecutionAgent:
         attempt = 0
         log_sections: list[str] = []
         while True:
+            if cancel_generation is not None and self._cancel_generation != cancel_generation:
+                raise RuntimeError("experiment execution cancelled")
             attempt += 1
             _remove_stale_metrics(metrics_path)
-            run, section = cls._execute_once(
+            run, section = self._execute_once(
                 command,
                 code_dir=code_dir,
                 timeout=timeout,

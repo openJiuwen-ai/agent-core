@@ -119,7 +119,7 @@ async def post_message(conversation, message_manager, sender: str, content: str,
         mentions = list(dict.fromkeys(mentions))
         targets = []
         for name in mentions:
-            if name != "user" and (await member(name)).role != "passive_human":
+            if name != "user" and (await member(name)).role not in ("passive_human", "host_managed"):
                 targets.append(name)
         meta = dict(type="group_chat", client_message_id=client_message_id,
                     sender_name=author.display_name if author else "user", mentions=mentions, attachments=attachments)

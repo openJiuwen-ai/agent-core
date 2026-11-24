@@ -64,7 +64,7 @@ def test_indexes_link_features_and_bugs_to_designs(sync_module: ModuleType, tmp_
         index = tmp_path / section / "INDEX.md"
         text = index.read_text(encoding="utf-8")
         assert "../designs/proposals/D-20261026-1200-topic/design.md" in text
-        assert "src/runtime.py" in text and "runtime" in text
+        assert "src/runtime.py" not in text and "runtime" in text
         assert metadata(index)["author"] == "sync_documents.py"
         assert "author_email" not in metadata(index)
     before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*.md")}
@@ -174,7 +174,8 @@ def test_module_groups_list_shared_documents_without_global_totals(sync_module: 
     assert "| [runtime](#module-runtime) |" in text
     assert text.count("[F_01_shared]") == 2
     assert text.count("[F_02_runtime]") == 1
-    assert text.count("src/shared.py") == 2
+    assert text.count("[F_01_shared]") == 2
+    assert "src/shared.py" not in text
 
 
 def test_missing_module_is_visible_in_last_group(sync_module: ModuleType, tmp_path: Path) -> None:
@@ -240,14 +241,15 @@ def test_indexes_do_not_depend_on_who_regenerates_them(sync_module: ModuleType, 
         assert "example.invalid" not in text
 
 
-def test_root_index_leaves_files_to_section_indexes(sync_module: ModuleType, tmp_path: Path) -> None:
-    """Keep root rows short; code files and modules are not repeated per group."""
+def test_indexes_do_not_list_code_files(sync_module: ModuleType, tmp_path: Path) -> None:
+    """Keep rows short; code files and modules are not repeated per group."""
     write_doc(tmp_path, "features/F_01_shared.md", "---\nmodules: [runtime, gateway]\nfiles: [src/shared.py]\ndesigns: []\ndesign_note: Existing contract\n---\n\n# Shared\n")
     sync_module.synchronize(tmp_path, sync_module.GitIdentity("writer", "writer@example.invalid"))
     root_text = (tmp_path / "INDEX.md").read_text(encoding="utf-8")
     section_text = (tmp_path / "features/INDEX.md").read_text(encoding="utf-8")
     assert "src/shared.py" not in root_text
+    assert "src/shared.py" not in section_text
     assert root_text.count("[F_01_shared]") == 2
     assert "| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |" in root_text
-    assert "| ID / 文档 | 类型 | 标题 | 作者 | 代码文件 | 关联 D |" in section_text
+    assert "| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |" in section_text
     assert "runtime, gateway" not in section_text

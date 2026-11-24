@@ -20,6 +20,7 @@ from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
 )
+from openjiuwen.agent_teams.i18n import get_language, set_language
 from openjiuwen.agent_teams.interaction.passive_tool_executor import PassiveToolExecutor
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.status import TaskStatus
@@ -263,3 +264,26 @@ async def test_map_output_uses_tool_rendering_and_falls_back_to_default(backend)
     assert "#t-5" in text
     assert "look here" in text
     assert executor.map_output("no_such_tool", ToolOutput(success=True, data={"content": "raw"})) == "raw"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_rendered_output_follows_the_executor_language(backend):
+    """An English passive human's view_task stays English when the process language is Chinese.
+
+    The executor builds its own tool surface, outside ``create_team_tools``.
+    The global language is left at ``cn`` so the assertion proves the executor
+    language, not the process default.
+    """
+    await backend.task_manager.add(title="look here", content="c", task_id="t-6")
+    previous = get_language()
+    set_language("cn")
+    try:
+        executor = PassiveToolExecutor(backend, language="en")
+        output = await executor.execute("pm-1", "view_task", {"task_id": "t-6"})
+        text = executor.map_output("view_task", output)
+    finally:
+        set_language(previous)
+
+    assert "m ago" in text or "just now" in text
+    assert "分钟前" not in text and "刚刚" not in text

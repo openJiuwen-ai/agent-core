@@ -87,6 +87,10 @@ class TeamMessageManager:
         self.db = db
         self.messager = messager
 
+    async def host_managed_recipients(self, names: list[str]) -> set[str]:
+        """Identify direct recipients that require a public group mention instead."""
+        return await self.db.member.host_managed_members(self.team_name, names)
+
     async def send_message(
         self,
         content: str,
@@ -108,6 +112,9 @@ class TeamMessageManager:
                 validated private delivery mode. Callers of the send_message
                 tool cannot provide arbitrary metadata.
         """
+        if await self.host_managed_recipients([to_member_name]):
+            team_logger.warning("Direct message rejected for host-managed recipient %s", to_member_name)
+            return None
         sender = from_member_name or self.member_name
         message_id = str(uuid.uuid4())
 
@@ -235,6 +242,10 @@ class TeamMessageManager:
         if not to_member_names:
             return []
 
+        blocked = await self.host_managed_recipients(to_member_names)
+        if blocked:
+            team_logger.warning("Multicast rejected for host-managed recipients %s", sorted(blocked))
+            return []
         pairs = [(str(uuid.uuid4()), to) for to in to_member_names]
         created = await self.db.message.create_direct_messages(
             team_name=self.team_name,

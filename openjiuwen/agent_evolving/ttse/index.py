@@ -350,8 +350,8 @@ class TTSEIndex:
             self.persist()
             return updated
 
-        async def save():
-            await orig_save()
+        async def save(*, strict: bool = False):
+            await orig_save(strict=strict)
             self.persist()
 
         def reload():
