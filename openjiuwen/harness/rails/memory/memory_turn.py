@@ -21,6 +21,23 @@ _TURN_TTL = 1800.0
 _TURN_TRUNCATION = "\n[交互轮次内容已截断]\n"
 
 
+def get_turn_session_id(ctx: AgentCallbackContext) -> str:
+    """Resolve the session ID used by the memory rails."""
+    session = getattr(ctx, "session", None)
+    if session is not None:
+        session_id = session.get_session_id()
+        if isinstance(session_id, str) and session_id:
+            return session_id
+    conversation_id = getattr(ctx.inputs, "conversation_id", None)
+    return conversation_id if isinstance(conversation_id, str) else ""
+
+
+def get_turn_interruption_state(ctx: AgentCallbackContext) -> object | None:
+    """Read the structured interrupt state associated with a memory turn."""
+    get_state = getattr(getattr(ctx, "session", None), "get_state", None)
+    return get_state(INTERRUPTION_KEY) if callable(get_state) else None
+
+
 @dataclass
 class _MemoryTurn:
     """Bounded user-side material for one logical turn, never a chat history."""
@@ -84,21 +101,6 @@ class MemoryTurnBuffer:
     def clear(self) -> None:
         self.turns.clear()
 
-    @staticmethod
-    def _turn_session_id(ctx: AgentCallbackContext) -> str:
-        session = getattr(ctx, "session", None)
-        if session is not None:
-            session_id = session.get_session_id()
-            if isinstance(session_id, str) and session_id:
-                return session_id
-        conversation_id = getattr(ctx.inputs, "conversation_id", None)
-        return conversation_id if isinstance(conversation_id, str) else ""
-
-    @staticmethod
-    def _interruption_state(ctx: AgentCallbackContext):
-        get_state = getattr(getattr(ctx, "session", None), "get_state", None)
-        return get_state(INTERRUPTION_KEY) if callable(get_state) else None
-
     def begin(self, ctx: AgentCallbackContext) -> None:
         if self._is_background_run(ctx):
             return
@@ -106,11 +108,11 @@ class MemoryTurnBuffer:
         for key, turn in list(self.turns.items()):
             if now - turn.updated >= _TURN_TTL:
                 self.turns.pop(key, None)
-        session_id = self._turn_session_id(ctx)
+        session_id = get_turn_session_id(ctx)
         if not session_id:
             return
         query = getattr(ctx.inputs, "query", None)
-        resume = isinstance(query, InteractiveInput) or self._interruption_state(ctx) is not None
+        resume = isinstance(query, InteractiveInput) or get_turn_interruption_state(ctx) is not None
         turn = self.turns.get(session_id) if resume else None
         if not isinstance(query, InteractiveInput):
             text = self._resolve_user_text_for_memory(ctx)
@@ -138,7 +140,7 @@ class MemoryTurnBuffer:
             or getattr(ctx, "is_paused", False)
         ):
             return
-        turn = self.turns.get(self._turn_session_id(ctx))
+        turn = self.turns.get(get_turn_session_id(ctx))
         result = getattr(ctx.inputs, "tool_result", None)
         if turn is None or not isinstance(result, str) or not result:
             return
@@ -166,7 +168,7 @@ class MemoryTurnBuffer:
         if self._is_background_run(ctx):
             return None
 
-        session_id = self._turn_session_id(ctx)
+        session_id = get_turn_session_id(ctx)
         turn = ctx.extra.pop(self._context_key, None)
         result = getattr(ctx.inputs, "result", None)
         interrupted = isinstance(result, dict) and result.get("result_type") == "interrupt"
@@ -175,7 +177,7 @@ class MemoryTurnBuffer:
         cancelled = task is not None and task.cancelling() > 0
         has_pending_interrupt = (
             not output
-            and self._interruption_state(ctx) is not None
+            and get_turn_interruption_state(ctx) is not None
             and getattr(ctx, "exception", None) is None
         )
         has_invocation_error = getattr(ctx, "exception", None) is not None

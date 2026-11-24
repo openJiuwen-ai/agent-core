@@ -15,6 +15,9 @@ from openjiuwen.core.memory.external.provider import MemoryProvider
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentKind
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.rails.memory.experience_capture import (
+    STATUS_TOOL, ExperienceCapture, ExperienceSync, drain_experience_writes, register_status_tool,
+)
 from openjiuwen.harness.rails.memory.jiuwen_memory_rail import JiuwenMemoryRail
 from openjiuwen.harness.rails.memory.memory_turn import MemoryTurnBuffer
 
@@ -29,6 +32,7 @@ class _Owner:
     turns: MemoryTurnBuffer
     tools: dict[str, ToolCard] = field(default_factory=dict)
     context: str | None = None
+    experience: ExperienceCapture | None = None
 
 
 class JiuwenMemoryCodingRail(DeepAgentRail):
@@ -47,8 +51,13 @@ class JiuwenMemoryCodingRail(DeepAgentRail):
         self, provider: MemoryProvider, *, user_id: str = "__default__",
         scope_id: str = "__default__", agent_id: str = "jiuwenswarm",
         session_id: str = "",
+        sync_experience: ExperienceSync | None = None,
     ) -> None:
         super().__init__()
+        if sync_experience is not None and not callable(sync_experience):
+            raise TypeError("sync_experience must be callable or None")
+        self._sync_experience = sync_experience
+        self._experience_writes: set[asyncio.Task[None]] = set()
         self._provider = provider
         self._identity = dict(user_id=user_id, scope_id=scope_id,
                               agent_id=agent_id, session_id=session_id)
@@ -82,6 +91,8 @@ class JiuwenMemoryCodingRail(DeepAgentRail):
             return
         try:
             self._register_tools(owner)
+            if self._sync_experience is not None:
+                self._init_experience(owner)
             builder = getattr(agent, "system_prompt_builder", None)
             if builder is not None:
                 language = getattr(builder, "language", "cn")
@@ -93,6 +104,21 @@ class JiuwenMemoryCodingRail(DeepAgentRail):
         except Exception as exc:
             logger.warning("[JiuwenMemoryCodingRail] registration failed: %s", type(exc).__name__)
             self.uninit(agent)
+
+    def _init_experience(self, owner: _Owner) -> None:
+        owner.experience = ExperienceCapture(
+            self._sync_experience,
+            self._experience_writes,
+            resolve_user_text=JiuwenMemoryRail.resolve_user_text_for_memory,
+            extract_output=JiuwenMemoryRail.extract_assistant_output,
+            is_background=JiuwenMemoryRail.is_background_run,
+        )
+        try:
+            card = register_status_tool(owner.agent)
+            if card is not None:
+                owner.tools[card.name] = card
+        except Exception as exc:
+            logger.warning("[JiuwenMemoryCodingRail] status tool registration failed: %s", type(exc).__name__)
 
     def _register_tools(self, owner: _Owner) -> None:
         for schema in self._provider.get_tool_schemas():
@@ -147,6 +173,11 @@ class JiuwenMemoryCodingRail(DeepAgentRail):
         owner.context = None
         if await self._initialize():
             owner.turns.begin(ctx)
+            if owner.experience is not None:
+                try:
+                    owner.experience.begin(ctx)
+                except Exception as exc:
+                    logger.warning("Agent experience capture failed: %s", type(exc).__name__)
             await self.before_model_call(ctx)
 
     async def before_model_call(self, ctx: Any) -> None:
@@ -187,11 +218,21 @@ class JiuwenMemoryCodingRail(DeepAgentRail):
         owner = self._owner(ctx)
         if owner is not None and self._initialized:
             owner.turns.capture_answer(ctx)
+            if owner.experience is not None:
+                try:
+                    owner.experience.capture_tool(ctx, owns_status_tool=STATUS_TOOL in owner.tools)
+                except Exception as exc:
+                    logger.warning("Agent experience capture failed: %s", type(exc).__name__)
 
     async def after_invoke(self, ctx: Any) -> None:
         owner = self._owner(ctx)
         if owner is None or not self._initialized:
             return
+        if owner.experience is not None:
+            try:
+                owner.experience.finish(ctx)
+            except Exception as exc:
+                logger.warning("[JiuwenMemoryCodingRail] experience capture failed: %s", type(exc).__name__)
         completed = owner.turns.finish(ctx)
         if completed is None:
             return
@@ -218,6 +259,7 @@ class JiuwenMemoryCodingRail(DeepAgentRail):
 
     async def drain(self) -> None:
         """Wait for writes already submitted by any owner."""
+        await drain_experience_writes(self._experience_writes)
         if self._writes:
             await asyncio.gather(*tuple(self._writes), return_exceptions=True)
 
@@ -226,6 +268,8 @@ class JiuwenMemoryCodingRail(DeepAgentRail):
         if owner is None:
             return
         owner.turns.clear()
+        if owner.experience is not None:
+            owner.experience.clear()
         for name, card in owner.tools.items():
             try:
                 if agent.ability_manager.get(name) is card:
