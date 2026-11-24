@@ -752,6 +752,7 @@ class TeamRuntimeContext(BaseModel):
             "to tighten the base config. None when no override was specified."
         ),
     )
+    agent_template_ref: dict[str, str | None] | None = None
     agent_template_spec: Optional[dict[str, Any]] = None
     """Capability snapshot of a member spawned from an expert template.
 

@@ -884,6 +884,8 @@ class AgentConfigurator:
                 member_card_id=self._card.id,
                 project_dir=member_project_dir,
             )
+        if ctx.agent_template_ref:
+            member_build_context.extras["team.agent_template_ref"] = dict(ctx.agent_template_ref)
         # Swarmflow shared infrastructure (worker-model resolver / worker +
         # human base specs / concurrency governor / budget ledger /
         # external-CLI allowlist / expert table). It is a team-level
@@ -1281,6 +1283,10 @@ class AgentConfigurator:
             on_member_started=self._on_teammate_created,
             on_member_restarted=on_member_restarted,
             on_member_stopped=on_member_stopped,
+            on_explicit_member_change=(
+                spec.build_context.extras.get("team.on_explicit_member_change")
+                if spec.build_context is not None else None
+            ),
             validate_worktree_isolation=validate_worktree_isolation,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
             org_task_manager=org_task_manager,
