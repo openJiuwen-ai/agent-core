@@ -9,7 +9,11 @@ from openjiuwen.core.foundation.tool import McpToolCard
 from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig, ToolAuthResult
 from openjiuwen.core.foundation.tool.mcp.base import McpServerConfig, NO_TIMEOUT, extract_mcp_tool_result_content
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
-from openjiuwen.core.foundation.tool.mcp.client.reconnect import with_reconnect, mark_reconnect_applied
+from openjiuwen.core.foundation.tool.mcp.client.reconnect import (
+    mark_reconnect_applied,
+    record_reconnect_success,
+    with_reconnect,
+)
 from openjiuwen.core.runner.callback.events import ToolCallEvents
 
 
@@ -22,6 +26,8 @@ class SseClient(McpClient):
     the same task they were entered) and prevents cross-task ``RuntimeError``
     when a timeout monitor or decorator calls ``disconnect`` from a different
     task.
+
+    ``_lazy_reconnect`` mirrors ``StreamableHttpClient``
     """
     __client_name__ = "sse"
 
@@ -50,6 +56,9 @@ class SseClient(McpClient):
         # sections atomic and avoid nested-lock deadlock surface.
         self._lifecycle_lock: asyncio.Lock = asyncio.Lock()
         self._reconnect_future: Optional[asyncio.Future] = None
+        # True once a successful connect allows lazy recovery; explicit
+        # disconnect() clears it so a user-initiated close stays closed.
+        self._lazy_reconnect: bool = False
 
     @staticmethod
     def _extract_auth_provider(auth_result: Any) -> Any:
@@ -151,6 +160,7 @@ class SseClient(McpClient):
             # and kills the owner loop.
             await asyncio.wait_for(self._session.initialize(), timeout=actual_timeout)
             self._is_disconnected = False
+            self._lazy_reconnect = True
             logger.info("[SseClient] SSE client connected successfully to %s", self._server_path)
             return True
 
@@ -262,7 +272,8 @@ class SseClient(McpClient):
         async with self._lifecycle_lock:
             result = await self._submit(lambda: self._do_disconnect(timeout=timeout))
             # A public disconnect is a final teardown: stop the owner task so it
-            # doesn't leak.
+            # doesn't leak, and clear lazy reconnect so Not connected stays final.
+            self._lazy_reconnect = False
             self._stopping = True
             if self._owner_task is not None and not self._owner_task.done():
                 self._owner_task.cancel()
@@ -298,6 +309,7 @@ class SseClient(McpClient):
                 logger.debug("[SseClient] Waiting for in-flight reconnect")
             else:
                 self._stopping = False
+                self._lazy_reconnect = True
                 self._reconnect_future = asyncio.get_running_loop().create_future()
                 fut = None
 
@@ -307,6 +319,8 @@ class SseClient(McpClient):
         try:
             result = await self._submit(lambda: self._do_reconnect(timeout=timeout))
             logger.info("[SseClient] Reconnect %s", "succeeded" if result else "failed")
+            if result:
+                record_reconnect_success(self)
             self._reconnect_future.set_result(result)
             return result
         except BaseException as exc:
