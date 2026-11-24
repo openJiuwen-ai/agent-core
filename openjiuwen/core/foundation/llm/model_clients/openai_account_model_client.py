@@ -70,7 +70,9 @@ class OpenAIAccountModelClient(BaseModelClient):
             refresh_timeout_seconds=model_client_config.timeout,
         )
         self._transport_override = extra.get("openai_account_transport")
-        self._request_fallback = RequestParameterFallback(model_client_config.client_provider, "OpenAI Responses")
+        self._request_fallback = RequestParameterFallback(
+            model_client_config.client_provider, "OpenAI Responses", retry_without_stop=True,
+        )
         self._model_catalog_override = extra.get("openai_account_model_catalog")
         self._model_catalog_transport = extra.get("openai_account_models_transport")
         self._model_catalog_cache_path = extra.get("openai_account_models_cache_path")
