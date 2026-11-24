@@ -315,3 +315,10 @@ async def test_switch_off_writes_no_step_records(monkeypatch):
         assert [k for k in kv._store if "agent-step" in k] == []
     finally:
         CheckpointerFactory.set_default_checkpointer(original)
+
+
+def test_iteration_checkpoint_is_on_by_default():
+    """The step checkpoint is opt-out: the config default must stay on."""
+    from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
+
+    assert ContextEngineConfig().enable_iteration_checkpoint is True
