@@ -107,7 +107,7 @@ generated: true
 | [F_09_team-stream-logging](features/agent_teams/F_09_team-stream-logging.md) | F | Team Stream Logging | alan_cheng | 待核实 |
 | [F_100_harness-system-prompt-modes](features/agent_teams/F_100_harness-system-prompt-modes.md) | F | Codex / DSH 系统提示词保留与替换模式 | alan_cheng | 待核实 |
 | [F_100_swarmflow-verify-fork-progress-events](features/agent_teams/F_100_swarmflow-verify-fork-progress-events.md) | F | Swarmflow verify/fork 结构化进度事件（VERIFY_STARTED/COMPLETED + fork 父标识） | hwxiajing | 待核实 |
-| [F_100_team-extension-wiring](features/agent_teams/F_100_team-extension-wiring.md) | F | Team 扩展机制接入（契约层 + 成员侧接线） | zhanglongmin | 待核实 |
+| [F_100_team-extension-wiring](features/agent_teams/F_100_team-extension-wiring.md) | F | Team 扩展机制接入（契约层 + 成员侧接线） | zhanglongmin | 无独立 D：本仓未维护独立设计文档；方案与取舍记录在本文档正文中（含历次设计缩减） |
 | [F_101_portable-skills-for-external-harnesses](features/agent_teams/F_101_portable-skills-for-external-harnesses.md) | F | 三方 Harness 的 Portable Skills | alan_cheng | 待核实 |
 | [F_109_send-message-recipient-parameter-split](features/agent_teams/F_109_send-message-recipient-parameter-split.md) | F | `send_message` 收件参数分离 | alan_cheng | 待核实 |
 | [F_10_temporary-leader-clean-team-stream-end](features/agent_teams/F_10_temporary-leader-clean-team-stream-end.md) | F | 临时团队 leader clean_team 后确定性结束自身 stream | alan_cheng | 待核实 |
