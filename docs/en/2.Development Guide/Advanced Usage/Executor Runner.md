@@ -213,16 +213,7 @@ def _create_model_config() -> ModelConfig:
 
 def _create_start_component():
     """Create Start component"""
-    return Start({
-        "inputs": [
-            {
-                "id": "query",
-                "type": "String",
-                "required": "true",
-                "sourceType": "ref"
-            }
-        ]
-    })
+    return Start()
 
 
 def _build_financial_workflow(

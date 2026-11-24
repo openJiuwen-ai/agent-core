@@ -779,7 +779,7 @@ from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.workflow import Start
 
 workflow = Workflow()
-workflow.set_start_comp("start", Start({"inputs": [{"id": "query", "type": "String", "required": "true", "sourceType": "ref"}]}), inputs_schema={"query": "${query}"})
+workflow.set_start_comp("start", Start(), inputs_schema={"query": "${query}"})
 workflow.add_workflow_comp(
     "questioner",
     questioner_component,
