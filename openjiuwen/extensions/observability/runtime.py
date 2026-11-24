@@ -31,6 +31,7 @@ from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.context_compression_handler import (
     ContextCompressionObservabilityBridge,
 )
+from openjiuwen.extensions.observability.demand import is_export_enabled
 from openjiuwen.extensions.observability.exporters.langfuse import (
     LangfuseExporterConfig,
     build_langfuse_span_exporter,
@@ -104,6 +105,45 @@ class SafeSpanProcessor(SpanProcessor):
             )
 
 
+class _ExportGate(SpanProcessor):
+    """Forward spans to the config-built exporter only while export is wanted.
+
+    A provider keeps the exporter it was created with (OTel allows no
+    processor removal), so a runtime that needs the provider only for span
+    capture — a trajectory store, or any capture-only consumer — must be able
+    to silence the exporter without tearing the provider down. The gate
+    consults the demand coordinator on every ended span; flush and shutdown
+    always pass through so provider teardown is never blocked by a closed
+    gate.
+    """
+
+    def __init__(self, inner: SpanProcessor) -> None:
+        self._inner = inner
+
+    def on_start(self, span: Any, parent_context: Any = None) -> None:
+        self._inner.on_start(span, parent_context=parent_context)
+
+    def on_end(self, span: Any) -> None:
+        try:
+            if is_export_enabled():
+                self._inner.on_end(span)
+        except Exception as exc:
+            # Fail open: a runtime that explicitly enabled observability must
+            # not lose data to a gate bug. The fallback is guarded too — this
+            # runs synchronously inside ``span.end``.
+            logger.warning("otel: export gate failed open - {}", exc)
+            try:
+                self._inner.on_end(span)
+            except Exception as inner_exc:
+                logger.warning("otel: export gate fallback failed - {}", inner_exc)
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return self._inner.force_flush(timeout_millis)
+
+    def shutdown(self) -> None:
+        self._inner.shutdown()
+
+
 class ObservabilityRuntime:
     """Own one configured ``TracerProvider`` and its processor lifecycle."""
 
@@ -162,19 +202,29 @@ class ObservabilityRuntime:
                 provider.add_span_processor(tracker)
 
                 exporter = span_exporter_override or build_span_exporter(config)
-                # An injected exporter ships spans however its owner sees fit,
-                # including off-process, so references are resolved for it the
-                # same way the built-in exporters are; see build_span_exporter.
-                if span_exporter_override is not None:
-                    exporter = TransformingSpanExporter(exporter, materialize_span_references)
                 # The console exporter is wrapped in a materializing transform
                 # (see build_span_exporter); see through the wrapper so console
                 # output stays on the synchronous SimpleSpanProcessor path.
                 unwrapped = getattr(exporter, "exporter", exporter)
-                if span_exporter_override is not None or isinstance(unwrapped, ConsoleSpanExporter):
+                if span_exporter_override is not None:
+                    # An injected exporter ships spans however its owner sees
+                    # fit, including off-process, so references are resolved for
+                    # it the same way the built-in exporters are (see
+                    # build_span_exporter); it is an explicit intent to export
+                    # and is never gated.
+                    exporter = TransformingSpanExporter(exporter, materialize_span_references)
                     provider.add_span_processor(SimpleSpanProcessor(exporter))
                 else:
-                    provider.add_span_processor(BatchSpanProcessor(exporter))
+                    # The config-built exporter goes through the export gate so
+                    # capture-only consumers (for example a trajectory store)
+                    # hold the provider up without exporting.
+                    provider.add_span_processor(
+                        _ExportGate(
+                            SimpleSpanProcessor(exporter)
+                            if isinstance(unwrapped, ConsoleSpanExporter)
+                            else BatchSpanProcessor(exporter)
+                        )
+                    )
 
                 self._register_span_processors(
                     provider,

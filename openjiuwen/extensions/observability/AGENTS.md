@@ -59,7 +59,12 @@ The relationship between the two packages is fixed:
   a provider factory instead of touching global state itself.
 - `demand.py`: acquire/release bookkeeping so one runtime's shutdown never
   tears down a provider another runtime still depends on. OTel allows exactly
-  one global provider per process; first initializer wins.
+  one global provider per process; first initializer wins. It also owns the
+  process-wide export decision: each acquire states whether that runtime
+  wants export (`export=`), and `runtime.py`'s `_ExportGate` consults
+  `is_export_enabled()` before forwarding ended spans to the config-built
+  exporter. Capture consumers (trajectory processor, record processor) and
+  `span_exporter_override` are never gated.
 - `config.py`: `ObservabilityConfig` (exporter, endpoint, sampling, redaction).
 - `semconv.py`: the project's attribute facade — standard GenAI keys
   re-exported from `gen_ai_semconv.py`, plus `openjiuwen.*` / `agentteam.*` /
@@ -102,6 +107,11 @@ The relationship between the two packages is fixed:
    `trace.set_tracer_provider()` or shut a provider down from a caller tier.
 5. One carrier per fact. Where a standard GenAI key exists it is the carrier
    and no project mirror is written.
+6. Nothing on the span hot path (`on_start` / `on_end`, snapshot and stream
+   publishing) takes `demand._DEMAND_LOCK`. Teardown holds that lock through
+   exporter flush, and `ObservabilityRuntime.shutdown` ends spans while
+   holding the runtime lock, so taking it there blocks business threads and
+   inverts the lock order. Publish state under the lock; read it lock-free.
 
 ## Change checklist
 

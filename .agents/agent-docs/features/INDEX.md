@@ -19,6 +19,7 @@ generated: true
 | [agent_teams](#module-agent_teams) |
 | [agent_teams/harness](#module-agent_teams-harness) |
 | [agent_teams/memory](#module-agent_teams-memory) |
+| [agent_teams/observability](#module-agent_teams-observability) |
 | [core.runner.resources_manager](#module-core-runner-resources_manager) |
 | [core.session.tracer](#module-core-session-tracer) |
 | [core/foundation/llm](#module-core-foundation-llm) |
@@ -27,6 +28,7 @@ generated: true
 | [extensions/observability](#module-extensions-observability) |
 | [extensions/tracer_otel](#module-extensions-tracer_otel) |
 | [harness](#module-harness) |
+| [harness/observability](#module-harness-observability) |
 | [harness/rails](#module-harness-rails) |
 | [harness/rails/evolution](#module-harness-rails-evolution) |
 | [harness/subagents](#module-harness-subagents) |
@@ -230,6 +232,14 @@ generated: true
 |---|---|---|---|---|
 | [F-20261118-1150-team-document-memory](F_20261118_1150_team-document-memory.md) | F | Team 接入 Jiuwen 文档记忆 | Wang Tao | 无独立 D：依据 D-20261113-2017-jiuwen-memory-team-upgrade 及已确认的跨仓 Team 方案。 |
 
+<a id="module-agent_teams-observability"></a>
+
+## agent_teams/observability
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261123_1804_observability-export-gate](F_20261123_1804_observability-export-gate.md) | F | 采集需求与导出需求拆分：observability 导出闸门 | hh0205 | 无独立 D：落实 GitCode jiuwenswarm issue 4327 第 3 条（trajectory_ui 不能影响 observability 功能）的 Core 侧能力，无独立 D 文档。 |
+
 <a id="module-core-runner-resources_manager"></a>
 
 ## core.runner.resources_manager
@@ -281,6 +291,7 @@ generated: true
 | [F_20261104_1638_drop-llm-span-cost-attrs](F_20261104_1638_drop-llm-span-cost-attrs.md) | F | LLM span 去掉 usage cost 属性（openjiuwen.gen_ai.usage.*_cost） | weixin_39960157 | 无独立 D：纯删减类变更（去掉一处已定属性的发射），无方案级取舍需要独立设计；键的引入背景与命名迁移见 |
 | [F_20261112_1120_goal-assessment-isolation](F_20261112_1120_goal-assessment-isolation.md) | F | Goal 评估调用的观测隔离实施 | alan_cheng | [D-20261112-1120-goal-assessment-isolation](../designs/active/D-20261112-1120-goal-assessment-isolation/design.md) |
 | [F_20261123_1139_trajectory-sequence-store](F_20261123_1139_trajectory-sequence-store.md) | F | 演进轨迹消息序列共享 | zhangzhongteng | 无独立 D：依据用户在本次任务中提供并要求执行的方案，无独立 D 文件。 |
+| [F_20261123_1804_observability-export-gate](F_20261123_1804_observability-export-gate.md) | F | 采集需求与导出需求拆分：observability 导出闸门 | hh0205 | 无独立 D：落实 GitCode jiuwenswarm issue 4327 第 3 条（trajectory_ui 不能影响 observability 功能）的 Core 侧能力，无独立 D 文档。 |
 
 <a id="module-extensions-tracer_otel"></a>
 
@@ -349,6 +360,14 @@ generated: true
 | [F_28_subagent-registration-event-bridge](harness/F_28_subagent-registration-event-bridge.md) | F | agent.register 启动 SubAgent 登记桥接 | 待确认 | 待核实 |
 | [F_29_browser-shared-state-and-source-delivery](harness/F_29_browser-shared-state-and-source-delivery.md) | F | Browser shared-state lifecycle and complete retained-source delivery | ShowHsiang | 待核实 |
 | [F_30_browser-output-and-dispatch-contracts](F_30_browser-output-and-dispatch-contracts.md) | F | Browser output limits and local dispatch contracts | ShowHsiang | 无独立 D：Implements the approved multiversion analysis section 19 using existing browser contracts. |
+
+<a id="module-harness-observability"></a>
+
+## harness/observability
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261123_1804_observability-export-gate](F_20261123_1804_observability-export-gate.md) | F | 采集需求与导出需求拆分：observability 导出闸门 | hh0205 | 无独立 D：落实 GitCode jiuwenswarm issue 4327 第 3 条（trajectory_ui 不能影响 observability 功能）的 Core 侧能力，无独立 D 文档。 |
 
 <a id="module-harness-rails"></a>
 
