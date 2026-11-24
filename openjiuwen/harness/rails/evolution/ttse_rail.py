@@ -903,13 +903,45 @@ class TTSERail(EvolutionRail):
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         await super().before_model_call(ctx)
+        builder = self._model_call_builder(ctx)
+        if self._is_background_run(ctx):
+            await self._withhold_consult(ctx, builder)
+            return
+        await self._inject_consult(ctx, builder)
+
+    async def after_model_call(self, ctx: AgentCallbackContext) -> None:
+        try:
+            await super().after_model_call(ctx)
+        finally:
+            if self._is_background_run(ctx):
+                await self._inject_consult(ctx, self._model_call_builder(ctx))
+
+    @staticmethod
+    def _model_call_builder(ctx: AgentCallbackContext) -> Any:
         builder = getattr(getattr(ctx, "inputs", None), "system_prompt_builder", None)
         if builder is None:
             builder = getattr(getattr(ctx, "agent", None), "system_prompt_builder", None)
+        return builder
+
+    async def _inject_consult(self, ctx: AgentCallbackContext, builder: Any) -> None:
         self._apply_catalog_guidance(builder)
         if not self._ttse_config.inject_enabled:
             return
         await self._attach_disk_catalog(ctx)
+
+    async def _withhold_consult(self, ctx: AgentCallbackContext, builder: Any) -> None:
+        """Hide ttse_consult from one background (cron/heartbeat) model call."""
+        if builder is not None:
+            builder.remove_section(SectionName.TTSE_FACTS_TIPS)
+        inputs = getattr(ctx, "inputs", None)
+        tools = getattr(inputs, "tools", None)
+        if isinstance(tools, list):
+            inputs.tools = [tool for tool in tools if getattr(tool, "name", None) != TTSE_CONSULT_TOOL_NAME]
+        agent = getattr(ctx, "agent", None) or self._agent
+        manager = getattr(agent, "prompt_attachment_manager", None) or self._attachment_manager
+        session_id = self._catalog_session_id(ctx)
+        if manager is not None and session_id:
+            await manager.clear_section(session_id=session_id, section=_TTSE_CATALOG_SECTION)
 
     def _catalog_guidance_section(self) -> PromptSection:
         return PromptSection(
