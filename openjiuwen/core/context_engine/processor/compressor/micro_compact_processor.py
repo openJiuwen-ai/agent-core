@@ -45,6 +45,9 @@ class MicroCompactProcessorConfig(BaseModel):
 
 @ContextEngine.register_processor()
 class MicroCompactProcessor(ContextProcessor):
+    # Rule-based tool-result clearance; not a user-visible LLM compression.
+    suppress_stream_state_events = True
+
     @property
     def config(self) -> MicroCompactProcessorConfig:
         return self._config

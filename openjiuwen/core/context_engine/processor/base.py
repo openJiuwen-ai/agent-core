@@ -59,6 +59,12 @@ class ContextProcessor(metaclass=MetaContextProcessor):
     # only surface compression indicators for real compression.
     suppress_state_events: bool = False
 
+    # Set to True on processors whose state should stay internal (log +
+    # recorder history) but must not be pushed to client streams.  Rule-based
+    # offloads/folds use this: operators still get logs, while clients only
+    # surface indicators for real (LLM) compression.
+    suppress_stream_state_events: bool = False
+
     def __init__(self, config: BaseModel):
         """
         Store the processor-specific configuration.

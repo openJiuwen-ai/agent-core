@@ -199,6 +199,9 @@ class ReasoningToolLoopCompactProcessor(ContextProcessor):
       - insert one AssistantMessage warning with the latest round's calls/results
     """
 
+    # Rule-based folding, not LLM compression; keep it out of client streams.
+    suppress_stream_state_events = True
+
     @property
     def config(self) -> ReasoningToolLoopCompactProcessorConfig:
         return self._config

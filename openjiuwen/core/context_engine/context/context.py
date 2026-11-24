@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -83,6 +84,12 @@ class SessionModelContext(ModelContext):
         )
         self._processor_lock = asyncio.Lock()
         self._active_compression_in_progress = False
+        # Provider-usage / local-tokenizer ratio.  Unlike the usage baseline it
+        # survives context rewrites: after set_messages() the old baseline is
+        # stale, but the ratio is still the best available scale for the next
+        # processor.  In-memory only; a fresh context starts with None.
+        self._token_scale_factor: float | None = None
+        self._token_scale_model_name: str | None = None
         self._last_context_window_access_at: float | None = None
         self._last_llm_bound_context_window: ContextWindow | None = None
         self._offload_message_buffer = OffloadMessageBuffer()
@@ -119,6 +126,18 @@ class SessionModelContext(ModelContext):
             fallback_context_window_tokens=self._context_window_tokens,
             model_context_window_tokens=self._model_context_window_tokens,
         )
+
+    def token_scale_factor(self) -> float | None:
+        """Return the last provider-usage / raw-tokenizer ratio, if known."""
+        return self._token_scale_factor
+
+    def _reset_token_scale(self) -> None:
+        self._token_scale_factor = None
+
+    def _update_token_scale_from_snapshot(self, snapshot: Any) -> None:
+        scale_factor = getattr(snapshot, "scale_factor", None)
+        if isinstance(scale_factor, (int, float)) and scale_factor > 0:
+            self._token_scale_factor = float(scale_factor)
 
     def workspace_dir(self) -> str:
         if self._workspace:
@@ -407,13 +426,35 @@ class SessionModelContext(ModelContext):
 
         async with self._guarded_processor_lock("get_context_window"):
             system_messages = (system_messages or [])[:]
+            full_context_message_count = len(self._message_buffer.get_back())
 
             # with specific context size
             system_messages, context_messages = self._get_window_messages(system_messages, window_size, dialogue_round)
+            window_was_trimmed = (
+                len(context_messages) < full_context_message_count
+                or self._message_buffer.is_size_limited()
+            )
 
             window = ContextWindow(
                 system_messages=system_messages, context_messages=context_messages, tools=tools or []
             )
+
+            # A usage baseline describes the whole conversation, while the raw
+            # count below covers only this window.  Their ratio is a valid
+            # provider/tokenizer scale only when both sides see the same range
+            # and include the same system+tools overhead.
+            window_overhead_tokens = self._measure_window_overhead(window)
+            has_window_overhead = bool(window.system_messages or window.tools)
+            scale_eligible = (
+                not window_was_trimmed
+                and (window_overhead_tokens > 0 or not has_window_overhead)
+            )
+            current_model_name = self._resolve_context_model_name(kwargs)
+            if current_model_name != self._token_scale_model_name:
+                self._reset_token_scale()
+                self._token_scale_model_name = current_model_name
+            if not scale_eligible:
+                self._reset_token_scale()
 
             call_window_mutators = kwargs.pop("window_mutators", None) or []
             kwargs.update({"window_size": window_size})
@@ -451,6 +492,7 @@ class SessionModelContext(ModelContext):
                                 force=False,
                                 context_max=context_max,
                                 overhead_tokens=self._measure_window_overhead(window),
+                                token_scale_eligible=scale_eligible,
                                 model_config=kwargs.get("model_config"),
                                 model_client_config=kwargs.get("model_client_config"),
                             )
@@ -477,6 +519,7 @@ class SessionModelContext(ModelContext):
                                 compact_summary=str(getattr(event, "compact_summary", "") or ""),
                                 compression_usage=getattr(event, "compression_usage", None),
                                 overhead_tokens=self._measure_window_overhead(window),
+                                token_scale_eligible=scale_eligible,
                                 model_config=kwargs.get("model_config"),
                                 model_client_config=kwargs.get("model_client_config"),
                             )
@@ -522,6 +565,7 @@ class SessionModelContext(ModelContext):
                                 model_context_window_tokens=self._model_context_window_tokens,
                             ),
                             overhead_tokens=self._measure_window_overhead(window),
+                            token_scale_eligible=scale_eligible,
                             model_config=kwargs.get("model_config"),
                             model_client_config=kwargs.get("model_client_config"),
                         )
@@ -590,19 +634,19 @@ class SessionModelContext(ModelContext):
         """
         Calculate token count for a single tool, using two-level priority:
         1. Use _token_counter (if available)
-        2. Fallback: text string length / 4
+        2. Fallback: CJK-aware estimate over name + description + parameters
         """
         # Priority 1: Use _token_counter
         if self._token_counter is not None:
             return self._token_counter.count_tools([tool_info])
 
-        # Priority 2: Fallback - estimate based on text string length / 4
+        # Priority 2: CJK-aware character fallback
         # Calculate text length of tool name + description + parameters
         text_content = f"{tool_info.name or ''} {tool_info.description or ''}"
         if tool_info.parameters:
             # Convert parameters dict to string for estimation
             text_content += json.dumps(tool_info.parameters, ensure_ascii=False)
-        return len(text_content) // 4
+        return ContextUtils.estimate_tokens(text_content)
 
     def _stat_tools(self, stat: ContextStats, tools: List[ToolInfo]):
         stat.tools = len(tools)
@@ -614,23 +658,13 @@ class SessionModelContext(ModelContext):
         """
         Calculate token count for a single message (without usage_metadata):
         1. Use _token_counter (if available)
-        2. Fallback: text string length / 4
+        2. Fallback: ContextUtils.estimate_message_tokens (CJK-aware content and
+           image-size estimate)
         """
         if self._token_counter is not None:
             return self._token_counter.count_messages([message])
 
-        content = message.content
-        if isinstance(content, str):
-            return len(content) // 4
-        elif isinstance(content, list):
-            total = 0
-            for part in content:
-                if isinstance(part, str):
-                    total += len(part) // 4
-                elif isinstance(part, dict) and "text" in part:
-                    total += len(part["text"]) // 4
-            return total
-        return 0
+        return ContextUtils.estimate_message_tokens(message)
 
     def _get_last_assistant_usage_tokens(self, messages: List[BaseMessage]) -> Optional[int]:
         """
@@ -1015,8 +1049,39 @@ class SessionModelContext(ModelContext):
         # silent: no stream push, no callback, no history record.
         if getattr(state_input.processor, "suppress_state_events", False):
             return
+        # The scale ledger is only meaningful on GET windows: that is the only
+        # path where the snapshot includes system+tools overhead, matching the
+        # provider usage baseline.  ADD/active paths omit that overhead, so
+        # borrowing the GET ratio there would double-count it on the next GET.
+        scale_eligible = (
+            state_input.token_scale_eligible
+            and state_input.phase == "get_context_window"
+        )
+        if state_input.token_scale_eligible != scale_eligible:
+            state_input = replace(
+                state_input,
+                token_scale_eligible=scale_eligible,
+            )
+        if (
+                scale_eligible
+                and state_input.token_scale_factor is None
+                and self._token_scale_factor is not None
+        ):
+            state_input = replace(
+                state_input,
+                token_scale_factor=self._token_scale_factor,
+            )
         state = self._processor_state_recorder.build_state(state_input)
-        await self._processor_state_recorder.emit(self, state)
+        if scale_eligible:
+            self._update_token_scale_from_snapshot(
+                self._processor_state_recorder.before_snapshot(state_input.operation_id)
+            )
+        emit_stream = not getattr(
+            state_input.processor, "suppress_stream_state_events", False
+        )
+        await self._processor_state_recorder.emit(
+            self, state, emit_stream=emit_stream
+        )
 
     async def _build_and_emit_processor_cancelled_state(
         self,

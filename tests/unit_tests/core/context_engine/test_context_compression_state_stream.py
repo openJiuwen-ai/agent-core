@@ -13,7 +13,13 @@ from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.context_engine.schema.context_state import ContextCompressionState
-from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    BaseMessage,
+    SystemMessage,
+    UsageMetadata,
+    UserMessage,
+)
 from openjiuwen.core.session.stream.base import OutputSchema
 
 
@@ -128,6 +134,31 @@ class _CancellingGetWindowProcessor(ContextProcessor):
         return {}
 
 
+class _ReplacingGetWindowCompressor(ContextProcessor):
+    """Retain the first message while rewriting the window, invalidating usage."""
+
+    def __init__(self):
+        super().__init__(_CompressConfig())
+
+    async def trigger_get_context_window(self, context, context_window, **kwargs: Any) -> bool:
+        return True
+
+    async def on_get_context_window(self, context, context_window, **kwargs: Any):
+        retained = list(context_window.context_messages[:1])
+        context_window.context_messages = [*retained, UserMessage(content="short")]
+        context.set_messages(context_window.context_messages)
+        return ContextEvent(
+            event_type=self.processor_type(),
+            messages_to_modify=[1],
+        ), context_window
+
+    def load_state(self, state: Dict[str, Any]) -> None:
+        return None
+
+    def save_state(self) -> Dict[str, Any]:
+        return {}
+
+
 class _ReplacingSummaryCompressor(_ReplacingCompressor):
     async def on_add_messages(
             self,
@@ -217,6 +248,126 @@ async def test_active_compression_streams_started_and_completed_state():
     assert completed.statistic.user_messages == 1
     assert completed.summary == "Compressed 2 -> 1 messages, ~40 -> ~2 tokens, saved ~38 tokens (95.0%), modified 2 messages"
     assert completed.duration_ms is not None
+
+
+@pytest.mark.asyncio
+async def test_completed_before_survives_usage_invalidation():
+    """压缩写回使 retained assistant usage 失效，completed 仍复用 started 的 before。"""
+    session = _FakeSession()
+    context = SessionModelContext(
+        "context-1",
+        session.get_session_id(),
+        ContextEngineConfig(),
+        history_messages=[
+            AssistantMessage(
+                content="history",
+                usage_metadata=UsageMetadata(total_tokens=180_000),
+            ),
+            UserMessage(content="x" * 4_000),  # tail = 1_000
+        ],
+        processors=[_ReplacingGetWindowCompressor()],
+        token_counter=None,
+    )
+    setattr(context, "_session_ref", session)
+
+    await context.get_context_window()
+
+    states = _compression_states(session)
+    assert [state.status for state in states] == ["started", "completed"]
+    assert states[0].before.tokens == 181_000
+    assert states[1].before.tokens == 181_000
+    assert states[1].before.token_source == "usage+tail"
+    assert states[1].scale_factor is not None
+    assert states[1].scale_factor > 0
+    assert context.token_scale_factor() is not None
+    assert context.token_scale_factor() > 0
+
+
+@pytest.mark.asyncio
+async def test_windowed_get_does_not_populate_scale_ledger():
+    """窗口裁剪时 usage（整段对话）与 raw（窗口）不同量纲，不写 scale ledger。"""
+    session = _FakeSession()
+    context = SessionModelContext(
+        "context-1",
+        session.get_session_id(),
+        ContextEngineConfig(default_window_message_num=1),
+        history_messages=[
+            UserMessage(content="old"),
+            AssistantMessage(
+                content="ok",
+                usage_metadata=UsageMetadata(total_tokens=180_000),
+            ),
+        ],
+        processors=[_ReplacingGetWindowCompressor()],
+        token_counter=None,
+    )
+    setattr(context, "_session_ref", session)
+
+    await context.get_context_window()
+
+    states = _compression_states(session)
+    assert states[0].status == "started"
+    assert states[0].before.token_source == "tokenizer"
+    assert states[0].scale_factor is None
+    assert states[1].scale_factor is None
+    assert context.token_scale_factor() is None
+
+
+@pytest.mark.asyncio
+async def test_get_window_without_overhead_counter_clears_scale_ledger():
+    """system/tools 存在但 token_counter 为空时，raw 不含 overhead，不得产 scale。"""
+    session = _FakeSession()
+    context = SessionModelContext(
+        "context-1",
+        session.get_session_id(),
+        ContextEngineConfig(),
+        history_messages=[
+            AssistantMessage(
+                content="ok",
+                usage_metadata=UsageMetadata(total_tokens=180_000),
+            )
+        ],
+        processors=[_ReplacingGetWindowCompressor()],
+        token_counter=None,
+    )
+    setattr(context, "_session_ref", session)
+    context._token_scale_factor = 0.5
+
+    await context.get_context_window(system_messages=[SystemMessage(content="sys")])
+
+    states = _compression_states(session)
+    assert states[0].status == "started"
+    assert states[0].scale_factor is None
+    assert context.token_scale_factor() is None
+
+
+@pytest.mark.asyncio
+async def test_add_messages_does_not_borrow_get_window_scale():
+    """ADD 路径缺少 system/tools overhead，不能套用 GET 的校准因子。"""
+    session = _FakeSession()
+    context = SessionModelContext(
+        "context-1",
+        session.get_session_id(),
+        ContextEngineConfig(),
+        history_messages=[
+            AssistantMessage(
+                content="old",
+                usage_metadata=UsageMetadata(total_tokens=180_000),
+            ),
+            UserMessage(content="a" * 80),
+        ],
+        processors=[_ReplacingCompressor()],
+        token_counter=None,
+    )
+    setattr(context, "_session_ref", session)
+    context._token_scale_factor = 0.5
+
+    await context.add_messages([UserMessage(content="b" * 80)])
+
+    states = _compression_states(session)
+    assert states[0].status == "started"
+    assert states[0].before.token_source == "tokenizer"
+    assert states[0].scale_factor is None
 
 
 @pytest.mark.asyncio
@@ -336,6 +487,35 @@ async def test_context_percent_uses_model_context_window_mapping():
     assert states[0].before.context_percent == 10
 
 
+class _StreamSuppressedCompressor(_ReplacingCompressor):
+    suppress_stream_state_events = True
+
+
+@pytest.mark.asyncio
+async def test_suppressed_stream_processor_keeps_history_but_skips_session_stream():
+    session = _FakeSession()
+    context = SessionModelContext(
+        "context-1",
+        session.get_session_id(),
+        ContextEngineConfig(),
+        history_messages=[
+            UserMessage(content="a" * 80),
+            UserMessage(content="b" * 80),
+        ],
+        processors=[_StreamSuppressedCompressor()],
+        token_counter=None,
+    )
+    setattr(context, "_session_ref", session)
+
+    result = await context.compress_context()
+
+    assert result == "compressed"
+    assert _compression_states(session) == []
+    history = context._processor_state_recorder.history()
+    assert [state["status"] for state in history] == ["started", "completed"]
+    assert history[-1]["processor"] == "_StreamSuppressedCompressor"
+
+
 @pytest.mark.asyncio
 async def test_state_callback_failure_does_not_block_stream_emit():
     session = _FakeSession()
@@ -350,8 +530,8 @@ async def test_state_callback_failure_does_not_block_stream_emit():
     setattr(context, "_session_ref", session)
 
     with patch(
-        "openjiuwen.core.context_engine.context.context._fw.trigger",
-        new=AsyncMock(side_effect=RuntimeError("callback failed")),
+            "openjiuwen.core.context_engine.context.context._fw.trigger",
+            new=AsyncMock(side_effect=RuntimeError("callback failed")),
     ):
         result = await context.compress_context()
 
