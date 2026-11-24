@@ -381,10 +381,12 @@ class TaskPlanningRail(DeepAgentRail):
 
     @staticmethod
     def _iteration_checkpoint_enabled(ctx: AgentCallbackContext) -> bool:
-        """Whether the agent run persists step checkpoints (default off)."""
+        """Whether the agent run persists step checkpoints (on by default)."""
         config = getattr(getattr(ctx, "agent", None), "_config", None)
         engine_config = getattr(config, "context_engine_config", None)
-        return bool(getattr(engine_config, "enable_iteration_checkpoint", False))
+        if engine_config is None:
+            return True
+        return bool(getattr(engine_config, "enable_iteration_checkpoint", True))
 
     @staticmethod
     async def _read_todo_file(tool, path: str) -> Optional[tuple[bool, str]]:
