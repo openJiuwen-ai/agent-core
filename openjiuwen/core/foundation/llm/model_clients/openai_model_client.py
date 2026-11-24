@@ -1302,17 +1302,31 @@ class OpenAIModelClient(BaseModelClient):
         configured_max_tokens = max_tokens if max_tokens is not None else self.model_config.max_tokens
         final_stop = stop if stop is not None else self.model_config.stop
 
-        reasoning = kwargs.pop("reasoning", None)
+        explicit_reasoning = kwargs.pop("reasoning", UNSET_REASONING)
+        reasoning_kwargs = dict(kwargs)
+        if explicit_reasoning is not UNSET_REASONING:
+            reasoning_kwargs["reasoning"] = explicit_reasoning
         extra_body = kwargs.pop("extra_body", None)
         tool_choice = kwargs.pop("tool_choice", "auto")
         parallel_tool_calls = kwargs.pop("parallel_tool_calls", True)
         include_reasoning = kwargs.pop("include_reasoning_encrypted_content", False)
 
         request_extra = self.model_config.model_dump(
-            exclude={"model_name", "model", "temperature", "top_p", "max_tokens", "stop"},
+            exclude={"model_name", "model", "temperature", "top_p", "max_tokens", "stop", "reasoning"},
             exclude_none=True,
         )
         request_extra.update(kwargs)
+        reasoning_params: dict[str, Any] = {}
+        apply_reasoning_plan(
+            reasoning_params,
+            resolve_reasoning_plan(
+                self.model_client_config,
+                self.model_config,
+                request_model=model,
+                explicit_kwargs=reasoning_kwargs,
+            ),
+        )
+        reasoning = reasoning_params.get("reasoning")
 
         return build_request_body(
             model=final_model,
