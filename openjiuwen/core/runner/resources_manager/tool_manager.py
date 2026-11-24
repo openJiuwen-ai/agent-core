@@ -124,7 +124,17 @@ class ToolMgr:
                 return cards
             client = self._create_client(server_config)
             connected = False
-            budget = {} if timeout is None else {"timeout": timeout}
+            # Call-level timeout keeps precedence; when the caller passed no
+            # explicit budget, the config's declared ``connect_timeout`` is
+            # the fallback so slow-initializing servers can be configured on
+            # the officially recommended registration path (issue #1975).
+            # ``None`` on both levels keeps the client's internal default
+            # (60s fallback), preserving the previous behavior. The field is
+            # constrained to positive values at validation time.
+            effective_timeout = timeout
+            if effective_timeout is None:
+                effective_timeout = server_config.connect_timeout
+            budget = {} if effective_timeout is None else {"timeout": effective_timeout}
             try:
                 connected = await client.connect(**budget)
                 if not connected:
@@ -135,7 +145,7 @@ class ToolMgr:
                         server_config=server_config, reason=reason,
                     )
                 results = await self._inner_refresh_mcp_tools(
-                    client, server_config, expiry_time, timeout=timeout
+                    client, server_config, expiry_time, timeout=effective_timeout
                 )
                 self._mcp_server_name_to_ids.setdefault(server_config.server_name, []).append(server_config.server_id)
                 return results

@@ -132,6 +132,7 @@ McpServerConfig contains the following core configuration fields:
 | `params` | dict | Extra parameters (e.g., command/args for StdioServerParameters) |
 | `auth_headers` | dict | HTTP authentication Header (SSE/StreamableHttp only) |
 | `auth_query_params` | dict[str, str] | HTTP authentication Query parameters |
+| `connect_timeout` | float | Connection budget in seconds for registering this server (connect + tool listing). `None` (default) keeps the client's internal fallback (60s), so existing configs are unaffected. Raise it for slow networks or slow-initializing servers (e.g., intranet simulation services); an explicit call-level `timeout` on `add_mcp_server` still takes precedence |
 
 ### 4.1 SSE-Based Remote Service Integration
 
