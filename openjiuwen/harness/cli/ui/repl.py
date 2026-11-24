@@ -296,19 +296,19 @@ async def _subcmd_run(
     """Handle /auto-harness run."""
     import time as _time
 
-    from openjiuwen.auto_harness.schema import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
         OptimizationTask,
         normalize_pipeline_preference,
         is_placeholder_local_repo,
         load_auto_harness_config,
     )
-    from openjiuwen.auto_harness.pipelines import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.pipelines import (
         META_EVOLVE_PIPELINE,
     )
-    from openjiuwen.auto_harness.orchestrator import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.orchestrator import (
         create_auto_harness_orchestrator,
     )
-    from openjiuwen.auto_harness.infra.github_cli import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.infra.github_cli import (
         ensure_github_cli_ready,
     )
 
@@ -588,7 +588,7 @@ async def _subcmd_memory(
     workspace: str,
 ) -> None:
     """Handle /auto-harness experience <search|list>."""
-    from openjiuwen.auto_harness.experience.experience_store import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.experience.experience_store import (
         ExperienceStore,
     )
 
@@ -674,10 +674,10 @@ async def _subcmd_gap_analyze(
     workspace: str,
 ) -> None:
     """Handle /auto-harness gap-analyze."""
-    from openjiuwen.auto_harness.schema import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
         AutoHarnessConfig,
     )
-    from openjiuwen.auto_harness.stages.assess import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.stages.assess import (
         run_gap_analysis,
     )
 
@@ -712,7 +712,7 @@ async def _subcmd_history(
     workspace: str,
 ) -> None:
     """Handle /auto-harness history."""
-    from openjiuwen.auto_harness.experience.experience_store import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.experience.experience_store import (
         ExperienceStore,
     )
 

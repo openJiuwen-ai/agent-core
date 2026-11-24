@@ -2093,16 +2093,13 @@ async def test_task_claimed_for_human_self_swallows_title_lookup_error():
     ``task_manager.get`` raising is logged + swallowed by the handler;
     the prompt still goes out with an empty title placeholder so the
     avatar still gets notified.
+
+    Role is mocked via ``is_human_agent``: this case only exercises
+    title-lookup exception swallowing, not DB-backed HUMAN_AGENT
+    persistence (avoids in-memory sqlite GC segfault flakes under xdist).
     """
     agent = _make_leader(team_name="human-claim-error-team", member_name="human-leader-error")
-    await _prepare_backend_db(agent)
-    await agent.team_backend.spawn_member(
-        member_name="human-leader-error",
-        display_name="Leader",
-        agent_card=AgentCard(),
-        desc="leader as human",
-        role=TeamRole.HUMAN_AGENT,
-    )
+    agent.team_backend.is_human_agent = AsyncMock(return_value=True)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.get = AsyncMock(side_effect=RuntimeError("db down"))
