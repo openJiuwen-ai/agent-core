@@ -152,7 +152,9 @@ class TeamAgent(BaseAgent):
         """Get-or-create the team-scoped tiny agent declared under ``name``.
 
         Lazily builds it from ``TeamAgentSpec.tiny_agents[name]`` on first access,
-        caches it on infra (one per name, per process), and reuses it afterwards.
+        caches it on this agent's infra (one per name per ``TeamAgent`` — the
+        infra container is process-local but not shared between agents), and
+        reuses it afterwards.
         Returns None when no tiny agent is declared under ``name``. The cached
         instance is disposed when the team stops.
 
@@ -867,9 +869,37 @@ class TeamAgent(BaseAgent):
 
         ``on_quiesced`` is forwarded to the coordination kernel and runs
         before the kernel and tiny-agent resources are torn down.
+
+        The tiny-agent sweep runs in ``finally``: the kernel's teardown tail
+        re-raises ``CancelledError`` after it finished reclaiming (deferred
+        cancellation), and the sweep must not be skipped on that path.
         """
-        await self._stop_coordination(on_quiesced=on_quiesced)
-        await self._dispose_tiny_agents()
+        try:
+            await self._stop_coordination(on_quiesced=on_quiesced)
+        finally:
+            await self._dispose_tiny_agents()
+
+    async def dispose_coordination(self) -> None:
+        """Tear down coordination resources after this member's task ends.
+
+        Counterpart of :meth:`stop_coordination` for spawned members: their
+        asyncio task can be cancelled by the leader's teardown long before any
+        pause/stop lifecycle transition, and the event bus (run loop + poll
+        timers) would otherwise keep running. Skips the pause/stop
+        memory/status semantics — see ``CoordinationKernel.dispose``.
+
+        The member's cached tiny agents are team-scoped resources that do
+        not outlive this task either, so they are closed like the
+        ``stop_coordination`` path does (best-effort, idempotent).
+
+        The tiny-agent sweep runs in ``finally``: the kernel re-raises
+        ``CancelledError`` once its deferred teardown finished, and the
+        owning task being cancelled must not skip the sweep.
+        """
+        try:
+            await self._coordination.dispose()
+        finally:
+            await self._dispose_tiny_agents()
 
     def _close_stream(self) -> None:
         self._coordination.close_stream()

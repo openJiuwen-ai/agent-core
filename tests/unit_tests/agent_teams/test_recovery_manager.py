@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -76,3 +77,29 @@ async def test_recover_team_still_restarts_previously_running_members():
 
     assert restarted == ["m-1", "m-2"]
     assert spawn_manager.restart_teammate.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_session_switch_cleanup_cancellation_marks_restart_aborted():
+    """session-switch 的 cleanup 被取消：归一持久态后再上抛，不再重启。"""
+    configurator = SimpleNamespace(
+        member_name="leader",
+        team_backend=SimpleNamespace(),
+        team_name="t",
+    )
+    spawn_manager = SimpleNamespace(
+        cleanup_teammate=AsyncMock(side_effect=asyncio.CancelledError()),
+        mark_restart_aborted=AsyncMock(),
+        restart_teammate=AsyncMock(),
+    )
+    mgr = RecoveryManager(configurator, spawn_manager)
+
+    with pytest.raises(asyncio.CancelledError):
+        await mgr.restart_for_session_switch(
+            [("m", MemberStatus.READY)],
+            cleanup_first=True,
+        )
+
+    spawn_manager.mark_restart_aborted.assert_awaited_once_with("m")
+    spawn_manager.restart_teammate.assert_not_awaited()

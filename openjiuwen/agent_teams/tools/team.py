@@ -495,6 +495,8 @@ class TeamBackend:
         self,
         member_name: str,
         new_status: MemberStatus,
+        *,
+        allowed_from: Optional[set[str]] = None,
     ) -> bool:
         """Persist a member status change AND publish MemberStatusChangedEvent.
 
@@ -505,15 +507,35 @@ class TeamBackend:
         used to write the DAO directly, so no status_changed event was emitted and
         frontends only learned about ERROR/PAUSED at the next snapshot poll.
         Event publish failure is logged but does not affect the write result.
+
+        Args:
+            member_name: Member whose status changes.
+            new_status: Target status.
+            allowed_from: Optional CAS guard: when given, the write applies
+                only while the row's current status is one of these values
+                (single conditional UPDATE). Pass it from writers that do
+                not own the row — e.g. the unhealthy-recovery normalization,
+                which runs on its own task and must not overwrite a
+                PAUSED/STOPPED the leader just wrote.
         """
         old = await self.db.member.get_member_status(self.team_name, member_name)
         if old is None:
             return False
         if old == new_status.value:
             return True
-        success = await self.db.member.update_member_status(
-            member_name, self.team_name, new_status.value
-        )
+        if allowed_from is None:
+            success = await self.db.member.update_member_status(
+                member_name, self.team_name, new_status.value
+            )
+        else:
+            # old 只用于日志/事件；并发防护在 WHERE status IN (...) 里——
+            # 读后若权威方改了状态，条件 UPDATE 落空而不是覆盖。
+            success = await self.db.member.update_member_status_if_in(
+                member_name,
+                self.team_name,
+                tuple(allowed_from),
+                new_status.value,
+            )
         if not success:
             return False
         try:

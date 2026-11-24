@@ -126,10 +126,11 @@ class TestTeamDatabaseInit:
             with engine.begin() as conn:
                 conn.exec_driver_sql(
                     """
-                    CREATE TABLE team_member (
-                        member_name TEXT NOT NULL,
-                        team_name TEXT NOT NULL,
-                        options TEXT,
+                    CREATE TABLE team_member
+                    (
+                        member_name    TEXT NOT NULL,
+                        team_name      TEXT NOT NULL,
+                        options        TEXT,
                         model_ref_json TEXT,
                         PRIMARY KEY (member_name, team_name)
                     )
@@ -148,8 +149,10 @@ class TestTeamDatabaseInit:
                 columns = {col["name"] for col in inspect(conn).get_columns("team_member")}
                 row = conn.exec_driver_sql(
                     """
-                    SELECT options FROM team_member
-                    WHERE member_name = ? AND team_name = ?
+                    SELECT options
+                    FROM team_member
+                    WHERE member_name = ?
+                      AND team_name = ?
                     """,
                     ("member_options", "team_options"),
                 ).mappings().one()
@@ -171,13 +174,14 @@ class TestTeamDatabaseInit:
             with engine.begin() as conn:
                 conn.exec_driver_sql(
                     """
-                    CREATE TABLE team_task_legacy (
-                        task_id TEXT PRIMARY KEY,
-                        team_name TEXT NOT NULL,
-                        title TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        assignee TEXT,
+                    CREATE TABLE team_task_legacy
+                    (
+                        task_id    TEXT PRIMARY KEY,
+                        team_name  TEXT NOT NULL,
+                        title      TEXT NOT NULL,
+                        content    TEXT NOT NULL,
+                        status     TEXT NOT NULL,
+                        assignee   TEXT,
                         updated_at BIGINT
                     )
                     """
@@ -224,14 +228,15 @@ class TestTeamDatabaseInit:
             with engine.begin() as conn:
                 conn.exec_driver_sql(
                     """
-                    CREATE TABLE team_task_prevote (
-                        task_id TEXT PRIMARY KEY,
-                        team_name TEXT NOT NULL,
-                        title TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        assignee TEXT,
-                        reviewer TEXT,
+                    CREATE TABLE team_task_prevote
+                    (
+                        task_id    TEXT PRIMARY KEY,
+                        team_name  TEXT NOT NULL,
+                        title      TEXT NOT NULL,
+                        content    TEXT NOT NULL,
+                        status     TEXT NOT NULL,
+                        assignee   TEXT,
+                        reviewer   TEXT,
                         updated_at BIGINT
                     )
                     """
@@ -265,11 +270,12 @@ class TestTeamDatabaseInit:
             with engine.begin() as conn:
                 conn.exec_driver_sql(
                     """
-                    CREATE TABLE team_info (
-                        team_name TEXT PRIMARY KEY,
-                        display_name TEXT NOT NULL,
-                        leader_member_name TEXT NOT NULL,
-                        created BIGINT NOT NULL
+                    CREATE TABLE team_info
+                    (
+                        team_name          TEXT PRIMARY KEY,
+                        display_name       TEXT   NOT NULL,
+                        leader_member_name TEXT   NOT NULL,
+                        created            BIGINT NOT NULL
                     )
                     """
                 )
@@ -306,16 +312,17 @@ class TestTeamDatabaseInit:
             with engine.begin() as conn:
                 conn.exec_driver_sql(
                     """
-                    CREATE TABLE team_message_premeta (
-                        message_id TEXT PRIMARY KEY,
-                        team_name TEXT NOT NULL,
-                        from_member_name TEXT NOT NULL,
-                        to_member_name TEXT,
-                        content TEXT NOT NULL,
-                        timestamp BIGINT NOT NULL,
-                        broadcast BOOLEAN NOT NULL,
-                        protocol TEXT NOT NULL DEFAULT 'plain',
-                        is_read BOOLEAN
+                    CREATE TABLE team_message_premeta
+                    (
+                        message_id       TEXT PRIMARY KEY,
+                        team_name        TEXT    NOT NULL,
+                        from_member_name TEXT    NOT NULL,
+                        to_member_name   TEXT,
+                        content          TEXT    NOT NULL,
+                        timestamp        BIGINT  NOT NULL,
+                        broadcast        BOOLEAN NOT NULL,
+                        protocol         TEXT    NOT NULL DEFAULT 'plain',
+                        is_read          BOOLEAN
                     )
                     """
                 )
@@ -715,6 +722,50 @@ class TestMemberOperations:
         """Test updating status for non-existent member returns False"""
         success = await db.member.update_member_status("nonexistentmember", "team6", "busy")
         assert success is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_update_member_status_if_in_is_a_cas_guard(self, db):
+        """CAS 变体：仅当前状态仍在调用方给定前驱集内才写，否则落空。"""
+        await db.team.create_team(
+            team_name="team_if_in",
+            display_name="Team IfIn",
+            leader_member_name="leader_ifin",
+        )
+        agent_card = AgentCard(name="IfInAgent").model_dump_json()
+        await db.member.create_member(
+            member_name="m_if_in",
+            team_name="team_if_in",
+            display_name="If In",
+            agent_card=agent_card,
+            status="paused",
+        )
+
+        # 当前 paused（leader 刚写的权威状态）：READY 系前驱集不得覆盖。
+        assert await db.member.update_member_status_if_in(
+            "m_if_in",
+            "team_if_in",
+            ("ready", "busy", "restarting"),
+            "error",
+        ) is False
+        assert (await db.member.get_member("m_if_in", "team_if_in")).status == "paused"
+
+        # 前驱集命中时才写。
+        assert await db.member.update_member_status_if_in(
+            "m_if_in",
+            "team_if_in",
+            ("paused",),
+            "error",
+        ) is True
+        assert (await db.member.get_member("m_if_in", "team_if_in")).status == "error"
+
+        # 空前驱集直接拒绝（不读不写）。
+        assert await db.member.update_member_status_if_in(
+            "m_if_in",
+            "team_if_in",
+            (),
+            "ready",
+        ) is False
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -1206,7 +1257,7 @@ class TestTaskOperations:
         try:
             await db.team.create_team(
                 team_name="team_file_conc",
-            display_name="File Concurrent Team",
+                display_name="File Concurrent Team",
                 leader_member_name="leader_file"
             )
 
@@ -1359,7 +1410,8 @@ class TestTaskDependencyOperations:
         result = await db.task.mutate_dependency_graph(
             "team_bidir1",
             new_tasks=[
-                NewTaskSpec(task_id="priority_task", title="Priority Task", content="High priority content", initial_status="pending")
+                NewTaskSpec(task_id="priority_task", title="Priority Task", content="High priority content",
+                            initial_status="pending")
             ],
             add_edges=[("task1", "priority_task"), ("task2", "priority_task")],
         )
@@ -1439,7 +1491,7 @@ class TestTaskDependencyOperations:
 
         # Setup: taskA -> taskB
         await db.task.create_task("taskA", "team_bidir3", "Task A", "Content A",
-                             "completed")
+                                  "completed")
         await db.task.create_task("taskB", "team_bidir3", "Task B", "Content B", "pending")
         await db.task.mutate_dependency_graph("team_bidir3", add_edges=[("taskB", "taskA")])
 
@@ -1447,7 +1499,8 @@ class TestTaskDependencyOperations:
         result = await db.task.mutate_dependency_graph(
             "team_bidir3",
             new_tasks=[
-                NewTaskSpec(task_id="taskM", title="Task M (Middle)", content="Middle task content", initial_status="blocked")
+                NewTaskSpec(task_id="taskM", title="Task M (Middle)", content="Middle task content",
+                            initial_status="blocked")
             ],
             add_edges=[("taskM", "taskA"), ("taskB", "taskM")],
         )
@@ -1547,14 +1600,15 @@ class TestTaskDependencyOperations:
 
         # Create a completed task
         await db.task.create_task("task_completed", "team_terminal1", "Task Completed",
-                             "Content", "completed")
+                                  "Content", "completed")
 
         # Try to create a new task that the completed task would depend on
         # This should fail because completed is a terminal status
         result = await db.task.mutate_dependency_graph(
             "team_terminal1",
             new_tasks=[
-                NewTaskSpec(task_id="new_priority", title="New Priority Task", content="Content", initial_status="pending")
+                NewTaskSpec(task_id="new_priority", title="New Priority Task", content="Content",
+                            initial_status="pending")
             ],
             add_edges=[("task_completed", "new_priority")],
         )
@@ -1577,13 +1631,14 @@ class TestTaskDependencyOperations:
 
         # Create a cancelled task
         await db.task.create_task("task_cancelled", "team_terminal2", "Task Cancelled",
-                             "Content", "cancelled")
+                                  "Content", "cancelled")
 
         # Try to create a new task that the cancelled task would depend on
         result = await db.task.mutate_dependency_graph(
             "team_terminal2",
             new_tasks=[
-                NewTaskSpec(task_id="new_priority2", title="New Priority Task 2", content="Content", initial_status="pending")
+                NewTaskSpec(task_id="new_priority2", title="New Priority Task 2", content="Content",
+                            initial_status="pending")
             ],
             add_edges=[("task_cancelled", "new_priority2")],
         )
@@ -1602,13 +1657,14 @@ class TestTaskDependencyOperations:
 
         # Create an in-progress task
         await db.task.create_task("task_claimed", "team_terminal3", "Task Claimed",
-                             "Content", "in_progress")
+                                  "Content", "in_progress")
 
         # Wiring a new prerequisite into an executing task is rejected.
         result = await db.task.mutate_dependency_graph(
             "team_terminal3",
             new_tasks=[
-                NewTaskSpec(task_id="new_priority3", title="New Priority Task 3", content="Content", initial_status="pending")
+                NewTaskSpec(task_id="new_priority3", title="New Priority Task 3", content="Content",
+                            initial_status="pending")
             ],
             add_edges=[("task_claimed", "new_priority3")],
         )
@@ -3005,7 +3061,7 @@ class TestSessionTables:
                 warning
                 for warning in caught
                 if issubclass(warning.category, SAWarning)
-                and "already contains a class with the same class name" in str(warning.message)
+                   and "already contains a class with the same class name" in str(warning.message)
             ]
             assert duplicate_class_warnings == []
             second_models = (
@@ -3350,7 +3406,7 @@ class TestDropSessionTablesById:
                     warning
                     for warning in caught
                     if issubclass(warning.category, SAWarning)
-                    and "already contains a class with the same class name" in str(warning.message)
+                       and "already contains a class with the same class name" in str(warning.message)
                 ]
                 assert duplicate_class_warnings == []
                 second_models = (
@@ -3409,11 +3465,11 @@ class TestDropSessionTablesById:
 
         # Cache entries and metadata registrations are both gone.
         for cache in (
-            _task_models,
-            _task_dependency_models,
-            _message_models,
-            _message_read_status_models,
-            _review_vote_models,
+                _task_models,
+                _task_dependency_models,
+                _message_models,
+                _message_read_status_models,
+                _review_vote_models,
         ):
             assert session_id not in cache
         assert dynamic_table_names.isdisjoint(set(SQLModel.metadata.tables))
