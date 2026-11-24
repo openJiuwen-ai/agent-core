@@ -19,16 +19,18 @@ from typing import Any, Literal
 from openjiuwen.core.common.logging import LogEventType, session_logger
 from openjiuwen.core.graph.store import create_serializer
 from openjiuwen.core.session.checkpointer.base import build_key_with_namespace, safe_agent_id
+from openjiuwen.core.session.vcs.codec import encode_context_state
 from openjiuwen.core.session.checkpointer.step_delta import (
     STEP_WINDOW_KEY,  # noqa: F401  (re-exported for callers building snapshots)
     StepKind,
     StepRecord,
     apply_step_context,
     apply_step_state,
-    build_step_snapshot,
+    build_step_snapshot,  # noqa: F401  (kept for callers that build snapshots directly)
     diff_step_context,
     diff_step_state,
     restore_full_state,
+    split_step_state,
 )
 from openjiuwen.core.session.session import BaseSession
 
@@ -95,11 +97,20 @@ class AgentStepStorage:
             return
         sid, aid = ids
         track = self._tracks.setdefault((sid, aid), _StepTrack())
-        snapshot = build_step_snapshot(session.state().get_state())
+        # Read the live state without copying it; the encoded snapshot and
+        # the state copy below are all the baseline needs. Nothing awaits
+        # between this read and the snapshot being built.
+        contexts, state = split_step_state(
+            session.state().get_state(copied=False), live=True
+        )
         base = track.baseline if track.baseline is not None else {"context": {}, "state": {}}
+        encoded_context = {
+            cid: encode_context_state(cstate or {}) for cid, cstate in contexts.items()
+        }
+        snapshot = {"context": encoded_context, "state": state}
 
-        context_delta = diff_step_context(base.get("context") or {}, snapshot["context"])
-        state_delta, state_full = diff_step_state(base.get("state") or {}, snapshot["state"])
+        context_delta = diff_step_context(base.get("context") or {}, encoded_context)
+        state_delta, state_full = diff_step_state(base.get("state") or {}, state)
         record_iteration = track.last_iteration if iteration is None else iteration
         record_query = track.last_query if query is None else query
         seq = track.next_seq

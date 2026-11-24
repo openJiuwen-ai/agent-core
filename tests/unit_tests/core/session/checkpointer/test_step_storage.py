@@ -251,3 +251,18 @@ async def test_session_without_agent_card_is_ignored():
     await storage.end(session, interrupted=False)
 
     assert kv._store == {}
+
+
+@pytest.mark.asyncio
+async def test_append_does_not_mutate_live_state():
+    """The live-state fast path must only read; the window key stays out of it."""
+    session = make_session("s1", "agent-1")
+    set_msgs(session, ["q", "a1"])
+    storage = AgentStepStorage(MockKVStore())
+
+    await storage.append(session, kind="step", iteration=0, query="q")
+
+    live = session.state().get_global(None)
+    assert "context" in live
+    assert "__step_context_window__" not in live
+    assert [m.content for m in live["context"]["cid"]["messages"]] == ["q", "a1"]
