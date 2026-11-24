@@ -28,7 +28,14 @@ async def env(tmp_path, monkeypatch):
     rail = TaskPlanningRail()
     rail.tools = [tool]
     session = Session("sess", card=AgentCard(id="todo-step", name="t"))
-    ctx = SimpleNamespace(session=session, extra={}, inputs=None)
+    ctx = SimpleNamespace(
+        session=session,
+        extra={},
+        inputs=None,
+        agent=SimpleNamespace(_config=SimpleNamespace(
+            context_engine_config=SimpleNamespace(enable_iteration_checkpoint=True)
+        )),
+    )
     yield rail, session, ctx, tmp_path / "sess" / "todo.json"
     await ReadWriteLockManager.stop()
 
@@ -199,3 +206,17 @@ async def test_content_without_metadata_uses_probe_for_existence(env):
     await rail.after_react_iteration(ctx)
 
     assert session.get_state(STEP_TODO_SNAPSHOT_KEY) == {"exists": True, "content": "REAL"}
+
+
+@pytest.mark.asyncio
+async def test_after_react_iteration_skips_snapshot_when_switch_is_off(env):
+    """The per-iteration snapshot only exists when the agent writes step records."""
+    rail, session, ctx, todo_path = env
+    _todo_file(todo_path).write_text('{"todos": [1]}', encoding="utf-8")
+    ctx.agent = SimpleNamespace(_config=SimpleNamespace(
+        context_engine_config=SimpleNamespace(enable_iteration_checkpoint=False)
+    ))
+
+    await rail.after_react_iteration(ctx)
+
+    assert session.get_state(STEP_TODO_SNAPSHOT_KEY) is None
