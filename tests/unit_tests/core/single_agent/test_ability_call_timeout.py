@@ -340,3 +340,124 @@ def test_timeout_error_carries_tool_message_for_llm() -> None:
             await Runner.stop()
 
     _run_async(_run())
+
+
+# ---------------------------------------------------------------------------
+# Arguments-derived deadline
+#
+# The 300s default used to cap tools that declare their own per-call timeout.
+# Log evidence from production: a bash call carrying ``timeout: 900`` failed
+# with ``Tool 'bash' timed out after 300.0s``, because the ToolCard declared no
+# ``resilience.timeout_s`` and the arguments were never consulted.
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_seconds_from_args_parsing() -> None:
+    """Argument-declared timeouts are read from every supported key shape."""
+    parse = AbilityManager._timeout_seconds_from_args
+    # seconds-family keys
+    assert parse({"timeout": 600}) == 600.0
+    assert parse({"timeout_seconds": 600}) == 600.0
+    assert parse({"timeout_sec": 600}) == 600.0
+    # millisecond keys win, so a ms value can never be read as seconds
+    assert parse({"timeout_ms": 600000}) == 600.0
+    assert parse({"timeoutMs": 600000}) == 600.0
+    assert parse({"timeout_ms": 5000, "timeout": 600}) == 5.0
+    # a bare value above the ms threshold is milliseconds
+    assert parse({"timeout": 600000}) == 600.0
+    assert parse({"timeout": 10000}) == 10000.0
+    # numeric strings are accepted
+    assert parse({"timeout": "600"}) == 600.0
+
+
+def test_timeout_seconds_from_args_rejects_unusable_values() -> None:
+    parse = AbilityManager._timeout_seconds_from_args
+    assert parse({"timeout": 0}) is None
+    assert parse({"timeout": -1}) is None
+    # bool is an int subclass; True must not become a 1s budget
+    assert parse({"timeout": True}) is None
+    assert parse({"timeout": "abc"}) is None
+    assert parse({"command": "ls"}) is None
+    assert parse(["timeout"]) is None
+    assert parse(None) is None
+
+
+def test_resolve_call_timeout_for_args_derives_from_declared_timeout() -> None:
+    """A declared timeout lifts the outer deadline past the 300s default."""
+    resolve = AbilityManager._resolve_call_timeout_for_args
+    grace = am_mod.TOOL_CALL_TIMEOUT_SETTLE_GRACE_S
+    # the reported case: timeout=600 must survive well past 300s
+    resolved = resolve(_tool_card("bash"), {"timeout": 600})
+    assert resolved == 600.0 + grace
+    assert resolved > am_mod.DEFAULT_TOOL_CALL_TIMEOUT
+    # the exact user scenario: a ~420s script
+    assert resolve(_tool_card("bash"), {"timeout": 420}) == 420.0 + grace
+    # the outer deadline must exceed the inner one so partial output survives
+    assert resolve(_tool_card("bash"), {"timeout": 600}) > 600.0
+
+
+def test_resolve_call_timeout_for_args_clamps_to_hard_limit() -> None:
+    resolve = AbilityManager._resolve_call_timeout_for_args
+    grace = am_mod.TOOL_CALL_TIMEOUT_SETTLE_GRACE_S
+    hard = am_mod.MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
+    assert resolve(_tool_card("bash"), {"timeout": 7200}) == hard + grace
+    assert resolve(_tool_card("bash"), {"timeout": 3600}) == hard + grace
+
+
+def test_resolve_call_timeout_for_args_precedence() -> None:
+    """A positive card declaration is authoritative; exemption yields to args."""
+    resolve = AbilityManager._resolve_call_timeout_for_args
+    grace = am_mod.TOOL_CALL_TIMEOUT_SETTLE_GRACE_S
+    default = am_mod.DEFAULT_TOOL_CALL_TIMEOUT
+
+    # positive card declaration wins over the arguments
+    assert resolve(_tool_card("t", timeout_s=10.0), {"timeout": 600}) == 10.0
+
+    # exempt card (timeout_s=None) + declared timeout -> derived from args,
+    # which is a tighter backstop than jumping to the 3600s hard limit
+    assert resolve(_tool_card("bash", timeout_s=None), {"timeout": 600}) == 600.0 + grace
+
+    # exempt card with no argument timeout -> no outer deadline at this layer;
+    # the call site applies MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
+    assert resolve(_tool_card("bash", timeout_s=None), {"command": "ls"}) is None
+    assert resolve(_tool_card("bash", timeout_s=0), {"command": "ls"}) is None
+
+    # malformed card value is not authoritative and must not shadow the args
+    assert resolve(_tool_card("t", timeout_s="nope"), {"timeout": 600}) == 600.0 + grace
+    # ...while keeping the legacy default when no args are declared
+    assert resolve(_tool_card("t", timeout_s="nope"), {"x": 1}) == default
+
+
+def test_resolve_call_timeout_for_args_falls_back_to_legacy_default() -> None:
+    resolve = AbilityManager._resolve_call_timeout_for_args
+    default = am_mod.DEFAULT_TOOL_CALL_TIMEOUT
+    assert resolve(_tool_card("read_file"), {"path": "/x"}) == default
+    assert resolve(None, {}) == default
+    # even without a card, a declared timeout still lifts the deadline
+    assert resolve(None, {"timeout": 600}) == 600.0 + am_mod.TOOL_CALL_TIMEOUT_SETTLE_GRACE_S
+
+
+def test_real_bash_card_without_resilience_is_lifted_by_arguments() -> None:
+    """End-to-end on the real BashTool card: the 300s cap no longer applies."""
+    bash_card = _real_tool_card("bash")
+    # The stock card still declares nothing - untouched by this change.
+    assert "resilience" not in bash_card.properties
+    # Legacy resolution alone still yields the 300s default (unchanged contract).
+    assert AbilityManager._resolve_call_timeout(bash_card) == am_mod.DEFAULT_TOOL_CALL_TIMEOUT
+    # But the invocation path now derives from the call's own timeout.
+    resolved = AbilityManager._resolve_call_timeout_for_args(bash_card, {"timeout": 600})
+    assert resolved == 600.0 + am_mod.TOOL_CALL_TIMEOUT_SETTLE_GRACE_S
+
+
+def test_timeout_message_names_the_limiting_layer() -> None:
+    """The model must be able to self-correct from the timeout message."""
+    msg = AbilityManager._describe_timeout_layer("bash", 630.0, {"timeout": 600})
+    assert "630" in msg
+    assert "600" in msg
+    assert "timed out" in msg
+    # points at the non-blocking escape hatch instead of inviting a blind retry
+    assert "background" in msg.lower()
+
+    no_declaration = AbilityManager._describe_timeout_layer("read_file", 300.0, {"path": "/x"})
+    assert "declared no timeout" in no_declaration
+
