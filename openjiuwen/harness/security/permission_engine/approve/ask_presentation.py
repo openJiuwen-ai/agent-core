@@ -344,12 +344,10 @@ def _shell_file_access_summary(
         if analysis is None:
             accesses = extract_shell_path_accesses(cmd, _workdir(tool_args), include_cd_reads=False)
         else:
-            accesses = [
-                (path, action)
-                for path, action, _ in extract_accesses_native(
-                    tool_name, tool_args, analysis.cwd, permission_config, include_cd_reads=False,
-                )
-            ]
+            native_accesses = extract_accesses_native(
+                tool_name, tool_args, analysis.cwd, permission_config, include_cd_reads=False,
+            )
+            accesses = [(path, action) for path, action, _ in native_accesses]
     except (OSError, RuntimeError, ValueError):
         return ""
     if require_file_io:
