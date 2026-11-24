@@ -1290,7 +1290,10 @@ class ReActAgent(BaseAgent):
             return
         session_id = ctx.session.get_session_id() if ctx.session is not None else context.session_id()
         try:
-            await sync_to_context(context, session_id)
+            if self._is_team_agent:
+                await sync_to_context(context, session_id, trigger_events=False)
+            else:
+                await sync_to_context(context, session_id)
         except Exception as exc:  # noqa: BLE001 - attachment updates must not block the model
             logger.warning(
                 "[ReActAgent] prompt attachment history sync failed: %s",
