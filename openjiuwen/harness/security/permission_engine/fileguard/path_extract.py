@@ -368,7 +368,8 @@ def _path_aware_one_segment(
         else:
             try:
                 home = Path.home().resolve()
-                results.append((home, "read"))
+                if include_cd_reads:
+                    results.append((home, "read"))
                 new_cwd = home
             except (OSError, RuntimeError):
                 pass
@@ -523,6 +524,8 @@ def extract_accesses_native(
     tool_args: Mapping[str, Any],
     workspace: Path,
     permission_config: Mapping[str, Any] | None = None,
+    *,
+    include_cd_reads: bool = True,
 ) -> list[tuple[Path, FileAction, str]]:
     """Native 抽取：``(path, action, source)``；source 为 ``tool_arg`` / ``shlex``。"""
     out: list[tuple[Path, FileAction, str]] = []
@@ -535,7 +538,11 @@ def extract_accesses_native(
     if is_shell_tool(tool_name, shell_tools_from_config(permission_config)):
         analysis = current_shell_path_analysis(tool_name, tool_args)
         if analysis is not None:
-            candidates = dict.fromkeys((entry.path, entry.action, "shell_ast") for entry in analysis.accesses)
+            candidates = dict.fromkeys(
+                (entry.path, entry.action, "shell_ast")
+                for entry in analysis.accesses
+                if include_cd_reads or entry.kind == "file_io"
+            )
             out.extend(candidates)
             if analysis.coverage == "complete":
                 return out
@@ -555,7 +562,9 @@ def extract_accesses_native(
                 pass
         cmd = str(tool_args.get("command", "") or tool_args.get("cmd", ""))
         literal_enabled = literal_shell_enabled(permission_config, tool_name, tool_args)
-        for p, act in extract_shell_path_accesses(cmd, workdir_resolved, skill_authorization=literal_enabled):
+        for p, act in extract_shell_path_accesses(
+            cmd, workdir_resolved, include_cd_reads=include_cd_reads, skill_authorization=literal_enabled,
+        ):
             out.append((p, act, "shlex"))
         if analysis is not None:
             # Compatibility rules remain a floor during partial analysis.

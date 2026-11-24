@@ -192,6 +192,32 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return False
         return True
 
+    def _complete_approval(
+        self,
+        ctx: AgentCallbackContext,
+        payload: PermissionConfirmResponse,
+        auto_confirm_key: str,
+        *,
+        persisted: bool,
+    ) -> str:
+        """Store any eligible session key and report the effective approval."""
+        permanent = payload.wants_permanent_persist()
+        stored = self._should_store_auto_confirm(
+            approved=payload.approved,
+            auto_confirm=payload.auto_confirm,
+            session=ctx.session,
+            auto_confirm_key=auto_confirm_key,
+            persisted=persisted,
+            permanent=permanent,
+        )
+        if stored:
+            self._store_auto_confirm(ctx, auto_confirm_key)
+        if permanent and persisted:
+            return "allow_always_persist"
+        if persisted or stored:
+            return "allow_always_session"
+        return "allow_once"
+
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         tool_name = ctx.inputs.tool_name
         tool_call = ctx.inputs.tool_call
@@ -544,20 +570,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                         persisted,
                         confirm_payload.persist_allow,
                     )
-                    if self._should_store_auto_confirm(
-                        approved=confirm_payload.approved,
-                        auto_confirm=confirm_payload.auto_confirm,
-                        session=ctx.session,
-                        auto_confirm_key=auto_confirm_key,
-                        persisted=persisted,
-                        permanent=confirm_payload.wants_permanent_persist(),
-                    ):
-                        self._store_auto_confirm(ctx, auto_confirm_key)
                     if confirm_payload.approved:
-                        decision = (
-                            "allow_always_persist" if confirm_payload.wants_permanent_persist()
-                            else "allow_always_session" if confirm_payload.auto_confirm
-                            else "allow_once"
+                        decision = self._complete_approval(
+                            ctx, confirm_payload, auto_confirm_key, persisted=persisted,
                         )
                         logger.info(
                             "[PermissionEngine] permission.user.decision tool=%s confirm_path=hosted "
@@ -648,22 +663,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 auto_confirm_key,
             )
 
-        if self._should_store_auto_confirm(
-            approved=payload.approved,
-            auto_confirm=payload.auto_confirm,
-            session=ctx.session,
-            auto_confirm_key=auto_confirm_key,
-            persisted=persisted,
-            permanent=payload.wants_permanent_persist(),
-        ):
-            self._store_auto_confirm(ctx, auto_confirm_key)
-
         if payload.approved:
-            decision = (
-                "allow_always_persist" if payload.wants_permanent_persist()
-                else "allow_always_session" if payload.auto_confirm
-                else "allow_once"
-            )
+            decision = self._complete_approval(ctx, payload, auto_confirm_key, persisted=persisted)
             logger.info(
                 "[PermissionEngine] permission.user.decision tool=%s confirm_path=%s decision=%s persisted=%s",
                 tool_name,
@@ -974,10 +975,27 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     def _build_always_allow_hint(self, tool_call: Optional[ToolCall]) -> str:
         if tool_call is None:
             return ""
-        
+
         tool_name = tool_call.name or ""
+        normalized_name = self._normalize_tool_name(tool_name)
         tool_args = self.parse_tool_args(tool_call)
         auto_confirm_key = self._get_auto_confirm_key(tool_call)
+
+        if is_shell_tool(normalized_name, shell_tools_from_config(self._engine.config)):
+            if auto_confirm_key:
+                return (
+                    f'\n\n> 选择「会话内记住」可在本会话内自动放行 ``{auto_confirm_key}`` 类调用；'
+                    f'选择「永久记住」可将此规则写回磁盘，所有会话均自动放行。'
+                )
+
+            from openjiuwen.harness.security.permission_engine.shell_path_context import current_shell_path_analysis
+
+            analysis = current_shell_path_analysis(normalized_name, tool_args)
+            if analysis is not None and analysis.blocks_remember(set(
+                self._collect_file_guard_persist_accesses(normalized_name, tool_args, self._engine.config)
+            )):
+                return '\n\n> 当前 Shell 路径证据不支持记住规则，确认后仅放行本次。'
+            return ""
 
         path_hint = ""
         for key in ("path", "file_path", "target_file", "file", "old_path", "new_path"):
@@ -993,23 +1011,6 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     continue
                 path_hint = val.strip()
                 break
-
-        if is_shell_tool(
-            self._normalize_tool_name(tool_name),
-            shell_tools_from_config(self._engine.config),
-        ):
-            cmd = tool_args.get("command", tool_args.get("cmd", ""))
-            shell_key = self._build_shell_auto_confirm_key(tool_name, str(cmd or ""))
-            if shell_key:
-                return (
-                    f'\n\n> 选择「会话内记住」可在本会话内自动放行 ``{shell_key}`` 类调用；'
-                    f'选择「永久记住」可将此规则写回磁盘，所有会话均自动放行。'
-                )
-            if auto_confirm_key:
-                return (
-                    f'\n\n> 选择「会话内记住」可在本会话内自动放行 ``{auto_confirm_key}`` 类调用。'
-                )
-            return ""
 
         if auto_confirm_key:
             path_desc = f"在 ``{path_hint}`` 下" if path_hint else ""

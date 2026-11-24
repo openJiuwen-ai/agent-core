@@ -25,6 +25,7 @@ _MAX_STATES = 64
 _MAX_ACCESSES = 256
 _DYNAMIC_WORD = re.compile(r"[*?\[\]{}~$`\\\r\n]")
 _PRINTF_FORMAT = re.compile(r"(?:[^%\\]|%[s%]|\\[nt])*")
+_PLAIN_VARIABLE = re.compile(r"\$(?:[A-Za-z_][A-Za-z_0-9]*|\{[A-Za-z_][A-Za-z_0-9]*\})")
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,7 @@ class _Command:
     accesses: tuple[tuple[str, FileAction], ...] = ()
     mkdir_operands: tuple[str, ...] = ()
     opaque: bool = False
+    partial: bool = False
 
 
 @dataclass(frozen=True)
@@ -113,6 +115,15 @@ def _redirect(node: Any, source: bytes) -> tuple[str, FileAction] | None:
     return path, "read" if operator.type == "<" else "write"
 
 
+def _is_plain_variable(node: Any, source: bytes) -> bool:
+    raw = _node_text(node, source)
+    if node.type == "string":
+        raw = raw[1:-1]
+    elif node.type not in {"simple_expansion", "expansion"}:
+        return False
+    return _PLAIN_VARIABLE.fullmatch(raw) is not None
+
+
 def _simple_command(
     node: Any, source: bytes, redirects: tuple[tuple[str, FileAction], ...],
 ) -> _Command:
@@ -123,7 +134,14 @@ def _simple_command(
     arguments = node.children_by_field_name("argument")
     if len(node.children) != len(arguments) + 1:
         raise _UnsupportedSyntax
-    words = [_literal(word, source, status_data=name == "echo") for word in arguments]
+    words = []
+    partial = False
+    for word in arguments:
+        if name == "cat" and _is_plain_variable(word, source):
+            # Its file operand is unknown, but cat cannot change the shell's cwd.
+            partial = True
+            continue
+        words.append(_literal(word, source, status_data=name == "echo"))
     if name == "cd":
         if words[:1] == ["--"]:
             words = words[1:]
@@ -154,9 +172,10 @@ def _simple_command(
         invalid = any(not word or word.startswith("-") for word in words)
     if invalid:
         raise _UnsupportedSyntax
-    if not words and (name != "cat" or not any(action == "read" for _, action in redirects)):
-        raise _UnsupportedSyntax
-    return _Command(accesses=(*redirects, *((word, "read") for word in words)))
+    if not words and not partial:
+        if name != "cat" or not any(action == "read" for _, action in redirects):
+            raise _UnsupportedSyntax
+    return _Command(accesses=(*redirects, *((word, "read") for word in words)), partial=partial)
 
 
 def _commands(
@@ -259,6 +278,8 @@ def analyze_posix_shell_paths(
                     coverage = "partial"
                     states = following
                     continue
+                if step.partial and ready:
+                    coverage = "partial"
                 for state in sorted(ready, key=lambda s: (str(s.cwd), s.directory_failed, str(s.previous))):
                     directory_failed = state.directory_failed or step.directory is not None
                     following.add(replace(state, succeeded=False, directory_failed=directory_failed))
