@@ -610,6 +610,7 @@ class ReActAgent(BaseAgent):
         self._llm = None
         self.prompt_builder: SystemPromptBuilder = SystemPromptBuilder()
         self.system_prompt_builder: SystemPromptBuilder = self.prompt_builder
+        self._is_team_agent = False
         super().__init__(card)
         self._hitl_handler = ToolInterruptHandler(self)
         self._ability_manager.set_context_engine(self.context_engine)
@@ -1378,7 +1379,16 @@ class ReActAgent(BaseAgent):
         return context_window, usage_prompt_sections
 
     async def _compose_prompt_sections(self, ctx: AgentCallbackContext) -> PromptComposeOutput | None:
-        """Trigger prompt composition at the final post-rail render boundary."""
+        """Trigger prompt composition at the final post-rail render boundary.
+
+        Team members already have their own builder populated by
+        ``TeamPolicyRail``. They share a session id, so the CORE
+        ``prompt.compose`` handler cannot use that id to identify the current
+        member without risking another member's builder being rendered here.
+        """
+        if self._is_team_agent:
+            return None
+
         from openjiuwen.core.events import Event
         from openjiuwen.core.runner import Runner
 
