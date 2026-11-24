@@ -18,8 +18,8 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/rails/` |
-| 最近一次修订日期 | 2026-11-23 |
-| 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_21_cua-desktop-subagent.md`、`F_22_cli-jiuwen-memory-rail-mount-and-switch.md` |
+| 最近一次修订日期 | 2026-11-24 |
+| 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_21_cua-desktop-subagent.md`、`F_22_cli-jiuwen-memory-rail-mount-and-switch.md`、`F_20261124_1707_checkpoint-step-resume-develop.md` |
 
 ## 范围 / 边界
 
@@ -181,6 +181,14 @@ author_email: yangzequ1@huawei.com
     和元数据投影保留紧凑表示。消费者可读取所需属性，`Trajectory.to_otlp()` 导出完整、自包含的
     标准属性。采集时已失效的序列使用既有缺失占位。查找与容量契约见
     [S_14](../agent_teams/S_14_monitor-and-observability.md) 不变量 19。
+
+17. **TaskPlanningRail 的 step 快照与滚回只在续跑边界生效**。`after_react_iteration` 在每轮
+    完整迭代后读取 `{workspace}/{session_id}/todo.json`，把整张列表的原文写入 session 状态
+    `__step_todo_snapshot__`（`{"exists", "content"}`，缺失时内容为空串），随 step 增量落盘；
+    `before_invoke` 仅在 `peek_agent_step_resume()` 非空时把文件滚回该快照。快照记录时文件不存在
+    则不写文件（fs 无删除接口），由重跑那一轮的 `todo_create` 整表覆盖。读取失败、后端无法判定
+    存在性时只记日志，不写状态、不阻断主链路。契约与 step 落盘的其余部分见
+    [S_02](../../core_runtime/S_02_session-step-checkpoints.md)。
 
 ## 接口契约
 

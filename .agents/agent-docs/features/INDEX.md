@@ -23,6 +23,9 @@ generated: true
 | [core.runner.resources_manager](#module-core-runner-resources_manager) |
 | [core.session.tracer](#module-core-session-tracer) |
 | [core/foundation/llm](#module-core-foundation-llm) |
+| [core/session](#module-core-session) |
+| [core/session/checkpointer](#module-core-session-checkpointer) |
+| [core/single_agent/agents](#module-core-single_agent-agents) |
 | [core/sys_operation](#module-core-sys_operation) |
 | [extensions.tracer_otel](#module-extensions-tracer_otel) |
 | [extensions/observability](#module-extensions-observability) |
@@ -266,6 +269,30 @@ generated: true
 | [F_20261103_0928_model-group-routed-model](F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | 无独立 D：issue |
 | [F_20261112_1120_goal-assessment-isolation](F_20261112_1120_goal-assessment-isolation.md) | F | Goal 评估调用的观测隔离实施 | alan_cheng | [D-20261112-1120-goal-assessment-isolation](../designs/active/D-20261112-1120-goal-assessment-isolation/design.md) |
 
+<a id="module-core-session"></a>
+
+## core/session
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261124_1707_checkpoint-step-resume-develop](F_20261124_1707_checkpoint-step-resume-develop.md) | F | 单 Agent 按 Step 断点续跑移植到 develop | n993577028 | 无独立 D：core 侧正式落地的方案先在 dev-stable 实现并评审（agent-core |
+
+<a id="module-core-session-checkpointer"></a>
+
+## core/session/checkpointer
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261124_1707_checkpoint-step-resume-develop](F_20261124_1707_checkpoint-step-resume-develop.md) | F | 单 Agent 按 Step 断点续跑移植到 develop | n993577028 | 无独立 D：core 侧正式落地的方案先在 dev-stable 实现并评审（agent-core |
+
+<a id="module-core-single_agent-agents"></a>
+
+## core/single_agent/agents
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261124_1707_checkpoint-step-resume-develop](F_20261124_1707_checkpoint-step-resume-develop.md) | F | 单 Agent 按 Step 断点续跑移植到 develop | n993577028 | 无独立 D：core 侧正式落地的方案先在 dev-stable 实现并评审（agent-core |
+
 <a id="module-core-sys_operation"></a>
 
 ## core/sys_operation
@@ -378,6 +405,7 @@ generated: true
 |---|---|---|---|---|
 | [F-20261107-1700-coding-document-memory](F_20261107_1700_coding-document-memory.md) | F | Coding 文档记忆 Rail | Wang Tao | 无独立 D：依据本会话已确认的跨仓 Coding 文档记忆方案及后续交互轮次复用决定；AutoMemory 保留宿主原有开关。 |
 | [F-20261118-1150-team-document-memory](F_20261118_1150_team-document-memory.md) | F | Team 接入 Jiuwen 文档记忆 | Wang Tao | 无独立 D：依据 D-20261113-2017-jiuwen-memory-team-upgrade 及已确认的跨仓 Team 方案。 |
+| [F_20261124_1707_checkpoint-step-resume-develop](F_20261124_1707_checkpoint-step-resume-develop.md) | F | 单 Agent 按 Step 断点续跑移植到 develop | n993577028 | 无独立 D：core 侧正式落地的方案先在 dev-stable 实现并评审（agent-core |
 
 <a id="module-harness-rails-evolution"></a>
 

@@ -20,8 +20,11 @@ generated: true
 | [core/controller](#module-core-controller) |
 | [core/runner/drunner/dmessage_queue](#module-core-runner-drunner-dmessage_queue) |
 | [core/session](#module-core-session) |
+| [core/session/checkpointer](#module-core-session-checkpointer) |
+| [core/single_agent/agents](#module-core-single_agent-agents) |
 | [extensions/a2a](#module-extensions-a2a) |
 | [harness](#module-harness) |
+| [harness/rails](#module-harness-rails) |
 
 <a id="module-agent_evolving-ttse"></a>
 
@@ -100,6 +103,23 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | — |
+| [S_02_session-step-checkpoints](core_runtime/S_02_session-step-checkpoints.md) | S | S_02 单 Agent 按 Step 断点续跑 | n993577028 | — |
+
+<a id="module-core-session-checkpointer"></a>
+
+## core/session/checkpointer
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [S_02_session-step-checkpoints](core_runtime/S_02_session-step-checkpoints.md) | S | S_02 单 Agent 按 Step 断点续跑 | n993577028 | — |
+
+<a id="module-core-single_agent-agents"></a>
+
+## core/single_agent/agents
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [S_02_session-step-checkpoints](core_runtime/S_02_session-step-checkpoints.md) | S | S_02 单 Agent 按 Step 断点续跑 | n993577028 | — |
 
 <a id="module-extensions-a2a"></a>
 
@@ -134,3 +154,11 @@ generated: true
 | [S_17_personal-context](harness/S_17_personal-context.md) | S | S_17 Personal Context | yangzequ | — |
 | [S_18_subagents-and-lifecycle](harness/S_18_subagents-and-lifecycle.md) | S | S_18 SubAgent 预设与生命周期 | yangzequ | — |
 | [S_19_harness-providers](harness/S_19_harness-providers.md) | S | S_19 Harness Providers（协议实现、IO Adapter 与 Manifest 工厂） | alan_cheng | — |
+
+<a id="module-harness-rails"></a>
+
+## harness/rails
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [S_02_session-step-checkpoints](core_runtime/S_02_session-step-checkpoints.md) | S | S_02 单 Agent 按 Step 断点续跑 | n993577028 | — |
