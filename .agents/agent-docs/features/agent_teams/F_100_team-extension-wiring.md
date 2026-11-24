@@ -8,8 +8,8 @@ type: F
 modules:
 - openjiuwen/agent_teams
 files: []
-designs: null
-design_note: 正文未引用独立设计，历史设计关联待核实，不等同于没有关联设计
+designs: []
+design_note: 本仓未维护独立设计文档；方案与取舍记录在本文档正文中（含历次设计缩减）
 ---
 
 # Team 扩展机制接入（契约层 + 成员侧接线）
@@ -44,8 +44,8 @@ CORE 默认实现，提供只读 Team Ops 查询能力，并把各成员的 Poli
   不等待）、满丢弃计数、独立消费任务、stop 时 cancel+await+积压计丢弃；stop 自身被取消时经
   `Task.cancelling()` 区分并传播调用方取消。
 - **Ops 与 resolver**：`team_ops_build_handler`（平台目录 `extensions/ops_build_handlers/team.py`）
-  注册 `ops.build` BUILTIN（空 pattern——框架 ops.build matcher 只放行空 pattern），`ops.team` 九个
-  只读方法（info/members/member/tasks/task/task_dependencies/messages/message/policy_context），含
+  注册 `ops.build` BUILTIN（空 pattern——框架 ops.build matcher 只放行空 pattern），`ops.team` 十个
+  只读方法（info/members/member/tasks/task/task_dependencies/messages/message/policy_context/list），含
   AND 筛选、timestamp+message_id 降序分页、服务端游标（关联 session/team/filters，不一致报错）、
   hide_dm 可见性、任务归属校验。数据源经 `TeamResourceResolver` 协议注入；`DatabaseResolver` +
   `BackendTeamReadView` 为生产实现——**统一数据库路径**：view 直连 db 与 team_name（不依赖
@@ -57,6 +57,14 @@ CORE 默认实现，提供只读 Team Ops 查询能力，并把各成员的 Poli
   `(team_name, session_id)` 唯一定位一套动态表（task_id / message_id 跨 session 同名歧义消解），
   消息游标绑定 resolved session（跨 session 旧游标报错）；静态表三方法与 `policy_context` 不加
   （静态表跨 session；构建快照天然"当前"）。当前团队与 policy context 的调用范围绑定（contextvar，嵌套恢复/异常解除）。
+- **`ops.team.list()`**：全量团队发现面——`TeamDao.list_teams()` 静态表轻投影（team_name /
+  display_name / leader_member_name / created / updated_at，不含 desc/prompt 重字段，created 升序）+
+  `MemberDao.count_members_by_team()` 一次 GROUP BY 聚合出 member_count；`TeamSummary` 为返回模型。
+  全局语义（无 session 作用域）：停止的团队与运行中的一并列出——这是插件发现自己从未见过事件的
+  团队的入口。不带任务统计（动态表按 session 归属，不撒谎）、**不带运行态字段**（设计缩减，见
+  关键决策 10）。实现注意：handler 内部函数名用 `list_teams` 而注册名用 `"list"`——在
+  `_build_team_methods` 作用域定义名为 `list` 的函数会遮蔽内建 `list()` 并经闭包污染同作用域
+  其余方法体里的 `list(...)` 调用。
 
 ### leader 侧接线
 
@@ -112,6 +120,12 @@ CORE 默认实现，提供只读 Team Ops 查询能力，并把各成员的 Poli
    团队的 session 读到空数据（列表空 / 单查 None）而非 missing-table 异常，读路径也不留任何空表。
 9. **显式 session_id 不做"最近关联"猜测**：归属无持久正向记录（动态表后缀是单向哈希），省略一律
    绑定调用方 session，跨 session 历史读取显式传参。
+10. **`list` 不带运行态字段（对原遗留设计的缩减）**：原方案给 TeamSummary 加 pool 标注
+   （running / paused / stopped），实现时砍掉——运行态归 `team.monitor_event` 事件流管（活跃团队
+   一有动静插件就收到事件，事件驱动维护自己的运行态），list 补的盲区恰恰是"从未见过事件的
+   停止团队"（对它们运行态无意义）；DB 的 `updated_at` 已是粗粒度活跃信号。pool 标注的成本
+   （pool provider 注入链：惰性槽位读取、不代创建约束、结构化协议）为一个可由事件流替代的
+   便利字段买单，不值。list 的职责边界由此定为**发现全集**，纯静态表作答。
 
 ## 拒绝的方案
 
@@ -133,7 +147,8 @@ CORE 默认实现，提供只读 Team Ops 查询能力，并把各成员的 Poli
   含真 `ExtensionEventBus` 端到端（注册 → USER handler → trigger → 链/短路/`to(CORE)`/校验器/容错）、
   桥接全生命周期（含取消传播）、内存 DB + db_factory 的 resolver、leader rail 惰性构建与前缀视图、
   `build_team` 披露经链（插件 section 到达 leader）、无活动 session 的缺表读空；显式 session_id
-  透传与消息游标 session 绑定、同一团队双 session 动态表隔离。
+  透传与消息游标 session 绑定、同一团队双 session 动态表隔离；`list` 全量轻投影 + member_count
+  聚合（含零成员团队）+ 无团队存储返回空，handler 侧透传且不经 session 解析。
 - 全量 `agent_teams` 回归：失败分布与 stash 基线一致（存量：coordination/observability 环境缺依赖
   等），零新增；`test_team_policy_rail.py` 74 个存量用例不动即绿（无 bus 分支逐字一致）。
 - ruff / pylint 干净（存量告警除外）。
@@ -147,8 +162,6 @@ CORE 默认实现，提供只读 Team Ops 查询能力，并把各成员的 Poli
   `AGENT_TEAM_STATE_INVALID`（132006），语义不贴但 reason 明确、测试不锁码；AGENT_TEAM 段缺
   NOT_FOUND 形态码（其他段有 `AGENT_TOOL_NOT_FOUND` 先例），待观测分类有真实需求时新增
   `AGENT_TEAM_RESOURCE_NOT_FOUND` 并分类收拾。
-- **`ops.team.list()` 未实现**：静态表全量轻投影 + pool 标注运行态（running / paused / stopped）+
-  member_count；不带任务统计（动态表归属未定，不撒谎）。
 - **跨 session 只读行为变化**：读取层统一数据库路径后，跨 session 只读从报错（"not accessible in
   this session"）变为可查（capability 语义），宿主文档需知情。
 - 平台侧设计仓的实现记录回填随该仓自行同步（本仓库不引用其文档编号）。
