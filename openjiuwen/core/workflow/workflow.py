@@ -708,9 +708,18 @@ class Workflow(metaclass=_WorkflowMeta):
         if not is_sub:
             session.set_workflow_card(self._card)
             parent = session.get_parent()
-            workflow_session = WorkflowSession(workflow_id=self._card.id,
-                                               parent=parent if parent is not None else None,
-                                               session_id=session.get_session_id())
+            env_scope = (
+                session.get_env_scope() if hasattr(session, "get_env_scope") else {}
+            )
+            workflow_session = WorkflowSession(
+                workflow_id=self._card.id,
+                parent=parent if parent is not None else None,
+                session_id=session.get_session_id(),
+                execution_id=session.get_execution_id() if hasattr(session, "get_execution_id") else None,
+                workspace_id=env_scope.get("workspace_id"),
+                environment_id=env_scope.get("environment_id"),
+                project_id=env_scope.get("project_id"),
+            )
             workflow_session.config().set_envs(session.get_envs())
             self._internal.auto_complete_abilities()
             workflow_session.config().add_workflow_config(workflow_id=self._card.id,

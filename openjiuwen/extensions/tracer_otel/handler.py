@@ -88,10 +88,12 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_GEN_AI_USER_ID,
     OJ_INNER_ERROR,
     OJ_INTERACTIVE_INPUTS,
+    OJ_ENVIRONMENT_ID,
     OJ_INVOKE_ID,
     OJ_LLM_PREV_MESSAGE_COUNT,
     OJ_PARENT_INVOKE_ID,
     OJ_PARENT_NODE_ID,
+    OJ_PROJECT_ID,
     OJ_SESSION_ID,
     OJ_SOURCE_IDS,
     OJ_START_TIME,
@@ -100,6 +102,7 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_STREAM_OUTPUTS,
     OJ_STREAM_TRUNCATED,
     OJ_TRACE_ID,
+    OJ_WORKSPACE_ID,
     OJ_WORKFLOW_COMPONENT_ID,
     OJ_WORKFLOW_COMPONENT_NAME,
     OJ_WORKFLOW_COMPONENT_TYPE,
@@ -129,6 +132,43 @@ def _get_parent_context(state: OtelSpanState | None) -> otel_context.Context | N
     if state is None:
         return None
     return trace.set_span_in_context(state.span)
+
+
+_ENV_SCOPE_KEYS = (
+    ("workspace_id", OJ_WORKSPACE_ID),
+    ("environment_id", OJ_ENVIRONMENT_ID),
+    ("project_id", OJ_PROJECT_ID),
+)
+
+
+def _ambient_env_scope() -> dict:
+    """执行上下文中的环境作用域（issue #1755）：agent_teams 绑定优先。
+
+    团队/成员任务可能不在请求 task 内，ContextVar 由执行入口在创建团队任务前
+    绑定（agent_teams.context.set_env_scope），此处统一读取。
+    """
+    try:
+        from openjiuwen.agent_teams.context import get_env_scope
+    except Exception:  # noqa: BLE001 - 未安装/未启用团队模块时降级
+        return {}
+    try:
+        return dict(get_env_scope() or {})
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _set_env_scope_attrs(otel_span: trace.Span, metadata: dict) -> None:
+    """写请求级环境作用域属性（issue #1755）；缺失/空值不写，不写占位。
+
+    Span 维度而非 Resource：同一 Runtime 进程同时服务多个工作空间。
+    """
+    if not metadata:
+        return
+    existing = otel_span.attributes or {}
+    for key, attr in _ENV_SCOPE_KEYS:
+        value = metadata.get(key)
+        if value and attr not in existing:
+            otel_span.set_attribute(attr, str(value))
 
 
 def _explicit_parent_context(instance_info: dict | None) -> otel_context.Context | None:
@@ -200,6 +240,26 @@ def _serialize(value: Any) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, default=str)
     return str(value)
+
+
+def _build_error_summary(exception: Exception) -> str:
+    """Build a safe status.description summary for a failed invocation.
+
+    Only the numeric error code and the exception class name enter this
+    non-redacted standard field: business messages may contain inputs or
+    credentials, so they stay in the redacted private attributes/events.
+    """
+    code = None
+    status = getattr(exception, "status", None)
+    if status is not None:
+        code = getattr(status, "code", None)
+    if code is None:
+        code = getattr(exception, "error_code", None)
+    if isinstance(code, bool) or not isinstance(code, (int, str)):
+        code = None
+    class_name = type(exception).__name__
+    summary = class_name if code is None else "%s %s" % (code, class_name)
+    return summary[:256]
 
 
 def _normalize_llm_payload(value: Any) -> Any:
@@ -283,12 +343,25 @@ def _set_llm_response_attrs(otel_span: trace.Span, outputs: Any) -> None:
     usage = sibling if isinstance(sibling, dict) else None
     if usage is None:
         usage = obj.get("usage_metadata") if isinstance(obj, dict) else None
+    finish_reason = None
     if isinstance(obj, dict):
         finish_reason = obj.get("finish_reason")
-        # "null" is the schema default for AssistantMessage.finish_reason, i.e.
-        # "provider did not report one" — not a zero value, so it stays filtered.
-        if finish_reason and str(finish_reason) != "null":
-            otel_span.set_attribute(GEN_AI_RESPONSE_FINISH_REASONS, [str(finish_reason)])
+    elif isinstance(obj, list):
+        # Decorator-measured streams pass a chunk list; the finish_reason lives
+        # on the terminal chunk (issue #1756: without this, the attribute was
+        # never written for streaming LLM spans).
+        for item in reversed(obj):
+            normalized_item = _normalize_llm_payload(item)
+            if not isinstance(normalized_item, dict):
+                continue
+            candidate = normalized_item.get("finish_reason")
+            if candidate and str(candidate) != "null":
+                finish_reason = candidate
+                break
+    # "null" is the schema default for AssistantMessage.finish_reason, i.e.
+    # "provider did not report one" — not a zero value, so it stays filtered.
+    if finish_reason and str(finish_reason) != "null":
+        otel_span.set_attribute(GEN_AI_RESPONSE_FINISH_REASONS, [str(finish_reason)])
     if not isinstance(usage, dict):
         return
     otel_span.set_attribute(GEN_AI_RESPONSE_MODEL, str(usage.get("model_name") or ""))
@@ -397,6 +470,8 @@ class OtelAgentHandler(TraceExtAgentHandler):
         otel_span.set_attribute(GEN_AI_PROVIDER_NAME, GEN_AI_SYSTEM_VALUE)
         # Span base fields — use span value if present, otherwise set ourselves
         otel_span.set_attribute(OJ_TRACE_ID, agent_span.trace_id)
+        # issue #1755：所有 agent/llm/tool span 统一带上请求级环境作用域
+        _set_env_scope_attrs(otel_span, _ambient_env_scope())
         # Absent for tracers not bound to a Session, so old consumers see no new key.
         session_id = getattr(agent_span, "session_id", None) or self._session_id
         if session_id:
@@ -513,6 +588,11 @@ class OtelAgentHandler(TraceExtAgentHandler):
         # start, and a later rail-forwarded info must not clobber it.
         if info.get("metadata") and OJ_GEN_AI_METADATA not in (otel_span.attributes or {}):
             otel_span.set_attribute(OJ_GEN_AI_METADATA, _serialize(info["metadata"]))
+        # issue #1755: 请求级环境作用域（根/LLM/工具 Span 共用此入口）。
+        # 装饰器路径把 identity 键摊平进 instance_info，rail 路径放在 metadata。
+        if isinstance(info.get("metadata"), dict):
+            _set_env_scope_attrs(otel_span, info["metadata"])
+        _set_env_scope_attrs(otel_span, info)
         # Workflow context from decorator-forwarded identity: written only when
         # absent so the start-time value survives a second identity forward.
         existing = otel_span.attributes or {}
@@ -1245,13 +1325,17 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     def _set_workflow_attrs(self, otel_span: trace.Span, metadata: dict | None, invoke_id: str) -> None:
         if metadata is None:
             return
+        # issue #1755: 请求级环境作用域（根与组件 Span 都写，缺失不写）
+        _set_env_scope_attrs(otel_span, metadata)
         is_workflow_root = "workflow_id" in metadata and "component_id" not in metadata
 
         if is_workflow_root:
             otel_span.set_attribute(OJ_WORKFLOW_ID, metadata.get("workflow_id", ""))
             otel_span.set_attribute(OJ_WORKFLOW_NAME, metadata.get("workflow_name", ""))
             otel_span.set_attribute(OJ_WORKFLOW_VERSION, metadata.get("workflow_version", ""))
-            otel_span.set_attribute(OJ_WORKFLOW_EXECUTION_ID, metadata.get("workflow_id", invoke_id))
+            execution_id = metadata.get("execution_id")
+            if execution_id:
+                otel_span.set_attribute(OJ_WORKFLOW_EXECUTION_ID, str(execution_id))
         else:
             otel_span.set_attribute(OJ_WORKFLOW_COMPONENT_ID, metadata.get("component_id", ""))
             otel_span.set_attribute(OJ_WORKFLOW_COMPONENT_TYPE, metadata.get("component_type", ""))
@@ -1699,7 +1783,12 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                         # Record interrupt payload for debuggability without error semantics
                         state.span.set_attribute(OJ_WORKFLOW_ERROR_MESSAGE, str(exception))
                     else:
-                        state.span.set_status(Status(StatusCode.ERROR))
+                        state.span.set_status(
+                            Status(
+                                StatusCode.ERROR,
+                                description=_build_error_summary(exception),
+                            )
+                        )
                         state.span.set_attribute(OJ_WORKFLOW_ERROR_MESSAGE, str(exception))
                         state.span.set_attribute(OJ_STATUS, NodeStatus.ERROR.value)
                         if isinstance(exception, BaseError):

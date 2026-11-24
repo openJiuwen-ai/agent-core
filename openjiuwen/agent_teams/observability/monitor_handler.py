@@ -118,6 +118,25 @@ class OtelTeamMonitorHandler:
         from openjiuwen.agent_teams.observability.setup import get_tracer
         return get_tracer(_TRACER_NAME)
 
+    def _start_span(self, name: str, **kwargs):
+        """统一 span 创建入口：写入请求级环境作用域（issue #1755）。"""
+        span = self._tracer().start_span(name=name, **kwargs)
+        try:
+            from openjiuwen.agent_teams.context import get_env_scope
+
+            scope = get_env_scope()
+        except Exception:  # noqa: BLE001 - 上下文不可用不影响 span 创建
+            scope = {}
+        for key, attr in (
+            ("workspace_id", "openjiuwen.workspace.id"),
+            ("environment_id", "openjiuwen.environment.id"),
+            ("project_id", "openjiuwen.project.id"),
+        ):
+            value = scope.get(key) if scope else None
+            if value:
+                span.set_attribute(attr, str(value))
+        return span
+
     @staticmethod
     def _get_ctx_session_id() -> str:
         """Get session_id from ContextVar, or empty string on failure."""
@@ -345,7 +364,7 @@ class OtelTeamMonitorHandler:
         if team_span is None:
             return
         parent_ctx = set_span_in_context(team_span, otel_context.get_current())
-        span = self._tracer().start_span(
+        span = self._start_span(
             name=name,
             context=parent_ctx,
             kind=SpanKind.INTERNAL,
@@ -390,7 +409,7 @@ class OtelTeamMonitorHandler:
             task_id, team_name
         )
         parent_ctx = set_span_in_context(team_span, otel_context.get_current())
-        span = self._tracer().start_span(
+        span = self._start_span(
             name=f"task.{task_id}",
             context=parent_ctx,
             kind=SpanKind.INTERNAL,
@@ -430,7 +449,7 @@ class OtelTeamMonitorHandler:
             AT_TASK_STATUS: "pending",
         }
         created_ctx = set_span_in_context(span, otel_context.get_current())
-        created_span = self._tracer().start_span(
+        created_span = self._start_span(
             name=f"task.{task_id}.created",
             context=created_ctx,
             kind=SpanKind.INTERNAL,
@@ -478,7 +497,7 @@ class OtelTeamMonitorHandler:
             close_attrs["agentteam.task.cancel_reason"] = str(cancel_reason)
 
         close_ctx = set_span_in_context(span, otel_context.get_current())
-        close_span = self._tracer().start_span(
+        close_span = self._start_span(
             name=f"task.{task_id}.{status_label}",
             context=close_ctx,
             kind=SpanKind.INTERNAL,
@@ -514,7 +533,7 @@ class OtelTeamMonitorHandler:
 
         task_id = str(payload.get("task_id") or "")
         parent_ctx = set_span_in_context(team_span, otel_context.get_current())
-        span = self._tracer().start_span(
+        span = self._start_span(
             name=f"task.{task_id}",
             context=parent_ctx,
             kind=SpanKind.INTERNAL,
@@ -596,7 +615,7 @@ class OtelTeamMonitorHandler:
 
         if task_span is not None and task_span.is_recording():
             task_ctx = set_span_in_context(task_span, otel_context.get_current())
-            status_span = self._tracer().start_span(
+            status_span = self._start_span(
                 name=span_name,
                 context=task_ctx,
                 kind=SpanKind.INTERNAL,

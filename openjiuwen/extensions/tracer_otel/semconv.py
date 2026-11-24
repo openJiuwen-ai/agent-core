@@ -113,6 +113,14 @@ OJ_AGENT_ERROR_MESSAGE = "openjiuwen.agent.error_message"
 OJ_TRACE_ID = "openjiuwen.trace.id"
 OJ_SESSION_ID = "openjiuwen.session_id"
 
+# ---------------------------------------------------------------------------
+# Request-scoped environment scope (issue #1755) — never Resource attributes
+# ---------------------------------------------------------------------------
+
+OJ_WORKSPACE_ID = "openjiuwen.workspace.id"
+OJ_ENVIRONMENT_ID = "openjiuwen.environment.id"
+OJ_PROJECT_ID = "openjiuwen.project.id"
+
 
 # ---------------------------------------------------------------------------
 # openjiuwen.* — Base Span attributes (shared by both handlers)

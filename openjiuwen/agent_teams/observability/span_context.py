@@ -68,6 +68,20 @@ def get_or_create_team_span(team_name: str, tracer) -> Span | None:
     )
 
     span = tracer.start_span(name=f"team.{team_name}", kind=SpanKind.SERVER)
+    # issue #1755：团队根 span 写请求级环境作用域
+    try:
+        from openjiuwen.agent_teams.context import get_env_scope
+
+        _scope = get_env_scope() or {}
+    except Exception:  # noqa: BLE001
+        _scope = {}
+    for _key, _attr in (
+        ("workspace_id", "openjiuwen.workspace.id"),
+        ("environment_id", "openjiuwen.environment.id"),
+        ("project_id", "openjiuwen.project.id"),
+    ):
+        if _scope.get(_key):
+            span.set_attribute(_attr, str(_scope[_key]))
     span.set_attribute(AT_TEAM_NAME, team_name)
     span.set_attribute(LANGFUSE_TRACE_NAME, f"team.{team_name}")
     span.set_attribute(LANGFUSE_TRACE_TAGS, [team_name])
