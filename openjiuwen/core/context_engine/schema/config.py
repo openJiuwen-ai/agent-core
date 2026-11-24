@@ -48,6 +48,12 @@ class ContextEngineConfig(BaseModel):
         for round-based truncation. Must be > 0 if set; None (default) disables
         round-based windowing.
 
+    enable_iteration_checkpoint : bool, default False
+        Persist the agent step checkpoint after each completed ReAct
+        iteration. When enabled, a killed process that restarts with the
+        same session resumes from the next iteration; when disabled no
+        step records are written and recovery keeps its original behavior.
+
     enable_reload : bool, default False
         Whether to enable automatic reloading of offloaded messages when the
         model requests them via reload hints (e.g., [[HANDLE:xxx]]). When enabled,
@@ -133,6 +139,10 @@ class ContextEngineConfig(BaseModel):
     default_window_round_num: Optional[int] = Field(default=None, gt=0)
     enable_reload: bool = Field(default=False)
     enable_tiktoken_counter: bool = Field(default=False)
+    # Persist a durable agent step checkpoint after every completed ReAct
+    # iteration so a killed process can resume from the last completed
+    # step. Off by default: enabling it adds one KV write per iteration.
+    enable_iteration_checkpoint: bool = Field(default=False)
     context_window_tokens: Optional[int] = Field(default=None, gt=0)
     model_name: Optional[str] = Field(default=None)
     model_provider: Optional[str] = Field(default=None)

@@ -3310,8 +3310,9 @@ class ReActAgent(BaseAgent):
                     ctx.extra["_original_query"] = interruption_state.original_query
                 # Step increments are consumed once per run, right after the
                 # HITL state is known and before the loop picks its first round.
-                step_resume = self._begin_agent_steps(session)
-                steps_started = True
+                step_checkpoint = self._iteration_checkpoint_enabled()
+                step_resume = self._begin_agent_steps(session) if step_checkpoint else None
+                steps_started = step_checkpoint
 
                 state_loaded_at = time.monotonic()
 
@@ -3506,9 +3507,11 @@ class ReActAgent(BaseAgent):
                                     )
                                     continue
                                 await self.context_engine.save_contexts(session)
-                                await self._save_agent_step(
-                                    session, iteration, self._step_query(ctx, user_input), final=True
-                                )
+                                if step_checkpoint:
+                                    await self._save_agent_step(
+                                        session, iteration,
+                                        self._step_query(ctx, user_input), final=True,
+                                    )
                                 invoke_inputs.result = {
                                     "output": EMPTY_RESPONSE_MSG,
                                     "result_type": "error",
@@ -3519,9 +3522,11 @@ class ReActAgent(BaseAgent):
                             await self.context_engine.save_contexts(session)
                             result = {"output": ai_message.content, "result_type": "answer"}
                             # The final answer is a completed step too.
-                            await self._save_agent_step(
-                                session, iteration, self._step_query(ctx, user_input), final=True
-                            )
+                            if step_checkpoint:
+                                await self._save_agent_step(
+                                    session, iteration,
+                                    self._step_query(ctx, user_input), final=True,
+                                )
                             invoke_inputs.result = result
                             break
 
@@ -3565,12 +3570,13 @@ class ReActAgent(BaseAgent):
                         # all written). Fire AFTER_REACT_ITERATION so rails (e.g.
                         # SnapshotRail) can capture a safe-state snapshot.
                         await ctx.fire(AgentCallbackEvent.AFTER_REACT_ITERATION)
-                        # Persist the increment after rails had their say, so a
-                        # todo snapshot they wrote belongs to this record.
-                        await self.context_engine.save_contexts(session)
-                        await self._save_agent_step(
-                            session, iteration, self._step_query(ctx, user_input)
-                        )
+                        if step_checkpoint:
+                            # Persist the increment after rails had their say, so
+                            # a todo snapshot they wrote belongs to this record.
+                            await self.context_engine.save_contexts(session)
+                            await self._save_agent_step(
+                                session, iteration, self._step_query(ctx, user_input)
+                            )
                     else:
                         # The loop exhausted its iteration budget. Honor a
                         # force_finish requested by the final iteration's
@@ -3966,6 +3972,11 @@ class ReActAgent(BaseAgent):
         return session is not None and all(
             callable(getattr(session, method_name, None)) for method_name in ("pre_run", "close_stream", "commit")
         )
+
+    def _iteration_checkpoint_enabled(self) -> bool:
+        """Whether this run persists a step after each completed iteration."""
+        config = getattr(self._config, "context_engine_config", None)
+        return bool(getattr(config, "enable_iteration_checkpoint", False))
 
     @staticmethod
     def _begin_agent_steps(session) -> "StepResume | None":
