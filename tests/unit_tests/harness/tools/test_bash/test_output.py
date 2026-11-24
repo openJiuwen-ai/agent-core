@@ -9,13 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from openjiuwen.harness.tools.shell.bash import _output
+from openjiuwen.harness.tools.shell.bash import _output as bash_output
 from openjiuwen.harness.tools.shell.bash._output import (
     _output_dir,
     _output_dir_name,
     persist_large_output,
     truncate_output,
 )
+from openjiuwen.harness.tools.shell.powershell import _output as powershell_output
 
 requires_posix_modes = pytest.mark.skipif(
     os.name == "nt",
@@ -206,7 +207,7 @@ class TestPersistLargeOutput:
                 warnings.append(args)
 
         monkeypatch.setattr(Path, "chmod", fail_chmod)
-        monkeypatch.setattr(_output, "sys_operation_logger", RecordingLogger)
+        monkeypatch.setattr(bash_output, "sys_operation_logger", RecordingLogger)
 
         path, _ = persist_large_output("output body", "")
 
@@ -253,3 +254,45 @@ class TestPersistLargeOutput:
         (first / "kept.txt").write_text("kept", encoding="utf-8")
         assert _output_dir() == first
         assert (first / "kept.txt").exists()
+
+
+# Both shell tools render results the same way; the command lives in the model's
+# tool call, so the result must not echo it back.
+@pytest.mark.parametrize("module", [bash_output, powershell_output], ids=["bash", "powershell"])
+class TestRenderToolContent:
+
+    @staticmethod
+    def _output(module, stdout="", stderr="", exit_code=0, warning=None, max_output_chars=30000):
+        return module.CommandOutput(
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            warning=warning,
+            max_output_chars=max_output_chars,
+        )
+
+    def test_sections_without_command_echo(self, module) -> None:
+        content, is_error = module.render_tool_content(self._output(module, stdout="a\nb\n"), False)
+        assert content == "Stdout: a\nb\n\nStderr: (empty)\nExit Code: 0"
+        assert is_error is False
+
+    def test_empty_streams_and_error_flag(self, module) -> None:
+        content, is_error = module.render_tool_content(
+            self._output(module, stderr="boom\n", exit_code=2), True,
+        )
+        assert content == "Stdout: (empty)\n\nStderr: boom\nExit Code: 2"
+        assert is_error is True
+
+    def test_warning_is_prepended(self, module) -> None:
+        content, _ = module.render_tool_content(self._output(module, stdout="ok", warning="Warning: risky"), False)
+        assert content == "Warning: risky\nStdout: ok\n\nStderr: (empty)\nExit Code: 0"
+
+    def test_oversized_output_is_persisted_without_echo(self, module) -> None:
+        content, _ = module.render_tool_content(self._output(module, stdout="x" * 50, max_output_chars=10), False)
+        assert content.startswith("Stdout: <persisted-output>")
+        assert content.endswith("Stderr: (empty)\nExit Code: 0")
+
+    def test_partial_output_on_failure(self, module) -> None:
+        content = module.render_partial_on_failure(self._output(module, stdout="half", exit_code=-1), "Timed out")
+        assert content == "Timed out\nStdout: half\n\nStderr: (empty)\nExit Code: -1"
+        assert module.render_partial_on_failure(self._output(module), "Timed out") is None
