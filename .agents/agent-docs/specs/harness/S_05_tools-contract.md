@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-11-05 |
+| 最近一次修订日期 | 2026-11-12 |
 | 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md`、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_21_cua-desktop-subagent、F_23_progressive-tool-discovery-metadata、F_20261104_1720_tool-execution-environment |
 
 ## 范围 / 边界
@@ -104,6 +104,20 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
      AbilityManager 从卡片或默认值解析的预算；Bash 前台覆写为执行期限加 30 秒清理窗口，
      供杀进程、收集已有输出和回传结果使用，执行本身不会延长。注册与资源回退两条调用路径
      均使用该扩展点；后台启动继续使用原调用预算，不受命令 `timeout` 控制。
+     `SysOperation.work_config` 只读属性提供实际生效的本地配置，远程沙箱模式返回 `None`。
+     本地 `restrict_to_sandbox=True` 时，Bash / PowerShell 的超长输出保存到有效沙箱
+     范围内的 `.outputs/` 子目录。优先选当前 workspace、cwd、project root 中可访问的位置，
+     显式 `sandbox_root` 是访问边界，也可作为保存位置的回退。输出目录按符号链接解析后
+     校验范围。写入逐级拒绝符号链接和 Windows reparse point，POSIX 使用目录描述符，
+     目录描述符的打开与关闭在同一上下文管理器中通过 `try/finally` 成对执行，
+     Windows 在写入期间持有仅允许读取共享的目录句柄，阻止原地设置 reparse point 及重命名替换。
+     Windows 目录保护和暂存文件发布通过同一上下文管理器取得文件句柄，
+     使用 Windows 调用约定绑定接口，并在正常及异常退出时通过 `finally` 关闭句柄。
+     完整内容先写入排他创建的暂存文件，
+     再原子发布，并核对发布后的路径与文件身份。普通、流式最终结果和超时已有输出
+     在保存成功时返回可回读路径，文件跨工具调用保留，供后续 `read_file` / 搜索调用使用。
+     保存遇到路径、权限或 I/O 错误时返回有长度限制的首尾预览及保存失败说明，工具的命令
+     成功状态与退出码由执行结果决定。受限模式找不到授权保存位置时通过该降级路径返回。
    - cron：`create_cron_tools()` + `CronToolContext` / `CronToolBackend`(Protocol)。
    - memory：`MemorySearchTool` / `MemoryGetTool` / `ReadMemoryTool` / `WriteMemoryTool` /
      `EditMemoryTool` + `CompressionRecallTool` + `CodingMemory{Read,Write,Edit}Tool`。
