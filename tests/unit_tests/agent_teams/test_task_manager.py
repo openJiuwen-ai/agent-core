@@ -61,14 +61,14 @@ async def message_bus():
 async def task_manager(db, message_bus):
     """Provide initialized task manager instance"""
     await db.team.create_team(
-            team_name="test_team",
-            display_name="Test Team",
-            leader_member_name="leader1"
+        team_name="test_team",
+        display_name="Test Team",
+        leader_member_name="leader1"
     )
     await db.member.create_member(
-            member_name="member1",
-            team_name="test_team",
-            display_name="member1",
+        member_name="member1",
+        team_name="test_team",
+        display_name="member1",
         agent_card=AgentCard().model_dump_json(),
         status="BUSY",
         mode=MemberMode.BUILD_MODE.value
@@ -203,6 +203,126 @@ class TestClaimConflict:
         assert task_state.status == TaskStatus.IN_PROGRESS.value
         assert task_state.assignee == "m1"
 
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_claim_own_blocked_task_reports_blocked_reason(self, db, message_bus):
+        """自派但依赖未解时，claim 报「依赖未解」而非「已被自己认领」，
+        并带 blocked_by；依赖解除后同一任务可正常 claim。"""
+        await db.team.create_team(
+            team_name="blocked_claim_team",
+            display_name="Blocked Claim Team",
+            leader_member_name="leader",
+        )
+        await db.member.create_member(
+            member_name="m1",
+            team_name="blocked_claim_team",
+            display_name="m1",
+            agent_card=AgentCard().model_dump_json(),
+            status="BUSY",
+            mode=MemberMode.BUILD_MODE.value,
+        )
+        tm = TeamTaskManager(
+            team_name="blocked_claim_team", member_name="m1", db=db, messager=message_bus,
+        )
+        upstream = await tm.add(title="Upstream", content="u")
+        graph = await tm.add_graph([
+            TaskGraphSpec(
+                title="Downstream",
+                content="d",
+                task_id="down-1",
+                depends_on=(upstream.task_id,),
+                assignee="m1",
+            )
+        ])
+        assert graph.ok
+        assert graph.tasks[0].status == TaskStatus.BLOCKED.value
+
+        refused = await tm.claim("down-1")
+        assert not refused.ok
+        assert "is blocked by" in refused.reason
+        assert upstream.task_id in refused.reason
+        assert "TASK_UNBLOCKED" in refused.reason
+        assert "already claimed" not in refused.reason
+
+        # 依赖解除后：任务转 PENDING(assignee=m1)，claim 走自启动分支成功。
+        assert (await tm.claim(upstream.task_id)).ok
+        assert (await tm.complete(upstream.task_id)).ok
+        unblocked = await tm.get("down-1")
+        assert unblocked.status == TaskStatus.PENDING.value
+        assert (await tm.claim("down-1")).ok
+        claimed = await tm.get("down-1")
+        assert claimed.status == TaskStatus.IN_PROGRESS.value
+        assert claimed.assignee == "m1"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_claim_own_completed_task_reports_status_not_conflict(self, db, message_bus):
+        """自派任务已终态时，claim 报「already completed」而非「已被自己认领」。"""
+        await db.team.create_team(
+            team_name="claim_terminal_team",
+            display_name="Claim Terminal Team",
+            leader_member_name="leader",
+        )
+        await db.member.create_member(
+            member_name="m1",
+            team_name="claim_terminal_team",
+            display_name="m1",
+            agent_card=AgentCard().model_dump_json(),
+            status="BUSY",
+            mode=MemberMode.BUILD_MODE.value,
+        )
+        tm = TeamTaskManager(
+            team_name="claim_terminal_team", member_name="m1", db=db, messager=message_bus,
+        )
+        task = await tm.add(title="Done", content="c")
+        assert (await tm.claim(task.task_id)).ok
+        assert (await tm.complete(task.task_id)).ok
+
+        again = await tm.claim(task.task_id)
+        assert not again.ok
+        assert "already completed" in again.reason
+        assert "already claimed by" not in again.reason
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_claim_own_reviewed_task_reports_review_state(self, db, message_bus):
+        """自派任务处于 IN_REVIEW 时，claim 报「已提交评审」而非冲突。"""
+        await db.team.create_team(
+            team_name="claim_review_team",
+            display_name="Claim Review Team",
+            leader_member_name="leader",
+        )
+        await db.member.create_member(
+            member_name="m1",
+            team_name="claim_review_team",
+            display_name="m1",
+            agent_card=AgentCard().model_dump_json(),
+            status="BUSY",
+            mode=MemberMode.BUILD_MODE.value,
+        )
+        tm = TeamTaskManager(
+            team_name="claim_review_team", member_name="m1", db=db, messager=message_bus,
+        )
+        graph = await tm.add_graph([
+            TaskGraphSpec(
+                title="Reviewed",
+                content="c",
+                task_id="rev-1",
+                assignee="m1",
+                reviewer=("m2",),
+            )
+        ])
+        assert graph.ok
+        assert (await tm.claim("rev-1")).ok
+        assert (await tm.complete("rev-1")).ok  # 有 reviewer → IN_REVIEW
+        reviewed = await tm.get("rev-1")
+        assert reviewed.status == TaskStatus.IN_REVIEW.value
+
+        again = await tm.claim("rev-1")
+        assert not again.ok
+        assert "submitted for review" in again.reason
+        assert "already claimed by" not in again.reason
+
 
 class TestTaskCompletionWithDependencyResolution:
     """Test task completion and dependency resolution"""
@@ -254,7 +374,7 @@ class TestTaskCompletionWithDependencyResolution:
     @pytest.mark.asyncio
     @pytest.mark.level0
     async def test_complete_task_unblocks_under_concurrent_sessions(
-        self, tmp_path, message_bus
+            self, tmp_path, message_bus
     ):
         """File-backed regression: complete_task must still unblock dependents
         when a second coroutine is hammering the database in parallel.

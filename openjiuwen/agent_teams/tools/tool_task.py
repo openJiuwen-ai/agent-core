@@ -41,9 +41,9 @@ def _base_task_node_properties(t: Translator) -> dict[str, Any]:
 
 
 def _task_node_schema(
-    properties: dict[str, Any],
-    *,
-    extra_required: list[str] | None = None,
+        properties: dict[str, Any],
+        *,
+        extra_required: list[str] | None = None,
 ) -> dict:
     """Build a per-task JSON schema from mode-specific properties.
 
@@ -87,10 +87,10 @@ def _scheduled_task_node_schema(t: Translator) -> dict:
 
 
 async def _validate_assignees(
-    agent_team: TeamBackend,
-    tasks: list[dict],
-    *,
-    required: bool,
+        agent_team: TeamBackend,
+        tasks: list[dict],
+        *,
+        required: bool,
 ) -> str | None:
     """Reject assignees that are missing, unknown, or point to the leader."""
     leader_member_name = await agent_team.resolve_leader_member_name()
@@ -239,7 +239,30 @@ class TaskCreateTool(TeamTool):
         if not result.ok:
             return ToolOutput(success=False, error=result.reason)
 
-        await self._auto_start_members([task.assignee for task in result.tasks])
+        # 依赖门：只拉起本批可执行（非 BLOCKED）任务的 assignee。
+        # BLOCKED 任务的 assignee 保持 UNSTARTED——否则成员被提前拉起，首巡
+        # 看板把自己的 blocked 任务当可执行活，claim 必败、产出后 complete
+        # 再撞非法迁移。依赖解除后任务转 PENDING(assignee)，由 leader 的
+        # stale-pending 自催「已指派未启动」扫描面拉起。
+        startable_assignees = [
+            task.assignee
+            for task in result.tasks
+            if task.status != TaskStatus.BLOCKED.value
+        ]
+        # 只记录「本次确实没拉起」的 blocked assignee：同一成员若同时拥有
+        # 可执行任务，它已随可执行任务被拉起，日志不得再报 Skipped。
+        startable_names = {name for name in startable_assignees if name}
+        blocked_names = {
+            task.assignee
+            for task in result.tasks
+            if task.assignee and task.status == TaskStatus.BLOCKED.value
+        }
+        skipped_blocked = sorted(blocked_names - startable_names)
+        if skipped_blocked:
+            team_logger.info(
+                f"Skipped blocked-task assignees (start on UNBLOCKED): {skipped_blocked}"
+            )
+        await self._auto_start_members(startable_assignees)
 
         briefs = [{**task.brief(), "assignee": task.assignee} for task in result.tasks]
         if len(briefs) == 1:
@@ -267,6 +290,12 @@ class TaskCreateTool(TeamTool):
         spawn failure is logged and the remaining assignees still start —
         a tool failure here would invite the model to create the tasks a
         second time.
+
+        ``BLOCKED`` tasks are excluded by the caller (their assignee is not
+        in ``assignees``): a blocked task has unmet dependencies, so waking
+        its owner here would only produce a claim that must fail. Those
+        members start later, once a dependency completes and the leader's
+        stale-pending sweep pulls them up.
         """
         started: list[str] = []
         for assignee in dict.fromkeys(a for a in assignees if a):
@@ -783,11 +812,12 @@ class UpdateTaskTool(TeamTool):
         Assignment only writes the board — it never launched anybody.
         A leader that assigns without a send_message leaves the task
         with an owner whose agent was never started: the assignment
-        event has no subscriber, the member-side stale self-check needs
-        a running kernel, and the leader-side stale-pending sweep only
-        scans unassigned tasks, so nothing ever notices. Starting the
-        member here is the assignment-path counterpart of create_task's
-        roster-wide autostart.
+        event has no subscriber and the member-side stale self-check
+        needs a running kernel. The leader-side stale-pending sweep does
+        cover that state as its "assigned-but-never-started" slice, but
+        only as a delayed prompt — starting the member here is what turns
+        the reminder into action at assignment time (the assignment-path
+        counterpart of create_task's assignee autostart).
 
         Best-effort: the assignment is already committed, so a spawn
         failure is logged and left to the stale-claim sweep rather than
@@ -817,12 +847,12 @@ class SubmitPlanTool(TeamTool):
     """Submit an execution plan for a plan-mode task."""
 
     def __init__(
-        self,
-        task_manager: TeamTaskManager,
-        t: Translator,
-        *,
-        name: str = "submit_plan",
-        tool_id: str = "team.submit_plan",
+            self,
+            task_manager: TeamTaskManager,
+            t: Translator,
+            *,
+            name: str = "submit_plan",
+            tool_id: str = "team.submit_plan",
     ):
         super().__init__(
             ToolCard(
