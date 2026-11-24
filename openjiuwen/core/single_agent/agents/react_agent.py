@@ -3976,7 +3976,7 @@ class ReActAgent(BaseAgent):
     def _iteration_checkpoint_enabled(self) -> bool:
         """Whether this run persists a step after each completed iteration."""
         config = getattr(self._config, "context_engine_config", None)
-        return bool(getattr(config, "enable_iteration_checkpoint", False))
+        return bool(getattr(config, "enable_iteration_checkpoint", True))
 
     @staticmethod
     def _begin_agent_steps(session) -> "StepResume | None":
