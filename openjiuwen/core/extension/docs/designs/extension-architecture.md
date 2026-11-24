@@ -3,7 +3,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 文档类型 | 目标设计草案；尚未确定的内容标为补充建议或待确认项 |
-| 最近一次修订日期 | 2026-10-22 |
+| 最近一次修订日期 | 2026-11-24 |
 | 责任人 | Core Extension 模块维护者；与 Events 的协作由双方维护者共同确认 |
 | 所属模块 | `agent-core/openjiuwen/core/extension/` |
 | 配套文档 | [设计概览](extension-overview.md)、[Core 公共规范](../../../AGENTS.md) |
@@ -356,6 +356,14 @@ Package Manager 根据本次选定的包和 Runtime 里已经生效的依赖检�
 依赖缺失、存在循环或版本不满足时，不加载受影响的计划，并记录原因。目前建议让不受影响的包继续安装。例如，A 注册失败，依赖 A 的 B 就不进入 Runtime；独立的 C 可以继续，其他已成功包也不因此回滚。
 
 同一批里 `package.id` 重复时整批失败。id 已经生效时，该包返回 `EXTENSION_PACKAGE_EXISTS`，不替换。磁盘上有一份目录，不等于它已经在 Runtime 的生效记录里。安装 Handler 按 `package.resolve` 的包序逐包触发 `extension.plan`，不把多个包的扩展混在一起排，也不联网下载依赖。卸载时同一事件检查反向依赖和在途调用。
+
+#### 4.2.5 bundle 根与 managed root
+
+bundle 根使用与普通包相同的 `<install_dir>/<bundle_id>/<version>/` 布局，但 manifest 必须声明 `is_bundle: true`，不得带 domain 或 extensions，成员由 `members[].path` 指向根内目录。Core 解析成员时校验路径逃逸、隐藏段、嵌套、重复 ID、成员上限、成员依赖版本与环，并按 `requires.packages` 分层；bundle 根强制 `enable=false`，只被发现、不被激活，`package.parse` 也不接受它作为普通包源。
+
+成员根由宿主通过 `register_managed_root(package_id, version, root)` 注册，`unregister_managed_root` 释放。`PackageManager` 将 managed root 纳入 `list_installed`、`version_dir`、`managed_versions` 和启动快照；`copy_into_store` 就地返回，`remove_installed` 不删除宿主副本。启动快照只接受已注册的深层根，宿主须在 `load_installed` 前完成注册。成员依赖由容器层检查，宿主可对已检查的成员使用 `begin_operation(..., skip_dependencies=True)` 跳过 Core 报告等待；普通包仍执行完整依赖检查。
+
+宿主负责 bundle 版本、成员状态、冲突和失败回滚；Core 不持久化容器记录，也不跨进程协调成员。
 
 ### 4.3 Orchestrator：单包计划与结果协调
 

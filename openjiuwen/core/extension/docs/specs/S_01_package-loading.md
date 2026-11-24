@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | `S_01 / package-loading` |
 | 关联模块 | `openjiuwen/core/extension/`；消费方包括管理事件 Core Handler 与宿主启动逻辑 |
-| 最近一次修订日期 | 2026-11-10 |
+| 最近一次修订日期 | 2026-11-24 |
 | 关联 feature | [F_01](../features/F_01_package-source.md)、[F_02](../features/F_02_plan-runtime.md)、[F_06](../features/F_06_package-enable.md) |
 | 设计依据 | [设计概览](../designs/extension-overview.md)、[详细架构](../designs/extension-architecture.md)、[开发计划](../designs/extension-development-plan.md) |
 
@@ -28,6 +28,8 @@
 | --- | --- |
 | 包根 | 含有 `manifest.json` 的目录 |
 | 安装副本 | `<install_dir>/<package.id>/<version>/` |
+| bundle 根 | `manifest.json` 声明 `is_bundle: true` 的包根，携带 `members`；只作为容器，不由 Core 激活 |
+| managed root | 宿主在安装目录内注册给 Core 的就地加载根；bundle 成员使用，Core 不复制、不删除 |
 | 用户来源 | 调用方传入的原始目录或 zip |
 | 生效记录 | Runtime 中的 `ActivePackageRecord`，供后续依赖与卸载判断 |
 | candidate | 一次 prepare 收集齐的 Handler 声明与已加载模块；发布前对业务调用不可见 |
@@ -106,6 +108,16 @@
 | `Registry.set_enabled` | `registry` | 保留安装副本地启用或禁用一个包 |
 | `ExtensionFailure` / `OperationError` / `operation_error` | `errors` | 同步失败与 Report 错误 |
 
+### 2.5 bundle 根与托管根
+
+bundle 根与普通包共用 `<install_dir>/<package.id>/<version>/` 布局，但 `manifest.json` 必须声明 `is_bundle: true`，不得声明 `package.domain` 或非空 `extensions`，成员通过 `members[].path` 指向根内目录。
+
+- 成员清单上限 50；成员路径必须是根内相对路径，不得含 `..` 或隐藏段，不得嵌套、重复 ID、使用符号链接，成员 ID 不得等于 bundle ID。成员之间按各自 `requires.packages` 做版本匹配、自依赖与环检测。
+- Core 解析 bundle 根时放宽 domain 要求并强制 `enable=false`：启动能够发现该副本，但不会把它当作可加载包。`package.parse` 拒绝 bundle 根，bundle 只由宿主容器层安装。
+- 成员不复制到独立安装副本。宿主把当前允许加载的成员根通过 `PackageManager.register_managed_root()` 注册为 managed root；`unregister_managed_root()` 释放。`list_installed()`、`version_dir()`、`managed_versions()` 与启动快照识别这些根，`copy_into_store()` 就地返回，`remove_installed()` 不删除宿主所有的副本。
+- 启动快照和 `normalize_legacy_enable()` 接受已注册的深层 managed root；未注册的深层目录仍按非法启动根拒绝。宿主必须在 `load_installed()` 前完成注册。
+- bundle 成员依赖由宿主容器层检查；宿主对已检查的成员调用 `begin_operation(..., skip_dependencies=True)` 时，Core 跳过安装报告中的依赖等待与校验。普通包不传该标记，依赖语义不变。
+
 ## 3. 依赖、排序与选择
 
 ### 3.1 不变量
@@ -119,6 +131,7 @@
 7. 环上节点 → `EXTENSION_DEPENDENCY_CYCLE`；仅被环挡住的节点 → 依赖未满足。
 8. 重载时，若某依赖方的版本条件不接受新版本 → `EXTENSION_DEPENDENT_INCOMPATIBLE`，生效记录不变。
 9. 启动计划中，磁盘存在精确 `(package.id, version)` 时保留真实 manifest。报告只为尚未复制完成、但已登记的目标补临时节点；相同版本的 domain 或依赖与磁盘不一致时拒绝，不以报告覆盖磁盘事实。
+10. bundle 成员之间的顺序由成员 `requires.packages` 决定；成员依赖的记录检查和激活由宿主容器层负责，Core 不把 bundle 根加入普通包依赖图。
 
 ### 3.2 版本条件
 
@@ -208,7 +221,7 @@ generation：进程内首次成功从 `1` 起；之后每次成功替换加 `1`�
 
 ## 5. 生命周期与资源责任
 
-- 安装副本和直接父级 `<install_dir>/<package.id>` 目录的所有权在 Package Manager；用户来源永不由本模块删除。成功卸载删除该包的所有受管版本和整个包 ID 目录；目录删除失败则卸载失败并保留可重试事实。
+- 安装副本和直接父级 `<install_dir>/<package.id>` 目录的所有权在 Package Manager；用户来源永不由本模块删除。成功卸载删除该包的所有受管版本和整个包 ID 目录；目录删除失败则卸载失败并保留可重试事实。bundle 根和 managed root 由宿主容器层持有，Core 不复制、不删除。
 - 生效记录在发布成功后写入；卸载判断通过并完成注册、资源和受管理副本清理后删除。
   清理失败保留记录供重试，具体编排见 [S_02 第 4.1 节](S_02_registry-and-bus.md#41-store-卸载清理)。
 - prepare 失败或 `abort` 只清理本次 `sys.modules` 条目。
@@ -222,6 +235,7 @@ generation：进程内首次成功从 `1` 起；之后每次成功替换加 `1`�
 - 报告格式、运行锁和重启判断见 [F_05](../features/F_05_domain-install-report.md)。
 - 受管版本按目录独立校验；合法的其它域版本可参与全局判断，无法验证身份的旧目录只跳过。损坏目录只有在报告或 Runtime 已知其版本时才允许进入清理流程。
 - 公共名称、错误码或不变量变更时，必须同步本规约与 `tests/unit_tests/core/extension/`。
+- 本次 bundle/managed root 变更为新增能力：不注册 managed root、不声明 `is_bundle` 的旧宿主和旧包保持原行为；bundle 能力要求宿主注册根并在加载前完成配置。`is_bundle` 为保留字段，普通包不得使用。
 - 启用、禁用仅控制本 Registry 及其绑定 Bus 中的加载结果。已开始的业务调用不回滚，调用方应按自身停止与资源释放约束处理。
 
 ## 7. 验证索引
@@ -232,6 +246,8 @@ generation：进程内首次成功从 `1` 起；之后每次成功替换加 `1`�
 | 声明、安装目录、zip 防护、依赖定序 | `tests/unit_tests/core/extension/test_package_source.py` |
 | Plan、prepare、生效记录、卸载判断 | `tests/unit_tests/core/extension/test_plan_runtime.py` |
 | `mcp.json` 解析与声明表 | `tests/unit_tests/core/extension/test_mcp_declarations.py` |
+| bundle 清单、成员校验与依赖分层 | `tests/unit_tests/core/extension/test_bundle.py` |
+| managed root 的存储视图、就地加载与启动快照 | `tests/unit_tests/core/extension/test_managed_roots.py` |
 | 安装/重载/卸载的 MCP 声明生命周期 | `tests/unit_tests/core/extension/test_mcp_package_lifecycle.py` |
 
 管理事件与 Bus 发布的验证在对应工作项（EX-03、EX-04）实现时建立，并引用本节控制面条款。
