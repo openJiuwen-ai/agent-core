@@ -117,6 +117,23 @@ MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT: float = float(
     os.getenv("MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT", "3600.0")
 )
 
+#: 外层调用期限相对工具自身 timeout 的收尾宽限(秒)。
+#: 工具内部超时到点后还要杀进程树并排空管道(local/utils.py 超时路径的
+#: ``_finish_readers(30)``)，外层若早于内层结束，调用方只会拿到一句没有
+#: 任何输出的外层超时，已产出的 partial output 全部丢失。
+TOOL_CALL_TIMEOUT_SETTLE_GRACE_S: float = float(
+    os.getenv("TOOL_CALL_TIMEOUT_SETTLE_GRACE", "30.0")
+)
+
+#: 工具参数里声明"自身 timeout"的键名。毫秒键优先解析，避免裸 ``timeout``
+#: 的毫秒值被当成秒(600ms 误判 600s)。
+_TIMEOUT_ARG_KEYS_MS: Tuple[str, ...] = ("timeout_ms", "timeoutMs")
+_TIMEOUT_ARG_KEYS_SECONDS: Tuple[str, ...] = ("timeout_seconds", "timeout_sec", "timeout")
+
+#: 裸 ``timeout`` 超过此值时按毫秒解释。与 relay-claw 侧
+#: ``resolveRelayClawToolTimeoutMs`` 保持同一约定，两仓语义不得分叉。
+_BARE_TIMEOUT_MS_THRESHOLD: float = 10_000.0
+
 #: 工具消息文本中内联多模态载荷(data URL)的占位符。结果对象 ``data.multimodal``
 #: 里的像素由 react_agent 提升为 user 消息的 image 块送达模型;消息文本里字符串化
 #: 出现的同一份 base64 是冗余副本(按文本 token 计量可达百万级),统一替换为占位符。
@@ -626,6 +643,137 @@ class AbilityManager:
         except (TypeError, ValueError):
             return DEFAULT_TOOL_CALL_TIMEOUT
         return value if value > 0 else None
+
+    @staticmethod
+    def _timeout_seconds_from_args(tool_args: Any) -> Optional[float]:
+        """Read the caller-declared tool timeout from ``tool_args``, in seconds.
+
+        Long-running tools (``bash`` / ``powershell`` / ``mcp_exec_command``)
+        carry their own ``timeout`` parameter. That value is the real budget of
+        the call, so the outer deadline must be derived from it instead of
+        falling back to ``DEFAULT_TOOL_CALL_TIMEOUT`` - otherwise a 420s script
+        gets killed at 300s no matter what the caller asked for.
+
+        Returns ``None`` when no usable timeout is declared.
+        """
+        if not isinstance(tool_args, dict):
+            return None
+
+        def _positive(raw_value: Any) -> Optional[float]:
+            # bool is an int subclass; ``True`` must not become 1 second.
+            if isinstance(raw_value, bool):
+                return None
+            if isinstance(raw_value, (int, float)):
+                return float(raw_value) if raw_value > 0 else None
+            if isinstance(raw_value, str):
+                try:
+                    parsed = float(raw_value.strip())
+                except ValueError:
+                    return None
+                return parsed if parsed > 0 else None
+            return None
+
+        for key in _TIMEOUT_ARG_KEYS_MS:
+            value_ms = _positive(tool_args.get(key))
+            if value_ms is not None:
+                return value_ms / 1000.0
+
+        for key in _TIMEOUT_ARG_KEYS_SECONDS:
+            value = _positive(tool_args.get(key))
+            if value is None:
+                continue
+            if key == "timeout" and value > _BARE_TIMEOUT_MS_THRESHOLD:
+                return value / 1000.0
+            return value
+        return None
+
+    @staticmethod
+    def _resolve_call_timeout_for_args(
+            tool_card: Optional[ToolCard],
+            tool_args: Any,
+    ) -> Optional[float]:
+        """Resolve the outer call deadline for one invocation.
+
+        Priority (highest first):
+
+        1. ``ToolCard.properties["resilience"]["timeout_s"]`` declared as a
+           **positive** number: that is the tool author's explicit call budget,
+           so arguments never override it.
+        2. A timeout declared in the arguments: the outer deadline becomes
+           ``min(declared, HARD_LIMIT) + SETTLE_GRACE``. This also applies to
+           cards that declare ``timeout_s = None`` ("exempt"): exemption means
+           "do not use the 300s default", not "ignore the real budget". Deriving
+           from the arguments is a *tighter* backstop than jumping to the 3600s
+           hard limit, and the inner timeout still fires first.
+        3. Card exempt and no argument timeout: ``None`` - the call site applies
+           ``MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT``.
+        4. Nothing usable declared: ``DEFAULT_TOOL_CALL_TIMEOUT`` (unchanged).
+
+        A malformed ``timeout_s`` (non-numeric) is *not* authoritative: it keeps
+        the legacy "fall back to default" behaviour but must not shadow a real
+        timeout declared in the arguments.
+        """
+        card_state = "unset"  # unset | positive | exempt | invalid
+        card_value: Optional[float] = None
+        properties = getattr(tool_card, "properties", None)
+        if isinstance(properties, dict):
+            resilience = properties.get("resilience")
+            if isinstance(resilience, dict):
+                declared_card = resilience.get("timeout_s", "unset")
+                if declared_card != "unset":
+                    if declared_card is None:
+                        card_state = "exempt"
+                    else:
+                        try:
+                            parsed_card = float(declared_card)
+                        except (TypeError, ValueError):
+                            card_state = "invalid"
+                        else:
+                            if parsed_card > 0:
+                                card_state = "positive"
+                                card_value = parsed_card
+                            else:
+                                card_state = "exempt"
+
+        # A positive card declaration is authoritative and final.
+        if card_state == "positive":
+            return card_value
+
+        declared = AbilityManager._timeout_seconds_from_args(tool_args)
+        if declared is not None:
+            return min(declared, MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT) + TOOL_CALL_TIMEOUT_SETTLE_GRACE_S
+
+        if card_state == "exempt":
+            # Exempt with no argument timeout -> no outer deadline here; the
+            # caller applies the global hard limit.
+            return None
+
+        # unset / invalid -> legacy resolution (DEFAULT_TOOL_CALL_TIMEOUT).
+        return AbilityManager._resolve_call_timeout(tool_card)
+
+    @staticmethod
+    def _describe_timeout_layer(tool_name: str, call_timeout: Optional[float],
+                                tool_args: Any) -> str:
+        """Build a self-correcting timeout message for the model.
+
+        Production logs show the model re-running an identical long command
+        right after an outer timeout (the 300s cap was invisible to it). The
+        message must therefore name the limiting layer and point at the
+        non-blocking escape hatch.
+        """
+        declared = AbilityManager._timeout_seconds_from_args(tool_args)
+        if declared is None:
+            layer = "outer tool-call deadline; the arguments declared no timeout"
+        else:
+            layer = (
+                f"outer tool-call deadline, derived from the declared "
+                f"{declared:g}s timeout plus settle grace"
+            )
+        return (
+            f"Tool '{tool_name}' timed out after {call_timeout}s ({layer}). "
+            "Do not re-run the same call synchronously: shrink the work, or use "
+            "the tool's background/run_in_background mode and poll for the result."
+        )
 
     @staticmethod
     def _get_stream_writer_manager(session: Session) -> Any:
@@ -1634,7 +1782,10 @@ class AbilityManager:
                     tool_call,
                     f"Tool instance not found in resource_mgr: {tool_id}",
                 )
-            call_timeout = self._resolve_call_timeout(tool_card)
+            # Derive the outer deadline from the arguments when the tool
+            # declares its own timeout (bash timeout=600 must survive past the
+            # 300s default); a card-level ``resilience.timeout_s`` still wins.
+            call_timeout = self._resolve_call_timeout_for_args(tool_card, tool_args)
             # Global hard limit: even exempt tools (None) get a ceiling so they
             # cannot hang the round indefinitely.
             if call_timeout is None:
@@ -1647,7 +1798,7 @@ class AbilityManager:
                         tool_call_id=tool_call.id,
                     )
             except TimeoutError as e:
-                error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
+                error_msg = self._describe_timeout_layer(tool_name, call_timeout, tool_args)
                 logger.warning(error_msg)
                 raise self._build_execution_error(
                     tool_call,
@@ -1744,7 +1895,8 @@ class AbilityManager:
             # Resolve timeout from the tool's own card so non-idempotent
             # tools are exempt on this path too (Layer 0 reads
             # ``ToolCard.idempotent``); the name kwarg is no longer used.
-            call_timeout = self._resolve_call_timeout(tool.card)
+            # Arguments-declared timeouts raise the outer deadline here as well.
+            call_timeout = self._resolve_call_timeout_for_args(tool.card, tool_args)
             # Global hard limit: even exempt tools (None) get a ceiling.
             if call_timeout is None:
                 call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
@@ -1756,7 +1908,7 @@ class AbilityManager:
                         tool_call_id=tool_call.id,
                     )
             except TimeoutError as e:
-                error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
+                error_msg = self._describe_timeout_layer(tool_name, call_timeout, tool_args)
                 logger.warning(error_msg)
                 raise self._build_execution_error(
                     tool_call,
