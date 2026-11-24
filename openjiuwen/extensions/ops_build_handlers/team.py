@@ -39,6 +39,7 @@ from openjiuwen.agent_teams.extensions.ops import (
     TaskDependencyInfo,
     TeamReadView,
     TeamResourceResolver,
+    TeamSummary,
     current_policy_context,
     current_team_name,
 )
@@ -418,6 +419,15 @@ def _build_team_methods(resolver: TeamResourceResolver) -> dict[str, Any]:
             )
         return context
 
+    async def list_teams(_ops: EventHandlerOps) -> list[TeamSummary]:
+        """List every team as read-only overview rows, oldest first.
+
+        Global by design: teams are discovered from the database, running
+        or stopped, with no session scoping — this is how a plugin finds
+        teams it never saw events for.
+        """
+        return list(await resolver.list_teams())
+
     return {
         "info": info,
         "members": members,
@@ -428,6 +438,7 @@ def _build_team_methods(resolver: TeamResourceResolver) -> dict[str, Any]:
         "messages": messages,
         "message": message,
         "policy_context": policy_context,
+        "list": list_teams,
     }
 
 
