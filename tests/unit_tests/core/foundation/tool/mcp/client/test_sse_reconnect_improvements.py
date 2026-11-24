@@ -13,12 +13,14 @@
       transport-error marker for RuntimeError; lazy reconnect may still
       recover after a prior successful connect.
 """
+
 from __future__ import annotations
 
 import asyncio
-import pytest
 from typing import Any
 from unittest.mock import patch
+
+import pytest
 
 from openjiuwen.core.foundation.tool.mcp.base import McpServerConfig
 from openjiuwen.core.foundation.tool.mcp.client import sse_client as sse_mod
@@ -45,7 +47,7 @@ def _install_fake_lifecycle(client: SseClient) -> dict[str, Any]:
         "connects": 0,
     }
 
-    async def _fake_connect(*, timeout: float = -1) -> bool:
+    async def _fake_connect(*, timeout: float = -1) -> bool:  # noqa: ASYNC109
         state["connect_tasks"].append(asyncio.current_task())
         state["connects"] += 1
         client._session = object()
@@ -53,7 +55,7 @@ def _install_fake_lifecycle(client: SseClient) -> dict[str, Any]:
         client._lazy_reconnect = True
         return True
 
-    async def _fake_disconnect(*, timeout: float = -1) -> bool:
+    async def _fake_disconnect(*, timeout: float = -1) -> bool:  # noqa: ASYNC109
         state["disconnect_tasks"].append(asyncio.current_task())
         client._session = None
         return True
@@ -83,7 +85,7 @@ class TestSseReconnectR1R2R6:
         _install_fake_lifecycle(client)
         await client.connect()
 
-        async def _fail_reconnect(*, timeout: float = -1) -> bool:
+        async def _fail_reconnect(*, timeout: float = -1) -> bool:  # noqa: ASYNC109
             await asyncio.sleep(0.02)
             return False
 
@@ -104,7 +106,7 @@ class TestSseReconnectR1R2R6:
         _install_fake_lifecycle(client)
         await client.connect()
 
-        async def _boom_reconnect(*, timeout: float = -1) -> bool:
+        async def _boom_reconnect(*, timeout: float = -1) -> bool:  # noqa: ASYNC109
             await asyncio.sleep(0.01)
             raise RuntimeError("reconnect blew up")
 
@@ -149,7 +151,7 @@ class TestSseReconnectR1R2R6:
         _install_fake_lifecycle(client)
         await client.connect()
 
-        async def slow_disconnect(*, timeout: float = -1) -> bool:
+        async def slow_disconnect(*, timeout: float = -1) -> bool:  # noqa: ASYNC109
             await asyncio.sleep(0.05)
             client._session = None
             return True
@@ -177,7 +179,7 @@ class TestSseReconnectR1R2R6:
 
         started = asyncio.Event()
 
-        async def slow_reconnect(*, timeout: float = -1) -> bool:
+        async def slow_reconnect(*, timeout: float = -1) -> bool:  # noqa: ASYNC109
             started.set()
             await asyncio.sleep(0.05)
             client._session = object()
@@ -229,9 +231,7 @@ class TestSseReconnectR1R2R6:
 
         await client.disconnect()
         assert client._lazy_reconnect is False
-        assert should_attempt_reconnect(
-            client, RuntimeError("Not connected to SSE server")
-        ) is False
+        assert should_attempt_reconnect(client, RuntimeError("Not connected to SSE server")) is False
 
     @pytest.mark.asyncio
     async def test_retryable_markers_match_case_insensitively(self) -> None:
@@ -240,9 +240,11 @@ class TestSseReconnectR1R2R6:
         definition site."""
         # Message with mixed case still matches a "broken pipe" marker.
         assert is_retryable_transport_error(RuntimeError("Broken PIPE on socket")) is True
+
         # A class whose name lowercases to contain a marker substring matches.
         class _EndOfStream(Exception):
             pass
+
         assert is_retryable_transport_error(_EndOfStream()) is True
 
     @pytest.mark.asyncio
@@ -272,7 +274,7 @@ class TestSseReconnectR1R2R6:
         reconnect_calls: list[int] = []
         original_reconnect = client.reconnect
 
-        async def _spy_reconnect(*, timeout: float = -1) -> bool:
+        async def _spy_reconnect(*, timeout: float = -1) -> bool:  # noqa: ASYNC109
             reconnect_calls.append(1)
             return await original_reconnect(timeout=timeout)
 
@@ -302,7 +304,7 @@ class TestSseReconnectR1R2R6:
             async def call_tool(self, name: str, arguments: Any = None) -> Any:
                 return object()
 
-        async def _recover_connect(*, timeout: float = -1) -> bool:
+        async def _recover_connect(*, timeout: float = -1) -> bool:  # noqa: ASYNC109
             state["connects"] += 1
             client._session = _OkSession()
             client._is_disconnected = False
@@ -310,9 +312,7 @@ class TestSseReconnectR1R2R6:
             return True
 
         client._do_connect = _recover_connect
-        with patch.object(
-            sse_mod, "extract_mcp_tool_result_content", lambda *a, **k: {"ok": True}
-        ):
+        with patch.object(sse_mod, "extract_mcp_tool_result_content", lambda *a, **k: {"ok": True}):
             assert await client.call_tool("t", {}, timeout=0.5) == {"ok": True}
         # Initial connect + recovery connect.
         assert state["connects"] >= 2
@@ -329,7 +329,7 @@ class TestSseReconnectR1R2R6:
 
         release = asyncio.Event()
 
-        async def _blocking_connect(*, timeout: float = -1) -> bool:
+        async def _blocking_connect(*, timeout: float = -1) -> bool:  # noqa: ASYNC109
             await release.wait()  # blocks on owner task until released
             client._session = object()
             client._is_disconnected = False

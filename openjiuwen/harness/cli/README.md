@@ -516,3 +516,5 @@ cli.py (Click)  →  chat / run 子命令
             ▼
     LLM Provider (OpenAI / DashScope / SiliconFlow / ...)
 ```
+
+Auto-Harness smoke test note
