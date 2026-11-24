@@ -7,12 +7,12 @@ Create team tasks (Leader only).
 
 - **title**: Concise description of the goal (imperative form, e.g. "Implement user auth")
 - **content**: Goals, acceptance criteria, and constraints — not specific operations
-- **assignee** (optional): Existing non-leader member who should carry this task — assigning **launches that member automatically**. Omit it to park the task in the shared claim pool without launching anyone
+- **assignee** (optional): Existing non-leader member who should carry this task — when the task is executable, assigning **launches that member automatically**. If the task lands in `blocked` because of unfinished `depends_on`, its assignee stays **unstarted** until the dependencies complete; the task then returns to `pending` (assignee kept), and you launch the member via `send_message`/`update_task` (or wait for the stale-nudge reminder). Omit it to park the task in the shared claim pool without launching anyone
 - **task_id** (required): Custom ID for dependency reference
 - **depends_on** (optional): **"who I depend on"** — prerequisite task IDs that must complete before this task can start; may reference in-batch or existing tasks. Veirfy that the task_id is correct before filling in this field.
 - **depended_by** (optional): **"who depends on me"** (reverse dependency) — **existing** task IDs that should wait for this task; must not reference in-batch tasks
 
-All created tasks enter `pending`; tasks with unfinished dependencies appear as `blocked`. Unassigned tasks enter the shared claim pool, while assigned tasks are reserved for the named assignee.
+All created tasks enter `pending`; tasks with unfinished dependencies appear as `blocked`, and their assignee stays unstarted until the dependencies complete. Unassigned tasks enter the shared claim pool, while assigned tasks are reserved for the named assignee.
 
 {{create_task_granularity}}
 
