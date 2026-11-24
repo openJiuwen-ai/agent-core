@@ -131,7 +131,7 @@ def test_successful_capacity_removal_preserves_description_coverage(tmp_path):
     (topic / "description.md").write_text("# Topic\n[Old](old.md)\n", encoding="utf-8")
     result = capacity.maintain_capacity(tmp_path, limit_bytes=1000)
     assert result["removed_count"] == 1
-    capacity._validate_description_coverage(root)
+    pipeline._validate_description_coverage(root)
 
 
 # Whole-job start failure, preparation timeout/cancellation, and subsequent
@@ -295,17 +295,16 @@ async def test_queued_publication_protects_its_reads_from_capacity_deletion(
         victim = next(path for path in root.rglob("*.md") if path.name != "description.md")
         relative = victim.relative_to(root).as_posix()
         candidate = tmp_path / "gc-candidate"
-        shutil.copytree(root, candidate)
-        (candidate / relative).unlink()
-        capacity._repair_navigation(candidate, {relative})
+        replacements, removed = capacity._prepare_capacity_candidate(
+            root, candidate, {relative}, capacity._markdown_sizes(root),
+        )
         before = {path.relative_to(root).as_posix(): path for path in root.rglob("*.md")}
-        after = {path.relative_to(candidate).as_posix(): path for path in candidate.rglob("*.md")}
         manifest = {
             "root": str(root), "candidate": str(candidate),
             "lock": str(tmp_path / "state/context_update.lock"),
             "baseline": {name: capacity._file_signature(path) for name, path in before.items()},
-            "replace": [name for name, path in after.items() if path.read_bytes() != before[name].read_bytes()],
-            "remove": sorted(before.keys() - after.keys()),
+            "replace": list(replacements),
+            "remove": sorted(removed),
         }
         attempts = []
         original_copytree = pipeline.shutil.copytree

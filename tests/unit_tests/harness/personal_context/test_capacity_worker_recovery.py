@@ -14,6 +14,7 @@ import pytest
 from filelock import FileLock
 
 from openjiuwen.harness.personal_context import context_capacity as capacity
+from openjiuwen.harness.personal_context import context_pipeline as pipeline
 from openjiuwen.harness.personal_context import context_usage as usage
 from tests.unit_tests.harness.personal_context.capacity_worker_helpers import inject_worker, ready_worker, until
 
@@ -43,7 +44,7 @@ async def _recover_and_reclaim(home):
         ledger = usage._load_usage(home)
         assert ledger["pages"]["hot.md"]["last_read_at"] == recorded
         assert ledger["pages"]["old.md"]["present"] is False
-        capacity._validate_description_coverage(root)
+        pipeline._validate_description_coverage(root)
         return worker["process"].pid
     finally:
         await capacity._close_capacity_worker(home)
@@ -56,12 +57,13 @@ async def test_stuck_preparation_is_terminated_and_next_round_actually_reclaims(
     started = tmp_path / "copying"
     with monkeypatch.context() as patcher:
         inject_worker(patcher, tmp_path,
-                      "original = capacity._copy_tree\n"
-                      "def slow(source, target):\n"
-                      "    original(source, target)\n"
+                      "original = capacity._prepare_capacity_candidate\n"
+                      "def slow(*args):\n"
+                      "    prepared = original(*args)\n"
                       f"    Path({str(started)!r}).touch()\n"
                       "    time.sleep(60)\n"
-                      "capacity._copy_tree = slow")
+                      "    return prepared\n"
+                      "capacity._prepare_capacity_candidate = slow")
         worker = await ready_worker(tmp_path)
         stopped = False
         task = asyncio.create_task(capacity.run_capacity_maintenance(
@@ -107,7 +109,7 @@ async def test_consecutive_timeouts_and_worker_crashes_do_not_leave_permanent_bu
                  "def fail(*args):\n    time.sleep(60)",
                  "def fail(*args):\n    os._exit(9)"):
         with monkeypatch.context() as patcher:
-            inject_worker(patcher, tmp_path, body + "\ncapacity._copy_tree = fail")
+            inject_worker(patcher, tmp_path, body + "\ncapacity._prepare_capacity_candidate = fail")
             worker = await ready_worker(tmp_path)
             result = await capacity.run_capacity_maintenance(
                 tmp_path, limit_bytes=6000, timeout=0.15, cancelled=lambda: False,
@@ -286,18 +288,25 @@ async def test_ready_worker_with_coarse_clock_short_reply_budget_can_recover(tmp
                       "def blocked(*args):\n"
                       f"    Path({str(entered)!r}).touch()\n"
                       "    time.sleep(60)\n"
-                      "capacity._copy_tree = blocked")
+                      "capacity._prepare_capacity_candidate = blocked")
         worker = await ready_worker(tmp_path)
         try:
             patcher.setattr(asyncio.get_running_loop(), "_clock_resolution", 0.015625)
-            result = await capacity.run_capacity_maintenance(
-                tmp_path, limit_bytes=6000, timeout=0.04, cancelled=lambda: False,
+            result = await asyncio.wait_for(
+                capacity.run_capacity_maintenance(
+                    tmp_path, limit_bytes=6000, timeout=0.04, cancelled=lambda: False,
+                ), timeout=0.7,
             )
             assert entered.exists()
             assert result["status"] == "failed" and result["reason"] in {"time_budget", "worker_exited"}, result
             process = worker["process"]
+            # Foreground timeout may precede asynchronous terminal cleanup.
+            # Observe cleanup before the test's explicit close can cause it.
+            await until(lambda: process.poll() is not None and tmp_path not in capacity._CAPACITY_WORKERS
+                        and process.stdin.closed and process.stdout.closed, timeout=3)
             assert process.poll() is not None
             assert tmp_path not in capacity._CAPACITY_WORKERS
+            assert process.stdin.closed and process.stdout.closed
         finally:
             await capacity._close_capacity_worker(tmp_path)
     new_pid = await _recover_and_reclaim(tmp_path)
@@ -364,13 +373,14 @@ async def test_real_preparer_keeps_new_publications_and_recent_reads(tmp_path, m
     root = _tree(tmp_path)
     entered, release = tmp_path / "prepared", tmp_path / "release"
     inject_worker(monkeypatch, tmp_path,
-                  "original = capacity._copy_tree\n"
-                  "def pause(source, target):\n"
-                  "    original(source, target)\n"
+                  "original = capacity._prepare_capacity_candidate\n"
+                  "def pause(*args):\n"
+                  "    prepared = original(*args)\n"
                   f"    Path({str(entered)!r}).touch()\n"
                   f"    while not Path({str(release)!r}).exists():\n"
                   "        time.sleep(0.005)\n"
-                  "capacity._copy_tree = pause")
+                  "    return prepared\n"
+                  "capacity._prepare_capacity_candidate = pause")
     await ready_worker(tmp_path)
     task = asyncio.create_task(capacity.run_capacity_maintenance(
         tmp_path, limit_bytes=6000, timeout=2, cancelled=lambda: False,
@@ -407,7 +417,9 @@ async def test_child_watchdog_releases_write_lock_even_while_parent_loop_is_dela
                       "capacity.COMMIT_LOCK_SECONDS = 0.1\n"
                       "from filelock import FileLock\n"
                       "from openjiuwen.harness.personal_context import _capacity_commit as commits\n"
-                      "def stuck(plan, *, seconds):\n"
+                      "def stuck(plan, *, seconds, deadline=None, on_commit=None):\n"
+                      "    if on_commit is not None:\n"
+                      "        on_commit()\n"
                       "    with FileLock(plan['lock'], timeout=0):\n"
                       f"        Path({str(entered)!r}).touch()\n"
                       "        time.sleep(60)\n"
