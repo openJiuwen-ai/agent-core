@@ -563,6 +563,8 @@ class PromptAttachmentManager:
         self,
         context: ModelContext,
         session_id: str,
+        *,
+        trigger_events: bool = True,
     ) -> UserMessage | None:
         """Persist an attachment snapshot or delta into the context history.
 
@@ -570,6 +572,12 @@ class PromptAttachmentManager:
         Later calls append only changed sections and explicit removals.  The
         user message metadata carries the materialized section hashes so the
         state can be recovered after the manager is recreated from a session.
+
+        Args:
+            context: Conversation context receiving the attachment history.
+            session_id: Session whose attachments should be synchronized.
+            trigger_events: Whether to run the ``prompt.attachment`` event
+                before rendering the history message.
         """
 
         async with self._history_lock:
@@ -594,7 +602,8 @@ class PromptAttachmentManager:
                     return None
                 mode = _PROMPT_ATTACHMENT_HISTORY_DELTA
 
-            changed = await self._run_attachment_events(changed, session_id)
+            if trigger_events:
+                changed = await self._run_attachment_events(changed, session_id)
             if not changed and not removed:
                 return None
             rendered = (

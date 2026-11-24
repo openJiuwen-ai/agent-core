@@ -126,7 +126,7 @@ class TeamHarness:
 
         Set ``track_completed_turn_fork`` for members that can serve as a fork source.
         """
-        native = NativeHarness(agent_spec, build_context)
+        native = NativeHarness(agent_spec, build_context, is_team_agent=True)
         return cls(
             agent_spec,
             build_context,
@@ -163,7 +163,7 @@ class TeamHarness:
         if self._native is None or self._native.state is HarnessState.TERMINATED:
             if self._native is not None:
                 await self._native.close_team_memory()
-            self._native = NativeHarness(self._agent_spec, self._build_context)
+            self._native = NativeHarness(self._agent_spec, self._build_context, is_team_agent=True)
             self._remount_dynamic_tools()
         if self._goal is not None:
             self._native.enable_goal(self._goal, ready=self._goal_ready)
@@ -224,7 +224,7 @@ class TeamHarness:
         if self._native is None or self._native.state is HarnessState.TERMINATED:
             if self._native is not None:
                 await self._native.close_team_memory()
-            self._native = NativeHarness(self._agent_spec, self._build_context)
+            self._native = NativeHarness(self._agent_spec, self._build_context, is_team_agent=True)
             self._remount_dynamic_tools()
             # Unlike ``start`` (:meth:`start` re-pushes ``_bg_controller`` onto
             # the rebuilt native), run_once callers (workers, scheduler,

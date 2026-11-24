@@ -190,6 +190,7 @@ class NativeHarness(DeepAgent):
         agent_spec: "DeepAgentSpec",
         build_context: "BuildContext | None" = None,
         extra_rails: "list[AgentRail] | None" = None,
+        is_team_agent: bool = False,
     ) -> None:
         """Initialize a NativeHarness that configures itself from a spec.
 
@@ -206,6 +207,9 @@ class NativeHarness(DeepAgent):
             extra_rails: Additional rails not declared in ``agent_spec.rails``
                 (transitional team-side rails; folded into the spec later).
                 Mounted after the spec rails.
+            is_team_agent: Whether this harness is owned by ``TeamHarness``.
+                Standalone NativeHarness consumers keep the normal prompt event
+                path; team-owned harnesses render their member-local builder.
         """
         from openjiuwen.harness.factory import apply_deep_agent_parts
 
@@ -217,12 +221,7 @@ class NativeHarness(DeepAgent):
 
         self._agent_spec = agent_spec
         self._build_context = build_context
-        if self._react_agent is not None:
-            # The inner ReActAgent emits model-call usage events.  Keep the
-            # team member's build-time identity on that request path without
-            # coupling core usage code to the team package.
-            self._react_agent._usage_build_context = build_context
-            self._react_agent._usage_agent_id = self.card.id
+        self._is_team_agent = is_team_agent
         self._extra_rails: list[AgentRail] = list(extra_rails) if extra_rails else []
         self._session: Session | None = None
         self.track_completed_turn_fork = False
@@ -276,6 +275,26 @@ class NativeHarness(DeepAgent):
         # model/tool/react-iteration hooks bridge onto the inner ReActAgent,
         # AFTER_TASK_ITERATION stays on this outer DeepAgent.
         self.add_rail(self._snapshot_rail)
+
+    def _wire_inner_react_agent(self, react_agent: Any) -> None:
+        """Apply harness-local prompt and usage identity to an inner agent."""
+        react_agent.set_runtime_context(
+            is_team_agent=self._is_team_agent,
+            usage_build_context=self._build_context,
+            usage_agent_id=self.card.id,
+        )
+
+    def _create_react_agent(self) -> Any:
+        """Create an inner agent while preserving the harness mode contract."""
+        react_agent = super()._create_react_agent()
+        self._wire_inner_react_agent(react_agent)
+        return react_agent
+
+    def set_react_agent(self, react_agent: Any, initialized: bool = False) -> "NativeHarness":
+        """Replace the inner agent without dropping harness-owned wiring."""
+        super().set_react_agent(react_agent, initialized)
+        self._wire_inner_react_agent(react_agent)
+        return self
 
     # ------------------------------------------------------------------
     # Read-only accessors
