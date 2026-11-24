@@ -108,17 +108,17 @@ class TeamTaskManager:
     """
 
     def __init__(
-        self,
-        team_name: str,
-        member_name: str,
-        db: TeamDatabase,
-        messager: Messager,
-        *,
-        plans_dir: str | Path | None = None,
-        team_plan_id: str | None = None,
-        leader_member_name: str | None = None,
-        dispatch_mode: str = "autonomous",
-        member_exhausted_gate: Callable[[str], bool] | None = None,
+            self,
+            team_name: str,
+            member_name: str,
+            db: TeamDatabase,
+            messager: Messager,
+            *,
+            plans_dir: str | Path | None = None,
+            team_plan_id: str | None = None,
+            leader_member_name: str | None = None,
+            dispatch_mode: str = "autonomous",
+            member_exhausted_gate: Callable[[str], bool] | None = None,
     ):
         """Initialize task manager.
 
@@ -149,7 +149,7 @@ class TeamTaskManager:
         self._member_exhausted_gate = member_exhausted_gate
 
     def set_member_exhausted_gate(
-        self, gate: Callable[[str], bool] | None,
+            self, gate: Callable[[str], bool] | None,
     ) -> None:
         """Install the round-scoped member-exhaustion gate."""
         self._member_exhausted_gate = gate
@@ -174,10 +174,10 @@ class TeamTaskManager:
             return False
 
     def configure_plan_storage(
-        self,
-        *,
-        plans_dir: str | Path | None = None,
-        team_plan_id: str | None = None,
+            self,
+            *,
+            plans_dir: str | Path | None = None,
+            team_plan_id: str | None = None,
     ) -> None:
         """Configure where member plan files and approvals are persisted."""
         if plans_dir is not None:
@@ -295,11 +295,11 @@ class TeamTaskManager:
         return TaskGraphResult.success(created)
 
     async def add(
-        self,
-        title: str,
-        content: str,
-        task_id: Optional[str] = None,
-        dependencies: Optional[List[str]] = None,
+            self,
+            title: str,
+            content: str,
+            task_id: Optional[str] = None,
+            dependencies: Optional[List[str]] = None,
     ) -> TaskCreateResult:
         """Add a single task to the team.
 
@@ -600,6 +600,48 @@ class TeamTaskManager:
             )
             return TaskOpResult.success()
 
+        # 自派但依赖未解：这不是「被别人认领」的冲突。明确告知 blocked_by
+        # 与等待路径——误导性冲突会让成员以为已认领而继续开工，产出后
+        # complete 又撞 pending/blocked -> completed 非法迁移。
+        if (
+                task.assignee == member_name
+                and task.status == TaskStatus.BLOCKED.value
+        ):
+            deps = await self.get_dependencies(task_id)
+            blocked_by = [d.depends_on_task_id for d in deps if not d.resolved]
+            team_logger.info(
+                "[{}] claim refused: task={} status=blocked blocked_by={}",
+                member_name,
+                task_id,
+                blocked_by,
+            )
+            return TaskOpResult.fail(
+                f"Task {task_id} is blocked by "
+                f"{', '.join(blocked_by) or 'unresolved dependencies'}; "
+                "wait for TASK_UNBLOCKED, then claim again"
+            )
+
+        # 自派但任务已不在可认领区间（终态 / 在审 / 待计划批复）：同样是
+        # 误导性冲突话术——真实处境是该任务已不需要（或暂时不能）再 claim。
+        if task.assignee == member_name:
+            if task.status in (
+                    TaskStatus.COMPLETED.value,
+                    TaskStatus.CANCELLED.value,
+            ):
+                return TaskOpResult.fail(
+                    f"Task {task_id} is already {task.status}; nothing to claim"
+                )
+            if task.status == TaskStatus.IN_REVIEW.value:
+                return TaskOpResult.fail(
+                    f"Task {task_id} is already submitted for review; "
+                    "wait for the reviewer's verdict"
+                )
+            if task.status == TaskStatus.PLANNING.value:
+                return TaskOpResult.fail(
+                    f"Task {task_id} is waiting at the plan gate; "
+                    "wait for plan approval before claiming"
+                )
+
         # Claim conflict must be reported before the state-transition check —
         # otherwise a task held by someone else surfaces as the misleading
         # "invalid in_progress → in_progress transition" error.
@@ -610,9 +652,9 @@ class TeamTaskManager:
 
         # Validate state transition (blocks e.g. COMPLETED/CANCELLED/BLOCKED claims).
         if not is_valid_transition(
-            TaskStatus(task.status),
-            TaskStatus.IN_PROGRESS,
-            TASK_TRANSITIONS,
+                TaskStatus(task.status),
+                TaskStatus.IN_PROGRESS,
+                TASK_TRANSITIONS,
         ):
             return TaskOpResult.fail(
                 f"Task {task_id} cannot be claimed from status '{task.status}' (only pending tasks are claimable)"
@@ -1105,11 +1147,11 @@ class TeamTaskManager:
         return self._read_plan_index(plan_id)
 
     async def submit_plan(
-        self,
-        task_id: str,
-        plan_path: str,
-        plan_id: str | None = None,
-        tool_call_id: str = "",
+            self,
+            task_id: str,
+            plan_path: str,
+            plan_id: str | None = None,
+            tool_call_id: str = "",
     ) -> dict[str, Any]:
         """Snapshot a member execution plan file and reserve the task as PLANNING."""
         member_name = self.member_name
@@ -1133,9 +1175,9 @@ class TeamTaskManager:
         # owner submits a plan against an already-started task without
         # re-claiming) are the states a member plan can be recorded from.
         if task.status not in (
-            TaskStatus.PENDING.value,
-            TaskStatus.PLANNING.value,
-            TaskStatus.IN_PROGRESS.value,
+                TaskStatus.PENDING.value,
+                TaskStatus.PLANNING.value,
+                TaskStatus.IN_PROGRESS.value,
         ):
             return {
                 "success": False,
@@ -1262,8 +1304,8 @@ class TeamTaskManager:
         return task
 
     async def cancel_all_tasks(
-        self,
-        skip_assignees: Optional[set[str]] = None,
+            self,
+            skip_assignees: Optional[set[str]] = None,
     ) -> List[TeamTaskBase]:
         """Cancel every active task in the team in a single transaction.
 
@@ -1417,10 +1459,10 @@ class TeamTaskManager:
         return await self.db.task.get_tasks_by_assignee(self.team_name, member_name, status)
 
     async def update_task(
-        self,
-        task_id: str,
-        title: Optional[str] = None,
-        content: Optional[str] = None,
+            self,
+            task_id: str,
+            title: Optional[str] = None,
+            content: Optional[str] = None,
     ) -> TaskOpResult:
         """Update task title / content.
 
@@ -1684,11 +1726,11 @@ class TeamTaskManager:
         return TaskOpResult.success()
 
     async def approve_plan(
-        self,
-        plan_id: str,
-        approved: bool = True,
-        feedback: str = "",
-        leader_name: str | None = None,
+            self,
+            plan_id: str,
+            approved: bool = True,
+            feedback: str = "",
+            leader_name: str | None = None,
     ) -> TaskOpResult:
         """Approve or reject a member plan submission for PLAN_MODE members.
 

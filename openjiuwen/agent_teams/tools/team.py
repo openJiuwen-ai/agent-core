@@ -608,9 +608,13 @@ class TeamBackend:
         specific member, so only that member needs to exist — starting
         the whole roster would spawn teammates the leader never
         addressed. An assigned-but-never-started member is otherwise a
-        structural dead end: the assignment event has no subscriber, the
-        member-side stale self-check requires a running kernel, and the
-        leader-side stale-pending sweep only scans unassigned tasks.
+        structural dead end: the assignment event has no subscriber and
+        the member-side stale self-check requires a running kernel. The
+        leader-side stale-pending sweep does cover it as its
+        "assigned-but-never-started" slice, but only as a delayed,
+        leader-driven prompt (``send_message`` retry or ``update_task``) —
+        starting the member here is what turns that reminder into action
+        at assignment time.
 
         Same guards as ``autostart_unstarted`` (leader-only,
         callback-gated); the UNSTARTED→STARTING CAS in ``startup_member``
