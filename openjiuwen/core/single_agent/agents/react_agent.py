@@ -1605,6 +1605,13 @@ class ReActAgent(BaseAgent):
         # Core never depends on upstream products — unknown/malformed payloads
         # are ignored so swarm-less / old-rail deployments keep working.
         extra_kwargs = self._apply_llm_call_kwargs(ctx, extra_kwargs)
+        # A rail may force a tool call without knowing the final tool window
+        # (filtered tools / no tools at all). Drop the override here instead of
+        # letting the provider reject the whole request.
+        extra_kwargs = self._prune_unusable_tool_choice(
+            extra_kwargs,
+            getattr(ctx.inputs, "tools", None),
+        )
 
         _max_tokens_override = ctx.extra.get("_max_tokens_override")
         if _max_tokens_override is not None:
@@ -2077,11 +2084,19 @@ class ReActAgent(BaseAgent):
     # Key consumed once per model call. Rails may write this before invoke/stream;
     # unknown producers are fine — merge is best-effort and never raises.
     _LLM_CALL_KWARGS_KEY = "llm_call_kwargs"
-    # Security: only thinking-related request overrides are accepted from rails.
-    _ALLOWED_LLM_CALL_KWARG_KEYS = frozenset({"extra_body", "reasoning_effort"})
+    # Security: only thinking- and tool-selection request overrides are accepted
+    # from rails. ``tool_choice`` lets a rail force one retrieval call for
+    # time-sensitive factual questions; it is validated and pruned against the
+    # final tool list before the request is sent.
+    _ALLOWED_LLM_CALL_KWARG_KEYS = frozenset(
+        {"extra_body", "reasoning_effort", "tool_choice"}
+    )
     _ALLOWED_EXTRA_BODY_KEYS = frozenset(
         {"thinking", "enable_thinking", "reasoning_effort"}
     )
+    # OpenAI-compatible ``tool_choice`` modes. A forced call must additionally
+    # name a tool advertised in the same request.
+    _TOOL_CHOICE_MODES = frozenset({"auto", "none", "required"})
 
     @staticmethod
     def _deep_merge_dicts(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
@@ -2102,7 +2117,7 @@ class ReActAgent(BaseAgent):
     ) -> Tuple[Dict[str, Any], List[str]]:
         """Whitelist top-level and ``extra_body`` subkeys; drop the rest.
 
-        Allowed top-level: ``extra_body``, ``reasoning_effort``.
+        Allowed top-level: ``extra_body``, ``reasoning_effort``, ``tool_choice``.
         Allowed ``extra_body`` keys: ``thinking``, ``enable_thinking``,
         ``reasoning_effort``.
         """
@@ -2125,8 +2140,80 @@ class ReActAgent(BaseAgent):
                 if body:
                     filtered[key] = body
                 continue
+            if key == "tool_choice":
+                if cls._is_valid_tool_choice(value):
+                    filtered[key] = value
+                else:
+                    dropped.append("tool_choice")
+                continue
             filtered[key] = value
         return filtered, dropped
+
+    @classmethod
+    def _is_valid_tool_choice(cls, value: Any) -> bool:
+        """Accept only the shapes OpenAI-compatible providers understand.
+
+        ``{"type": "function", "function": {"name": ...}}`` is the forced-call
+        form rails use. Free-form payloads are rejected here rather than being
+        forwarded into a provider 400 at request time.
+        """
+        if isinstance(value, str):
+            return value in cls._TOOL_CHOICE_MODES
+        if isinstance(value, dict):
+            function = value.get("function")
+            return (
+                value.get("type") == "function"
+                and isinstance(function, dict)
+                and isinstance(function.get("name"), str)
+                and bool(function["name"].strip())
+            )
+        return False
+
+    @staticmethod
+    def _tool_names(tools: Any) -> set[str]:
+        """Return the tool names advertised in one request.
+
+        Tolerant of both shapes the core can hand over: ``ToolInfo`` objects
+        (``.name``) and already-converted OpenAI dicts.
+        """
+        names: set[str] = set()
+        for item in tools or []:
+            if isinstance(item, dict):
+                function = item.get("function")
+                if isinstance(function, dict) and isinstance(function.get("name"), str):
+                    names.add(function["name"])
+                elif isinstance(item.get("name"), str):
+                    names.add(item["name"])
+            else:
+                name = getattr(item, "name", None)
+                if isinstance(name, str):
+                    names.add(name)
+        return names
+
+    @classmethod
+    def _prune_unusable_tool_choice(
+            cls,
+            extra_kwargs: Dict[str, Any],
+            tools: Any,
+    ) -> Dict[str, Any]:
+        """Drop a ``tool_choice`` the request cannot honor.
+
+        Providers reject ``tool_choice`` without a non-empty ``tools`` array, and
+        a forced function must be advertised in that same request. Rails set the
+        value per call, but only the call site knows the final tool list.
+        """
+        choice = extra_kwargs.get("tool_choice")
+        if choice is None:
+            return extra_kwargs
+        if not tools:
+            extra_kwargs.pop("tool_choice", None)
+            return extra_kwargs
+        if isinstance(choice, dict):
+            function = choice.get("function") or {}
+            name = function.get("name") if isinstance(function, dict) else None
+            if not isinstance(name, str) or name not in cls._tool_names(tools):
+                extra_kwargs.pop("tool_choice", None)
+        return extra_kwargs
 
     def _apply_llm_call_kwargs(
             self,
