@@ -91,6 +91,8 @@ def build_request_body(
     expanded = expand_nested_extra_body(extra_body)
     if expanded:
         body.update(expanded)
+    if "tool_choice" in body:
+        body["tool_choice"] = _responses_tool_choice(body["tool_choice"])
     _move_response_format_to_text(body)
     return clean_unicode(body)
 
@@ -623,6 +625,19 @@ def _response_input_tool_call(tool_call: Any, *, fallback_index: int) -> dict[st
     raise OpenAIAccountResponsesError(f"Unsupported tool call type: {type(tool_call).__name__}")
 
 
+def _responses_tool_choice(tool_choice: Any) -> Any:
+    """Flatten a Chat-style named ``tool_choice`` into the Responses shape.
+
+    Chat Completions names the tool as ``{"type": "function", "function": {"name": ...}}``;
+    Responses expects ``{"type": "function", "name": ...}``. Other values are sent unchanged.
+    """
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "function" and "name" not in tool_choice:
+        name = _dict_or_empty(tool_choice.get("function")).get("name")
+        if name:
+            return {"type": "function", "name": str(name)}
+    return tool_choice
+
+
 def _tool_definition(tool: Union[ToolInfo, dict]) -> dict[str, Any]:
     if isinstance(tool, ToolInfo):
         return {
@@ -635,21 +650,34 @@ def _tool_definition(tool: Union[ToolInfo, dict]) -> dict[str, Any]:
     if isinstance(tool, dict):
         function = _dict_or_empty(tool.get("function"))
         if function:
-            return {
-                "type": "function",
-                "name": str(function.get("name") or ""),
-                "description": str(function.get("description") or ""),
-                "parameters": _schema_dict(function.get("parameters") or {}),
-            }
+            return _with_strict(
+                {
+                    "type": "function",
+                    "name": str(function.get("name") or ""),
+                    "description": str(function.get("description") or ""),
+                    "parameters": _schema_dict(function.get("parameters") or {}),
+                },
+                function.get("strict"),
+            )
         if tool.get("type") == "function" and tool.get("name"):
-            return {
-                "type": "function",
-                "name": str(tool.get("name") or ""),
-                "description": str(tool.get("description") or ""),
-                "parameters": _schema_dict(tool.get("parameters") or {}),
-            }
+            return _with_strict(
+                {
+                    "type": "function",
+                    "name": str(tool.get("name") or ""),
+                    "description": str(tool.get("description") or ""),
+                    "parameters": _schema_dict(tool.get("parameters") or {}),
+                },
+                tool.get("strict"),
+            )
 
     raise OpenAIAccountResponsesError(f"Unsupported tool schema: {tool!r}")
+
+
+def _with_strict(definition: dict[str, Any], strict: Any) -> dict[str, Any]:
+    """Keep a caller-set ``strict``: Responses treats a missing one differently from ``false``."""
+    if strict is not None:
+        definition["strict"] = strict
+    return definition
 
 
 def _schema_dict(schema: Any) -> dict[str, Any]:
