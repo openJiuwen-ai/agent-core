@@ -56,6 +56,7 @@ TEAM_DYNAMIC_TABLE_PREFIXES = (
     "team_message_",
     "message_read_status_",
     "team_review_vote_",
+    "group_notification_",
 )
 TEAM_STATIC_TABLES_TO_CLEAR = (
     "team_session_settings",
@@ -403,6 +404,26 @@ class MessageReadStatusBase(SQLModel):
     read_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True, index=True)
 
 
+class GroupNotificationBase(SQLModel):
+    """Base class for the group notification table (one per session).
+
+    A notification asks one member to respond to an already persisted public
+    group message without changing that message's mentions. Each row carries
+    its own consumption state because a notification may target a message
+    older than the member's broadcast watermark.
+    """
+
+    __abstract__ = True
+
+    notification_id: str = Field(primary_key=True)
+    team_name: str = Field(foreign_key="team_info.team_name", ondelete="CASCADE")
+    member_name: str
+    message_id: str
+    created_at: int = Field(sa_type=BigInteger)
+    # None while pending; set once the member has consumed the message.
+    consumed_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True)
+
+
 # ============== Session ID Sanitization ==============
 
 
@@ -426,6 +447,7 @@ _task_dependency_models: Dict[str, type[TeamTaskDependencyBase]] = {}
 _message_models: Dict[str, type[TeamMessageBase]] = {}
 _message_read_status_models: Dict[str, type[MessageReadStatusBase]] = {}
 _review_vote_models: Dict[str, type[TeamTaskReviewVoteBase]] = {}
+_group_notification_models: Dict[str, type[GroupNotificationBase]] = {}
 
 
 def _get_task_model() -> type[TeamTaskBase]:
@@ -567,6 +589,34 @@ def _get_review_vote_model() -> type[TeamTaskReviewVoteBase]:
     return _review_vote_models[session_id]
 
 
+def _get_group_notification_model() -> type[GroupNotificationBase]:
+    """Get or create the dynamic group notification model for the current session.
+
+    The table name avoids the ``team_task_`` and ``team_message_`` prefixes so
+    the migration sweeps in ``database/engine.py`` never misclassify it.
+    """
+    session_id = get_session_id()
+    if session_id not in _group_notification_models:
+        suffix = _sanitize_session_id_for_table(session_id)
+        class_name = f"GroupNotification_{suffix}"
+        table_name = f"group_notification_{suffix}"
+
+        # Every read is "notifications of one member in one team", optionally
+        # narrowed to a message, so one composite index serves them all.
+        attrs = {
+            "__tablename__": table_name,
+            "__table_args__": (
+                Index(f"ix_{table_name}_target", "team_name", "member_name", "message_id"),
+            ),
+        }
+
+        model_cls = SQLModelMetaclass(class_name, (GroupNotificationBase,), attrs, table=True)
+
+        _group_notification_models[session_id] = cast(type[GroupNotificationBase], model_cls)
+
+    return _group_notification_models[session_id]
+
+
 def static_tables() -> list[Table]:
     """Return the static (team-scoped) tables registered on ``SQLModel.metadata``.
 
@@ -593,3 +643,4 @@ def _clear_session_model_cache(session_id: str) -> None:
     _message_models.pop(session_id, None)
     _message_read_status_models.pop(session_id, None)
     _review_vote_models.pop(session_id, None)
+    _group_notification_models.pop(session_id, None)

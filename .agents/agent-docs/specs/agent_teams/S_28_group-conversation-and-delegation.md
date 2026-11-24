@@ -164,3 +164,18 @@ register_host_managed_inbound(member_name, callback) 独立注册或撤销通知
 群消息允许该角色发言或被提及。向该角色直发、批量直发或分配团队任务时返回明确失败，成员也不能自行认领任务。该角色不进入普通智能体的启动目标，也不计入私信、普通广播或群聊广播的 core 未读接收者。
 新团队在写库前校验预置宿主管理成员的身份，注册失败时清理本次创建的团队和名册行，允许修正配置或恢复数据库后再次建团。
 此角色不继承人类成员身份或任务控制语义，也不替代宿主的请求授权、排队、审批和投递。
+
+## 成员通知
+
+关联设计：`D-20261121-0832-group-member-notification`。宿主可在公开群消息写入之后请成员响应该消息，而不修改消息的 mentions。
+`TeamBackend.notify_group_member(member_name, message_id, *, notification_id)` 仅在群聊运行时可用，返回 `GroupNotificationResult(created, duplicate)`。
+成员必须存在、未离开、角色不是 passive_human / host_managed，且不是该消息的发送者；消息必须是本团队已持久化的群聊广播。任一条件不满足抛 ValueError，不产生记录。
+notification_id 由宿主提供并作为幂等键；重复提交返回 duplicate，不产生第二条记录，但会再次发布该消息的 BROADCAST 事件，供事件丢失后重试。成功只表示通知已持久化，不表示成员已读或已回复。
+
+通知保存在每会话动态表 `group_notification_<session>`，每条带独立的 consumed_at。该表与其他会话动态表一同创建和清理。
+“群消息是否寻址到成员”的条件为：成员在 mentions 中且消息高于其 read_at，或存在对（成员, 消息）的待消费通知。待消费通知不受 read_at 影响。
+`get_unread_group_members`、`get_broadcast_messages` 与未读接收者统计都按此条件；事件回调、轮询、退出前 drain、外部收件箱和团队完成判定因此得到相同行为。
+成员成功接收该消息并标记已读时，同一事务把对应通知标为已消费；read_at 仍只在消息时间更大时前进，不会后退。
+被通知的消息早于成员 read_at 时，摘录窗口只含触发消息本身，成员按需读取 history.jsonl。
+
+core 不提供撤回入口，暂停或停止时也不清除待消费通知；成员下次运行时仍会处理。通知不设过期，不承诺恰好一次投递，边界与群聊消息相同。

@@ -610,6 +610,63 @@ class TeamBackend:
             attachments=attachments,
         )
 
+    async def notify_group_member(self, member_name: str, message_id: str, *, notification_id: str):
+        """Ask a member to respond to a persisted public group message.
+
+        The message and its mentions are left untouched. The notification is
+        stored with its own consumption state, then the message's broadcast
+        event is published again so the leader starts the member and the
+        member reads the message as group input.
+
+        Args:
+            member_name: An agent member of this group; humans and
+                host-managed identities cannot be notified.
+            message_id: A persisted public group message not sent by the member.
+            notification_id: Stable host-provided identity; repeats are no-ops.
+
+        Returns:
+            GroupNotificationResult. Stored does not mean read or answered.
+
+        Raises:
+            ValueError: The runtime is not a group chat, or the member, the
+                message or the identity is not acceptable.
+        """
+        from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+        from openjiuwen.agent_teams.group_chat.handler import group_metadata
+        from openjiuwen.agent_teams.schema.conversation import GroupNotificationResult
+        from openjiuwen.agent_teams.schema.status import MEMBER_DEPARTED_STATUSES
+
+        if self.conversation_mode != "group_chat":
+            raise ValueError("Group notifications require a group chat runtime")
+        for label, value in (("member_name", member_name), ("message_id", message_id),
+                             ("notification_id", notification_id)):
+            if not isinstance(value, str) or not value.strip() or len(value) > 255:
+                raise ValueError(f"{label} must be a nonempty string of at most 255 characters")
+        conversation = await self.group_conversation()
+        token = set_session_id(conversation.session_id)
+        try:
+            await self.db.initialize()
+            member = await self.db.member.get_member(member_name, self.team_name)
+            if member is None or member.status in MEMBER_DEPARTED_STATUSES:
+                raise ValueError(f"Unknown or departed group member: {member_name}")
+            if member.role in ("passive_human", TeamRole.HOST_MANAGED.value):
+                raise ValueError(f"Member cannot be notified: {member_name}")
+            message = await self.db.message.get_message(message_id)
+            if message is None or not message.broadcast:
+                raise ValueError("Not a public group message")
+            if message.team_name != self.team_name or not group_metadata(message):
+                raise ValueError("Not a public group message")
+            if message.from_member_name == member_name:
+                raise ValueError("A member cannot be notified of its own message")
+            created = await self.db.message.create_group_notification(
+                notification_id, self.team_name, member_name, message_id,
+            )
+            # A repeat publishes again so a lost event can be retried; consumed rows stay consumed.
+            await self.message_manager.publish_broadcast(message_id, message.from_member_name)
+            return GroupNotificationResult(created=created, duplicate=not created)
+        finally:
+            reset_session_id(token)
+
     def set_snapshot_length(self, fn) -> None:
         """Register the callback that returns this member's message count."""
         self._snapshot_length = fn
