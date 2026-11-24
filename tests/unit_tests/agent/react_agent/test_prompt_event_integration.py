@@ -175,8 +175,8 @@ async def test_team_members_keep_their_prompt_builders_without_prompt_compose(tm
                 priority=10,
             )
         )
-        leader._react_agent._is_team_agent = True
-        teammate._react_agent._is_team_agent = True
+        leader._react_agent.set_runtime_context(is_team_agent=True)
+        teammate._react_agent.set_runtime_context(is_team_agent=True)
 
         shared_conversation_id = f"team_prompt_shared_{uuid.uuid4().hex[:8]}"
         leader_system = await run_agent_once(leader, shared_conversation_id)

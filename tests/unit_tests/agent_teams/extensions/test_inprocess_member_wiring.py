@@ -88,7 +88,7 @@ async def test_native_harness_marks_inner_react_agent_as_team_mode(tmp_path) -> 
         spec = _seeded_spec(bus)
         agent = spec.build()
 
-        assert getattr(agent.harness._native._react_agent, "_is_team_agent", False) is True
+        assert agent.harness._native._react_agent.is_team_agent is True
     finally:
         reset_openjiuwen_home()
 
@@ -99,7 +99,7 @@ def test_standalone_native_harness_keeps_inner_react_agent_out_of_team_mode() ->
 
     native = NativeHarness(make_spec())
 
-    assert getattr(native._react_agent, "_is_team_agent", False) is False
+    assert native._react_agent.is_team_agent is False
 
 
 @pytest.mark.asyncio
@@ -115,7 +115,7 @@ async def test_team_mode_survives_inner_react_agent_replacement(tmp_path) -> Non
 
         native.set_react_agent(native._create_react_agent())
 
-        assert getattr(native._react_agent, "_is_team_agent", False) is True
+        assert native._react_agent.is_team_agent is True
     finally:
         reset_openjiuwen_home()
 

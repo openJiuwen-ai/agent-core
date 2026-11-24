@@ -270,7 +270,7 @@ async def test_react_agent_attachment_sync_uses_legacy_path_for_team_mode(
         source="test",
     )
     agent = ReActAgent(AgentCard(id="agent-1", name="agent-1"))
-    agent._is_team_agent = team_mode
+    agent.set_runtime_context(is_team_agent=team_mode)
     agent.prompt_attachment_manager = manager
     context = _context()
     callback_context = AgentCallbackContext(

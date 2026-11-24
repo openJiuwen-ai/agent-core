@@ -278,9 +278,11 @@ class NativeHarness(DeepAgent):
 
     def _wire_inner_react_agent(self, react_agent: Any) -> None:
         """Apply harness-local prompt and usage identity to an inner agent."""
-        react_agent._is_team_agent = self._is_team_agent
-        react_agent._usage_build_context = self._build_context
-        react_agent._usage_agent_id = self.card.id
+        react_agent.set_runtime_context(
+            is_team_agent=self._is_team_agent,
+            usage_build_context=self._build_context,
+            usage_agent_id=self.card.id,
+        )
 
     def _create_react_agent(self) -> Any:
         """Create an inner agent while preserving the harness mode contract."""
