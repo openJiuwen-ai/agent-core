@@ -49,6 +49,7 @@ generated: true
 | [harness/tools/subagent](#module-harness-tools-subagent) |
 | [harness_providers](#module-harness_providers) |
 | [symphony/shared/fingerprint](#module-symphony-shared-fingerprint) |
+| [tests/unit_tests/agent/react_agent](#module-tests-unit_tests-agent-react_agent) |
 | [未分类](#module-unclassified) |
 
 <a id="module-agent_evolving"></a>
@@ -672,6 +673,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261109_1721_symphony-hidden-skill-scan](bugfix/openjiuwen/symphony/B_20261109_1721_symphony-hidden-skill-scan.md) | B | Symphony 忽略技能归档和隐藏资产 | lin-xiaoyu | 无独立 D：技能文件夹扫描的局部修复。 |
+
+<a id="module-tests-unit_tests-agent-react_agent"></a>
+
+## tests/unit_tests/agent/react_agent
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261118_1219_turn-step-runtime-cleanup](bugfix/core_runtime/B_20261118_1219_turn-step-runtime-cleanup.md) | B | turn.step 测试会话绑定泄漏导致 PR 门禁偶发失败 | liaojunzhuo-sefonsoft | 无独立 D：修复既有测试的资源清理与隔离，不改变生产代码或公开契约，无需独立设计。 |
 
 <a id="module-unclassified"></a>
 
