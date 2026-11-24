@@ -876,6 +876,16 @@ class TeamAgent(BaseAgent):
             ctx,
             member_runtime=member_runtime,
         )
+        if self.task_manager is not None:
+            from openjiuwen.agent_teams.memory.jiuwen import record_jiuwen_task_delivery, submit_jiuwen_task_acceptance
+
+            async def on_task_accepted(event) -> None:
+                await submit_jiuwen_task_acceptance(self.harness, event)
+
+            def on_task_delivered(task_id: str, version: str) -> None:
+                record_jiuwen_task_delivery(self.harness, task_id, version)
+
+            self.task_manager.set_task_acceptance_listener(on_task_accepted, on_delivery=on_task_delivered)
         if ctx.role == TeamRole.LEADER and ctx.cli_agent:
             # The leader's third-party harness was built by the configurator;
             # its team tools and context tracker need this agent's backend.

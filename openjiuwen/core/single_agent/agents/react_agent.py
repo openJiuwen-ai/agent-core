@@ -612,6 +612,9 @@ class ReActAgent(BaseAgent):
         self._llm = None
         self.prompt_builder: SystemPromptBuilder = SystemPromptBuilder()
         self.system_prompt_builder: SystemPromptBuilder = self.prompt_builder
+        self._is_team_agent = False
+        self._usage_build_context: Any = None
+        self._usage_agent_id: str | None = None
         super().__init__(card)
         self._hitl_handler = ToolInterruptHandler(self)
         self._ability_manager.set_context_engine(self.context_engine)
@@ -639,6 +642,27 @@ class ReActAgent(BaseAgent):
         exception recovery follow it; cancellation still propagates.
         """
         self._final_request_check = check
+
+    @property
+    def is_team_agent(self) -> bool:
+        """Whether this agent is running as a member of an agent team."""
+        return self._is_team_agent
+
+    def set_runtime_context(
+        self,
+        *,
+        is_team_agent: bool,
+        usage_build_context: Any = None,
+        usage_agent_id: str | None = None,
+    ) -> None:
+        """Set host-owned runtime metadata for nested harness execution.
+
+        Harnesses use this public boundary to configure prompt composition mode
+        and usage attribution without reaching into private agent state.
+        """
+        self._is_team_agent = is_team_agent
+        self._usage_build_context = usage_build_context
+        self._usage_agent_id = usage_agent_id
 
     async def _final_request_finish(self, ctx: AgentCallbackContext) -> Optional[Dict[str, Any]]:
         """The installed check's result for this final request; None when none is installed or it allows the call."""
@@ -1291,7 +1315,10 @@ class ReActAgent(BaseAgent):
             return
         session_id = ctx.session.get_session_id() if ctx.session is not None else context.session_id()
         try:
-            await sync_to_context(context, session_id)
+            if self._is_team_agent:
+                await sync_to_context(context, session_id, trigger_events=False)
+            else:
+                await sync_to_context(context, session_id)
         except Exception as exc:  # noqa: BLE001 - attachment updates must not block the model
             logger.warning(
                 "[ReActAgent] prompt attachment history sync failed: %s",
@@ -1380,7 +1407,16 @@ class ReActAgent(BaseAgent):
         return context_window, usage_prompt_sections
 
     async def _compose_prompt_sections(self, ctx: AgentCallbackContext) -> PromptComposeOutput | None:
-        """Trigger prompt composition at the final post-rail render boundary."""
+        """Trigger prompt composition at the final post-rail render boundary.
+
+        Team members already have their own builder populated by
+        ``TeamPolicyRail``. They share a session id, so the CORE
+        ``prompt.compose`` handler cannot use that id to identify the current
+        member without risking another member's builder being rendered here.
+        """
+        if self._is_team_agent:
+            return None
+
         from openjiuwen.core.events import Event
         from openjiuwen.core.runner import Runner
 

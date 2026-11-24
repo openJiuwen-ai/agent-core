@@ -2,155 +2,138 @@
 """Team extraction ownership, failure independence, filtering and drain."""
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
 from openjiuwen.harness.rails import JiuwenTeamMemoryRail
-from openjiuwen.harness.rails.memory import jiuwen_team_memory_rail as module
 from tests.unit_tests.harness.rails.test_jiuwen_memory_coding_rail import context
 from tests.unit_tests.harness.rails.test_jiuwen_memory_rail import MockAgent, MockMemoryProvider
 
 
 @pytest.mark.asyncio
-async def test_member_turn_and_round_use_responder_model_and_filter(monkeypatch):
+async def test_team_turn_submits_verified_human_source_once():
     provider = MockMemoryProvider()
-    provider.add_team_memories = AsyncMock(return_value=1)
-    extract = AsyncMock(return_value=[{"label": "decision", "content": "confirmed"},
-                                     {"label": "context", "content": "secret"}])
-    monkeypatch.setattr(module, "extract_team_conclusions", extract)
-    rail = JiuwenTeamMemoryRail(provider, content_allowed=lambda text: "secret" not in text)
-    agent = MockAgent()
-    model = object()
-    agent._react_agent = SimpleNamespace(_llm=model)
-    rail.init(agent)
-    try:
-        await rail.before_invoke(context(agent))
-        await rail.after_invoke(context(agent))
-        await rail.drain()
-        assert provider.sync_calls == [("query", "answer")]
-        assert extract.await_args.args[0] is model
-        provider.add_team_memories.assert_awaited_once_with([{"label": "decision", "content": "confirmed"}])
-        await rail.conclude_round("finished round", model=model)
-        assert extract.await_count == 2
-        await rail.before_invoke(context(agent, "secret"))
-        await rail.after_invoke(context(agent, "secret"))
-        await rail.drain()
-        assert extract.await_count == 2
-        assert len(provider.sync_calls) == 1
-    finally:
-        await rail.aclose()
-
-
-@pytest.mark.asyncio
-async def test_missing_model_or_failed_team_extraction_keeps_ordinary_sync(monkeypatch):
-    provider = MockMemoryProvider()
-    provider.add_team_memories = AsyncMock()
-    extract = AsyncMock(side_effect=RuntimeError("offline"))
-    monkeypatch.setattr(module, "extract_team_conclusions", extract)
+    provider.sync_turn = AsyncMock()
     rail = JiuwenTeamMemoryRail(provider)
     agent = MockAgent()
     rail.init(agent)
     try:
-        await rail.before_invoke(context(agent))
-        await rail.after_invoke(context(agent))
+        internal = context(agent, "agent assignment")
+        await rail.before_invoke(internal)
+        await rail.after_invoke(internal)
+        human = context(agent, "wrapped")
+        human.extra["run_context"] = SimpleNamespace(extra={
+            "raw_query": "Use the confirmed brief", "raw_query_origin": "human",
+        })
+        await rail.before_invoke(human)
+        await rail.after_invoke(human)
         await rail.drain()
-        extract.assert_not_awaited()
-        agent._react_agent = SimpleNamespace(_llm=object())
-        await rail.before_invoke(context(agent))
-        await rail.after_invoke(context(agent))
-        await rail.drain()
-        assert len(provider.sync_calls) == 2
-        provider.add_team_memories.assert_not_awaited()
+        provider.sync_turn.assert_awaited_once()
+        sources = provider.sync_turn.await_args.kwargs["sources"]
+        assert [(item["role"], item["text"]) for item in sources] == [
+            ("user", "Use the confirmed brief"), ("assistant", "answer"),
+        ]
     finally:
         await rail.aclose()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("has_noncallable_method", [False, True])
-async def test_missing_team_writer_skips_extraction_and_preserves_sync(monkeypatch, has_noncallable_method):
+async def test_team_write_deduplicates_the_same_acceptance_version():
     provider = MockMemoryProvider()
-    if has_noncallable_method:
-        provider.add_team_memories = None
-    extract = AsyncMock(return_value=[])
-    warning = MagicMock()
-    monkeypatch.setattr(module, "extract_team_conclusions", extract)
-    monkeypatch.setattr(module.logger, "warning", warning)
-    agent = MockAgent()
-    model = object()
-    monkeypatch.setattr(agent, "_react_agent", SimpleNamespace(_llm=model), raising=False)
+    provider.sync_turn = AsyncMock()
     rail = JiuwenTeamMemoryRail(provider)
+    agent = MockAgent()
     rail.init(agent)
     try:
-        for _ in range(2):
-            await rail.before_invoke(context(agent))
-            await rail.after_invoke(context(agent))
-            await rail.drain()
-        await rail.conclude_round("finished round", model=model)
-        assert provider.sync_calls == [("query", "answer"), ("query", "answer")]
-        extract.assert_not_awaited()
-        warning.assert_called_once()
-        assert "add_team_memories" in warning.call_args.args[0]
+        event = SimpleNamespace(task_id="task-1", acceptance_version="first", content="assignment",
+                                summary="", note="")
+        delivery = context(agent, "execute task-1")
+        await rail.before_invoke(delivery)
+        rail.record_task_delivery(event.task_id, event.acceptance_version)
+        await rail.on_task_accepted(event)
+        await rail.on_task_accepted(event)
+        await rail.drain()
+        provider.sync_turn.assert_not_awaited()
+        await rail.after_invoke(delivery)
+        await rail.drain()
+        provider.sync_turn.assert_awaited_once()
+        sources = provider.sync_turn.await_args.kwargs["sources"]
+        assert [(item["role"], item["text"]) for item in sources] == [
+            ("agent", "assignment"), ("assistant", "answer"),
+        ]
+        event.acceptance_version = "second"
+        event.summary = "validated fix"
+        await rail.on_task_accepted(event)
+        await rail.drain()
+        assert provider.sync_turn.await_count == 2
     finally:
         await rail.aclose()
 
 
 @pytest.mark.asyncio
-async def test_cancelled_round_is_drained_before_provider_close(monkeypatch):
+@pytest.mark.parametrize("early_exit", ["detached", "source_error"])
+async def test_interrupted_finish_releases_delivery_for_later_acceptance(early_exit):
+    def check_content(text):
+        if text == "human request":
+            raise RuntimeError("source rejected before submission")
+        return True
+
+    provider = MockMemoryProvider()
+    provider.sync_turn = AsyncMock()
+    rail = JiuwenTeamMemoryRail(provider, content_allowed=check_content)
+    first, second = MockAgent(), MockAgent()
+    rail.init(first)
+    rail.init(second)
+    try:
+        delivery = context(first)
+        delivery.extra["run_context"] = SimpleNamespace(extra={
+            "raw_query": "human request", "raw_query_origin": "human",
+        })
+        event = SimpleNamespace(task_id="task", acceptance_version="1", content="",
+                                summary="validated outcome", note="")
+        await rail.before_invoke(delivery)
+        rail.record_task_delivery(event.task_id, event.acceptance_version)
+        if early_exit == "detached":
+            rail.uninit(first)
+            await rail.after_invoke(delivery)
+        else:
+            with pytest.raises(RuntimeError, match="source rejected"):
+                await rail.after_invoke(delivery)
+
+        await rail.on_task_accepted(event)
+        await rail.drain()
+        provider.sync_turn.assert_awaited_once()
+        assert [source["text"] for source in provider.sync_turn.await_args.kwargs["sources"]] == [
+            "validated outcome",
+        ]
+    finally:
+        await rail.aclose()
+
+
+@pytest.mark.asyncio
+async def test_close_drains_accepted_delivery():
     started, release = asyncio.Event(), asyncio.Event()
-    async def extract(*_args):
+
+    async def sync(*_args, **_kwargs):
         started.set()
         await release.wait()
-        return [{"label": "lesson", "content": "confirmed"}]
-    monkeypatch.setattr(module, "extract_team_conclusions", extract)
+
     provider = MockMemoryProvider()
-    provider.add_team_memories = AsyncMock(return_value=1)
+    provider.sync_turn = AsyncMock(side_effect=sync)
     provider.shutdown = AsyncMock()
     rail = JiuwenTeamMemoryRail(provider)
     rail.init(MockAgent())
-    task = asyncio.create_task(rail.conclude_round("round", model=object()))
-    await started.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    event = SimpleNamespace(task_id="task", acceptance_version="1", content="",
+                            summary="validated outcome", note="")
+    await rail.on_task_accepted(event)
+    await asyncio.wait_for(started.wait(), timeout=2)
     close = asyncio.create_task(rail.aclose())
     await asyncio.sleep(0)
     provider.shutdown.assert_not_awaited()
     release.set()
     await close
-    provider.add_team_memories.assert_awaited_once()
     provider.shutdown.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_extraction_agent_uses_only_collection_tool():
-    import json
-
-    from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
-    from openjiuwen.core.runner import Runner
-    from tests.unit_tests.fixtures.mock_llm import (
-        create_text_response,
-        create_tool_call_response,
-        mock_llm_context,
-    )
-    model = Model(model_client_config=ModelClientConfig(client_provider="OpenAI",
-        api_key="mock", api_base="http://mock-base"), model_config=ModelRequestConfig(model="mock-model"))
-    await Runner.start()
-    try:
-        with mock_llm_context() as llm:
-            llm.set_responses([
-                create_tool_call_response("collect_team_conclusions", json.dumps({"items": [
-                    {"label": "decision", "content": "confirmed", "confirmed": True},
-                    {"label": "lesson", "content": "draft", "confirmed": False},
-                ]})), create_text_response("analysis complete"),
-            ])
-            result = await module.extract_team_conclusions(model, "confirmed decision; pending draft")
-        assert result == [{"label": "decision", "content": "confirmed"}]
-        calls = str(llm.call_history)
-        assert "collect_team_conclusions" in calls
-        assert "write_memory_file" not in calls and "read_memory_file" not in calls
-    finally:
-        await Runner.stop()
 
 
 @pytest.mark.asyncio
@@ -176,8 +159,13 @@ async def test_native_dispose_drains_own_memory_and_leaves_other_member_live():
         for native, rail in zip(natives, rails):
             await start_harness(native)
             await rail.before_invoke(context(native))
-        await rails[0].after_invoke(context(natives[0]))
-        await started.wait()
+        turn = context(natives[0], "human request")
+        turn.extra["run_context"] = {"extra": {
+            "raw_query": "human request", "raw_query_origin": "human",
+        }}
+        await rails[0].before_invoke(turn)
+        await rails[0].after_invoke(turn)
+        await asyncio.wait_for(started.wait(), 5)
         closing = asyncio.create_task(natives[0].dispose())
         await asyncio.sleep(0)
         providers[0].shutdown.assert_not_awaited()

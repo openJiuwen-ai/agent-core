@@ -2244,11 +2244,18 @@ async def test_shutdown_member_event_carries_retire_target(db, message_bus):
 @pytest.mark.level0
 async def test_shutdown_dormant_member_event_targets_shutdown(db, message_bus):
     """Shutting down an already-dormant member removes it for good: the event says shut_down."""
-    backend = await _dormant_backend(db, message_bus, "dormant_target_team")
+    from openjiuwen.agent_teams.tools.tool_member import ShutdownMemberTool
 
-    assert (await backend.shutdown_member("dev-1")).ok
+    changed = AsyncMock()
+    backend = await _dormant_backend(
+        db, message_bus, "dormant_target_team", on_explicit_member_change=changed,
+    )
+    tool = ShutdownMemberTool(backend, lambda *_args, **_kwargs: "")
+
+    assert (await tool.invoke({"member_name": "dev-1"})).success
 
     assert _shutdown_event_targets(message_bus) == {"dev-1": MemberStatus.SHUTDOWN.value}
+    changed.assert_awaited_once_with("dev-1", {}, False)
 
 
 @pytest.mark.asyncio

@@ -1674,8 +1674,8 @@ async def test_complete_persists_note_on_the_row(task_manager):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_submit_for_review_persists_note_too(task_manager):
-    """A reviewed task lands in IN_REVIEW with the note already on the row for reviewers."""
+async def test_submit_for_review_persists_note_too(task_manager, monkeypatch):
+    """The review note and delivery version reflect the row committed by the DAO."""
     graph = await task_manager.add_graph(
         [
             TaskGraphSpec(
@@ -1689,13 +1689,26 @@ async def test_submit_for_review_persists_note_too(task_manager):
     )
     assert graph.ok
     assert await task_manager.claim("r1")
+    delivered = []
+    task_manager.set_task_acceptance_listener(
+        AsyncMock(), on_delivery=lambda task_id, version: delivered.append((task_id, version)),
+    )
+    task_dao = task_manager.db.task
+    submit = task_dao.submit_for_review
 
+    async def submit_after_edit(task_id, **kwargs):
+        assert await task_dao.update_task(task_id, content="revised while submitting") is not None
+        return await submit(task_id, **kwargs)
+
+    monkeypatch.setattr(task_dao, "submit_for_review", submit_after_edit)
     result = await task_manager.complete("r1", note="see pr #12")
 
     assert result.ok
     detail = await task_manager.get_task_detail("r1")
     assert detail.status == TaskStatus.IN_REVIEW.value
     assert detail.note == "see pr #12"
+    committed = await task_dao.get_task("r1")
+    assert delivered == [("r1", f"{committed.revision}:{committed.review_round}")]
 
 
 @pytest.mark.asyncio

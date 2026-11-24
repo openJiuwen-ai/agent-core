@@ -154,6 +154,7 @@ class TeamBackend:
         on_member_started: Callable[[str], Awaitable[None]] | None = None,
         on_member_restarted: Callable[[str], Awaitable[bool]] | None = None,
         on_member_stopped: Callable[[str], Awaitable[None]] | None = None,
+        on_explicit_member_change: Callable[[str, dict, bool], Awaitable[None]] | None = None,
         validate_worktree_isolation: Callable[[str], Awaitable[None]] | None = None,
         plan_storage_dir: str | None = None,
         plan_id: str | None = None,
@@ -354,6 +355,7 @@ class TeamBackend:
         self._on_member_started = on_member_started
         self._on_member_restarted = on_member_restarted
         self._on_member_stopped = on_member_stopped
+        self.on_explicit_member_change = on_explicit_member_change
         self._validate_worktree_isolation = validate_worktree_isolation
 
         self.task_manager = TeamTaskManager(
@@ -1448,6 +1450,36 @@ class TeamBackend:
             auto_confirm,
         )
         return True
+
+    async def notify_explicit_member_change(self, member_name: str, *, added: bool, force: bool = False) -> None:
+        """Notify the host of a deliberate roster change after the backend operation."""
+        callback = self.on_explicit_member_change
+        if callback is None:
+            return
+        from openjiuwen.agent_teams.tools.member_options import get_member_agent_template
+
+        try:
+            member = await self.db.member.get_member(member_name, self.team_name)
+            if member is None:
+                return
+            if not added and member.status != MemberStatus.SHUTDOWN.value:
+                lifetime = await self.get_member_lifetime(member_name)
+                if retire_target(lifetime, force=force) is MemberStatus.DORMANT:
+                    return
+            template = get_member_agent_template(member)
+            ref = template.ref if template is not None else {}
+            if ref and not added:
+                for other in await self.db.member.get_team_members(self.team_name):
+                    if (other.member_name == member_name or other.status in (
+                        MemberStatus.SHUTDOWN.value, MemberStatus.SHUTDOWN_REQUESTED.value,
+                    )):
+                        continue
+                    survivor = get_member_agent_template(other)
+                    if survivor is not None and survivor.ref == ref:
+                        return
+            await callback(member_name, dict(ref), added)
+        except Exception as exc:
+            team_logger.warning("Host member change callback failed for {}: {}", member_name, type(exc).__name__)
 
     async def shutdown_member(self, member_name: str, force: bool = False) -> MemberOpResult:
         """Shutdown a member.

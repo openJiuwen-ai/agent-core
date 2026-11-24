@@ -117,3 +117,73 @@ async def test_prompt_compose_output_order_is_used_by_the_final_renderer(tmp_pat
     assert mock_llm.call_history
     system_message = mock_llm.call_history[0][0]
     assert system_message.content == "\n\n".join(expected_content)
+
+
+@pytest.mark.asyncio
+async def test_team_members_keep_their_prompt_builders_without_prompt_compose(tmp_path) -> None:
+    bus = await build_extension_bus()
+    compose_calls: list[str] = []
+
+    async def observe_compose(
+        event: Event,
+        ops: EventHandlerOps | None,
+        event_next: EventNext,
+    ) -> object:
+        del ops
+        compose_calls.append(event.event_type)
+        return await event_next(event)
+
+    bus.register_event_handler(PROMPT_COMPOSE, observe_compose, {}, HandlerLevel.USER)
+
+    async def run_agent_once(agent, conversation_id: str) -> str:
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([create_text_response("done")])
+        with patch_mock_llm(mock_llm):
+            await Runner.run_agent(
+                agent=agent,
+                inputs={"query": "keep the member prompt", "conversation_id": conversation_id},
+            )
+        assert mock_llm.call_history
+        return mock_llm.call_history[0][0].content
+
+    async with harness_runner(bus=bus):
+        leader = create_deep_agent(
+            model=fake_model(),
+            card=AgentCard(id=f"prompt_leader_{uuid.uuid4().hex[:8]}", name="PromptLeader"),
+            system_prompt="leader identity",
+            max_iterations=2,
+            **default_agent_options(tmp_path),
+        )
+        teammate = create_deep_agent(
+            model=fake_model(),
+            card=AgentCard(id=f"prompt_teammate_{uuid.uuid4().hex[:8]}", name="PromptTeammate"),
+            system_prompt="teammate identity",
+            max_iterations=2,
+            **default_agent_options(tmp_path),
+        )
+        leader.system_prompt_builder.add_section(
+            PromptSection(
+                name="leader_bootstrap",
+                content={"cn": "leader bootstrap", "en": "leader bootstrap"},
+                priority=10,
+            )
+        )
+        teammate.system_prompt_builder.add_section(
+            PromptSection(
+                name="team_role",
+                content={"cn": "teammate role", "en": "teammate role"},
+                priority=10,
+            )
+        )
+        leader._react_agent.set_runtime_context(is_team_agent=True)
+        teammate._react_agent.set_runtime_context(is_team_agent=True)
+
+        shared_conversation_id = f"team_prompt_shared_{uuid.uuid4().hex[:8]}"
+        leader_system = await run_agent_once(leader, shared_conversation_id)
+        teammate_system = await run_agent_once(teammate, shared_conversation_id)
+
+    assert compose_calls == []
+    assert "leader bootstrap" in leader_system
+    assert "teammate role" not in leader_system
+    assert "teammate role" in teammate_system
+    assert "leader bootstrap" not in teammate_system

@@ -2252,7 +2252,7 @@ class DeepAgent(BaseAgent):
             if raw_query:
                 if run_context is None:
                     run_context = RunContext(extra={"raw_query": raw_query})
-                else:
+                elif run_context.extra.get("raw_query_origin") != "human":
                     run_context.extra["raw_query"] = raw_query
         elif isinstance(inputs, str):
             query = inputs
@@ -2306,6 +2306,8 @@ class DeepAgent(BaseAgent):
     ) -> RunContext:
         """Return a per-round RunContext with refreshed raw_query."""
         extra = dict(run_context.extra)
+        # Follow-up text has no independently attested origin at this boundary.
+        extra.pop("raw_query_origin", None)
         extra["raw_query"] = raw_query
         return RunContext(
             reason=run_context.reason,

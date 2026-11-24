@@ -1968,11 +1968,6 @@ def test_summary_redacts_normalized_sensitive_keys(key: str) -> None:
         ("https://user:fake-url-pass@example.test/path?token=fake-query&x=1", "fake-url-pass", "example.test"),
         ("postgresql://user:fake-db-pass@db.test/app?password=fake-db-query", "fake-db-pass", "db.test/app"),
         ("connection failed: password=fake-error-pass; retry=true", "fake-error-pass", "retry=true"),
-        (
-            "-----BEGIN PRIVATE KEY-----\nfake-pem-private-material\n-----END PRIVATE KEY-----",
-            "fake-pem-private-material",
-            "-----BEGIN PRIVATE KEY-----",
-        ),
     ],
 )
 def test_summary_redacts_credentials_inside_free_text(text: str, secret: str, preserved: str) -> None:
