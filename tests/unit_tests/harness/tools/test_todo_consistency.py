@@ -47,7 +47,7 @@ async def env(tmp_path, monkeypatch):
 
 async def create(tool, session, **kwargs):
     return await tool.invoke(
-        {"tasks": [{"id": "A", "content": "first"}, {"id": "B", "content": "second"}], **kwargs}, session=session
+        {"todos": [{"id": "A", "content": "first"}, {"id": "B", "content": "second"}], **kwargs}, session=session
     )
 
 
@@ -58,10 +58,10 @@ async def update(tool, session, ident, **fields):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("inputs,reason", [
     ({}, "is required"),
-    ({"tasks": "[]"}, "must be a JSON array"),
-    ({"tasks": []}, "non-empty"),
-    ({"tasks": ["bad"]}, "JSON object"),
-    ({"tasks": [{"content": ""}]}, "nonempty content"),
+    ({"todos": "[]"}, "must be a JSON array"),
+    ({"todos": []}, "non-empty"),
+    ({"todos": ["bad"]}, "JSON object"),
+    ({"todos": [{"content": ""}]}, "nonempty content"),
 ])
 async def test_create_input_errors_preserve_domain_code_without_io(env, monkeypatch, inputs, reason):
     from unittest.mock import AsyncMock
@@ -72,7 +72,7 @@ async def test_create_input_errors_preserve_domain_code_without_io(env, monkeypa
     with pytest.raises(BaseError, match=reason) as caught:
         await creator.invoke(inputs, session=session)
     assert caught.value.code == 182503
-    assert caught.value.details["field"] == "tasks"
+    assert caught.value.details["field"] == "todos"
     assert str(caught.value).count("[182503]") == 1
     read.assert_not_awaited()
     assert not path.exists()
@@ -99,7 +99,7 @@ async def test_todo_outcomes_are_internal_and_preserve_partial_update_semantics(
     assert noop.tool_execution_status == "noop"
     assert path.read_bytes() == before
     read = await listing.invoke({}, session=session)
-    assert set(read) == {"tasks"}
+    assert set(read) == {"todos"}
     assert read.tool_execution_status == "success"
     assert "tool_execution_status" not in json.dumps(read)
 
@@ -849,7 +849,7 @@ async def test_unsupported_provider_todo_reports_contract_before_write(env, monk
 
     tool.snapshot_guard = lifecycle
     inputs = {
-        "TodoCreateTool": {"tasks": [{"id": "A", "content": "valid"}]},
+        "TodoCreateTool": {"todos": [{"id": "A", "content": "valid"}]},
         "TodoGetTool": {"id": "A"},
         "TodoModifyTool": {"action": "update", "todos": [{"id": "A"}]},
         "TodoListTool": {},
@@ -892,7 +892,7 @@ async def test_ordinary_reads_on_legacy_provider_do_not_enable_unprotected_write
     modifier = TodoModifyTool(operation, str(path.parent.parent))
 
     listed = await reader.invoke({}, session=session)
-    assert listed["tasks"][0]["id"] == "A"
+    assert listed["todos"][0]["id"] == "A"
     assert not hasattr(listed, "todo_snapshot")
     assert (await getter.invoke({"id": "A"}, session=session))["todo"]["id"] == "A"
     items = await modifier.load_todos("session")
@@ -958,7 +958,7 @@ async def test_actual_ability_manager_keeps_batch_plan_without_extra_storage(env
                     id="create",
                     type="function",
                     name="todo_create",
-                    arguments=json.dumps({"tasks": [{"id": "A", "content": "new"}], "plan_action": "rebuild"}),
+                    arguments=json.dumps({"todos": [{"id": "A", "content": "new"}], "plan_action": "rebuild"}),
                 ),
                 ToolCall(
                     id="modify",

@@ -197,7 +197,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
     async def test_invoke_create_json_array(self):
         """Creates todos from JSON array."""
         result = await self.tool.invoke({
-            "tasks": [
+            "todos": [
                 {"content": "Task 1", "activeForm": "Doing Task 1", "description": "Desc 1"},
                 {"content": "Task 2", "activeForm": "Doing Task 2", "description": "Desc 2"},
                 {"content": "Task 3", "activeForm": "Doing Task 3", "description": "Desc 3"}
@@ -212,7 +212,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
     async def test_invoke_create_with_chinese_content(self):
         """Chinese content in task fields works correctly."""
         inputs = {
-            "tasks": [
+            "todos": [
                 {"content": "需求分析", "activeForm": "正在分析需求", "description": "明确项目目标、用户需求及功能边界"},
                 {"content": "技术选型", "activeForm": "正在选型", "description": "评估并选择合适的技术栈"},
                 {"content": "实施方案", "activeForm": "正在制定方案", "description": "制定开发计划、分配任务"},
@@ -231,7 +231,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
             {"content": "Translate doc", "activeForm": "Translating doc", "description": "Translate document to English", "selected_model_id": "fast"},
             {"content": "Analyze code", "activeForm": "Analyzing code", "description": "Analyze code architecture", "selected_model_id": "smart"},
         ]
-        result = await self.tool.invoke({"tasks": tasks}, session=self.mock_session)
+        result = await self.tool.invoke({"todos": tasks}, session=self.mock_session)
         self.assertIn("Successfully created 2 task(s)", result["message"])
         saved = self.tool._save_todos.call_args[0][1]
         self.assertEqual(saved[0].selected_model_id, "fast")
@@ -241,26 +241,41 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
     async def test_invoke_create_empty_tasks(self):
         """Raises error for empty task list."""
         with self.assertRaises(Exception):
-            await self.tool.invoke({"tasks": []}, session=self.mock_session)
+            await self.tool.invoke({"todos": []}, session=self.mock_session)
 
     async def test_invoke_missing_tasks_param(self):
-        """Raises error when tasks parameter is missing."""
+        """Raises error when todos parameter is missing."""
         with self.assertRaises(Exception):
             await self.tool.invoke({}, session=self.mock_session)
+
+    async def test_invoke_create_legacy_tasks_key(self):
+        """旧容器名 tasks 仍可创建：统一为 todos 前的存量调用（含中断恢复重放）不因改名失效。"""
+        result = await self.tool.invoke(
+            {"tasks": [{"content": "Task 1"}]}, session=self.mock_session
+        )
+        self.assertIn("Successfully created 1 task(s)", result["message"])
+
+    async def test_invoke_create_rejects_both_container_keys(self):
+        """todos 与 tasks 同时出现视为歧义输入，拒绝而非静默丢弃其一。"""
+        with self.assertRaises(Exception):
+            await self.tool.invoke(
+                {"todos": [{"content": "A"}], "tasks": [{"content": "B"}]},
+                session=self.mock_session,
+            )
 
     async def test_invoke_create_invalid_json_string(self):
         """Raises error for non-array input (string format no longer supported)."""
         with self.assertRaises(Exception):
-            await self.tool.invoke({"tasks": "not a valid json array"}, session=self.mock_session)
+            await self.tool.invoke({"todos": "not a valid json array"}, session=self.mock_session)
 
     async def test_invoke_create_missing_content_field(self):
         """Raises error when required field 'content' is missing."""
         with self.assertRaises(Exception):
-            await self.tool.invoke({"tasks": [{"activeForm": "Doing"}]}, session=self.mock_session)
+            await self.tool.invoke({"todos": [{"activeForm": "Doing"}]}, session=self.mock_session)
 
     async def test_invoke_create_optional_fields_default_empty(self):
         """activeForm and description are optional; missing fields default to empty strings."""
-        result = await self.tool.invoke({"tasks": [{"content": "Task 1"}]}, session=self.mock_session)
+        result = await self.tool.invoke({"todos": [{"content": "Task 1"}]}, session=self.mock_session)
         self.assertIn("Successfully created 1 task(s)", result["message"])
         saved = self.tool._save_todos.call_args[0][1]
         self.assertEqual(saved[0].activeForm, "")
@@ -270,7 +285,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
         # todo_create marker, allowing a fresh rebuild.
         self.tool.reset_invoke_marker(self.mock_session.get_session_id())
         result = await self.tool.invoke(
-            {"tasks": [{"content": "Task 1", "activeForm": "Doing"}]},
+            {"todos": [{"content": "Task 1", "activeForm": "Doing"}]},
             session=self.mock_session,
         )
         self.assertIn("Successfully created 1 task(s)", result["message"])
@@ -281,14 +296,14 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
     async def test_reject_second_create_within_same_invoke(self):
         """Second todo_create in the same invoke is rejected and todo.json is not overwritten."""
         await self.tool.invoke(
-            {"tasks": [{"content": "Task 1"}]},
+            {"todos": [{"content": "Task 1"}]},
             session=self.mock_session,
         )
         self.tool._save_todos.reset_mock()
 
         with self.assertRaises(Exception) as cm:
             await self.tool.invoke(
-                {"tasks": [{"content": "Task 2"}]},
+                {"todos": [{"content": "Task 2"}]},
                 session=self.mock_session,
             )
         self.assertIn("todo_create has already rebuilt", str(cm.exception))
@@ -298,14 +313,14 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
     async def test_reset_allows_new_create(self):
         """After reset_invoke_marker, a new todo_create succeeds."""
         await self.tool.invoke(
-            {"tasks": [{"content": "Task 1"}]},
+            {"todos": [{"content": "Task 1"}]},
             session=self.mock_session,
         )
         self.tool._save_todos.reset_mock()
 
         self.tool.reset_invoke_marker(self.mock_session.get_session_id())
         result = await self.tool.invoke(
-            {"tasks": [{"content": "Task 2"}]},
+            {"todos": [{"content": "Task 2"}]},
             session=self.mock_session,
         )
         self.assertIn("Successfully created 1 task(s)", result["message"])
@@ -345,8 +360,8 @@ class TestTodoListTool(unittest.IsolatedAsyncioTestCase):
     async def test_invoke_list_success(self):
         """Returns only active (non-completed, non-cancelled) tasks in simplified format."""
         result = await self.tool.invoke({}, session=self.mock_session)
-        self.assertIn("tasks", result)
-        tasks = result["tasks"]
+        self.assertIn("todos", result)
+        tasks = result["todos"]
         # Only IN_PROGRESS and PENDING should be returned
         self.assertEqual(len(tasks), 2)
         contents = [t["content"] for t in tasks]
@@ -607,7 +622,7 @@ class TestTodoGenerationToken(unittest.IsolatedAsyncioTestCase):
         """Session token present: all saved items are stamped with it."""
         self.mock_session.get_state.return_value = "gen-1"
         await self.create_tool.invoke({
-            "tasks": [
+            "todos": [
                 {"content": "Task 1"},
                 {"content": "Task 2"},
             ]
@@ -618,14 +633,14 @@ class TestTodoGenerationToken(unittest.IsolatedAsyncioTestCase):
     async def test_create_without_token_leaves_items_unstamped(self):
         """No session token: items stay unstamped (fail-open)."""
         self.mock_session.get_state.return_value = None
-        await self.create_tool.invoke({"tasks": [{"content": "Task 1"}]}, session=self.mock_session)
+        await self.create_tool.invoke({"todos": [{"content": "Task 1"}]}, session=self.mock_session)
         saved = self.create_tool._save_todos.call_args[0][1]
         self.assertTrue(all(t.generation_token is None for t in saved))
 
     async def test_create_with_non_string_token_is_fail_open(self):
         """Non-string session state value is ignored (fail-open)."""
         self.mock_session.get_state.return_value = 12345
-        await self.create_tool.invoke({"tasks": [{"content": "Task 1"}]}, session=self.mock_session)
+        await self.create_tool.invoke({"todos": [{"content": "Task 1"}]}, session=self.mock_session)
         saved = self.create_tool._save_todos.call_args[0][1]
         self.assertTrue(all(t.generation_token is None for t in saved))
 
@@ -640,7 +655,7 @@ class TestTodoGenerationToken(unittest.IsolatedAsyncioTestCase):
         ])
         self.mock_session.get_state.return_value = "gen-1"
         result = await self.list_tool.invoke({}, session=self.mock_session)
-        ids = [t["id"] for t in result["tasks"]]
+        ids = [t["id"] for t in result["todos"]]
         self.assertIn("cur", ids)
         self.assertIn("legacy", ids)
         self.assertNotIn("old", ids)
@@ -654,7 +669,7 @@ class TestTodoGenerationToken(unittest.IsolatedAsyncioTestCase):
         ])
         self.mock_session.get_state.return_value = None
         result = await self.list_tool.invoke({}, session=self.mock_session)
-        ids = [t["id"] for t in result["tasks"]]
+        ids = [t["id"] for t in result["todos"]]
         self.assertEqual(sorted(ids), ["cur", "old"])
 
     async def test_modify_append_tolerates_superseded_in_progress(self):

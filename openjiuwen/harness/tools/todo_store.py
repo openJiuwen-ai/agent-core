@@ -270,9 +270,9 @@ def _record_counts(tool, inputs, result, tx):
     kind = getattr(tool, "_todo_action", None)
     action = inputs.get("action") if kind == "modify" else kind
     if action in ("list", "get"):
-        tx.counts = {"returned_count": len(result.get("tasks", [])) if action == "list" else 1}
+        tx.counts = {"returned_count": len(result.get("todos", [])) if action == "list" else 1}
         return
-    group = (inputs.get("tasks", []) if action == "create" else
+    group = (inputs.get("todos", inputs.get("tasks", [])) if action == "create" else
              inputs.get("ids", []) if action in ("delete", "cancel") else
              inputs.get("todo_data", {}).get("items", []) if action in ("insert_before", "insert_after") else
              inputs.get("todos", []))
@@ -418,11 +418,29 @@ async def transact(
     raise RuntimeError("Todo update conflicted in all three attempts; read the current plan and retry")
 
 
+def _migrate_legacy_container_key(tool, inputs):
+    """把 create 的旧容器键 tasks 搬运为 todos，其余情况原样返回。
+
+    容器名统一为 todos 后，存量调用仍可能携带旧键 tasks。搬运必须发生在
+    ``_validate_inputs`` 之前，否则缺键拒绝会让工具体内的兼容分支永远不可达
+    （中断恢复重放的历史 todo_create 调用仍携带旧键）。
+    """
+    if not isinstance(inputs, dict) or getattr(tool, "_todo_action", None) != "create":
+        return inputs
+    if "todos" in inputs or "tasks" not in inputs:
+        return inputs
+    # 剔除旧键而非并存：并存会触发工具体的双容器键拒绝。
+    migrated = {key: value for key, value in inputs.items() if key != "tasks"}
+    migrated["todos"] = inputs["tasks"]
+    return migrated
+
+
 def todo_operation(method):
     """Wrap the existing business body, including nested compatibility helpers."""
 
     @wraps(method)
     async def invoke(self, inputs, **kwargs):
+        inputs = _migrate_legacy_container_key(self, inputs)
         validator = getattr(self, "_validate_inputs", None)
         if validator is not None:
             validator(inputs)
@@ -432,7 +450,12 @@ def todo_operation(method):
         # Generated ids are stable across a conditional-write retry.
         data = copy.deepcopy(inputs)
         if isinstance(data, dict):
-            groups = [(data.get("tasks"), True)]
+            # id 自动补全只覆盖"模型可不带 id"的载荷：create 的容器键 todos
+            # （旧键 tasks 已在入口搬运）。modify 的 todos 必须显式带 id，
+            # 纳入本组会让 append 绕过缺 id 校验。
+            groups: list = []
+            if getattr(self, "_todo_action", None) == "create":
+                groups.append((data.get("todos"), True))
             if data.get("action") == "append":
                 groups.append((data.get("todos"), False))
             if isinstance(data.get("todo_data"), dict):

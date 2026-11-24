@@ -121,7 +121,7 @@ class TestBuilderInputParams:
             "file_path",
             "content",
         }
-        assert get_todo_create_input_params("cn")["required"] == ["tasks"]
+        assert get_todo_create_input_params("cn")["required"] == ["todos"]
         assert get_image_ocr_input_params("cn")["required"] == [
             "image_path_or_url"
         ]

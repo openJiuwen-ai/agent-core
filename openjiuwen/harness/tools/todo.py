@@ -107,7 +107,7 @@ class TodoTool(Tool):
             if not inputs.get("id"):
                 invalid("id", "Task ID is required")
             return
-        field = "tasks" if action == "create" else "ids" if action in ("delete", "cancel") else "todos"
+        field = "todos" if action == "create" else "ids" if action in ("delete", "cancel") else "todos"
         data = inputs
         if action in ("insert_before", "insert_after"):
             data = inputs.get("todo_data")
@@ -351,18 +351,26 @@ class TodoCreateTool(TodoTool):
 
         results = dict()
         try:
-            tasks_input = inputs.get("tasks")
-            if tasks_input and isinstance(tasks_input, list):
+            # 旧键 tasks 的搬运由 todo_operation 装饰器在任何校验之前完成，
+            # 工具体只需处理歧义输入与规范键。
+            todos_input = inputs.get("todos")
+            if todos_input is not None and inputs.get("tasks") is not None:
+                # 两个容器名同时出现时不能靠优先级静默丢弃其中一个。
+                raise build_error(
+                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                    reason="'todos' and 'tasks' are the same container; pass exactly one of them",
+                )
+            if todos_input and isinstance(todos_input, list):
                 generation_token = self._session_generation_token(session)
                 results["message"] = await self._create_from_list(
-                    session_id, tasks_input, generation_token=generation_token,
+                    session_id, todos_input, generation_token=generation_token,
                     plan_action=inputs.get("plan_action")
                 )
                 return results
 
             raise build_error(
                 StatusCode.TOOL_TODOS_INVOKE_FAILED,
-                reason="'tasks' parameter is required and must be a JSON array"
+                reason="'todos' parameter is required and must be a JSON array"
             )
 
         except BaseError:
@@ -426,13 +434,13 @@ class TodoCreateTool(TodoTool):
     async def _create_from_list(
         self,
         session_id: str,
-        tasks_data: List[Dict[str, Any]],
+        todos_data: List[Dict[str, Any]],
         *,
         generation_token: Optional[str] = None,
         plan_action: str | None = None,
     ) -> str:
         """Create todo items from a JSON array of task objects."""
-        if not tasks_data:
+        if not todos_data:
             raise build_error(
                 StatusCode.TOOL_TODOS_VALIDATION_INVALID,
                 reason="Task list cannot be empty"
@@ -440,7 +448,7 @@ class TodoCreateTool(TodoTool):
         tx = current_transaction(self, session_id)
         if tx is None:
             return await transact(self, session_id, lambda: self._create_from_list(
-                session_id, tasks_data, generation_token=generation_token, plan_action=plan_action))
+                session_id, todos_data, generation_token=generation_token, plan_action=plan_action))
         if plan_action not in (None, "new", "rebuild"):
             raise ValueError("plan_action must be new or rebuild")
         await self._reject_recreate_within_invoke(session_id)
@@ -450,7 +458,7 @@ class TodoCreateTool(TodoTool):
             raise ValueError("An active plan exists; use todo_modify or explicitly choose plan_action=new/rebuild")
         new_todos = []
         seen_ids: set = set()
-        for i, task_data in enumerate(tasks_data):
+        for i, task_data in enumerate(todos_data):
             content = task_data.get("content", "")
             if not content:
                 raise build_error(
@@ -557,7 +565,10 @@ class TodoListTool(TodoTool):
                 }
                 for t in active_tasks
             ]
-            return {"tasks": simplified}
+            # 输出容器键与 create 输入同名，均为 todos。宿主侧的列表合并/展示
+            # 需同步读取该键；输入侧为旧调用保留的 tasks 搬运不延伸到输出，
+            # 避免同一结果里出现两份同构列表。
+            return {"todos": simplified}
         except BaseError:
             raise
         except Exception as e:
