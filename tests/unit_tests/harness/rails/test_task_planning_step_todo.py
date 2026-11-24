@@ -220,3 +220,15 @@ async def test_after_react_iteration_skips_snapshot_when_switch_is_off(env):
     await rail.after_react_iteration(ctx)
 
     assert session.get_state(STEP_TODO_SNAPSHOT_KEY) is None
+
+
+@pytest.mark.asyncio
+async def test_after_react_iteration_snapshots_when_config_is_unresolved(env):
+    """An agent without a resolvable config follows the on-by-default setting."""
+    rail, session, ctx, todo_path = env
+    _todo_file(todo_path).write_text('{"todos": [3]}', encoding="utf-8")
+    ctx.agent = SimpleNamespace()
+
+    await rail.after_react_iteration(ctx)
+
+    assert session.get_state(STEP_TODO_SNAPSHOT_KEY) == {"exists": True, "content": '{"todos": [3]}'}
