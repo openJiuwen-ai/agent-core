@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""End-to-end tests for the yuanrong code-execution paths.
+"""End-to-end tests for the ADX code-execution paths.
 
 Gated on ``RUN_YUANRONG_TEST=1``.
 """
@@ -20,14 +20,14 @@ from openjiuwen.core.sys_operation.config import ContainerScope, PreDeployLaunch
 from openjiuwen.core.sys_operation.result import ExecuteCodeResult, ExecuteCodeStreamResult
 from openjiuwen.core.sys_operation.sandbox.gateway.gateway_client import SandboxGatewayClient
 
-requires_yuanrong = pytest.mark.skipif(
+requires_adx = pytest.mark.skipif(
     os.environ.get("RUN_YUANRONG_TEST") != "1",
-    reason="Requires running YuanRong cluster",
+    reason="Requires a running ADX HTTP service",
 )
 
 
 def _stdout_tail(stdout: Optional[str], n: int = 1) -> str:
-    """YuanRong execute may prepend banner lines; use trailing non-empty lines as payload."""
+    """ADX execute may prepend banner lines; use trailing non-empty lines as payload."""
     lines = [line for line in (stdout or "").splitlines() if line.strip()]
     if not lines:
         return ""
@@ -64,11 +64,11 @@ async def _remove_sys_operation_with_sandbox_release(sys_operation_id: str) -> N
 
 
 @pytest.mark.asyncio
-class TestYuanrongCodeOperation:
+class TestAdxCodeOperation:
     @pytest_asyncio.fixture
     async def sys_op(self) -> AsyncIterator[SysOperation]:
         await Runner.start()
-        card_id = f"yuanrong_code_op_{uuid.uuid4().hex[:8]}"
+        card_id = f"adx_code_op_{uuid.uuid4().hex[:8]}"
         card = SysOperationCard(
             id=card_id,
             mode=OperationMode.SANDBOX,
@@ -79,7 +79,7 @@ class TestYuanrongCodeOperation:
                 ),
                 launcher_config=PreDeployLauncherConfig(
                     base_url=_base_url(),
-                    sandbox_type="yuanrong",
+                    sandbox_type="adx-environment",
                     idle_ttl_seconds=600,
                     extra_params=_extra_params(),
                 ),
@@ -107,7 +107,7 @@ class TestYuanrongCodeOperation:
             results.append(res)
         return results
 
-    @requires_yuanrong
+    @requires_adx
     async def test_execute_python_code_success(self, sys_op: SysOperation):
         code = "print('Hello, Python!'); x = 1 + 2; print(x)"
         result: ExecuteCodeResult = await sys_op.code().execute_code(code=code, language="python")
@@ -121,10 +121,10 @@ class TestYuanrongCodeOperation:
         assert _stdout_tail(result.data.stdout, 2) == "Hello, Python!\n3"
         assert result.data.stderr == ""
 
-    @requires_yuanrong
+    @requires_adx
     async def test_execute_javascript_code_success(self, sys_op: SysOperation):
         if not await self._sandbox_has_node(sys_op):
-            pytest.skip("Node.js not found in yuanrong sandbox")
+            pytest.skip("Node.js not found in the ADX sandbox")
 
         code = "console.log('Hello, JavaScript!'); const x = 3 * 4; console.log(x)"
         result: ExecuteCodeResult = await sys_op.code().execute_code(code=code, language="javascript")
@@ -135,7 +135,7 @@ class TestYuanrongCodeOperation:
         assert result.data.exit_code == 0
         assert _stdout_tail(result.data.stdout, 2) == "Hello, JavaScript!\n12"
 
-    @requires_yuanrong
+    @requires_adx
     async def test_execute_code_with_environment_vars(self, sys_op: SysOperation):
         env_vars: Dict[str, str] = {"TEST_ENV": "pytest_test", "COUNT": "5"}
         code = """
@@ -154,7 +154,7 @@ print(os.getenv('COUNT'))
         assert result.data.exit_code == 0
         assert _stdout_tail(result.data.stdout, 2) == "pytest_test\n5"
 
-    @requires_yuanrong
+    @requires_adx
     async def test_execute_empty_code(self, sys_op: SysOperation):
         empty_codes: List[str] = ["", "   ", "\n", "\t"]
         for code in empty_codes:
@@ -162,7 +162,7 @@ print(os.getenv('COUNT'))
             assert result.code == StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.code
             assert "code can not be empty" in result.message
 
-    @requires_yuanrong
+    @requires_adx
     async def test_execute_unsupported_language(self, sys_op: SysOperation):
         code = "print('test')"
         for lang in ["java", "c++", "ruby", "go"]:
@@ -170,7 +170,7 @@ print(os.getenv('COUNT'))
             assert result.code == StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.code
             assert f"{lang} is not supported" in result.message
 
-    @requires_yuanrong
+    @requires_adx
     async def test_execute_python_code_with_syntax_error(self, sys_op: SysOperation):
         code = "print('missing quote"
         result: ExecuteCodeResult = await sys_op.code().execute_code(code=code)
@@ -179,7 +179,7 @@ print(os.getenv('COUNT'))
         assert result.data is not None
         assert result.data.exit_code != 0
 
-    @requires_yuanrong
+    @requires_adx
     async def test_execute_code_timeout(self, sys_op: SysOperation):
         code = "import time; time.sleep(3)"
         result: ExecuteCodeResult = await sys_op.code().execute_code(code=code, language="python", timeout=1)
@@ -188,7 +188,7 @@ print(os.getenv('COUNT'))
         assert "execution timeout after 1 seconds" in result.message
         assert result.data.exit_code != 0
 
-    @requires_yuanrong
+    @requires_adx
     async def test_execute_code_force_file_true_via_options(self, sys_op: SysOperation):
         test_code = """
 print(f"Python Exec Mode: Temp File")
@@ -205,7 +205,7 @@ print(f"50 + 60 = {a + b}")
         assert result.data.exit_code == 0
         assert "50 + 60 = 110" in result.data.stdout
 
-    @requires_yuanrong
+    @requires_adx
     async def test_code_stream_python_success(self, sys_op: SysOperation):
         results: list[ExecuteCodeStreamResult] = []
         async for item in sys_op.code().execute_code_stream(code="print('stream-ok')", language="python"):
@@ -216,13 +216,13 @@ print(f"50 + 60 = {a + b}")
         assert results[-1].data.exit_code == 0
         assert "stream-ok" in "".join(item.data.text or "" for item in results if item.data)
 
-    @requires_yuanrong
+    @requires_adx
     async def test_execute_code_stream_empty_code(self, sys_op: SysOperation):
         empty_code_results = await self.collect_stream_results(sys_op.code().execute_code_stream(code=""))
         assert len(empty_code_results) == 1
         assert "code can not be empty" in empty_code_results[0].message
 
-    @requires_yuanrong
+    @requires_adx
     async def test_execute_code_stream_unsupported_language(self, sys_op: SysOperation):
         unsupported_results = await self.collect_stream_results(
             sys_op.code().execute_code_stream(code="print(1)", language="java")

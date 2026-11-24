@@ -86,8 +86,8 @@ async def test_stuck_preparation_is_terminated_and_next_round_actually_reclaims(
                 stopped = stop_kind == "stop"
                 assert (await task)["reason"] == "time_budget"
             assert time.monotonic() - began < 0.7
-            assert process.returncode is not None
-            assert tmp_path not in capacity._CAPACITY_WORKERS
+            # The caller can return before the background reaper finishes.
+            await until(lambda: process.returncode is not None and tmp_path not in capacity._CAPACITY_WORKERS)
             # The dead task cannot overwrite this subsequent normal publication.
             candidate = tmp_path / "new-publication"
             shutil.copytree(root, candidate)
