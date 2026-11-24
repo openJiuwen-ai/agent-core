@@ -42,15 +42,18 @@ def serve(startup_seconds: float) -> None:
     def commit_in_process(manifest, *, deadline: float, cancelled):
         if cancelled() or time.monotonic() >= deadline:
             return {"status": "failed", "reason": "time_budget", "removed": []}
-        send({"event": "commit_started"})
         overall_deadline = deadline
-        # Independently enforce the write window even if the parent's event
-        # loop is delayed. The same process owns preparation and both locks.
-        job_deadline[0] = min(deadline, time.monotonic() + capacity.COMMIT_LOCK_SECONDS)
+
+        def start_commit():
+            # Snapshot validation remains under the overall job budget. The
+            # short watchdog applies only when entering the publication lock.
+            job_deadline[0] = min(deadline, time.monotonic() + capacity.COMMIT_LOCK_SECONDS)
+            send({"event": "commit_started"})
+
         try:
             # No grandchild may retain a publication lock after we are killed.
             plan = json.loads(manifest.read_text(encoding="utf-8"))
-            return commit(plan, seconds=min(capacity.COMMIT_LOCK_SECONDS, deadline - time.monotonic()))
+            return commit(plan, seconds=capacity.COMMIT_LOCK_SECONDS, deadline=deadline, on_commit=start_commit)
         finally:
             job_deadline[0] = overall_deadline
             send({"event": "commit_finished"})

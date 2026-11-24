@@ -27,19 +27,24 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.harness.personal_context.context_pipeline import (
     _DIRECTORY_DESCRIPTION_END,
     _DIRECTORY_DESCRIPTION_START,
+    _DIRECTORY_OVERVIEW_END,
+    _DIRECTORY_OVERVIEW_START,
     _MARKDOWN_LINK,
+    _ROOT_NAVIGATION_END,
+    _ROOT_NAVIGATION_START,
+    _assert_canonical_description_names,
     _assert_no_symlinks,
     _assert_path_chain_no_symlinks,
     _atomic_write,
-    _copy_tree,
     _extended_path,
     _is_program_description,
     _managed_block_bounds,
-    _path_is_dir,
+    _markdown_heading,
+    _markdown_label,
+    _markdown_link_target,
     _path_is_file,
-    _render_context_navigation,
+    _replace_managed_block,
     _split_markdown_destination,
-    _validate_description_coverage,
     _walk_tree_paths,
 )
 from openjiuwen.harness.personal_context.context_usage import (
@@ -423,36 +428,37 @@ def _markdown_sizes(root: Path) -> dict[str, int]:
     }
 
 
-def _repair_navigation(root: Path, removed: set[str]) -> None:
-    """Prune empty topics and repair links without a model or a new body usage event."""
-    for directory in sorted(
-        (entry for entry in _walk_tree_paths(root) if _path_is_dir(entry)),
-        key=lambda path: (-len(path.parts), path.as_posix()),
-    ):
-        entries = list(_extended_path(directory).iterdir())
-        if all(entry.name.casefold() == "description.md" for entry in entries):
-            for entry in entries:
-                removed.add((directory / entry.name).relative_to(root).as_posix())
-                entry.unlink()
-            _extended_path(directory).rmdir()
+def _prepare_capacity_candidate(
+    root: Path, candidate: Path, removed: set[str], sizes: dict[str, int],
+) -> tuple[dict[str, int], set[str]]:
+    """Write only changed navigation and backlinks; never copy retained bodies."""
+    _assert_canonical_description_names(root)
+    _extended_path(candidate).mkdir(parents=True)
+    active = {Path()}
 
-    affected = {"description.md"}
-    for relative in removed:
-        for parent in Path(relative).parents:
-            affected.add((parent / "description.md").as_posix())
-    for relative in _markdown_sizes(root):
-        page = _extended_path(root / relative)
-        original = page.read_text(encoding="utf-8")
-        markdown = original
-        if relative in affected and _is_program_description(relative):
-            # A model-written overview of removed knowledge is no longer current.
-            bounds = _managed_block_bounds(
-                markdown, start=_DIRECTORY_DESCRIPTION_START, end=_DIRECTORY_DESCRIPTION_END,
-            )
-            if bounds is not None:
-                begin, finish = bounds
-                markdown = markdown[:begin] + markdown[finish:]
+    def retain_directory(directory):
+        active.update((directory, *directory.parents))
 
+    for relative in sizes.keys() - removed:
+        if not _is_program_description(relative):
+            retain_directory(Path(relative).parent)
+    # A topic containing unrelated files must not be retired with its navigation.
+    extended_root = _extended_path(root)
+    directories = set()
+    for current, _directories, files in os.walk(extended_root, followlinks=False):
+        directory = Path(current).relative_to(extended_root)
+        directories.add(directory)
+        if any(Path(name).suffix.casefold() != ".md" for name in files):
+            retain_directory(directory)
+    removed = removed | {
+        (directory / "description.md").as_posix() for directory in directories - active
+    }
+    affected = {parent for relative in removed for parent in Path(relative).parents}
+    labels = {}
+    descriptions = {}
+    replacements = {}
+
+    def clean_links(markdown, relative):
         def remove_link(match, page_relative=relative):
             split = _split_markdown_destination(match.group(1))
             if split is None:
@@ -465,11 +471,65 @@ def _repair_navigation(root: Path, removed: set[str]) -> None:
                 return match.group(0)
             return match.group(0)[1:].partition("](")[0]
 
-        markdown = rewrite_markdown_prose(markdown, partial(_MARKDOWN_LINK.sub, remove_link))
+        return rewrite_markdown_prose(markdown, partial(_MARKDOWN_LINK.sub, remove_link))
+
+    def replace(relative, markdown):
+        data = markdown.encode("utf-8")
+        _atomic_write(candidate / relative, data)
+        replacements[relative] = len(data)
+
+    for relative in sorted(sizes.keys() - removed):
+        original = _extended_path(root / relative).read_bytes().decode("utf-8")
+        labels[relative] = _markdown_label(_markdown_heading(original, fallback=Path(relative).stem))
+        if _is_program_description(relative):
+            descriptions[relative] = original
+            continue
+        markdown = clean_links(original, relative)
         if markdown != original:
-            _atomic_write(page, markdown.encode("utf-8"))
-    _render_context_navigation(root)
-    _validate_description_coverage(root)
+            replace(relative, markdown)
+
+    direct_pages = {directory: [] for directory in active}
+    child_topics = {directory: [] for directory in active}
+    for relative in sizes.keys() - removed:
+        if not _is_program_description(relative):
+            direct_pages[Path(relative).parent].append(relative)
+    for directory in active - {Path()}:
+        child_topics[directory.parent].append(directory)
+    for directory in sorted(active):
+        relative = (directory / "description.md").as_posix()
+        original = descriptions.get(relative, "")
+        heading = "PersonalContext" if directory == Path() else _markdown_label(directory.name)
+        markdown = clean_links(original, relative) if original.strip() else f"# {heading}\n"
+        if directory in affected:
+            bounds = _managed_block_bounds(
+                markdown, start=_DIRECTORY_DESCRIPTION_START, end=_DIRECTORY_DESCRIPTION_END,
+            )
+            if bounds is not None:
+                begin, finish = bounds
+                markdown = markdown[:begin] + markdown[finish:]
+        rows = []
+        for child in sorted(child_topics[directory]):
+            target = (Path(child.name) / "description.md").as_posix()
+            label = labels.get((child / "description.md").as_posix(), _markdown_label(child.name))
+            rows.append(f"- [{label}]({_markdown_link_target(target)})")
+        for page in sorted(direct_pages[directory]):
+            rows.append(f"- [{labels[page]}]({_markdown_link_target(Path(page).name)})")
+        markdown = _replace_managed_block(
+            markdown, start=_ROOT_NAVIGATION_START, end=_ROOT_NAVIGATION_END,
+            body="## 目录导航\n\n" + "\n".join(rows) if rows else None, default_heading=heading,
+        )
+        if directory in affected or not original.strip():
+            # Reclamation updates structural facts, not semantic summaries or
+            # content signatures that require rereading the whole directory.
+            markdown = _replace_managed_block(
+                markdown, start=_DIRECTORY_OVERVIEW_START, end=_DIRECTORY_OVERVIEW_END,
+                body=("## 目录概览\n\n"
+                      f"- 直属页面：{len(direct_pages[directory])}\n"
+                      f"- 子目录：{len(child_topics[directory])}"), default_heading=heading,
+            )
+        if markdown != original:
+            replace(relative, markdown)
+    return replacements, removed
 
 
 def maintain_capacity(
@@ -492,6 +552,11 @@ def maintain_capacity(
         return cancelled() or time.monotonic() >= deadline
 
     # Preparation never owns a lock needed by normal publication or reads.
+    # Capture the publication generation before scanning or preparing any pages.
+    try:
+        generation = _file_signature(root / "description.md")
+    except FileNotFoundError:
+        generation = None
     sizes = _markdown_sizes(root)
     before_bytes = sum(sizes.values())
     result = {
@@ -502,7 +567,8 @@ def maintain_capacity(
         return result
     if expired():
         return {**result, "status": "over_limit", "reason": "time_budget"}
-    baseline = {relative: _file_signature(root / relative) for relative in sizes}
+    baseline = {relative: _file_signature(root / relative) for relative in sizes if relative != "description.md"}
+    baseline["description.md"] = generation
     try:
         with usage_lock(home).acquire(timeout=0):
             value = _load_usage(home)  # Invalid current records rebuild from the page scan below.
@@ -540,13 +606,9 @@ def maintain_capacity(
         Path(temporary) / ".owner.lock", timeout=0,
     ):
         candidate = Path(temporary) / "context"
-        _copy_tree(root, candidate)
-        if expired():
-            return {**result, "status": "over_limit", "reason": "time_budget"}
-        for relative in removed:
-            _extended_path(candidate / relative).unlink()
-        _repair_navigation(candidate, set(removed))
-        after_bytes = sum(_markdown_sizes(candidate).values())
+        replacements, deleted_paths = _prepare_capacity_candidate(root, candidate, set(removed), sizes)
+        after_bytes = (before_bytes - sum(sizes.get(path, 0) for path in deleted_paths)
+                       + sum(size - sizes.get(path, 0) for path, size in replacements.items()))
         if expired():
             return {**result, "status": "over_limit", "reason": "time_budget"}
         fingerprints = None
@@ -571,25 +633,12 @@ def maintain_capacity(
                 return {**result, "status": "over_limit", "reason": "usage_changed"}
             if expired():
                 return {**result, "status": "over_limit", "reason": "time_budget"}
-            candidate_paths = {
-                page.relative_to(candidate).as_posix(): page
-                for page in _walk_tree_paths(candidate)
-                if page.suffix.casefold() == ".md" and _path_is_file(page)
-            }
-            replacements = []
-            for relative, page in candidate_paths.items():
-                try:
-                    original = _extended_path(root / relative).read_bytes()
-                except FileNotFoundError:
-                    original = None
-                if _extended_path(page).read_bytes() != original:
-                    replacements.append(relative)
             manifest = Path(temporary) / "commit.json"
             manifest.write_text(json.dumps({
                 "root": str(root), "candidate": str(candidate),
                 "lock": str(_state_path(home, "context_update.lock")), "baseline": baseline,
                 "replace": sorted(replacements, key=lambda name: name == "description.md"),
-                "remove": sorted(set(sizes) - set(candidate_paths)),
+                "remove": sorted(deleted_paths),
             }), encoding="utf-8")
             outcome = commit_candidate(manifest, deadline=deadline, cancelled=cancelled)
             actually_removed = set(outcome.get("removed", []))
