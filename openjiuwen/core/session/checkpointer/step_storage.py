@@ -21,12 +21,10 @@ from openjiuwen.core.graph.store import create_serializer
 from openjiuwen.core.session.checkpointer.base import build_key_with_namespace, safe_agent_id
 from openjiuwen.core.session.vcs.codec import encode_context_state
 from openjiuwen.core.session.checkpointer.step_delta import (
-    STEP_WINDOW_KEY,  # noqa: F401  (re-exported for callers building snapshots)
     StepKind,
     StepRecord,
     apply_step_context,
     apply_step_state,
-    build_step_snapshot,  # noqa: F401  (kept for callers that build snapshots directly)
     diff_step_context,
     diff_step_state,
     restore_full_state,
