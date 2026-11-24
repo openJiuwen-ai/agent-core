@@ -488,17 +488,27 @@ class QuestionerDirectReplyHandler:
         return QuestionerUtils.format_questioner_output(output)
 
     def _handle_end_state(self, inputs, session, context):
-        output = QuestionerOutput(**self._state.extracted_key_fields)
+        output = QuestionerOutput(**self._configured_extracted_key_fields())
         output.user_response = self._state.user_response
         output.question = self._state.question
         return output.model_dump(exclude_defaults=True)
+
+    def _configured_extracted_key_fields(self):
+        configured_names = {item.field_name for item in self._config.field_names}
+        return {key: value for key, value in self._state.extracted_key_fields.items()
+                if key in configured_names}
 
     def _is_set_question_content(self):
         return isinstance(self._config.question_content, str) and len(self._config.question_content) > 0
 
     def _need_extract_fields(self):
-        return (self._config.extract_fields_from_response and
-                len(self._config.field_names) > len(self._state.extracted_key_fields))
+        if not self._config.extract_fields_from_response:
+            return False
+        # Compare field names, not counts: the LLM may return keys that were never
+        # configured, and counting them lets those keys satisfy the check while
+        # required fields are still missing (see _filter_non_extracted_key_fields).
+        extracted_key_fields = self._state.extracted_key_fields
+        return any(item.field_name not in extracted_key_fields for item in self._config.field_names)
 
     async def _initial_extract_from_chat_history(self, chat_history, output: OutputCache) -> bool:
         await self._invoke_llm_and_parse_result(chat_history, output)
@@ -661,8 +671,12 @@ class QuestionerDirectReplyHandler:
         return result
 
     def _update_state_of_key_fields(self, key_fields):
+        # Only keep configured fields: anything else the model invents would
+        # otherwise be persisted in the state (and its checkpoint) and outlive
+        # the round it came from.
+        configured_names = {item.field_name for item in self._config.field_names}
         for k, v in key_fields.items():
-            if v:
+            if v and k in configured_names:
                 self._state.extracted_key_fields.update({k: v})
 
     def _update_param_default_value(self, output: OutputCache):
@@ -698,14 +712,17 @@ class QuestionerDirectReplyHandler:
         if is_continue_ask:
             output.key_fields.clear()
         else:
-            output.key_fields.update(self._state.extracted_key_fields)
+            output.key_fields.update(self._configured_extracted_key_fields())
         return is_continue_ask
 
     async def _invoke_llm_and_parse_result(self, chat_history, output):
         llm_inputs = self._build_llm_inputs(chat_history=chat_history)
         extracted_key_fields = await self._invoke_llm_for_extraction(llm_inputs)
+        # Dropping unconfigured keys here as well keeps them out of the assistant
+        # message written back to the context, not just out of the state.
+        configured_names = {item.field_name for item in self._config.field_names}
         for k, v in extracted_key_fields.items():
-            if v:
+            if v and k in configured_names:
                 output.key_fields.update({k: v})
 
         self._update_state_of_key_fields(extracted_key_fields)

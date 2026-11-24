@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/__init__.py`、`openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/runtime/manager.py`、`openjiuwen/core/runner/team_runner.py`、`openjiuwen/core/runner/runner.py` |
-| 最近一次修订日期 | 2026-07-03 |
+| 最近一次修订日期 | 2026-08-19 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -35,7 +35,7 @@ Spec 形态：
 
 5. `TeamAgentSpec`、`LeaderSpec`、`TransportSpec`、`StorageSpec`、`DeepAgentSpec`、`TeamSpec`、`TeamMemberSpec`、`TeamRuntimeContext` 是 `pydantic.BaseModel`，可经 `model_dump()` 完整 JSON 序列化。
 6. Spec 上禁止持有运行时引用：不持有 `Runner`、`Session`、文件句柄、socket、进程句柄、`asyncio` 对象、已构造的 `Messager` / `TeamAgent` 实例等。
-7. `TeamAgentSpec.agent_customizer` 是唯一允许的 `Callable` 字段；其 `Field(exclude=True)` 标记保证它**不进入** `model_dump()`，且只能用于 `spawn_mode='inprocess'`，不能跨进程传递。
+7. `TeamAgentSpec.build_context` 是运行时 provider carrier，以 `Field(exclude=True)` 保证不进入 `model_dump()`；跨序列化边界只携带 plain-data `build_context_seed`，接收侧通过已注册 factory 重建 live context。
 8. `TransportSpec.build()` 与 `StorageSpec.build()` 是 spec → 具体 Config 实例的**唯一桥**，必须经由 `_TRANSPORT_REGISTRY` / `_STORAGE_REGISTRY` 注册表派发；不允许调用方直接 import 具体 Config 类。
 
 build 流向：
@@ -108,7 +108,8 @@ class TeamAgentSpec(BaseModel):
     metadata: dict[str, Any] = {}
     enable_hitt: bool = False
     language: Optional[str] = None
-    agent_customizer: Optional[Callable[..., None]] = Field(default=None, exclude=True)
+    build_context: Any | None = Field(default=None, exclude=True)
+    build_context_seed: dict[str, Any] | None = None
     memory: Optional[TeamMemoryConfig] = None
 
     def build(self) -> TeamAgent: ...
@@ -255,7 +256,7 @@ async def Runner.release(self, session_id: str, *, force: bool = False) -> None
 | `transport` | 构造时（用户）或 `_default_transport_for_spawn_mode` 验证器（`spawn_mode='inprocess'` 时自动填 `TransportSpec(type="inprocess")`） | 不清 | 写回到 spec 自身——dumped spec 保持自描述 |
 | `model_pool` / `model_router` / `model_pool_strategy` | 构造时 | 不清 | `build()` 期间根据 `model_router` 派生 `team_pool` / `team_strategy` 局部变量并写入 `TeamSpec`；**不**修改 `TeamAgentSpec` 自身的这三个字段 |
 | `agents[*].language` | 构造时（用户）或 `build()` 中 `resolve_language()` 下发 | 不清 | 用户未指定时由 spec language 下发，已指定的不覆盖；属于 spec 内部一致性补全 |
-| `agent_customizer` | 构造时 | 不清 | `Field(exclude=True)`，不进入 `model_dump()`；仅 `inprocess` spawn 可用 |
+| `build_context` / `build_context_seed` | 平台装配时 | 不清 | live context 不进入 dump；plain-data seed 跨序列化边界并用于重建 context |
 | `predefined_members` | 构造时 | 不清 | 直接进入 `TeamSpec` 的成员预声明 |
 
 ### TeamRuntimeContext 字段生命周期

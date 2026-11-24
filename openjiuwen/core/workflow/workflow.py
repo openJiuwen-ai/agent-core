@@ -621,20 +621,43 @@ class Workflow(metaclass=_WorkflowMeta):
             compiled_graph = self._internal.compile(sub_workflow_session, context=context)
             await compiled_graph.invoke({INPUTS_KEY: inputs, CONFIG_KEY: kwargs.get(CONFIG_KEY)}, sub_workflow_session)
             if self._is_streaming:
-                frame_count = 0
                 stream_timeout = session.get_env(WORKFLOW_EXECUTE_TIMEOUT)
                 sub_end_ability = self._internal.config().spec.comp_configs.get(self._end_comp_id).abilities
-            required_abilities = [ComponentAbility.STREAM, ComponentAbility.TRANSFORM]
-            stream_ability_count = sum(ability in sub_end_ability for ability in required_abilities)
-            while stream_ability_count > 0:
-                frame = await sub_workflow_session.actor_manager().sub_workflow_stream().receive(stream_timeout)
-                if frame is None:
-                    continue
-                if frame == StreamEmitter.END_FRAME:
-                    stream_ability_count -= 1
-                    continue
-                frame_count += 1
-                yield frame
+                required_abilities = [ComponentAbility.STREAM, ComponentAbility.TRANSFORM]
+                stream_ability_count = sum(ability in sub_end_ability for ability in required_abilities)
+                while stream_ability_count > 0:
+                    frame = await sub_workflow_session.actor_manager().sub_workflow_stream().receive(stream_timeout)
+                    if frame is None:
+                        continue
+                    if frame == StreamEmitter.END_FRAME:
+                        stream_ability_count -= 1
+                        continue
+                    yield frame
+            else:
+                # Interaction frames already use the parent workflow's shared
+                # stream writer; the sub-workflow actor queue holds End frames.
+                node_session = NodeSession(sub_workflow_session, self._end_comp_id)
+                outputs = node_session.state().get_outputs(self._end_comp_id)
+                # Normalize the batched end-node output to the streaming frame
+                # contract: like End.stream, each frame carries an 'output' entry.
+                if outputs is None:
+                    # A streaming End with no inputs yields no frames either.
+                    return
+                if isinstance(outputs, dict):
+                    end_abilities = self._internal.config().spec.comp_configs[self._end_comp_id].abilities
+                    if ComponentAbility.COLLECT in end_abilities and isinstance(outputs.get("output"), list):
+                        # Batched collect result: deliver per chunk, same as
+                        # streaming sub-workflows.
+                        for item in outputs["output"]:
+                            yield {"output": item}
+                    else:
+                        # {'output': ...} / {'response': ...}, same key shape as
+                        # the streaming branch produces for this End config.
+                        yield outputs
+                else:
+                    # Bare value (e.g. filtered by outputs_schema): wrap it like
+                    # End.stream wraps non-dict inputs.
+                    yield {"output": outputs}
         finally:
             await asyncio.shield(sub_workflow_session.close())
             await asyncio.shield(self._internal.reset())
