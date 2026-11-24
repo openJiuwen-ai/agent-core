@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from typing import (
     TYPE_CHECKING,
     Any,
+    NamedTuple,
     Optional,
 )
 
@@ -38,6 +39,22 @@ if TYPE_CHECKING:
 _TAKEOVER_NUDGE_DELAY_SEC = 300.0
 
 
+def _task_cancelling_count() -> int:
+    """Current task's cumulative cancellation-request counter.
+
+    Teardown awaits many inner tasks (EventBus loop/poll tasks, recovery
+    tasks, member disposals); a ``CancelledError`` they raise does not mean
+    the *caller* was cancelled. Snapshot this counter before a teardown
+    segment and compare afterwards: only growth means a new cancellation
+    request targeted the caller task. ``Task.cancelling()`` is cumulative
+    and does not reset after an earlier (possibly intentionally handled)
+    cancellation, so absolute ``> 0`` checks misreport completed teardown
+    as cancelled; inner-task cancellations never touch this counter.
+    """
+    task = asyncio.current_task()
+    return task.cancelling() if task is not None else 0
+
+
 def _leader_reserve_for(limit: Optional[int]) -> int:
     """Leader 预留额度：成员不可推过“总用量阈值”的尾部份额。
 
@@ -59,6 +76,55 @@ def _leader_reserve_for(limit: Optional[int]) -> int:
         return 0
     reserve = max(20, math.ceil(limit * 0.1))
     return min(reserve, 30, limit // 2)
+
+
+class TeardownStep(NamedTuple):
+    """One isolated step of a teardown chain.
+
+    ``name`` labels the step in the error/warning logs emitted by
+    ``CoordinationKernel._run_teardown_steps``; ``run`` is the coroutine to
+    execute. A named record instead of a bare ``(name, step)`` pair keeps
+    call sites self-describing when a chain grows past two or three steps.
+    """
+
+    name: str
+    run: Callable[[], Awaitable[None]]
+
+
+class StopFallbackRelease(NamedTuple):
+    """Permanent-resource release steps the ``stop`` fallback replays.
+
+    Grouped into a named record rather than an anonymous six-element tuple:
+    the producer and the consumer both stay readable (``release.close_memory``
+    instead of "the third element"), and adding or reordering a step cannot
+    silently shift positional meaning. ``as_steps()`` yields the ordered
+    chain consumed by ``_run_teardown_steps``.
+    """
+
+    unsubscribe_transport: TeardownStep
+    close_stream: TeardownStep
+    close_memory: TeardownStep
+    dispose_harness: TeardownStep
+    stop_messager: TeardownStep
+    release_session: TeardownStep
+
+    def as_steps(self) -> tuple[TeardownStep, ...]:
+        """Return the record's steps in execution order."""
+        return tuple(self)
+
+
+class TeardownOutcome(NamedTuple):
+    """What ``_run_teardown_steps`` observed while running a chain.
+
+    ``caller_cancelled`` is True when a *new* cancellation request targeted
+    the calling task during the run (an inner task's cancellation does not
+    set it). ``interrupted_step`` names the step whose await was broken by
+    that caller cancellation — such a step did not finish, so a teardown
+    that latches a terminal state must not claim its resources are released.
+    """
+
+    caller_cancelled: bool
+    interrupted_step: Optional[str] = None
 
 
 class CoordinationKernel:
@@ -90,6 +156,15 @@ class CoordinationKernel:
         # pause/stop calls become no-ops so the Runner-level finally can
         # safely re-trigger them after an external stop_coordination.
         self._lifecycle_state: str = "idle"
+        # Terminal teardown marker for spawned members whose owning asyncio
+        # task has ended (see ``dispose``); keeps a late stop/pause no-op.
+        # ``_disposing`` guards re-entrancy while the teardown runs. The
+        # runner executes every step even when a caller cancellation arrives,
+        # but an interrupted step did not finish — ``_disposed`` is latched
+        # only when no step was interrupted (then the cancellation is
+        # re-raised); a partially torn-down dispose stays retryable.
+        self._disposed: bool = False
+        self._disposing: bool = False
         # Round-scoped shared iteration budget ledger:
         # leader-only; opened/reset per user question, kept across
         # pause/resume, discarded at round finalize.
@@ -421,6 +496,12 @@ class CoordinationKernel:
     def _cancel_takeover_nudge(self) -> None:
         task = self._takeover_nudge_task
         self._takeover_nudge_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _cancel_budget_wake(self) -> None:
+        task = self._budget_wake_task
+        self._budget_wake_task = None
         if task is not None and not task.done():
             task.cancel()
 
@@ -851,6 +932,19 @@ class CoordinationKernel:
 
     async def start(self, session: Any = None) -> None:
         host = self._host
+        if self._disposed:
+            # ``dispose`` is terminal: it already released the harness, stream
+            # and session, and re-starting here would spin up a fresh EventBus
+            # whose only reclaim path (``dispose``) now short-circuits on the
+            # latch — the exact leak this kernel teardown exists to prevent.
+            team_logger.error(
+                "[CoordinationKernel] [{}] start() refused: kernel already disposed",
+                host.member_name or "?",
+            )
+            raise RuntimeError(
+                "CoordinationKernel.start() after dispose(): "
+                "a disposed kernel is terminal"
+            )
         if self._event_bus is None:
             return
         member_name = host.member_name or "?"
@@ -1020,8 +1114,7 @@ class CoordinationKernel:
         if self._lifecycle_state != "running":
             # 防御：历史上半途中断的 teardown 可能留下 state 非 running 但
             # EventBus 仍活的残留态——stop 幂等，顺手收掉周期轮询
-            if self._event_bus is not None:
-                await self._event_bus.stop()
+            await self._stop_event_bus_safely(context="pause early-return")
             return
         host = self._host
         team_logger.info("[CoordinationKernel] [{}] coordination pausing (persistent)", host.member_name or "?")
@@ -1032,6 +1125,8 @@ class CoordinationKernel:
         # finally 的 stop，不改变中段的事件处理语义。pause_polls/stop 均幂等。
         if self._event_bus is not None:
             await self._event_bus.pause_polls()
+        members_torn_down = False
+        propagating_error: BaseException | None = None
         try:
             # Pause, do not tear down: the round stops at a clean inner-iteration
             # boundary and stays resumable in place. This used to hard-cancel via
@@ -1049,6 +1144,7 @@ class CoordinationKernel:
                 await self._mark_live_teammates(MemberStatus.PAUSED)
                 await host.spawn_manager.cancel_recovery_tasks()
                 await host.spawn_manager.shutdown_all_handles()
+                members_torn_down = True
                 self._persist_team_lifecycle("paused")
                 # Make a later cold start (pause -> stop -> start) continue this
                 # round rather than idle waiting for a new message.
@@ -1072,8 +1168,7 @@ class CoordinationKernel:
                     except Exception as e:
                         team_logger.error("[CoordinationKernel] Failed to publish TEAM_STANDBY: {}", e)
             await self.unsubscribe_transport()
-            if self._event_bus is not None:
-                await self._event_bus.stop()
+            await self._stop_event_bus_safely(context="pause")
             self.close_stream()
             host.session_manager.release_session()
             # team_member status update is owned by ``TeamRuntimeManager.finalize_member``
@@ -1083,11 +1178,57 @@ class CoordinationKernel:
             # would trip the kernel.start ``all-SHUTDOWN -> clean_team`` guard and
             # delete a team that should be recoverable.
             self._lifecycle_state = "paused"
+        except BaseException as exc:
+            # 同 stop：主链异常在途时，tail 里的取消不得覆盖它。
+            propagating_error = exc
+            raise
         finally:
-            # EventBus 必停：中段任何一步失败都不能留下周期轮询——否则池条目
-            # 被移除后僵尸内核无限轮询已删除的团队表（no such table 刷屏）。
-            if self._event_bus is not None:
-                await self._event_bus.stop()
+            # EventBus 必停 + 成员 teardown 兜底：前半段（回合暂停/记忆抽取/
+            # 状态标记）任一步失败都不能留下周期轮询或成员任务——它们是独立
+            # asyncio 任务，leader 侧是唯一能取消它们的位置。两步各自独立
+            # 兜底，EventBus 失败不再连带跳过成员拆除。兜底拆成员前先补
+            # PAUSED 标记（best-effort）：中段失败可能停在标记之前，而
+            # handle 一旦 pop 就再无人能区分「外部暂停」与「成员仍在跑」，
+            # 持久态会一直停在 READY/BUSY。
+            members_still_live = (
+                    host.role == TeamRole.LEADER and not members_torn_down
+            )
+            main_chain_aborted = self._lifecycle_state == "running"
+            if main_chain_aborted and host.role == TeamRole.LEADER:
+                # 主链中断（无论成员是否已拆）：lifecycle/pending-resume 可能
+                # 未落，best-effort 补写。若释放 session 尚未执行，这里仍
+                # 能写进 session；已释放时内部直接 no-op。
+                self._persist_pause_fallback_state()
+            # 内存态无条件归一：主链的 ``_lifecycle_state = "paused"`` 在
+            # 末尾，中段任一 await 失败都会停在 running——包括成员已经拆除
+            # （``members_still_live`` 为 False）之后、落 paused 之前的收尾段
+            # （TEAM_STANDBY 发布 / 退订 / 停 bus / 关流 / 释放 session）。
+            # 资源已按暂停语义拆解，状态机不落 paused 会让后续 pause/stop
+            # 把已释放资源当运行中再跑一遍。
+            if main_chain_aborted:
+                self._lifecycle_state = "paused"
+            # latch 之后本内核不再重试 pause：主链没走到的暂停域资源
+            # （退订 / 关流 / 释放 session）必须在这里兜底回收，否则
+            # 流不关、session 不放，且再 pause 已无法补齐。
+            pause_fallback_steps: tuple[TeardownStep, ...] = ()
+            if main_chain_aborted:
+                pause_fallback_steps = (
+                    TeardownStep(
+                        "fallback unsubscribe transport",
+                        self._step_unsubscribe_transport,
+                    ),
+                    TeardownStep("fallback close stream", self._step_close_stream),
+                    TeardownStep(
+                        "fallback release session", self._step_release_session,
+                    ),
+                )
+            await self._teardown_tail(
+                context="pause",
+                tear_down_members=members_still_live,
+                member_status=MemberStatus.PAUSED,
+                propagating_error=propagating_error,
+                extra_steps=pause_fallback_steps,
+            )
 
     async def _mark_live_teammates(self, target_status: MemberStatus) -> None:
         """Persist ``target_status`` for every spawned teammate before tearing down handles.
@@ -1139,6 +1280,26 @@ class CoordinationKernel:
                     target_status.value,
                     e,
                 )
+
+    def _persist_pause_fallback_state(self) -> None:
+        """Persist pause intent when the pause main chain aborted early.
+
+        The main chain writes the lifecycle hint *after* member teardown and
+        the pending-resume marker *after* that; a mid-chain failure skips
+        both while the fallback still kills the member runtimes. Mirrors both
+        writes best-effort: persistence must never mask the original pause
+        error (or the cancellation being propagated).
+        """
+        try:
+            self._persist_team_lifecycle("paused")
+            self._persist_pending_resume()
+        except Exception as exc:
+            team_logger.warning(
+                "[CoordinationKernel] [{}] pause fallback persistence "
+                "failed: {}",
+                self._host.member_name or "?",
+                exc,
+            )
 
     def _persist_team_lifecycle(self, lifecycle: str) -> None:
         """Write the team lifecycle hint into the session's per-team bucket."""
@@ -1263,8 +1424,7 @@ class CoordinationKernel:
         # are no-ops.
         if self._lifecycle_state in ("idle", "stopped"):
             # 防御：同 pause——半途中断的历史 teardown 残留态顺手收轮询（幂等）
-            if self._event_bus is not None:
-                await self._event_bus.stop()
+            await self._stop_event_bus_safely(context="stop early-return")
             return
         host = self._host
         team_logger.info("[CoordinationKernel] [{}] coordination stopping", host.member_name or "?")
@@ -1274,6 +1434,8 @@ class CoordinationKernel:
         # 保留到 finally 的 stop。pause_polls/stop 均幂等。
         if self._event_bus is not None:
             await self._event_bus.pause_polls()
+        handles_torn_down = False
+        propagating_error: BaseException | None = None
         try:
             await self.drain_agent_task()
             host.persist_allocator_state()
@@ -1302,10 +1464,10 @@ class CoordinationKernel:
             await self.unsubscribe_transport()
             await host.spawn_manager.cancel_recovery_tasks()
             await host.spawn_manager.shutdown_all_handles()
+            handles_torn_down = True
             if memory_manager:
                 await memory_manager.close()
-            if self._event_bus is not None:
-                await self._event_bus.stop()
+            await self._stop_event_bus_safely(context="stop")
             self.close_stream()
             # Permanent teardown (not round-end): stop the native and drop its
             # process-global sys_operation so a stopped/discarded member does not
@@ -1326,11 +1488,410 @@ class CoordinationKernel:
             # teammate kernel only tears down runtime and leaves persisted
             # status alone — that is what makes stop -> recover possible.
             self._lifecycle_state = "stopped"
+        except BaseException as exc:
+            # 记下主链在途的异常传给 tail：tail 里到达的取消不得把它顶掉。
+            propagating_error = exc
+            raise
         finally:
-            # EventBus 必停：中段任何一步失败都不能留下周期轮询（僵尸内核
-            # 会持续查询已删除的团队表）。stop 幂等。
-            if self._event_bus is not None:
-                await self._event_bus.stop()
+            # EventBus 必停 + 句柄 teardown 兜底（同 pause）：中段任何一步
+            # 失败都不能留下周期轮询（僵尸内核会持续查询已删除的团队表）
+            # 或成员线程/成员 EventBus。两步各自独立兜底，互不连带。
+            # 兜底拆成员前先补 STOPPED 标记，保持「先写状态再 shutdown」
+            # 的顺序契约。
+            extra_steps: tuple[TeardownStep, ...] = ()
+            if self._lifecycle_state != "stopped":
+                # 主链没走到末尾的 ``stopped``：兜底已拆成员句柄，内存态
+                # 必须同步落终态（与 pause 兜底对称），否则后续 pause/stop
+                # 会把已拆资源当运行中再跑一遍。
+                self._lifecycle_state = "stopped"
+                # latch 之后本内核不再重试：主链没走到的永久资源
+                # （流/连接/内存/harness/messager/session）必须在这里兜底
+                # 回收，否则会一直泄漏到进程退出。
+                extra_steps = self._stop_fallback_release().as_steps()
+            await self._teardown_tail(
+                context="stop",
+                tear_down_members=not handles_torn_down,
+                member_status=MemberStatus.STOPPED,
+                propagating_error=propagating_error,
+                extra_steps=extra_steps,
+            )
+
+    async def dispose(self) -> None:
+        """Release volatile coordination resources after the owning task ends.
+
+        Spawned members run as one asyncio task, but the event bus runs as
+        its own task set (the event loop plus the two 30s poll timers):
+        ending the member task — normally or by cancellation — does not
+        cascade to them. Without this teardown every pause/stop/restart of
+        an in-process member leaves a zombie EventBus polling the mailbox
+        and task board until the process exits.
+
+        Deliberately skips the pause/stop life-cycle semantics — memory
+        extraction, member status writes, resume markers, messager shutdown:
+        those belong to the team transition the leader drives. This only
+        tears down what must not outlive the task.
+
+        Every step runs independently (``_run_teardown_steps``), so a
+        failure or cancellation in one never skips the EventBus stop. The
+        ``_disposed`` latch is set only when no step was interrupted by a
+        caller cancellation: an interrupted step broke mid-await and did not
+        release its resource, so claiming the kernel disposed would make the
+        only remaining retry point a no-op. A partial dispose therefore stays
+        retryable (all steps are idempotent); the caller cancellation is
+        re-raised either way.
+
+        Idempotent; safe to call after ``pause()``/``stop()``.
+        """
+        if self._disposed or self._disposing:
+            return
+        self._disposing = True
+
+        cancelling_before = _task_cancelling_count()
+        try:
+            if self._scheduler is not None:
+                self._scheduler.deactivate()
+            # Leader-only one-shot timers (takeover nudge / budget wrap-up
+            # wake): cancel them like ``stop`` does, so no timer outlives the
+            # kernel it would wake.
+            self._cancel_takeover_nudge()
+            self._cancel_budget_wake()
+            outcome = await self._run_teardown_steps(
+                context="dispose",
+                steps=(
+                    TeardownStep("pause polls", self._step_pause_polls),
+                    TeardownStep("unsubscribe transport", self._step_unsubscribe_transport),
+                    TeardownStep("stop event bus", self._step_stop_event_bus),
+                    TeardownStep("close stream", self._step_close_stream),
+                    TeardownStep("close memory", self._step_close_memory),
+                    TeardownStep("dispose harness", self._step_dispose_harness),
+                    TeardownStep("release session", self._step_release_session),
+                ),
+            )
+            # Latch only when every step actually finished. A caller
+            # cancellation can break a step mid-await: the runner still runs
+            # the remaining steps, but the interrupted one did not release
+            # its resource — claiming `_disposed` would make a later dispose
+            # (the only remaining retry point) a no-op and leak that resource.
+            if outcome.interrupted_step is None:
+                self._lifecycle_state = "stopped"
+                self._disposed = True
+            else:
+                team_logger.warning(
+                    "[CoordinationKernel] [{}] dispose step {} interrupted "
+                    "by a caller cancellation; not latching so a later "
+                    "dispose can retry",
+                    self._host.member_name or "?",
+                    outcome.interrupted_step,
+                )
+            if outcome.caller_cancelled:
+                raise asyncio.CancelledError()
+        finally:
+            self._disposing = False
+            # 兜底。内层取消（bus 内部任务）只在调用方本次确实被取消时
+            # 才向上抛，否则吞掉记日志——不能把已跑完的 dispose 误标成被取消。
+            try:
+                await self._stop_event_bus_safely(context="dispose fallback")
+            except asyncio.CancelledError:
+                if _task_cancelling_count() > cancelling_before:
+                    raise
+                team_logger.warning(
+                    "[CoordinationKernel] [{}] dispose fallback bus stop "
+                    "observed an inner cancellation; ignoring",
+                    self._host.member_name or "?",
+                )
+
+    # Teardown steps shared by ``dispose()`` and the ``stop()`` fallback:
+    # each is a single idempotent unit fed to ``_run_teardown_steps``, so a
+    # failure or cancellation is isolated per step. Keep them idempotent —
+    # the stop fallback may run a step the main chain already completed.
+
+    async def _step_pause_polls(self) -> None:
+        """Pause periodic polls first — the cheapest leak carrier."""
+        if self._event_bus is not None:
+            await self._event_bus.pause_polls()
+
+    async def _step_stop_event_bus(self) -> None:
+        await self._stop_event_bus_safely(context="dispose")
+
+    async def _step_unsubscribe_transport(self) -> None:
+        await self.unsubscribe_transport()
+
+    async def _step_close_stream(self) -> None:
+        self.close_stream()
+
+    async def _step_close_memory(self) -> None:
+        memory_manager = self._host.resources.memory_manager
+        if memory_manager is not None:
+            await memory_manager.close()
+
+    async def _step_dispose_harness(self) -> None:
+        harness = self._host.resources.harness
+        if harness is not None:
+            await harness.dispose()
+
+    async def _step_stop_messager(self) -> None:
+        messager = self._host.infra.messager
+        if messager is not None:
+            await messager.stop()
+
+    async def _step_release_session(self) -> None:
+        self._host.session_manager.release_session()
+
+    async def _run_teardown_steps(
+            self,
+            *,
+            context: str,
+            steps: tuple[TeardownStep, ...],
+    ) -> TeardownOutcome:
+        """Run teardown steps one by one, isolating failures from each other.
+
+        Each step is awaited independently: a failing step is logged and
+        execution continues with the remaining steps. The EventBus stop is
+        one such step, so nothing in the teardown chain can skip it any more.
+
+        Args:
+            context: Teardown phase named in the error logs.
+            steps: The ordered teardown steps.
+
+        Returns:
+            A :class:`TeardownOutcome`. ``caller_cancelled`` reports a
+            *new* cancellation request targeting the caller task during the
+            run (a counter increase — an inner task's cancellation does not
+            touch it); the caller restores cancellation semantics after the
+            remaining steps have run. ``interrupted_step`` names the step
+            whose await was broken by that caller cancellation: it did **not**
+            finish, so callers that latch terminal state must not treat its
+            resources as released. Inner cancellations (e.g. ``EventBus.stop``
+            waiting on the loop task) are logged and swallowed: they say
+            nothing about the caller.
+        """
+        member_name = self._host.member_name or "?"
+        cancelling_before = _task_cancelling_count()
+        caller_cancelled = False
+        interrupted_step: Optional[str] = None
+        for step in steps:
+            try:
+                await step.run()
+            except asyncio.CancelledError:
+                if _task_cancelling_count() > cancelling_before:
+                    caller_cancelled = True
+                    interrupted_step = step.name
+                    continue
+                team_logger.warning(
+                    "[CoordinationKernel] [{}] {} {} observed an inner "
+                    "cancellation; continuing teardown",
+                    member_name,
+                    context,
+                    step.name,
+                )
+            except Exception as exc:
+                team_logger.error(
+                    "[CoordinationKernel] [{}] {} {} failed: {}",
+                    member_name,
+                    context,
+                    step.name,
+                    exc,
+                )
+        return TeardownOutcome(
+            caller_cancelled=caller_cancelled,
+            interrupted_step=interrupted_step,
+        )
+
+    async def _stop_event_bus_safely(self, *, context: str) -> None:
+        """Stop the EventBus, logging a failure instead of raising it.
+
+        Teardown calls this from ``finally`` blocks and from the middle of
+        chains that still have resources to release afterwards: a bus
+        failure must neither abort the remaining steps nor skip the other
+        tail fallback. ``CancelledError`` is propagated as-is; callers
+        (``_teardown_tail`` / the dispose fallback) compare
+        ``_task_cancelling_count()`` deltas to decide whether it was the
+        caller task or an inner bus task, and restore cancellation semantics
+        only for the former.
+
+        Args:
+            context: Teardown phase named in the error log (``pause``,
+                ``stop``, ``dispose``, or an early-return probe).
+        """
+        if self._event_bus is None:
+            return
+        try:
+            await self._event_bus.stop()
+        except Exception as exc:
+            team_logger.error(
+                "[CoordinationKernel] [{}] {} event bus stop failed: {}",
+                self._host.member_name or "?",
+                context,
+                exc,
+            )
+
+    async def _teardown_member_handles_safely(
+            self,
+            *,
+            context: str,
+            member_status: MemberStatus | None = None,
+    ) -> None:
+        """Mark live teammates, cancel recovery tasks, shut down member handles.
+
+        Fallback for pause/stop when the main chain aborted before reaching
+        them: teammate tasks and their EventBuses are independent asyncio
+        tasks, so the leader-side teardown is the only place they can be
+        cancelled. When the main chain failed *before* marking the roster,
+        the same mark runs first — otherwise the persisted status keeps
+        saying READY/BUSY while the runtime is being torn down, violating
+        the "write status, then kill" order of S_03 invariant 16. All steps
+        always run (``_run_teardown_steps``); marking is best-effort, so a
+        broken DB cannot block the handle teardown.
+
+        Args:
+            context: Teardown phase named in the error logs.
+            member_status: Status to persist for live teammates before their
+                handles are dropped; ``None`` when marking is not needed
+                (non-leader fallback, or the main chain already marked).
+        """
+        steps: list[TeardownStep] = []
+        if member_status is not None:
+            steps.append(
+                TeardownStep(
+                    "fallback mark live teammates",
+                    lambda: self._mark_live_teammates(member_status),
+                )
+            )
+        steps.extend(
+            (
+                TeardownStep(
+                    "fallback cancel recovery tasks",
+                    self._host.spawn_manager.cancel_recovery_tasks,
+                ),
+                TeardownStep(
+                    "fallback shutdown member handles",
+                    self._host.spawn_manager.shutdown_all_handles,
+                ),
+            )
+        )
+        outcome = await self._run_teardown_steps(
+            context=context,
+            steps=tuple(steps),
+        )
+        if outcome.caller_cancelled:
+            raise asyncio.CancelledError()
+
+    async def _teardown_tail(
+            self,
+            *,
+            context: str,
+            tear_down_members: bool,
+            member_status: MemberStatus | None = None,
+            propagating_error: BaseException | None = None,
+            extra_steps: tuple[TeardownStep, ...] = (),
+    ) -> None:
+        """Best-effort teardown tail shared by ``pause`` and ``stop``.
+
+        Runs from the teardown chain's ``finally``: the EventBus is always
+        stopped, and — when the main chain did not get there —
+        ``tear_down_members`` tears down the member handles. The steps are
+        isolated, so an EventBus failure no longer skips the member
+        teardown.
+
+        A cancellation that lands during the tail is deferred until all
+        steps have run and then re-raised, so the caller's task stays
+        cancelled while the resources are still reclaimed — unless the main
+        chain is already unwinding a real error (``propagating_error``):
+        raising a fresh ``CancelledError`` from ``finally`` would replace
+        that error and hide the actual failure, so the cancellation is only
+        logged there and the original exception keeps propagating.
+
+        Args:
+            context: Teardown phase named in error logs (``pause``/``stop``).
+            tear_down_members: Whether the member-handle fallback is needed
+                (the main chain aborted before reaching it).
+            member_status: Status to persist for live teammates before they
+                are killed (``PAUSED``/``STOPPED``) when the main chain
+                aborted before marking them; ``None`` otherwise.
+            propagating_error: Exception the main chain is already raising
+                when it entered ``finally``; suppresses the deferred
+                cancellation so the original failure is not masked.
+            extra_steps: Additional best-effort steps run after the member
+                teardown (used by ``stop`` to release the permanent
+                resources its main chain owns). Every step there must be
+                idempotent: the main chain may already have completed some
+                of them before it aborted.
+        """
+        cancelling_before = _task_cancelling_count()
+        try:
+            await self._stop_event_bus_safely(context=context)
+        except asyncio.CancelledError:
+            if _task_cancelling_count() <= cancelling_before:
+                team_logger.warning(
+                    "[CoordinationKernel] [{}] {} event bus stop observed an "
+                    "inner cancellation; continuing tail",
+                    self._host.member_name or "?",
+                    context,
+                )
+        if tear_down_members:
+            try:
+                await self._teardown_member_handles_safely(
+                    context=context,
+                    member_status=member_status,
+                )
+            except asyncio.CancelledError:
+                if _task_cancelling_count() <= cancelling_before:
+                    team_logger.warning(
+                        "[CoordinationKernel] [{}] {} member teardown observed "
+                        "an inner cancellation; continuing tail",
+                        self._host.member_name or "?",
+                        context,
+                    )
+        if extra_steps:
+            await self._run_teardown_steps(context=context, steps=extra_steps)
+        if _task_cancelling_count() > cancelling_before:
+            if propagating_error is None:
+                raise asyncio.CancelledError()
+            # 主链已有异常在途：finally 里再抛 CancelledError 会把它顶掉，
+            # 调用方就再也看不到真正的失败原因（且原异常的回溯一起丢失）。
+            # 取消只记日志，让原异常继续上抛。
+            team_logger.warning(
+                "[CoordinationKernel] [{}] {} deferred cancellation suppressed; "
+                "the in-flight {} keeps propagating",
+                self._host.member_name or "?",
+                context,
+                type(propagating_error).__name__,
+            )
+
+    def _stop_fallback_release(self) -> StopFallbackRelease:
+        """Permanent-resource release steps for the ``stop`` fallback.
+
+        Used only when ``stop()``'s main chain aborted: the kernel is then
+        latched ``stopped`` and never retried, so whatever the main chain
+        did not reach would leak for the process lifetime. Stream and
+        transport teardown are included for the same reason (an unclosed
+        leader stream leaves the client waiting).
+
+        Every step is idempotent — ``close_stream``, ``memory.close``,
+        ``harness.dispose``, ``messager.stop`` and ``release_session`` are
+        all safe to call after the main chain already ran them — so the
+        steps run unconditionally instead of tracking per-step progress.
+        """
+        return StopFallbackRelease(
+            unsubscribe_transport=TeardownStep(
+                "fallback unsubscribe transport", self._step_unsubscribe_transport,
+            ),
+            close_stream=TeardownStep(
+                "fallback close stream", self._step_close_stream,
+            ),
+            close_memory=TeardownStep(
+                "fallback close memory", self._step_close_memory,
+            ),
+            dispose_harness=TeardownStep(
+                "fallback dispose harness", self._step_dispose_harness,
+            ),
+            stop_messager=TeardownStep(
+                "fallback stop messager", self._step_stop_messager,
+            ),
+            release_session=TeardownStep(
+                "fallback release session", self._step_release_session,
+            ),
+        )
 
     async def subscribe_transport(self, team_name: str) -> None:
         host = self._host

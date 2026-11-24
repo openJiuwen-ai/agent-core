@@ -351,6 +351,56 @@ class MemberDao:
             await self._log_member_update_rejection(session, member_name, team_name, TeamMember.status, status)
             return False
 
+    @with_db_retry(False)
+    async def update_member_status_if_in(
+            self,
+            member_name: str,
+            team_name: str,
+            from_statuses: tuple[str, ...],
+            status: str,
+    ) -> bool:
+        """Atomically set ``status`` only while the row is in ``from_statuses``.
+
+        CAS variant of :meth:`update_member_status` for writers that do not
+        own the row. The accepted predecessors come from the caller instead
+        of the target's transition table, so a concurrent authority write —
+        e.g. the leader marking ``PAUSED``/``STOPPED`` while an
+        unhealthy-recovery task normalizes the same member — can never be
+        overwritten: the WHERE clause simply stops matching.
+
+        Args:
+            member_name: Member whose status is normalized.
+            team_name: Team identifier.
+            from_statuses: Values the row must currently hold for the write
+                to happen; an empty tuple rejects without touching the DB.
+            status: Target status.
+
+        Returns:
+            True when exactly this row was updated, False otherwise.
+        """
+        if not from_statuses:
+            return False
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                update(TeamMember)
+                .where(
+                    TeamMember.member_name == member_name,
+                    TeamMember.team_name == team_name,
+                    TeamMember.status.in_(from_statuses),
+                )
+                .values(status=status)
+            )
+            if result.rowcount == 1:
+                await session.commit()
+                team_logger.debug(
+                    "Member %s status updated to %s (conditional on %s)",
+                    member_name,
+                    status,
+                    from_statuses,
+                )
+                return True
+            return False
+
     async def _log_member_update_rejection(
         self,
         session,

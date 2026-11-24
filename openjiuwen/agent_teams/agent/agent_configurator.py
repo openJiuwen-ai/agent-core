@@ -144,7 +144,13 @@ class AgentConfigurator:
 
     @property
     def infra(self) -> TeamInfra:
-        """Return the per-process infrastructure container."""
+        """Return this agent's infrastructure container.
+
+        One ``TeamInfra`` per ``AgentConfigurator`` (and therefore per
+        ``TeamAgent`` instance): it is process-local, but **never shared
+        between agents** — the leader and each teammate own their own, so
+        e.g. ``tiny_agents`` caches are per-agent, not process-global.
+        """
         return self._infra
 
     @property
