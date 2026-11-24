@@ -15,11 +15,13 @@ from typing import Any, Awaitable, Callable, Iterable, Sequence
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.symphony.orchestration.artifacts import GraphArtifacts
+from openjiuwen.symphony.orchestration.contracts import PlanningInput
 from openjiuwen.symphony.orchestration.language import (
     default_beam_plan_title,
     planner_language_instruction,
 )
 from openjiuwen.symphony.orchestration.model import ModelResponseObserver, invoke_json, model_usage_context
+from openjiuwen.symphony.orchestration.planning.input_matching import supplied_input_keys
 from openjiuwen.symphony.orchestration.planning.models import (
     OrchestrationPlan,
     SearchState,
@@ -71,6 +73,7 @@ Return strict JSON only.
 
 You receive:
 - The user's query.
+- Optional named task data in inputs, including host workspace file references.
 - The current Skill being expanded.
 - A search direction: forward or backward.
 - Candidate Skills already validated by existing can_feed edges.
@@ -92,7 +95,7 @@ Schema:
 BEAM_FINAL_RERANK_SYSTEM_PROMPT = """You are a final task orchestration reranker.
 Return strict JSON only.
 
-You receive the user's query, candidate plans produced by bidirectional beam
+You receive the user's query, optional named task data in inputs, candidate plans produced by bidirectional beam
 search, a candidate Skill pool, and the existing can_feed edges available among
 those Skills.
 
@@ -332,6 +335,8 @@ class BidirectionalBeamPlanner:
         language: str = "cn",
         dynamic_overlay: dict[str, Any] | None = None,
         task_cluster_id: str | None = None,
+        layer: str = "skill",
+        inputs: Sequence[PlanningInput] = (),
     ) -> None:
         self.artifacts = artifacts
         self.model = model
@@ -347,6 +352,9 @@ class BidirectionalBeamPlanner:
         )
         self.progress_callback = progress_callback
         self.language = language
+        self.layer = layer
+        self.inputs = [item.model_dump(exclude_none=True) for item in inputs]
+        self.supplied_input_keys = supplied_input_keys(inputs)
         self.dynamic_overlay = dynamic_overlay if isinstance(dynamic_overlay, dict) else {}
         self.task_cluster_id = task_cluster_id
         self.eligible_edges = self._sorted_eligible_edges()
@@ -364,7 +372,15 @@ class BidirectionalBeamPlanner:
         self._current_expansions: dict[str, NeighborExpansion] = {}
         self._current_expansion_aliases: dict[str, list[str]] = {}
 
-    async def plan(self, query: str) -> dict[str, Any]:
+    async def candidate_ids_for_query(self, query: str) -> tuple[str, ...]:
+        """Collect candidates reached by the search before final plan selection."""
+        states, seeds, _ = await self._search(query)
+        candidates = list(seeds)
+        for state in states:
+            candidates.extend(state.skill_ids)
+        return tuple(dict.fromkeys(candidates))
+
+    async def _search(self, query: str) -> tuple[list[BeamState], tuple[str, ...], int]:
         self._reset_beam_progress()
         self._final_rerank_call_count = 0
         self.required_output_types = _required_output_types_from_query(query)
@@ -425,6 +441,10 @@ class BidirectionalBeamPlanner:
                 graph=self._beam_graph.snapshot(),
             )
 
+        return all_states, seed_skill_ids, round_index
+
+    async def plan(self, query: str) -> dict[str, Any]:
+        all_states, seed_skill_ids, round_index = await self._search(query)
         final_states = self._merge_converged_states(all_states)
         plans = self._plans_from_states(final_states)[: self.top_k]
         recommended_plans = [self._plan_payload(plan, query=query) for plan in plans]
@@ -486,6 +506,11 @@ class BidirectionalBeamPlanner:
             "reason": reason,
         }
 
+    def _system_prompt(self, prompt: str) -> str:
+        if self.layer == "expert":
+            prompt = prompt.replace("Skill", "expert") + "\nExisting skill_id fields identify experts in this request."
+        return f"{prompt}\n{planner_language_instruction(self.language)}"
+
     async def judge_expansions(
         self,
         query: str,
@@ -502,10 +527,12 @@ class BidirectionalBeamPlanner:
             "current_skill": skill_payload(current_skill),
             "candidates": [self._candidate_payload(expansion) for expansion in expansions],
         }
+        if self.inputs:
+            payload["inputs"] = self.inputs
         with model_usage_context("orchestration", "bidirectional_beam_judgement"):
             raw = await invoke_json(
                 self.model,
-                system_prompt=(f"{BEAM_JUDGE_SYSTEM_PROMPT}\n{planner_language_instruction(self.language)}"),
+                system_prompt=self._system_prompt(BEAM_JUDGE_SYSTEM_PROMPT),
                 user_content=json.dumps(payload, ensure_ascii=False),
                 error_context="Symphony bidirectional beam judgement",
                 response_observer=self.model_response_observer,
@@ -557,7 +584,7 @@ class BidirectionalBeamPlanner:
             with model_usage_context("orchestration", "beam_final_rerank"):
                 raw = await invoke_json(
                     self.model,
-                    system_prompt=(f"{BEAM_FINAL_RERANK_SYSTEM_PROMPT}\n{planner_language_instruction(self.language)}"),
+                    system_prompt=self._system_prompt(BEAM_FINAL_RERANK_SYSTEM_PROMPT),
                     user_content=json.dumps(payload, ensure_ascii=False),
                     error_context="Symphony beam final rerank",
                     request_overrides={"extra_body": {"thinking": {"type": "disabled"}}},
@@ -605,7 +632,7 @@ class BidirectionalBeamPlanner:
         seed_skill_ids: tuple[str, ...],
     ) -> dict[str, Any]:
         candidate_skill_ids = _candidate_plan_skill_ids(recommended_plans)
-        return {
+        payload = {
             "query": query,
             "required_output_types": sorted(self.required_output_types),
             "candidate_skill_pool": self._candidate_skill_pool_for_rerank(
@@ -618,6 +645,9 @@ class BidirectionalBeamPlanner:
                 for index, plan in enumerate(recommended_plans, start=1)
             ],
         }
+        if self.inputs:
+            payload["inputs"] = self.inputs
+        return payload
 
     def _candidate_skill_pool_for_rerank(
         self,
@@ -817,11 +847,10 @@ class BidirectionalBeamPlanner:
             (skill_id(edge.get("source")), skill_id(edge.get("target"))): edge for edge in self.eligible_edges
         }
         edge_items = [edge_plan_item(edge_by_key[edge]) for edge in selected_edges]
-        status = "needs_input" if missing_inputs else "ready"
         reason = _short_text(str(selection.get("reason") or ""))
         return {
             "title": _query_plan_title(query, language=self.language),
-            "status": status,
+            "status": "ready",
             "steps": steps,
             "stages": _rerank_plan_stages(steps, edge_items),
             "produced_artifacts": _dedupe_dict_items(produced_artifacts),
@@ -829,7 +858,7 @@ class BidirectionalBeamPlanner:
             "can_feed_edges": edge_items,
             "reason": reason,
             "reasons": [reason] if reason else [],
-            "plan_classification": ("executable" if status == "ready" else "structurally_valid_but_incomplete"),
+            "plan_classification": "structurally_valid_but_incomplete" if missing_inputs else "executable",
             "connectivity_trace": ["can_feed"] if edge_items else [],
             "source": "bidirectional_beam_final_rerank",
         }
@@ -1132,6 +1161,7 @@ class BidirectionalBeamPlanner:
                     seed_skill_ids=state.seed_skill_ids,
                     skill_by_id=self.skill_by_id,
                     can_feed_edges=self.eligible_edges,
+                    supplied_inputs=self.supplied_input_keys,
                 ),
             )
             for state in states
@@ -1273,6 +1303,7 @@ class BidirectionalBeamPlanner:
             seed_skill_ids=state.seed_skill_ids,
             skill_by_id=self.skill_by_id,
             can_feed_edges=self.eligible_edges,
+            supplied_inputs=self.supplied_input_keys,
         )
 
     def _state_edge_confidence(self, state: BeamState) -> float:
@@ -1318,7 +1349,7 @@ class BidirectionalBeamPlanner:
                 "title": title,
                 "reason": reason,
                 "plan_classification": (
-                    "executable" if plan.status == "ready" else "structurally_valid_but_incomplete"
+                    "structurally_valid_but_incomplete" if plan.missing_inputs else "executable"
                 ),
                 "connectivity_trace": (["can_feed"] if plan.can_feed_edges else []),
                 "source": "bidirectional_beam",

@@ -63,7 +63,7 @@ def test_state_to_plan_projects_inputs_outputs_and_edge_metadata():
         can_feed_edges=edges,
     )
 
-    assert plan.status == "needs_input"
+    assert plan.status == "ready"
     assert [step.skill_id for step in plan.steps] == ["draft", "review"]
     assert plan.missing_inputs == [{"name": "brief", "type": "text", "skill_id": "draft"}]
     assert plan.consumed_user_artifacts == 0

@@ -7,9 +7,10 @@ import asyncio
 import copy
 import os
 import uuid
-from dataclasses import replace
-from contextlib import AbstractAsyncContextManager, ExitStack, aclosing, contextmanager, suppress
 import warnings
+from collections.abc import Mapping
+from contextlib import AbstractAsyncContextManager, ExitStack, aclosing, contextmanager, suppress
+from dataclasses import replace
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -19,6 +20,7 @@ from typing import (
     Callable,
     Dict,
     List,
+    Literal,
     Optional,
     Tuple,
     cast,
@@ -28,7 +30,7 @@ import anyio
 
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.errors import build_error, raise_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.logging.invocation import invocation_log_scope
 from openjiuwen.core.common.run_context import normalize_run_context
@@ -46,6 +48,25 @@ from openjiuwen.core.controller.schema.event import (
     TaskInteractionEvent,
 )
 from openjiuwen.core.controller.schema.task import TaskStatus
+from openjiuwen.core.events.builtins.event_types.prompt_compose import (
+    PromptComposeInput,
+    PromptComposeOutput,
+    PromptSectionSpec,
+)
+from openjiuwen.core.events.builtins.event_types.prompt_section import (
+    PROMPT_SECTION,
+    PromptSectionInput,
+    PromptSectionOutput,
+)
+from openjiuwen.core.events.builtins.event_types.turn import (
+    TURN_COMPLETE,
+    TURN_START,
+    TurnCompleteInput,
+    TurnCompleteOutput,
+    TurnStartInput,
+    TurnStartOutput,
+)
+from openjiuwen.core.events.types import Event, SessionContext
 from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.kv_cache.kv_cache_metadata import KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV
@@ -53,6 +74,7 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream.base import OutputSchema, StreamMode
+from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.rail.base import (
@@ -66,6 +88,8 @@ from openjiuwen.core.single_agent.rail.base import (
     log_rail_init_breakdown,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.goal.manager import GoalManager
+from openjiuwen.harness.goal.schema import GoalRecord, GoalStatus
 from openjiuwen.harness.image_modality_probe import (
     get_cached_image_support,
     schedule_image_support_probe,
@@ -79,16 +103,30 @@ from openjiuwen.harness.schema.config import (
     DeepAgentConfig,
     resolve_inner_react_max_iterations,
 )
-from openjiuwen.harness.schema.stop_condition import (
-    NoProgressAnswerEvaluator,
-    StopConditionEvaluator,
+from openjiuwen.harness.schema.interaction import (
+    ActiveInteractionRound,
+    InputDispatchMode,
+    InteractionEvent,
+    InteractionOutputStream,
+    InteractionPhase,
+    OutputLease,
+    OutputLeaseManager,
+    RoundOutcome,
+    RoundWorkItem,
+    SendInputRequest,
 )
 from openjiuwen.harness.schema.state import (
     _SESSION_RUNTIME_ATTR,
     _SESSION_STATE_KEY,
     DeepAgentState,
+    TurnState,
+)
+from openjiuwen.harness.schema.stop_condition import (
+    NoProgressAnswerEvaluator,
+    StopConditionEvaluator,
 )
 from openjiuwen.harness.security.factory import build_permission_interrupt_rail
+from openjiuwen.harness.task_loop.event_manager import EventManager
 from openjiuwen.harness.task_loop.loop_coordinator import (
     LoopCoordinator,
 )
@@ -110,26 +148,12 @@ from openjiuwen.harness.tools.subagent._control_registry import (
     _CONTROL_ATTR,
     release_subagent_control,
 )
-from openjiuwen.harness.goal.manager import GoalManager
-from openjiuwen.harness.goal.schema import GoalRecord, GoalStatus
-from openjiuwen.harness.schema.interaction import (
-    ActiveInteractionRound,
-    InteractionEvent,
-    InteractionPhase,
-    InteractionOutputStream,
-    OutputLease,
-    OutputLeaseManager,
-    InputDispatchMode,
-    RoundOutcome,
-    RoundWorkItem,
-    SendInputRequest,
-)
-from openjiuwen.harness.task_loop.event_manager import EventManager
 
 if TYPE_CHECKING:
     from openjiuwen.core.controller.modules.event_queue import (
         EventQueue,
     )
+    from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
     from openjiuwen.harness.schema.config import SubAgentConfig
 
 from openjiuwen.harness.prompts import (
@@ -320,10 +344,17 @@ def _expert_role_unload_content(role_name: str, language: str = "cn") -> str:
 class DeepAgent(BaseAgent):
     """High-level agent that delegates to an internal ReActAgent."""
 
-    def __init__(self, card: AgentCard):
+    def __init__(
+        self,
+        card: AgentCard,
+        *,
+        extension_bus: "ExtensionEventBusProtocol | None" = None,
+    ):
         self._deep_config: Optional[DeepAgentConfig] = None
         self._react_agent: Optional[ReActAgent] = None
         self._pending_rails: List[AgentRail] = []
+        self._pending_tool_registrations: List[Tool] = []
+        self._pending_subagent_registrations: List[SubAgentConfig] = []
         self._stale_rails: List[AgentRail] = []
         self._registered_rails: List[AgentRail] = []
         self._loop_coordinator: Optional[LoopCoordinator] = None
@@ -340,7 +371,12 @@ class DeepAgent(BaseAgent):
         self._active_agent_template: tuple[str, str] | None = None
         self._session_toolkit: SessionToolkit | None = None
         self._pending_harness_configs: List[str] = []
-        self.prompt_attachment_manager: PromptAttachmentManager = PromptAttachmentManager()
+        self._extension_bus = extension_bus
+        self._defer_event_tool_registration = False
+        self._event_initialized_rails: set[int] = set()
+        self.prompt_attachment_manager: PromptAttachmentManager = PromptAttachmentManager(
+            event_bus=extension_bus,
+        )
         self._interaction_session: Optional[Session] = None
         self._interaction_phase = InteractionPhase.IDLE
         self._active_interaction_round: Optional[ActiveInteractionRound] = None
@@ -377,6 +413,11 @@ class DeepAgent(BaseAgent):
     def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
         """Attach or clear the session toolkit (wired by SubagentRail async)."""
         self._session_toolkit = toolkit
+
+    def set_extension_bus(self, bus: "ExtensionEventBusProtocol | None") -> None:
+        """Attach or clear the optional bus used by prompt attachment events."""
+        self._extension_bus = bus
+        self.prompt_attachment_manager.event_bus = bus
 
     def set_fresh_input_context_factory(
         self,
@@ -416,7 +457,13 @@ class DeepAgent(BaseAgent):
             except Exception:
                 logger.exception("[DeepAgent] task resource cleanup failed")
 
-    def configure(self, config: DeepAgentConfig) -> "DeepAgent":
+    def configure(
+        self,
+        config: DeepAgentConfig,
+        *,
+        defer_event_tool_registration: bool = False,
+        deferred_event_tool_card_ids: Optional[set[str]] = None,
+    ) -> "DeepAgent":
         """Apply configuration and rebuild the internal ReActAgent."""
         # Factory config_kwargs are applied after dataclass construction.
         config.__post_init__()
@@ -428,10 +475,17 @@ class DeepAgent(BaseAgent):
             )
 
         self._filter_disabled_tools(config)
-        if self._deep_config is None:
-            self._initial_configure(config)
-        else:
-            self._hot_reconfigure(config)
+        self._defer_event_tool_registration = defer_event_tool_registration
+        try:
+            if self._deep_config is None:
+                self._initial_configure(config)
+            else:
+                self._hot_reconfigure(
+                    config,
+                    deferred_event_tool_card_ids=deferred_event_tool_card_ids,
+                )
+        finally:
+            self._defer_event_tool_registration = False
 
         self._initialized = False
         return self
@@ -506,6 +560,29 @@ class DeepAgent(BaseAgent):
 
     def _initial_configure(self, config: DeepAgentConfig) -> None:
         """First-time setup: persist config, create the inner ReActAgent, and queue rails."""
+        event_subagents: list[SubAgentConfig] = []
+        if config.subagent_registration_mode == "event":
+            from openjiuwen.harness.schema.config import SubAgentConfig
+
+            if config.event_subagent_configs is not None:
+                event_subagents = list(config.event_subagent_configs)
+            else:
+                event_subagents = [
+                    subagent
+                    for subagent in config.subagents or []
+                    if isinstance(subagent, SubAgentConfig)
+                ]
+            event_ids = {id(subagent) for subagent in event_subagents}
+            static_subagents = [
+                subagent
+                for subagent in config.subagents or []
+                if id(subagent) not in event_ids
+            ]
+            config = replace(
+                config,
+                subagents=static_subagents or None,
+                event_subagent_configs=event_subagents or None,
+            )
         self._deep_config = config
         # Exposure is an agent-level registration policy.  Configure it before
         # the factory adds ``config.tools`` and before rails can register their
@@ -520,6 +597,9 @@ class DeepAgent(BaseAgent):
             self.ability_manager.set_owner_id(self._resolve_tool_owner_id(config))
 
         self._react_agent = self._create_react_agent()
+        if config.subagent_registration_mode == "event":
+            for subagent in event_subagents:
+                self._queue_subagent_registration(subagent)
         self._queue_pending_rails(config)
 
     def _goal_prompt_language(
@@ -529,9 +609,75 @@ class DeepAgent(BaseAgent):
         cfg = config if config is not None else self._deep_config
         return resolve_language(None if cfg is None else cfg.language)
 
-    def _hot_reconfigure(self, config: DeepAgentConfig) -> None:
+    def _prepare_event_subagent_hot_reconfigure(
+        self,
+        config: DeepAgentConfig,
+        previous_config: Optional[DeepAgentConfig],
+    ) -> DeepAgentConfig:
+        """Preserve registered event sub-agents while queueing new ones.
+
+        ``load_subagent_config`` appends the event payload to the live config.
+        A later hot reconfigure receives the provider's static subset, so
+        replacing ``_deep_config`` directly would hide already-registered
+        event agents and duplicate them on the next initialization. Existing
+        identities remain authoritative; new identities are queued once.
+        """
+        if config.subagent_registration_mode != "event":
+            return config
+
+        from openjiuwen.harness.schema.config import SubAgentConfig
+
+        previous_event_names = {
+            item.agent_card.name
+            for item in (previous_config.event_subagent_configs or [])
+            if isinstance(item, SubAgentConfig)
+        } if previous_config is not None else set()
+        new_event_configs = [
+            item
+            for item in (config.event_subagent_configs or [])
+            if isinstance(item, SubAgentConfig)
+        ]
+        new_event_names = {item.agent_card.name for item in new_event_configs}
+        configured = list(config.subagents or [])
+        configured_names = {
+            item.agent_card.name
+            for item in configured
+            if isinstance(item, SubAgentConfig)
+        }
+
+        # Keep the already-bound copy (including any provider-resolved runtime
+        # handles) for identities that remain event-managed in the new config.
+        if previous_config is not None:
+            for item in previous_config.subagents or []:
+                if not isinstance(item, SubAgentConfig):
+                    continue
+                name = item.agent_card.name
+                if name in previous_event_names and name in new_event_names and name not in configured_names:
+                    configured.append(item)
+                    configured_names.add(name)
+
+        pending_names = {
+            item.agent_card.name
+            for item in self._pending_subagent_registrations
+            if isinstance(item, SubAgentConfig)
+        }
+        for item in new_event_configs:
+            name = item.agent_card.name
+            if name not in previous_event_names and name not in pending_names:
+                self._queue_subagent_registration(item)
+                pending_names.add(name)
+
+        return replace(config, subagents=configured or None)
+
+    def _hot_reconfigure(
+        self,
+        config: DeepAgentConfig,
+        *,
+        deferred_event_tool_card_ids: Optional[set[str]] = None,
+    ) -> None:
         """Hot-reconfigure an already-running agent without restarting it."""
         previous_config = self._deep_config
+        config = self._prepare_event_subagent_hot_reconfigure(config, previous_config)
         self._deep_config = config
         self.ability_manager.set_tool_exposure_policy(
             config.progressive_tool_enabled,
@@ -550,6 +696,7 @@ class DeepAgent(BaseAgent):
             self._hot_reload_tools(
                 config,
                 previous_tools=(previous_config.tools if previous_config is not None else None),
+                deferred_event_tool_card_ids=deferred_event_tool_card_ids,
             )
 
         if config.system_prompt is not None and self._react_agent is not None:
@@ -594,9 +741,15 @@ class DeepAgent(BaseAgent):
             for rail in self._registered_rails:
                 if type(rail) in replacing_types:
                     self._stale_rails.append(rail)
+                    self._event_initialized_rails.discard(id(rail))
                 else:
                     retained.append(rail)
             self._registered_rails = retained
+            removed_pending = [
+                rail for rail in self._pending_rails if type(rail) in replacing_types
+            ]
+            for rail in removed_pending:
+                self._event_initialized_rails.discard(id(rail))
             self._pending_rails = [
                 rail for rail in self._pending_rails
                 if type(rail) not in replacing_types
@@ -606,6 +759,7 @@ class DeepAgent(BaseAgent):
             self._stale_rails.extend(self._registered_rails)
             self._registered_rails.clear()
             self._pending_rails.clear()
+            self._event_initialized_rails.clear()
 
     def _hot_reload_model(self, config: DeepAgentConfig) -> None:
         """Apply updated model/iteration config to the live inner ReActAgent.
@@ -756,6 +910,7 @@ class DeepAgent(BaseAgent):
         config: DeepAgentConfig,
         *,
         previous_tools: Optional[List[ToolCard]] = None,
+        deferred_event_tool_card_ids: Optional[set[str]] = None,
     ) -> None:
         """Sync tool cards in the shared AbilityManager during hot-reconfigure.
 
@@ -790,10 +945,21 @@ class DeepAgent(BaseAgent):
                     self._unregister_tool_resource(card)
             self.ability_manager.remove(stale)
 
-        # Add or replace tools whose id has changed (or are new).
+        # Add or replace tools whose id has changed (or are new). When parts
+        # are being applied to an existing event-mode agent, concrete tools
+        # must remain absent until the registration event succeeds; the apply
+        # phase queues those instances and adds pure cards separately.
+        defer_event_tools = (
+            getattr(self, "_defer_event_tool_registration", False)
+            and config.tool_registration_mode == "event"
+        )
         for name, card in new_by_name.items():
             existing = self.ability_manager.get(name)
             existing_tool = existing if isinstance(existing, ToolCard) else None
+            if defer_event_tools and card.id in (deferred_event_tool_card_ids or set()):
+                if existing_tool is not None:
+                    self.ability_manager.remove_ability(name)
+                continue
             same_card = existing_tool is not None and existing_tool.id == card.id
             if same_card and (name != "paid_search" or existing_tool == card):
                 self._ensure_builtin_tool_resource(card, config)
@@ -862,6 +1028,87 @@ class DeepAgent(BaseAgent):
                 rail.system_prompt_builder = builder
             if hasattr(rail, "_system_prompt_builder"):
                 setattr(rail, "_system_prompt_builder", builder)
+
+    async def compose_prompt_sections(
+        self,
+        compose_input: PromptComposeInput,
+        bus: ExtensionEventBusProtocol,
+        session_context: SessionContext,
+    ) -> PromptComposeOutput:
+        """Build an immutable, event-processed view of the effective prompt sections.
+
+        The shared builder remains the source of native filtering and ordering. The
+        returned section view is request-local and can therefore be rendered without
+        re-reading mutable builder state after compose handlers have run.
+        """
+        builder = self.system_prompt_builder
+        if builder is None:
+            raise_error(
+                StatusCode.EVENTS_STATE_INVALID,
+                reason="prompt.compose requires an initialized system prompt builder",
+            )
+        if not isinstance(compose_input, PromptComposeInput):
+            raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="prompt.compose input is invalid")
+        if not isinstance(session_context, SessionContext) or not session_context.session_id:
+            raise_error(StatusCode.EVENTS_STATE_INVALID, reason="prompt.compose requires a session context")
+
+        output_style = compose_input.output_style
+        compose_detail = {
+            "model": compose_input.model,
+            "prompt_model": compose_input.prompt_model,
+            "surfaces": compose_input.surfaces,
+            "tools": compose_input.tools,
+            "traits": compose_input.traits,
+            "output_style": (
+                {
+                    "name": output_style.name,
+                    "is_keeping_coding_instructions": output_style.is_keeping_coding_instructions,
+                }
+                if output_style is not None
+                else None
+            ),
+            "detail": dict(compose_input.detail),
+        }
+        sections: list[PromptSectionSpec] = []
+        for section in builder.get_effective_sections():
+            rendered = section.render(builder.language)
+            section_input = PromptSectionInput(
+                name=str(section.name),
+                text=rendered if rendered.strip() else None,
+                detail={
+                    "priority": int(builder.get_effective_priority(section)),
+                    "declared_priority": int(section.priority),
+                    "category": getattr(section.category, "value", section.category),
+                    "carrier": str(getattr(section, "carrier", "system_message")),
+                    "language": builder.language,
+                    "prompt_mode": getattr(getattr(builder, "mode", None), "value", getattr(builder, "mode", None)),
+                    "compose": compose_detail,
+                },
+            )
+            section_output = await bus.trigger(
+                Event(PROMPT_SECTION, section_input),
+                session_context,
+            )
+            if not isinstance(section_output, PromptSectionOutput):
+                raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="prompt.section returned an invalid output")
+            if section_output.text is None or not section_output.text.strip():
+                continue
+
+            category = getattr(section.category, "value", section.category)
+            if category is not None and not isinstance(category, str):
+                category = str(category)
+            carrier = str(getattr(section, "carrier", "system_message"))
+            sections.append(
+                PromptSectionSpec(
+                    id=str(section.name),
+                    text=section_output.text,
+                    priority=int(builder.get_effective_priority(section)),
+                    category=category,
+                    carrier=carrier,
+                    detail=section_input.detail,
+                )
+            )
+        return PromptComposeOutput(sections=tuple(sections))
 
     def apply_prompt_builder_to_react_agent(self) -> None:
         """Re-render the current system_prompt_builder into the inner ReActAgent.
@@ -945,6 +1192,88 @@ class DeepAgent(BaseAgent):
             return
         self._pending_rails.append(rail)
         logger.info("[DeepAgent] %s added from environment", type(rail).__name__)
+
+    def uses_event_tool_registration(self) -> bool:
+        """Return whether startup tool instances use the event bridge."""
+        return (
+            self._deep_config is not None
+            and self._deep_config.tool_registration_mode == "event"
+        )
+
+    def queue_tool_registration(self, tool: Tool) -> None:
+        """Queue one concrete startup tool for FIFO event registration."""
+        if not isinstance(tool, Tool):
+            raise TypeError("startup tool registration requires a concrete Tool")
+        self._pending_tool_registrations.append(tool)
+
+    async def _flush_tool_registrations(self) -> None:
+        """Register queued startup tools through ``tool.register`` in FIFO order."""
+        if not self._pending_tool_registrations:
+            return
+        if self._extension_bus is None:
+            raise RuntimeError("event tool registration requires an extension bus")
+
+        from openjiuwen.core.events.builtins.event_types.tool_register import (
+            TOOL_REGISTER,
+            ToolRegisterInput,
+            ToolRegisterTriggerContext,
+        )
+
+        while self._pending_tool_registrations:
+            tool = self._pending_tool_registrations[0]
+            await self._extension_bus.trigger(
+                Event(TOOL_REGISTER, ToolRegisterInput(source=tool)),
+                trigger_context=ToolRegisterTriggerContext(agent=self),
+            )
+            # Remove only after the event has completed successfully. If CORE,
+            # a built-in handler, or a user handler fails, retrying initialization
+            # must start with this uncompleted item.
+            del self._pending_tool_registrations[0]
+
+    def _uses_event_subagent_registration(self) -> bool:
+        """Return whether startup sub-agent configs use the event bridge."""
+        return (
+            self._deep_config is not None
+            and self._deep_config.subagent_registration_mode == "event"
+        )
+
+    def _queue_subagent_registration(self, config: "SubAgentConfig") -> None:
+        """Queue one startup sub-agent config for FIFO event registration."""
+        from openjiuwen.harness.schema.config import SubAgentConfig
+
+        if not isinstance(config, SubAgentConfig):
+            raise TypeError("startup subagent registration requires a SubAgentConfig")
+        self._pending_subagent_registrations.append(config)
+
+    async def _flush_subagent_registrations(self) -> None:
+        """Register queued startup sub-agents through ``agent.register``."""
+        if not self._pending_subagent_registrations:
+            return
+        if self._extension_bus is None:
+            raise RuntimeError("event subagent registration requires an extension bus")
+
+        from openjiuwen.core.events.builtins.event_types.agent_register import (
+            AGENT_REGISTER,
+            AgentRegisterInput,
+            AgentRegisterTriggerContext,
+            prepare_agent_register_input,
+        )
+
+        while self._pending_subagent_registrations:
+            config = self._pending_subagent_registrations[0]
+            prepared = prepare_agent_register_input(
+                AgentRegisterInput.from_subagent_config(config),
+            )
+            await self._extension_bus.trigger(
+                Event(
+                    AGENT_REGISTER,
+                    prepared,
+                ),
+                trigger_context=AgentRegisterTriggerContext(agent=self),
+            )
+            # Remove only after the event has completed successfully. A USER,
+            # BUILTIN, or CORE failure leaves the item available for a retry.
+            del self._pending_subagent_registrations[0]
 
     def _build_online_training_rail_from_env(self) -> AgentRail | None:
         """Build the env-selected online training Rail without duplicating existing rails."""
@@ -1469,6 +1798,10 @@ class DeepAgent(BaseAgent):
 
         self._sync_prompt_builder_references()
 
+        # Factory-supplied concrete tools are queued synchronously by
+        # apply_deep_agent_parts. Flush them before any rail sees the agent.
+        await self._flush_tool_registrations()
+
         # Unregister stale rails left over from a previous configure() cycle.
         # Skip rails that are also in pending (same instance): they will be
         # re-initialized by the pending loop below without needing a full retire.
@@ -1507,9 +1840,18 @@ class DeepAgent(BaseAgent):
                 if isinstance(rail_inst, DeepAgentRail):
                     rail_inst.set_sys_operation(self._deep_config.sys_operation)
                     rail_inst.set_workspace(self._deep_config.workspace)
-                rail_init_timings.append(
-                    (type(rail_inst).__name__, init_rail(rail_inst, self))
-                )
+                if id(rail_inst) in self._event_initialized_rails:
+                    rail_init_timings.append((type(rail_inst).__name__, 0.0))
+                else:
+                    queue_size = len(self._pending_tool_registrations)
+                    rail_init_timings.append(
+                        (type(rail_inst).__name__, init_rail(rail_inst, self))
+                    )
+                    if len(self._pending_tool_registrations) > queue_size:
+                        self._event_initialized_rails.add(id(rail_inst))
+                # A higher-priority rail may contribute tools needed by later
+                # rails. Keep event-mode ordering identical to legacy init order.
+                await self._flush_tool_registrations()
                 await self._register_rail_selective(rail_inst)
                 initializing_rail = None
             if moa_integration is not None:
@@ -1518,6 +1860,11 @@ class DeepAgent(BaseAgent):
             if moa_integration is not None:
                 await moa_integration.rollback(initializing_rail)
             raise
+
+        # Register startup sub-agents only after every parent rail has been
+        # initialized.  This lets Extension Binder reuse Jiuwen's custom
+        # BrowserTaskPromptRail instead of creating a generic rail.
+        await self._flush_subagent_registrations()
 
         # ProgressiveToolRail owns the BM25 catalog. Build its initial
         # snapshot only after every pending startup rail has registered its
@@ -1989,7 +2336,10 @@ class DeepAgent(BaseAgent):
         )
 
     @staticmethod
-    def _to_effective_inputs(invoke_inputs: InvokeInputs) -> Dict[str, Any]:
+    def _to_effective_inputs(
+        invoke_inputs: InvokeInputs,
+        turn_state: TurnState | None = None,
+    ) -> Dict[str, Any]:
         """Convert typed invoke inputs to ReAct input dict."""
         effective_inputs: Dict[str, Any] = {"query": invoke_inputs.query}
         if invoke_inputs.conversation_id is not None:
@@ -2012,6 +2362,8 @@ class DeepAgent(BaseAgent):
             effective_inputs["run_kind"] = invoke_inputs.run_kind
         if invoke_inputs.run_context is not None:
             effective_inputs["run_context"] = invoke_inputs.run_context
+        if turn_state is not None:
+            effective_inputs["_turn_state"] = turn_state
         return effective_inputs
 
     @staticmethod
@@ -2077,6 +2429,11 @@ class DeepAgent(BaseAgent):
         await session.pre_run(inputs=self._to_effective_inputs(inputs))
         return session
 
+    def _bind_session_runtime(self, session: Session | None) -> None:
+        """Bind this agent to a concrete session when one is available."""
+        if session is not None:
+            get_agent_runtime().bind(session.get_session_id(), self)
+
     def add_rail(self, rail: AgentRail) -> "DeepAgent":
         """Synchronously queue a rail for registration.
 
@@ -2138,6 +2495,7 @@ class DeepAgent(BaseAgent):
     def remove_pending_rail(self, rail: AgentRail) -> "DeepAgent":
         """Remove a specific rail from the pending queue by object identity."""
         self._pending_rails = [queued for queued in self._pending_rails if queued is not rail]
+        self._event_initialized_rails.discard(id(rail))
         return self
 
     def strip_rails_by_type(self, rail_types: tuple[type, ...]) -> int:
@@ -2151,6 +2509,9 @@ class DeepAgent(BaseAgent):
 
         removed = 0
         before = len(self._pending_rails)
+        removed_pending = [rail for rail in self._pending_rails if isinstance(rail, rail_types)]
+        for rail in removed_pending:
+            self._event_initialized_rails.discard(id(rail))
         self._pending_rails = [r for r in self._pending_rails if not isinstance(r, rail_types)]
         removed += before - len(self._pending_rails)
 
@@ -2183,7 +2544,12 @@ class DeepAgent(BaseAgent):
             rail.set_sys_operation(self.deep_config.sys_operation)
             rail.set_workspace(self.deep_config.workspace)
         self._sync_prompt_builder_references()
-        init_rail(rail, self)
+        if id(rail) not in self._event_initialized_rails:
+            queue_size = len(self._pending_tool_registrations)
+            init_rail(rail, self)
+            if len(self._pending_tool_registrations) > queue_size:
+                self._event_initialized_rails.add(id(rail))
+        await self._flush_tool_registrations()
         await self._register_rail_selective(rail)
         self._sync_prompt_builder_references()
         return self
@@ -2198,6 +2564,7 @@ class DeepAgent(BaseAgent):
         # Remove queued instances first so lazy-init does not re-register stale rails.
         self._pending_rails = [queued for queued in self._pending_rails if queued is not rail]
         self._registered_rails = [r for r in self._registered_rails if r is not rail]
+        self._event_initialized_rails.discard(id(rail))
 
         if isinstance(rail, TaskCompletionRail) and self._task_completion_rail is rail:
             self._task_completion_rail = None
@@ -2371,6 +2738,25 @@ class DeepAgent(BaseAgent):
                 cause=exc,
             ) from exc
 
+    async def load_subagent_config(self, config: "SubAgentConfig") -> LoadRecord:
+        """Bind one in-memory sub-agent config through the extension binder.
+
+        This is the production entry used by event-driven registration. It
+        records the same ``LoadRecord`` as file-backed extension loading and
+        delegates duplicate checks, ability binding, and rail preparation to
+        ``apply_extension_hot``.
+        """
+        from openjiuwen.harness.schema.config import SubAgentConfig
+
+        if not isinstance(config, SubAgentConfig):
+            raise TypeError("config must be SubAgentConfig")
+        if self.deep_config is None:
+            raise ValueError("DeepAgentConfig is required. Call configure() first.")
+        return await self._apply_extension_parts(
+            ExtensionParts(subagents=[config]),
+            source_uri=None,
+        )
+
     async def unload_extension(self, record: LoadRecord) -> list[str]:
         """Unload resources produced by a successful Plugin / AgentTemplate load.
 
@@ -2539,7 +2925,10 @@ class DeepAgent(BaseAgent):
                 error_msg="DeepAgent not configured. Call configure() first.",
             )
 
-        effective_inputs = self._to_effective_inputs(modified)
+        effective_inputs = self._to_effective_inputs(
+            modified,
+            ctx.extra.get("_turn_state"),
+        )
         steering_queue = ctx.steering_queue
         if steering_queue is None:
             steering_queue = asyncio.Queue()
@@ -2733,6 +3122,127 @@ class DeepAgent(BaseAgent):
         self._write_runtime_state(session, loaded)
         return loaded
 
+    def _start_turn(self, session: Session) -> TurnState:
+        """Start a new logical turn on the session runtime state.
+
+        Turn identity is written to the session checkpoint when the
+        outer invoke/stream/run_one_round path exits (``save_state``).
+        """
+        state = self.load_state(session)
+        turn = TurnState(turn_id=uuid.uuid4().hex)
+        state.turn_state = turn
+        return turn
+
+    async def _bind_turn_state(
+        self,
+        ctx: AgentCallbackContext,
+        session: Session | None,
+        is_resume: bool,
+    ) -> None:
+        """Bind the session turn to the current callback context."""
+        if session is None:
+            return
+        turn_state = (
+            self.load_state(session).turn_state
+            if is_resume
+            else self._start_turn(session)
+        )
+        if turn_state is None:
+            return
+        ctx.extra["_turn_state"] = turn_state
+        if is_resume:
+            return
+
+        bus = Runner.get_extension_bus()
+        if bus is None:
+            return
+        output = cast(
+            TurnStartOutput,
+            await bus.trigger(
+                Event(
+                    TURN_START,
+                    TurnStartInput(
+                        turn_id=turn_state.turn_id,
+                        text=str(ctx.inputs.query),
+                    ),
+                ),
+                session,
+            ),
+        )
+        if output.turn_id != turn_state.turn_id:
+            raise_error(
+                StatusCode.EVENTS_PAYLOAD_INVALID,
+                reason="turn.start cannot rewrite turn_id",
+            )
+
+    @staticmethod
+    def _is_terminal_turn_result(result: object) -> bool:
+        """Return whether a structured result terminates the current turn."""
+        if not isinstance(result, dict):
+            return False
+        result_type = result.get("result_type")
+        return (
+            result_type in ("answer", "error", "aborted")
+            or result.get("error") == "aborted"
+        )
+
+    @staticmethod
+    def _apply_turn_complete_output(
+        result: Dict[str, Any],
+        output: TurnCompleteOutput,
+    ) -> Dict[str, Any]:
+        """Copy a terminal result and apply only public completion fields."""
+        updated = dict(result)
+        updated["output"] = output.text
+        if output.usage is not None:
+            updated["usage"] = output.usage
+        return updated
+
+    async def _trigger_turn_complete(
+        self,
+        ctx: AgentCallbackContext,
+        session: Session | None,
+        result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Trigger ``turn.complete`` for a structured terminal result."""
+        if session is None or not self._is_terminal_turn_result(result):
+            return result
+        turn_state = ctx.extra.get("_turn_state")
+        if not isinstance(turn_state, TurnState):
+            return result
+        bus = Runner.get_extension_bus()
+        if bus is None:
+            return result
+
+        result_type = result.get("result_type")
+        reason: Literal["completed", "aborted", "error"]
+        if result_type == "aborted" or result.get("error") == "aborted":
+            reason = "aborted"
+        elif result_type == "error":
+            reason = "error"
+        else:
+            reason = "completed"
+        answer = result.get("output")
+        if answer is None:
+            answer = result.get("error", "")
+        usage = result.get("usage")
+        output = cast(
+            TurnCompleteOutput,
+            await bus.trigger(
+                Event(
+                    TURN_COMPLETE,
+                    TurnCompleteInput(
+                        turn_id=turn_state.turn_id,
+                        reason=reason,
+                        answer=str(answer),
+                        usage=usage if isinstance(usage, Mapping) else None,
+                    ),
+                ),
+                session,
+            ),
+        )
+        return self._apply_turn_complete_output(result, output)
+
     def save_state(
         self,
         session: Session,
@@ -2853,9 +3363,10 @@ class DeepAgent(BaseAgent):
 
         self._log_loop("forcing controller cleanup due to session switch")
 
-        if self._loop_session is not None:
+        loop_session = self._loop_session
+        if loop_session is not None:
             try:
-                await self._loop_controller.unbind_session(self._loop_session)
+                await self._loop_controller.unbind_session(loop_session)
             except Exception as e:
                 logger.warning(f"unbind_session failed during force cleanup: {e}")
 
@@ -2864,6 +3375,8 @@ class DeepAgent(BaseAgent):
         except Exception as e:
             logger.warning(f"controller.stop() failed during force cleanup: {e}")
 
+        if loop_session is not None:
+            get_agent_runtime().unbind(loop_session.get_session_id(), self)
         self._loop_coordinator = None
         self._loop_controller = None
         self._loop_session = None
@@ -3257,7 +3770,10 @@ class DeepAgent(BaseAgent):
                 error_msg="DeepAgent not configured. Call configure() first.",
             )
 
-        effective_inputs = self._to_effective_inputs(modified)
+        effective_inputs = self._to_effective_inputs(
+            modified,
+            ctx.extra.get("_turn_state"),
+        )
         steering_queue = ctx.steering_queue
         if steering_queue is None:
             steering_queue = asyncio.Queue()
@@ -3388,6 +3904,7 @@ class DeepAgent(BaseAgent):
         invoke_inputs = self._normalize_inputs(inputs)
         owns_session = session is None
         session = await self._prepare_single_round_session(invoke_inputs, session)
+        self._bind_session_runtime(session)
         host_iteration_limit = self._deep_config.max_iterations_hard_limit if self._deep_config else None
         task_loop_enabled = bool(
             self._deep_config
@@ -3416,6 +3933,11 @@ class DeepAgent(BaseAgent):
                     AgentCallbackEvent.BEFORE_INVOKE,
                     AgentCallbackEvent.AFTER_INVOKE,
                 ):
+                    await self._bind_turn_state(
+                        ctx,
+                        session,
+                        self._is_resume_input(invoke_inputs),
+                    )
                     await self._sync_expert_role_attachment(invoke_inputs, session)
                     if (
                         task_loop_enabled
@@ -3426,6 +3948,7 @@ class DeepAgent(BaseAgent):
                         result = await self._run_single_round_invoke(
                             ctx, session, host_iteration_limit=host_iteration_limit,
                         )
+                    result = await self._trigger_turn_complete(ctx, session, result)
                     invoke_inputs.result = result
 
                 if session is not None:
@@ -3473,6 +3996,7 @@ class DeepAgent(BaseAgent):
         invoke_inputs = self._normalize_inputs(inputs)
         owns_session = session is None
         session = await self._prepare_single_round_session(invoke_inputs, session)
+        self._bind_session_runtime(session)
         host_iteration_limit = self._deep_config.max_iterations_hard_limit if self._deep_config else None
         task_loop_enabled = bool(
             self._deep_config
@@ -3504,6 +4028,11 @@ class DeepAgent(BaseAgent):
                     AgentCallbackEvent.BEFORE_INVOKE,
                     AgentCallbackEvent.AFTER_INVOKE,
                 ):
+                    await self._bind_turn_state(
+                        ctx,
+                        session,
+                        self._is_resume_input(invoke_inputs),
+                    )
                     await self._sync_expert_role_attachment(invoke_inputs, session)
                     if (
                         task_loop_enabled
@@ -3539,6 +4068,11 @@ class DeepAgent(BaseAgent):
                             "result_type": "answer",
                         }
                     if stream_result is not None:
+                        stream_result = await self._trigger_turn_complete(
+                            ctx,
+                            session,
+                            stream_result,
+                        )
                         invoke_inputs.result = stream_result
 
                 if session is not None:
@@ -3823,6 +4357,11 @@ class DeepAgent(BaseAgent):
                 AgentCallbackEvent.BEFORE_INVOKE,
                 AgentCallbackEvent.AFTER_INVOKE,
             ):
+                await self._bind_turn_state(
+                    ctx,
+                    session,
+                    is_resume_input,
+                )
                 await self._sync_expert_role_attachment(invoke_inputs, session)
                 if is_resume_input:
                     result = await self._run_single_round_invoke(
@@ -3846,6 +4385,7 @@ class DeepAgent(BaseAgent):
                         else 600.0
                     )
                     result = await controller.wait_round_completion(timeout=timeout)
+                result = await self._trigger_turn_complete(ctx, session, result)
                 await self._write_round_result_to_stream(result, session)
                 invoke_inputs.result = result
                 proposal_result = result
@@ -4000,39 +4540,96 @@ class DeepAgent(BaseAgent):
 
             self._interaction_session = session
             await self.prepare_interaction_task_loop(session)
-            goal_language = self._goal_prompt_language()
-            if self._task_completion_rail is None:
-                await self.register_rail(
-                    TaskCompletionRail(goal_language=goal_language)
+            self._bind_session_runtime(session)
+            try:
+                goal_language = self._goal_prompt_language()
+                if self._task_completion_rail is None:
+                    await self.register_rail(TaskCompletionRail(goal_language=goal_language))
+
+                from openjiuwen.harness.goal.store import SessionGoalStore
+
+                self.goal_manager = GoalManager(
+                    store=SessionGoalStore(session),
+                    event_manager=self._event_manager,
+                    control_lock=self._interaction_control_lock,
+                    has_output_stream=self.has_output_stream,
+                    cancel_active_round=self._cancel_active_round,
+                    emit_event=self._emit_interaction_event,
+                    notify_work=self._notify_work,
+                    language=goal_language,
+                )
+                self._interaction_started = True
+                self._interaction_forwarder_task = asyncio.create_task(
+                    self._forward_session_stream(), name=f"interaction_forwarder[{sid}]"
                 )
 
-            from openjiuwen.harness.goal.store import SessionGoalStore
+                rail = self._task_completion_rail
+                if isinstance(rail, TaskCompletionRail):
+                    self._bind_live_goal_manager(rail)
+                    try:
+                        init_rail(rail, self)
+                    except Exception:
+                        logger.exception("[DeepAgent] Failed to register goal tools")
 
-            self.goal_manager = GoalManager(
-                store=SessionGoalStore(session),
-                event_manager=self._event_manager,
-                control_lock=self._interaction_control_lock,
-                has_output_stream=self.has_output_stream,
-                cancel_active_round=self._cancel_active_round,
-                emit_event=self._emit_interaction_event,
-                notify_work=self._notify_work,
-                language=goal_language,
+                self._ensure_supervisor_running()
+                logger.info("[DeepAgent] Started for session %s", sid)
+            except BaseException:
+                get_agent_runtime().unbind(sid, self)
+                raise
+
+    async def aclose(self) -> None:
+        """Extend :meth:`BaseAgent.aclose` to session-scoped tasks, the wrapped
+        react agent and subagents.
+
+        Rails register on both this agent's callback manager and the inner
+        ``_react_agent``'s one, so both namespaces must be cleared; cached
+        subagent controls for every parent session are cancelled as well.
+        Session-scoped asyncio tasks must be stopped too — the eviction path
+        that only cleared callbacks/tools left per-session consumers pending
+        forever (issue#5240 residual).
+
+        Order matters for permanent teardown (``NativeHarness.dispose`` and
+        session eviction): ``stop()`` / controller ``stop()`` run first so a
+        still-live supervisor or round cannot observe tools/callbacks already
+        yanked from the process-global registries. ``BaseAgent.aclose`` then
+        drops this instance's callback namespace and owner-scoped tools;
+        ``_react_agent.aclose`` clears the bridged rail namespace. ``stop()`` is
+        idempotent, so hosts that already stopped before calling ``aclose``
+        are fine.
+        """
+        try:
+            await self.stop()
+        except Exception as exc:  # noqa: BLE001 - 释放路径不抛出
+            logger.warning("[DeepAgent] aclose: stop loops failed: %s", exc)
+        controllers = []
+        for owner in (self, self._react_agent):
+            ctl = getattr(owner, "_loop_controller", None) or getattr(owner, "_controller", None)
+            if ctl is not None and ctl not in controllers:
+                controllers.append(ctl)
+        for ctl in controllers:
+            try:
+                await ctl.stop()
+            except Exception as exc:  # noqa: BLE001 - 释放路径不抛出
+                logger.warning("[DeepAgent] aclose: controller stop failed: %s", exc)
+        await super().aclose()
+        react_agent = self._react_agent
+        if react_agent is not None and react_agent is not self:
+            try:
+                await react_agent.aclose()
+            except Exception as exc:  # noqa: BLE001 - 释放路径不抛出
+                logger.warning(
+                    "[DeepAgent] aclose: react agent close failed: %s", exc
+                )
+        try:
+            from openjiuwen.harness.tools.subagent._control_registry import (
+                release_all_subagent_controls,
             )
-            self._interaction_started = True
-            self._interaction_forwarder_task = asyncio.create_task(
-                self._forward_session_stream(), name=f"interaction_forwarder[{sid}]"
+
+            await release_all_subagent_controls(self, reason="agent_closed")
+        except Exception as exc:  # noqa: BLE001 - 释放路径不抛出
+            logger.warning(
+                "[DeepAgent] aclose: subagent control release failed: %s", exc
             )
-
-            rail = self._task_completion_rail
-            if isinstance(rail, TaskCompletionRail):
-                self._bind_live_goal_manager(rail)
-                try:
-                    init_rail(rail, self)
-                except Exception:
-                    logger.exception("[DeepAgent] Failed to register goal tools")
-
-            self._ensure_supervisor_running()
-            logger.info("[DeepAgent] Started for session %s", sid)
 
     async def stop(self) -> None:
         """Serialize teardown with start and terminate this interaction runtime."""
@@ -4047,42 +4644,47 @@ class DeepAgent(BaseAgent):
         self._try_transition_interaction_phase(InteractionPhase.TERMINATED)
         if not self._interaction_started:
             return
-        self._event_manager.discard_all_work()
-        await self._interaction_output.shutdown()
-        await self._cancel_active_round(reason="stop")
+        interaction_session = self._interaction_session
+        try:
+            self._event_manager.discard_all_work()
+            await self._interaction_output.shutdown()
+            await self._cancel_active_round(reason="stop")
 
-        for task in (self._interaction_supervisor_task, self._interaction_forwarder_task):
-            if task is not None and not task.done():
-                task.cancel()
+            for task in (self._interaction_supervisor_task, self._interaction_forwarder_task):
+                if task is not None and not task.done():
+                    task.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await task
+            self._interaction_supervisor_task = None
+            self._interaction_forwarder_task = None
+
+            emit_tasks = list(self._interaction_emit_tasks)
+            self._interaction_emit_tasks.clear()
+            for task in emit_tasks:
+                if not task.done():
+                    task.cancel()
+            for task in emit_tasks:
                 with suppress(asyncio.CancelledError, Exception):
                     await task
-        self._interaction_supervisor_task = None
-        self._interaction_forwarder_task = None
 
-        emit_tasks = list(self._interaction_emit_tasks)
-        self._interaction_emit_tasks.clear()
-        for task in emit_tasks:
-            if not task.done():
-                task.cancel()
-        for task in emit_tasks:
-            with suppress(asyncio.CancelledError, Exception):
-                await task
+            if interaction_session is not None:
+                with suppress(Exception):
+                    await interaction_session.close_stream()
+            controller = self.loop_controller
+            if controller is not None and interaction_session is not None:
+                with suppress(Exception):
+                    await controller.unbind_session(interaction_session)
+                with suppress(Exception):
+                    await controller.stop()
 
-        if self._interaction_session is not None:
-            with suppress(Exception):
-                await self._interaction_session.close_stream()
-        controller = self.loop_controller
-        if controller is not None and self._interaction_session is not None:
-            with suppress(Exception):
-                await controller.unbind_session(self._interaction_session)
-            with suppress(Exception):
-                await controller.stop()
-
-        self._interaction_started = False
-        self._event_manager.discard_all_work()
-        self._try_transition_interaction_phase(InteractionPhase.TERMINATED)
-        self._active_interaction_round = None
-        self._interaction_round_task = None
+            self._interaction_started = False
+            self._event_manager.discard_all_work()
+            self._try_transition_interaction_phase(InteractionPhase.TERMINATED)
+            self._active_interaction_round = None
+            self._interaction_round_task = None
+        finally:
+            if interaction_session is not None:
+                get_agent_runtime().unbind(interaction_session.get_session_id(), self)
 
     async def attach_output(self) -> Optional[InteractionOutputStream]:
         """Claim the sole output reader for this interaction.

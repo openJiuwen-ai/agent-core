@@ -153,6 +153,16 @@ class MemberDao:
             )
             return (await session.execute(stmt)).scalar_one_or_none() is not None
 
+    async def host_managed_members(self, team_name: str, names: list[str]) -> set[str]:
+        """Return the host-managed identities among the given recipient names."""
+        async with self._sessions.read() as session:
+            stmt = select(TeamMember.member_name).where(
+                TeamMember.team_name == team_name,
+                TeamMember.member_name.in_(names),
+                TeamMember.role == "host_managed",
+            )
+            return set((await session.execute(stmt)).scalars())
+
     async def is_passive_human(self, team_name: str, member_name: str) -> bool:
         """Return True if ``member_name`` is a passive human member.
 

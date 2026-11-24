@@ -26,7 +26,7 @@ does not.
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/deep_agent_spec.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/schema/events.py`、`openjiuwen/agent_teams/schema/status.py`、`openjiuwen/agent_teams/schema/stream.py`、`openjiuwen/agent_teams/schema/task.py` |
-| 最近一次修订日期 | 2026-10-25 |
+| 最近一次修订日期 | 2026-11-10 |
 | 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）、`F_69_cwd-workspace-project-root-separation.md`（`DeepAgentSpec.cwd` / `project_root` 与 workspace 分离）、`F_78_steering-batch-quota-hook.md`（`TeamAgentSpec.steer_batch_size`）、`F_79_team-scoped-skill-library-and-visibility.md`（team 成员的 `skills` / `enable_skill_discovery` 落 build_spec 前被清空）、`F_118_task-scoped-member-lifetime.md`（`MemberStatus.DORMANT` + `retire_target`）、`F_119_scheduled-completion-handoff-via-note.md`（任务行 `summary` 列与改派 / 重置清空）、`F_128_scheduled-member-subtasks.md`（任务行 `parent_task_id` / `created_by` 列、`IN_PROGRESS → BLOCKED` 挂起、`max_subtask_depth`）。其余条目见 `docs/features/`、`F_129_task-revision-and-staleness.md`（任务行 `revision` / `observed_revision` / `parent_revision` / `change_notes`、`TaskUpdatedEvent.revision`、版本快照） |
 
 ## 范围 / 边界
@@ -650,6 +650,7 @@ team（如直接 streaming 的单 agent）。`role` 用 `TeamRole`（`str` 枚�
 | `title` | `str` |
 | `status` | `str`（`TaskStatus.value`） |
 | `assignee` | `Optional[str]` |
+| `assignee_status` | `Optional[str]`（负责人此刻的 `MemberStatus.value`；仅任务未结束且负责人仍在名册时有值，读取时由名册投影填入，不持久化，见 `F_20261110_1912_view-task-names-the-assignee-and-its-status`） |
 | `blocked_by` | `list[str]` |
 | `updated_at` | `Optional[int]`（毫秒级 wall-clock 最近一次状态变更时刻） |
 
@@ -801,8 +802,9 @@ CANCELLED    -> (terminal)
   排队，但同一时刻至多一个活跃任务。
 - 调度模式的开工由 `TeamTaskManager.start_task(task_id)` 经 DAO CAS
   `WHERE assignee=? AND status='pending'` 落库（目标态镜像 `assign` 的成员 mode 感知：
-  build → `IN_PROGRESS`、plan → `PLANNING`，DAO `start_task(to_status=...)` 参数化；**有子任务的任务一律
-  `IN_PROGRESS`**——那是挂起后恢复，计划已批过，F_128），并发 `TaskStartedEvent`。调用方是
+  build → `IN_PROGRESS`、plan → `PLANNING`，DAO `start_task(to_status=...)` 参数化；**`resume_pending` 为真的任务一律
+  `IN_PROGRESS`**——那是挂起后恢复，计划已批过，F_128），并发 `TaskStartedEvent`（`resumed` 取开工前的
+  `resume_pending`，区分恢复与首次开工）。调用方是
   `agent/scheduling/TeamScheduler`（F_62，见 `S_22`）。
 - `PLANNING` / `IN_PROGRESS` / `IN_REVIEW`（与终态一起）在 `TASK_DEPENDENCY_REJECT_STATUSES`
   里：已在推进的任务不可再被加前置依赖。编辑锁只锁 `IN_REVIEW`（验证期内容冻结）。
@@ -811,7 +813,9 @@ CANCELLED    -> (terminal)
   父任务 `depends_on` 子任务的边——顺序不可调换，执行中的任务不能加依赖。挂起的父任务不在活跃集里，不占名额；依赖
   刷新在全部子任务终态（COMPLETED 与 CANCELLED 都解边）后把它放回 `PENDING`。因此 **`BLOCKED` 不再只表示"没开工"**：
   有未终态子任务的 `BLOCKED` 父任务是"做了一半、在等子任务"，`TeamTaskManager.reassign` 拒绝改派它（理由同两个闸被排除出
-  `TASK_REASSIGNABLE_STATUSES`）；普通 `BLOCKED` 任务照旧可改派。
+  `TASK_REASSIGNABLE_STATUSES`）；普通 `BLOCKED` 任务照旧可改派。挂起本身不发事件，子任务的
+  `TaskCreatedEvent.parent_task_id` 标出被挂起的父任务；观测侧把它写成 `task.{id}.created` span 的
+  `agentteam.task.parent_id`，轨迹据此与父任务恢复时的 `TaskStartedEvent.resumed` 推出父任务等待子任务的区间。
 - 见 F_59（取代 F_58 的 `STARTED`）、F_62（投票 + 调度 runtime）、F_128（成员子任务）。
 
 ### 任务行 `parent_task_id` / `created_by` 列（F_128）
@@ -993,6 +997,29 @@ state["teams"][team_name] = {
 `TeamLifecycle` 进 spec → 跨进程序列化；`RuntimeState` 留在 pool entry，进程内
 in-memory，不写 spec。
 
+## Goal 模式配置
+
+```python
+class TeamGoalSpec(BaseModel):
+    strategy: Literal["agent_report", "transcript", "hybrid"] = "hybrid"
+    max_attempts: int | None = 10     # ge=1；None = 不限
+    token_budget: int | None = None   # ge=1
+
+LeaderSpec.goal: TeamGoalSpec | None = None
+TeamAgentSpec.member_goal: TeamGoalSpec | None = None
+TeamMemberSpec.goal: bool | None = None          # 预定义成员；None = 跟随 member_goal
+TeamMemberOptions.goal: bool | None = None       # 落库的成员级开关
+TeamRuntimeContext.goal_enabled: bool | None     # 由 options.goal 带入成员装配
+```
+
+- 全部默认关闭。生效规则由 `agent_teams/goal.py::resolve_goal_spec` 唯一定义：leader 取
+  `leader.goal`；角色为 `TEAMMATE` 且 `goal_enabled is not False` 的成员取 `member_goal`；其余角色、
+  以及任何带 `cli_agent` 的成员一律无 goal。
+- `leader.goal` 与 `leader.cli_agent` 同时配置在 spec 校验期被拒。
+- `TeamMemberOptions` 是 JSON blob，新增 `goal` 键不需要 DB 迁移。
+- goal 自身的状态不在 team DB：`GoalRecord` 与成员 goal 绑定的任务 id（键 `team.goal.task_id`）都在
+  成员自己的 session state。
+
 ## 与其它 spec 的关系
 
 - **`S_01_public-api-and-spec-flow.md`**：本规约钉死 schema 形状，S_01 描述
@@ -1019,3 +1046,12 @@ in-memory，不写 spec。
   `TaskListResult` / `MemberOpResult` / `TaskOpResult` / `TaskCreateResult` /
   `GraphMutationResult`；本规约钉死返回模型与写路径结果包装的形状，S_08
   钉死团队工具的描述契约与 ID 命名。
+
+
+## 会话执行设置（F_20261104_1721_session-execution-settings）
+
+静态表 `team_session_settings`：`session_id` 主键、`settings_json` JSON 文本、`version` 整数。
+设置独立于团队行与成员行，首轮 leader 执行工具前即可创建。`SessionSettingsDao.initialize`
+不覆盖已有行；`replace(..., expected_version=...)` 采用 CAS 并递增版本；`get` 返回已提交值。
+表由静态 schema 初始化创建，已有数据库无需修改旧表。全量 runtime-state 清理包含此表。
+暂停、成员重建和 session 动态表释放不删除设置。平台负责 settings JSON 的校验与策略解释。

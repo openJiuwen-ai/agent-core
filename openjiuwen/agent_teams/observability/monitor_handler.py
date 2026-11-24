@@ -430,6 +430,17 @@ class OtelTeamMonitorHandler:
             AT_TASK_ID: task_id,
             AT_TASK_STATUS: "pending",
         }
+        if assignee:
+            # The created event span states the task's owner from the start so
+            # trajectory consumers can attribute a pending task (scheduled
+            # dispatch rests at PENDING with an assignee) before it starts.
+            created_attrs[AT_TASK_ASSIGNEE] = str(assignee)
+        parent_task_id = payload.get("parent_task_id")
+        if parent_task_id:
+            # A member-split subtask: its creation suspends the parent (F_128),
+            # which has no event of its own, so trajectory consumers derive the
+            # parent's waiting interval from this attribute.
+            created_attrs["agentteam.task.parent_id"] = str(parent_task_id)
         created_ctx = set_span_in_context(span, otel_context.get_current())
         created_span = self._tracer().start_span(
             name=f"task.{task_id}.created",

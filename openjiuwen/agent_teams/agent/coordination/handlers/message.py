@@ -285,46 +285,50 @@ class MessageHandler(BaseCoordinationHandler):
                         if self._round.has_in_flight_round():
                             interrupted = True
                             continue
-                        if self._round.has_pending_interrupt():
-                            team_logger.info(
-                                "[{}] admitting approval message {} to resume interrupt",
+                        team_logger.info(
+                            "[{}] admitting approval message {} to resume interrupt",
+                            member_name,
+                            msg.message_id,
+                        )
+                        reply = InteractiveInput()
+                        reply.update(
+                            approval_data["tool_call_id"],
+                            {key: approval_data[key] for key in ("approved", "feedback", "auto_confirm")},
+                        )
+                        try:
+                            result = await self._round.resume_interrupt(reply)
+                        except asyncio.CancelledError:
+                            team_logger.debug(
+                                "[{}] approval message {} admission cancelled; keeping it unread",
                                 member_name,
                                 msg.message_id,
                             )
-                            reply = InteractiveInput()
-                            reply.update(
-                                approval_data["tool_call_id"],
-                                {key: approval_data[key] for key in ("approved", "feedback", "auto_confirm")},
+                            raise
+                        except Exception:
+                            team_logger.error(
+                                "[{}] approval message {} admission failed; keeping it unread",
+                                member_name,
+                                msg.message_id,
+                                exc_info=True,
                             )
-                            try:
-                                await self._round.resume_interrupt(reply)
-                            except asyncio.CancelledError:
-                                team_logger.debug(
-                                    "[{}] approval message {} admission cancelled; keeping it unread",
-                                    member_name,
-                                    msg.message_id,
-                                )
-                                raise
-                            except Exception:
-                                team_logger.error(
-                                    "[{}] approval message {} admission failed; keeping it unread",
-                                    member_name,
-                                    msg.message_id,
-                                    exc_info=True,
-                                )
-                                raise
-                            await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
+                            raise
+                        if not result.ok:
+                            # A confirmed mismatch is finished. So is an answer that
+                            # arrived after the interrupt was already consumed: the
+                            # member is idle and nothing is pending, so keeping the
+                            # durable copy would only replay it onto a later tool.
+                            stale_after_resume = (
+                                result.reason == "interrupt_resume_unavailable"
+                                and not self._round.has_pending_interrupt()
+                                and not self._round.has_in_flight_round()
+                            )
+                            if result.reason == "unsupported_interactive_input" or stale_after_resume:
+                                await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
+                                continue
+                            # Busy, or the interrupt is not readable yet: leave the mail.
                             return
-                        # A settled runtime with no interrupt cannot use this
-                        # reply. Never feed stale control data as a new query.
-                        team_logger.debug(
-                            "[{}] discarding settled approval message {} for tool_call_id={}",
-                            member_name,
-                            msg.message_id,
-                            approval_data["tool_call_id"],
-                        )
                         await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
-                        continue
+                        return
                     if interrupted or self._round.has_pending_interrupt():
                         team_logger.info(
                             "[{}] deferring mailbox message {} until pending interrupt is resolved",

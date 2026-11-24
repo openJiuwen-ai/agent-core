@@ -22,10 +22,13 @@ class _CmdSend:
     Attributes:
         msg: Wrapped inbound message.
         ack: Future resolved with the message seq id.
+        require_pending_interrupt: Match and admit a Team-directed answer,
+            without treating it as ordinary queued or steering input.
     """
 
     msg: InboxMessage
     ack: asyncio.Future
+    require_pending_interrupt: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +107,16 @@ class _CmdResume:
     query: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _CmdGoalWork:
+    """A request to re-check whether a goal attempt should start.
+
+    Carries no payload and no ack: the supervisor reads the goal state itself,
+    and a request that arrives while a round is running is simply dropped —
+    that round's settlement makes the same check.
+    """
+
+
 ControlEvent = Union[
     _CmdSend,
     _CmdAbort,
@@ -111,4 +124,5 @@ ControlEvent = Union[
     _CmdResume,
     _CmdRoundFinished,
     _CmdStop,
+    _CmdGoalWork,
 ]

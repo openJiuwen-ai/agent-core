@@ -27,6 +27,7 @@ from openjiuwen.agent_teams.tools.member_options import (
     get_member_agent_template,
     get_member_builtin_model,
     get_member_fallback_model_ref,
+    get_member_goal,
     get_member_model_ref,
 )
 from openjiuwen.agent_teams.worktree import TeammateWorktreeLifecycle
@@ -104,7 +105,7 @@ class SpawnManager:
         # The recovery loop also skips it explicitly (see
         # ``RecoveryManager.recover_team``) — one guard per layer, each
         # pointing at the other, so future drift is grep-able (F_14 lesson).
-        if getattr(ctx, "role", None) == TeamRole.PASSIVE_HUMAN:
+        if getattr(ctx, "role", None) in (TeamRole.PASSIVE_HUMAN, TeamRole.HOST_MANAGED):
             team_logger.warning(
                 "[{}] refusing to spawn passive human {}; it has no runtime by design",
                 self._configurator.member_name or "?",
@@ -564,6 +565,7 @@ class SpawnManager:
             builtin_model=builtin_model,
             worktree_path=worktree_path,
             cli_agent=cli_agent,
+            goal_enabled=get_member_goal(teammate),
             permissions_override=permissions_override,
             agent_template_spec=agent_template_spec,
             template_external_cli=template_external_cli,

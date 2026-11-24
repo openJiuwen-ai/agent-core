@@ -87,6 +87,7 @@ class PaperArtifactProviderImpl:
             task_id=request.task_id,
             status=state.status,
             final_node_id=state.best_node_id,
+            error_message=state.error_message,
         )
 
     async def pause(self, task_id: str, on_event: OnEvent | None = None) -> EngineResult:

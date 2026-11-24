@@ -3,10 +3,10 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any, cast
+from types import SimpleNamespace
 
 from openjiuwen.symphony.retrieval.build.io.tree import write_tree_preset
-from openjiuwen.symphony.retrieval.build.tree import TreeBuildConfig, TreeManagerConfig
+from openjiuwen.symphony.config import RetrievalBuildConfig
 from openjiuwen.symphony.retrieval.build.tree.builder import TreeBuilder
 from openjiuwen.symphony.retrieval.build.tree.preset_writer import TreePresetWriter
 from openjiuwen.symphony.retrieval.build.tree.schema import Skill, TreeNode
@@ -61,15 +61,10 @@ class TreeBuilderSkillProfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             builder = TreeBuilder(
                 skills_dir=Path(tmpdir),
-                model="fake-tree-model",
-                client=cast(Any, object()),
-                manager_config=TreeManagerConfig(
-                    build=TreeBuildConfig(
-                        skill_profiles_enabled=True,
-                        skill_profile_description_limit=80,
-                        skill_profile_rule_limit=60,
-                    )
-                ),
+                model=SimpleNamespace(invoke=lambda **kwargs: None),
+                config=RetrievalBuildConfig(profiles={
+                    "enabled": True, "max_description_chars": 80, "max_rule_chars": 60,
+                }),
             )
 
             def call_llm_json(prompt: str) -> dict:
@@ -111,9 +106,8 @@ class TreeBuilderSkillProfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             builder = TreeBuilder(
                 skills_dir=Path(tmpdir),
-                model="fake-tree-model",
-                client=cast(Any, object()),
-                manager_config=TreeManagerConfig(build=TreeBuildConfig(skill_profiles_enabled=False)),
+                model=SimpleNamespace(invoke=lambda **kwargs: None),
+                config=RetrievalBuildConfig(profiles={"enabled": False}),
             )
 
             def call_llm_json(prompt: str) -> None:

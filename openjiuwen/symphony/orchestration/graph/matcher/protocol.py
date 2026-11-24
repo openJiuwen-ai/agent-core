@@ -401,8 +401,8 @@ def _normalize_match(
         supporting_fields = {}
 
     if relation_type == "can_feed" and candidate is not None:
-        source_outputs = set(_validation_field_names(supporting_fields.get("source_outputs", [])))
-        target_inputs = set(_validation_field_names(supporting_fields.get("target_inputs", [])))
+        source_outputs = set(supporting_field_names(supporting_fields.get("source_outputs")))
+        target_inputs = set(supporting_field_names(supporting_fields.get("target_inputs")))
         requested_port_mappings = _port_mapping_pairs(supporting_fields.get("port_mappings", []))
         directional_evidence = _validation_directional_evidence(
             candidate,
@@ -473,7 +473,8 @@ def _normalize_match(
     return match, diagnostics
 
 
-def _validation_field_names(values: Any) -> List[str]:
+def supporting_field_names(values: Any) -> List[str]:
+    """Read port names from published matcher evidence."""
     if not isinstance(values, list):
         return []
     names = []

@@ -170,6 +170,8 @@ def emit_context_window_commit(
     """Emit one ended context.window.commit child span.
 
     Only a request that carries the conversation forward advances the chain.
+    A goal assessment judges a separate transcript and must not advance this
+    conversation. Its input and output stay on its own inference span.
     A compaction asks the model to summarize the conversation, so its prompt
     is *about* the context rather than part of it; committing it would splice
     a foreign window into the chain a reader replays. The window a compaction
@@ -179,7 +181,7 @@ def emit_context_window_commit(
         The emitted span, or None when this request does not advance the
         chain or the owning span is no longer recording.
     """
-    if request_purpose == "compaction":
+    if request_purpose in ("compaction", "goal_assessment"):
         # Return before advancing: the advance is what rewrites the subject's
         # canonical state, so letting a compaction reach it would both corrupt
         # the chain and make the next real turn's delta a near-full window.

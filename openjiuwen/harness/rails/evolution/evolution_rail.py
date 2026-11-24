@@ -47,13 +47,13 @@ from openjiuwen.agent_evolving.trajectory.schema import (
 )
 from openjiuwen.agent_evolving.trajectory.spans import (
     attributes_from_map,
-    iter_spans,
-    merge_trajectories,
+    attributes_to_map,
+    iter_payload_spans,
     span_attributes,
     span_sort_key,
 )
 from openjiuwen.agent_evolving.trajectory.team import span_category
-from openjiuwen.agent_evolving.trajectory.windows import trim_trajectory_window
+from openjiuwen.agent_evolving.trajectory.windows import OnlineTrajectoryWindow
 from openjiuwen.extensions.observability import semconv as observability_semconv
 from openjiuwen.extensions.observability.span_context import get_root_span
 from openjiuwen.core.common.background_tasks import BackgroundTask
@@ -309,7 +309,7 @@ class EvolutionRail(DeepAgentRail):
         self._evolution_trigger = evolution_trigger
         self._disabled_skills: set[str] = _normalize_skill_names(disabled_skills)
         self._member_role: Optional[str] = None
-        self._scope_windows: dict[tuple[str, ...], Trajectory] = {}
+        self._scope_windows: dict[tuple[str, ...], OnlineTrajectoryWindow] = {}
         self._scope_locks: dict[tuple[str, ...], threading.RLock] = {}
         self._window_lock = threading.RLock()
         self._subscription_lock = threading.RLock()
@@ -569,7 +569,7 @@ class EvolutionRail(DeepAgentRail):
     def _with_scope_metadata(trajectory: Trajectory, metadata: Mapping[str, Any]) -> Trajectory:
         """Replace producer resource attributes with the canonical envelope."""
 
-        payload = trajectory.to_otlp()
+        payload = trajectory.copy_compact_payload()
         for resource_span in payload.get("resourceSpans") or []:
             resource = resource_span.setdefault("resource", {})
             resource["attributes"] = attributes_from_map(metadata)
@@ -580,11 +580,7 @@ class EvolutionRail(DeepAgentRail):
 
         with self._scope_lock(capture.scope_key):
             window = self._scope_windows.get(capture.scope_key)
-            if window is None:
-                return None
-            payload = window.to_otlp()
-        projected = Trajectory.from_otlp(payload)
-        return self._with_scope_metadata(projected, self._scope_metadata(capture))
+        return window.snapshot(self._scope_metadata(capture)) if window is not None else None
 
     def get_trajectory(
         self,
@@ -604,11 +600,9 @@ class EvolutionRail(DeepAgentRail):
         )
         with self._scope_lock(key):
             window = self._scope_windows.get(key)
-            if window is None:
-                return None
-            projected = Trajectory.from_otlp(window.to_otlp())
-        return self._with_scope_metadata(
-            projected,
+        if window is None:
+            return None
+        return window.snapshot(
             self._trajectory_metadata(
                 session_id=str(session_id),
                 member_id=member_id if team_id is None else None,
@@ -734,12 +728,17 @@ class EvolutionRail(DeepAgentRail):
         capture: _InvokeCapture,
         increment: Trajectory,
     ) -> Trajectory:
-        with self._scope_lock(capture.scope_key):
+        scope_lock = self._scope_lock(capture.scope_key)
+        with scope_lock:
             current = self._scope_windows.get(capture.scope_key)
-            merged = merge_trajectories(current, increment) if current is not None else increment
-            merged = trim_trajectory_window(merged, self._max_trajectory_spans)
-            self._scope_windows[capture.scope_key] = merged
-        return self._project_window(capture)
+            if current is None:
+                current = OnlineTrajectoryWindow()
+            updated = current.updated(increment, self._max_trajectory_spans)
+            with self._window_lock:
+                # An inflight update cannot restore a window cleared by uninit.
+                if self._scope_locks.get(capture.scope_key) is scope_lock:
+                    self._scope_windows[capture.scope_key] = updated
+        return updated.snapshot(self._scope_metadata(capture))
 
     def _reset_current_scope(self) -> None:
         """Discard the active scope window at an explicit lifecycle boundary."""
@@ -747,8 +746,10 @@ class EvolutionRail(DeepAgentRail):
         capture = self._current_capture()
         if capture is None:
             return
-        with self._scope_lock(capture.scope_key):
-            self._scope_windows.pop(capture.scope_key, None)
+        scope_lock = self._scope_lock(capture.scope_key)
+        with scope_lock, self._window_lock:
+            if self._scope_locks.get(capture.scope_key) is scope_lock:
+                self._scope_windows.pop(capture.scope_key, None)
 
     @staticmethod
     def _capture_quality_issues(trajectory: Trajectory | None) -> tuple[Mapping[str, object], ...]:
@@ -757,7 +758,7 @@ class EvolutionRail(DeepAgentRail):
         if trajectory is None:
             return ()
         issues: list[Mapping[str, object]] = []
-        for span in iter_spans(trajectory):
+        for span in iter_payload_spans(trajectory.copy_compact_payload()):
             if span_category(span) != "tool":
                 continue
             attrs = span_attributes(span)
@@ -796,7 +797,10 @@ class EvolutionRail(DeepAgentRail):
         if required_category is not None:
             has_required = bool(
                 increment is not None
-                and any(span_category(span) == required_category for span in iter_spans(increment))
+                and any(
+                    span_category(span) == required_category
+                    for span in iter_payload_spans(increment.copy_compact_payload())
+                )
             )
             if not has_required:
                 # A model/tool callback with no corresponding ended span is a
@@ -806,11 +810,13 @@ class EvolutionRail(DeepAgentRail):
                     increment,
                     (MappingProxyType({"code": "missing_required_span", "category": required_category}),),
                 )
-        if increment is not None and merge:
-            return self._merge_clean_increment(capture, increment), increment, ()
         if increment is not None:
-            return self._project_window(capture), increment, ()
-        return self._project_window(capture), None, ()
+            if merge:
+                return self._merge_clean_increment(capture, increment), increment, ()
+            if isinstance(ctx.inputs, ModelCallInputs):
+                # The model hook will enrich the increment and project its update.
+                return None, increment, ()
+        return self._project_window(capture), increment, ()
 
     @staticmethod
     def _record_execution_increment(
@@ -828,7 +834,7 @@ class EvolutionRail(DeepAgentRail):
         _, prompt_ids, completion_ids, logprobs = _split_response_token_fields(response)
         if prompt_ids is None and completion_ids is None and logprobs is None:
             return trajectory
-        payload = trajectory.to_otlp()
+        payload = trajectory.copy_compact_payload()
         target: dict[str, Any] | None = None
         # ``iter_spans`` intentionally returns detached projections.  Locate
         # the mutable copy in the private payload tree instead, then wrap the
@@ -844,14 +850,14 @@ class EvolutionRail(DeepAgentRail):
                         target = span
         if target is None:
             return trajectory
-        attrs = span_attributes(target)
+        attrs = attributes_to_map(target.get("attributes"), preserve_sequences=True)
         if prompt_ids is not None:
             attrs[RL_PROMPT_TOKEN_IDS] = deepcopy(prompt_ids)
         if completion_ids is not None:
             attrs[RL_COMPLETION_TOKEN_IDS] = deepcopy(completion_ids)
         if logprobs is not None:
             attrs[RL_LOGPROBS] = deepcopy(logprobs)
-        target["attributes"] = attributes_from_map(attrs)
+        target["attributes"] = attributes_from_map(attrs, preserve_sequences=True)
         return Trajectory.from_otlp(payload)
 
     async def _trigger_evolution(

@@ -50,7 +50,7 @@ from openjiuwen.agent_evolving.ttse.stores import (
     parse_ts,
 )
 from openjiuwen.agent_evolving.ttse.catalog import project_catalog
-from openjiuwen.agent_evolving.ttse.dream import load_dream_state
+from openjiuwen.agent_evolving.ttse.dream import DreamState, load_dream_state, save_dream_state
 from openjiuwen.agent_evolving.ttse.classify import parse_assignments
 from openjiuwen.agent_evolving.ttse.consult import (
     CONSULT_ALL_CATEGORY,
@@ -2055,7 +2055,62 @@ async def test_dream_interval_survives_rail_remount(tmp_path):
     await second.after_task_iteration(ctx)
     await asyncio.sleep(0)
     assert called["n"] == 1
-    assert load_dream_state(cfg.resolved_dream_state_path()).non_followup_count == 0
+    # Scheduling alone does not consume the count; fake_run_dream did no pass.
+    assert load_dream_state(cfg.resolved_dream_state_path()).non_followup_count == 2
+
+
+@pytest.mark.asyncio
+async def test_dream_time_gate_retains_count_until_next_eligible_iteration(tmp_path, monkeypatch):
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        dream_min_rules=100,
+        dream_prune_enabled=False,
+        dream_purge_tips_enabled=False,
+    )
+    now = time.time()
+    path = cfg.resolved_dream_state_path()
+    save_dream_state(path, DreamState(last_dream_at=now, non_followup_count=49))
+    monkeypatch.setattr("openjiuwen.agent_evolving.ttse.dream.time.time", lambda: now + 3600)
+    rail = _make_rail(tmp_path, ScriptedLLM(lambda _: "NONE"), cfg=cfg)
+    ctx = SimpleNamespace(
+        inputs=SimpleNamespace(is_follow_up=False), extra={}, agent=None, session=None,
+    )
+
+    await rail.after_task_iteration(ctx)
+    await rail._dream_task
+    state = load_dream_state(path)
+    assert state.non_followup_count == 50
+    assert state.last_dream_at == pytest.approx(now, abs=1)
+
+    # Eligibility survives a new rail instance and another time-gated attempt.
+    rail = _make_rail(tmp_path, ScriptedLLM(lambda _: "NONE"), cfg=cfg)
+    await rail.after_task_iteration(ctx)
+    await rail._dream_task
+    assert load_dream_state(path).non_followup_count == 51
+
+    monkeypatch.setattr("openjiuwen.agent_evolving.ttse.dream.time.time", lambda: now + 24 * 3600 + 1)
+    original_save = rail._ttse_store.save
+
+    async def failed_save(*, strict=False):
+        assert strict is True
+        raise RuntimeError("bank save failed")
+
+    monkeypatch.setattr(rail._ttse_store, "save", failed_save)
+    await rail.after_task_iteration(ctx)
+    await rail._dream_task
+    state = load_dream_state(path)
+    assert state.non_followup_count == 52
+    assert state.last_dream_at == pytest.approx(now, abs=1)
+
+    monkeypatch.setattr(rail._ttse_store, "save", original_save)
+    await rail.after_task_iteration(ctx)
+    await rail._dream_task
+    state = load_dream_state(path)
+    assert state.non_followup_count == 0
+    assert state.last_dream_at == pytest.approx(now + 24 * 3600 + 1, abs=1)
+
+    await rail.after_task_iteration(ctx)
+    assert load_dream_state(path).non_followup_count == 1
 
 
 @pytest.mark.asyncio

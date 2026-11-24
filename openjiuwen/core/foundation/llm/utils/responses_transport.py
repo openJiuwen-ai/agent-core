@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""HTTP transport for the OpenAI account Responses backend.
+"""HTTP transport shared by API key and account Responses clients.
 
 This module is responsible only for HTTP I/O: sending requests and
 iterating SSE events. All request-body construction and response
@@ -10,6 +10,7 @@ parsing is handled by :mod:`responses_utils`.
 
 from __future__ import annotations
 
+from contextlib import AsyncExitStack
 from typing import Any, AsyncIterator, Optional, Union
 
 import httpx
@@ -17,12 +18,14 @@ import httpx
 from openjiuwen.core.common.logging import llm_logger as logger
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+from openjiuwen.core.foundation.llm.utils.request_parameter_fallback import RequestParameterFallback
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import LLMCallEvents
 from openjiuwen.extensions.external_provider.openai_auth.openai_account_auth import DEFAULT_OPENAI_ACCOUNT_BASE_URL
 from openjiuwen.core.foundation.llm.utils.responses_utils import (
     build_headers,
     message_from_stream_chunk,
+    OpenAIAccountResponsesError,
     parse_sse_block,
     ResponsesStreamParser,
     raise_for_http_error,
@@ -46,6 +49,7 @@ class OpenAIAccountResponsesTransport:
         verify: Union[bool, str, Any] = True,
         proxy: Optional[str] = None,
         max_retries: int = 0,
+        request_fallback: Optional[RequestParameterFallback] = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
@@ -53,6 +57,7 @@ class OpenAIAccountResponsesTransport:
         self._verify = verify
         self._proxy = proxy
         self._max_retries = max(0, int(max_retries or 0))
+        self._request_fallback = request_fallback or RequestParameterFallback("OpenAI", "OpenAI Responses")
         self._client: Optional[httpx.AsyncClient] = None
 
     async def create_response(
@@ -90,19 +95,23 @@ class OpenAIAccountResponsesTransport:
         stream_body["stream"] = True
         effective_model = model_name or str(body.get("model") or "")
         client = await self._get_client()
-        async with client.stream(
-            "POST",
-            self._responses_url(),
-            json=stream_body,
-            headers=build_headers(
-                access_token=access_token,
-                session_id=session_id,
-                extra_headers=extra_headers,
-            ),
-        ) as response:
-            if response.status_code >= 400:
-                await response.aread()
-            raise_for_http_error(response)
+        headers = build_headers(access_token=access_token, session_id=session_id, extra_headers=extra_headers)
+        async with AsyncExitStack() as connection:
+            async def open_response(**request_body) -> httpx.Response:
+                response = await connection.enter_async_context(
+                    client.stream("POST", self._responses_url(), json=request_body, headers=headers)
+                )
+                if response.status_code >= 400:
+                    await response.aread()
+                    try:
+                        raise_for_http_error(response)
+                    except OpenAIAccountResponsesError:
+                        await connection.aclose()
+                        raise
+                return response
+
+            # Retry only while opening the response. SSE events belong to the accepted request.
+            response = await self._request_fallback.call(open_response, stream_body, is_stream=True)
             # httpx transport retries only cover failed connects and are not
             # reported back, so the retry count is unknown here.
             await trigger(

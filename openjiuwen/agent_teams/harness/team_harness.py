@@ -27,6 +27,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     AsyncIterator,
+    Awaitable,
     Callable,
     Optional,
 )
@@ -41,6 +42,7 @@ from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.state import (
     INTERRUPTION_KEY,
+    can_retarget_stale_permission_answer,
     match_answers,
     pending_interrupts,
 )
@@ -52,6 +54,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.team_context import TaskOutcomeTracker, TaskRevisionTracker
     from openjiuwen.core.single_agent.rail.base import AgentRail
     from openjiuwen.harness.deep_agent import DeepAgent
+    from openjiuwen.harness.goal.schema import GoalStopConfig
     from openjiuwen.harness.schema.config import DeepAgentConfig
 
 
@@ -68,8 +71,15 @@ class TeamHarness:
         member_name: Optional[str],
         initial_plan_mode: bool = False,
         task_event_tracker: "TaskOutcomeTracker | TaskRevisionTracker | None" = None,
+        goal: "GoalStopConfig | None" = None,
+        track_completed_turn_fork: bool = False,
     ) -> None:
         self._agent_spec = agent_spec
+        # Goal mode, applied to every native this harness builds (a stopped
+        # native is terminal, so each run cycle gets a fresh one).
+        self._goal = goal
+        self._goal_ready: Callable[[], Awaitable[bool]] | None = None
+        self._on_goal: Callable[..., Any] | None = None
         self._build_context = build_context
         self._native: Optional[NativeHarness] = native
         self._role = role
@@ -78,6 +88,7 @@ class TeamHarness:
         self._initial_plan_mode_seeded = False
         # The member's task notice tracker, owned by its TeamAgent (F_129).
         self._task_event_tracker = task_event_tracker
+        self._track_completed_turn_fork = track_completed_turn_fork
         self._active_agent_session: Optional[Any] = None
         self._native_session_id: Optional[str] = None
         self._bg_controller: Optional[Any] = None
@@ -100,6 +111,8 @@ class TeamHarness:
         initial_plan_mode: bool = False,
         build_context: "BuildContext | None" = None,
         task_event_tracker: "TaskOutcomeTracker | TaskRevisionTracker | None" = None,
+        goal: "GoalStopConfig | None" = None,
+        track_completed_turn_fork: bool = False,
     ) -> "TeamHarness":
         """Construct the native via forward construction and configure it.
 
@@ -110,6 +123,8 @@ class TeamHarness:
         every other rail — no hand-mounting here. The native configures itself
         synchronously in its constructor, so the configurator can read
         ``workspace`` / ``sys_operation`` right after construction.
+
+        Set ``track_completed_turn_fork`` for members that can serve as a fork source.
         """
         native = NativeHarness(agent_spec, build_context)
         return cls(
@@ -120,6 +135,8 @@ class TeamHarness:
             member_name=member_name,
             initial_plan_mode=initial_plan_mode,
             task_event_tracker=task_event_tracker,
+            goal=goal,
+            track_completed_turn_fork=track_completed_turn_fork,
         )
 
     # ------------------------------------------------------------------
@@ -144,14 +161,21 @@ class TeamHarness:
         by the child session.
         """
         if self._native is None or self._native.state is HarnessState.TERMINATED:
+            if self._native is not None:
+                await self._native.close_team_memory()
             self._native = NativeHarness(self._agent_spec, self._build_context)
             self._remount_dynamic_tools()
+        if self._goal is not None:
+            self._native.enable_goal(self._goal, ready=self._goal_ready)
         if self._bg_controller is not None:
             self._native.background_task_controller = self._bg_controller
+        self._native.track_completed_turn_fork = self._track_completed_turn_fork
         child = self._make_child_session(team_session)
         kv_cache_harness_session_lifecycle_hook.on_harness_session_created(self, child)
         await child.pre_run()
         await self._native.start(session=child)
+        if self._on_goal is not None:
+            await self._native.subscribe(on_goal=self._on_goal)
         self._native_session_id = self._session_id_of(team_session)
         self._active_agent_session = child
         self._seed_initial_plan_mode(child)
@@ -198,6 +222,8 @@ class TeamHarness:
             The invoke result dict (same shape as ``Runner.run_agent``).
         """
         if self._native is None or self._native.state is HarnessState.TERMINATED:
+            if self._native is not None:
+                await self._native.close_team_memory()
             self._native = NativeHarness(self._agent_spec, self._build_context)
             self._remount_dynamic_tools()
             # Unlike ``start`` (:meth:`start` re-pushes ``_bg_controller`` onto
@@ -369,6 +395,17 @@ class TeamHarness:
             run_context=run_context,
         )
 
+    async def resume_interrupt(
+        self, content: Any, *, run_context: RunContext | None = None,
+    ) -> Any:
+        """Forward Team-directed answers without falling back to ordinary send."""
+        if self._native is None:
+            raise_error(
+                StatusCode.AGENT_TEAM_EXECUTION_ERROR,
+                error_msg="TeamHarness interrupt resume before start().",
+            )
+        return await self._native.resume_interrupt(content, run_context=run_context)
+
     async def abort(self, *, immediate: bool = False) -> None:
         """Abort the active round: graceful (False) or hard+rollback (True).
 
@@ -426,6 +463,48 @@ class TeamHarness:
             await self._native.subscribe(on_state=on_state, on_round=on_round)
 
     # ------------------------------------------------------------------
+    # Goal mode
+    # ------------------------------------------------------------------
+
+    @property
+    def goal_enabled(self) -> bool:
+        """Whether this harness was built with goal mode on."""
+        return self._goal is not None
+
+    @property
+    def goal_manager(self) -> Any | None:
+        """The running native's goal manager; None when goal mode is off or not started."""
+        return self._native.goal_manager if self._native is not None else None
+
+    @property
+    def goal_session(self) -> Any | None:
+        """The session the running native keeps its goal on; None before start."""
+        return self._native.session if self._native is not None else None
+
+    def set_goal_hooks(
+        self,
+        *,
+        ready: Callable[[], Awaitable[bool]] | None = None,
+        on_goal: Callable[..., Any] | None = None,
+    ) -> None:
+        """Install the team's goal hooks; they apply from the next ``start``.
+
+        Args:
+            ready: Precondition a goal attempt waits for (the leader waits for
+                the team to go quiet). None lets an attempt start whenever
+                the member would otherwise go idle.
+            on_goal: Called with ``goal`` (the record as a dict, or None once
+                cleared) whenever the goal record changes.
+        """
+        self._goal_ready = ready
+        self._on_goal = on_goal
+
+    def nudge_goal(self) -> None:
+        """Ask the native to re-check whether a goal attempt should start."""
+        if self._native is not None and self._native.state is not HarnessState.TERMINATED:
+            self._native.nudge_goal()
+
+    # ------------------------------------------------------------------
     # Interrupt-resume helpers
     # ------------------------------------------------------------------
 
@@ -443,9 +522,14 @@ class TeamHarness:
         session = self._interrupt_session()
         if session is None:
             return False
-        # Any answer to something no longer pending makes the input stale.
-        matched = match_answers(user_input, pending_interrupts(session.get_state(INTERRUPTION_KEY)))
-        return bool(matched.answers) and not matched.unmatched
+        # Any answer to something no longer pending makes the input stale,
+        # except one permission card whose interrupt id was replaced and is
+        # the only permission interrupt still waiting.
+        pending = pending_interrupts(session.get_state(INTERRUPTION_KEY))
+        matched = match_answers(user_input, pending)
+        if bool(matched.answers) and not matched.unmatched:
+            return True
+        return can_retarget_stale_permission_answer(user_input, pending)
 
     def _interrupt_session(self) -> Optional[Any]:
         if self._native is None:

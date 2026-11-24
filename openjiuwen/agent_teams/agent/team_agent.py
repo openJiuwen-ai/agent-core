@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
@@ -28,15 +29,18 @@ from openjiuwen.agent_teams.agent.member_activity import (
     MemberActivityRegistry,
     parse_member_status,
 )
+from openjiuwen.agent_teams.agent.goal_coordinator import TeamGoalCoordinator
 from openjiuwen.agent_teams.agent.member_factory import create_member_handle
+from openjiuwen.agent_teams.harness import TeamHarness
 from openjiuwen.agent_teams.agent.recovery_manager import RecoveryManager
 from openjiuwen.agent_teams.agent.session_manager import SessionManager
 from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
 from openjiuwen.agent_teams.agent.state import TeamAgentState
 from openjiuwen.agent_teams.agent.stream_controller import StreamController
 from openjiuwen.agent_teams.fork import ForkContext
+from openjiuwen.agent_teams.harness import TeamHarness
 from openjiuwen.agent_teams.i18n import t
-from openjiuwen.agent_teams.interaction.payload import GodViewMessage
+from openjiuwen.agent_teams.interaction.payload import DeliverResult, GodViewMessage
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
@@ -52,7 +56,7 @@ from openjiuwen.agent_teams.schema.team import (
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import raise_error
+from openjiuwen.core.common.exception.errors import BaseError, raise_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.runner.spawn.agent_config import SpawnAgentConfig
@@ -66,7 +70,7 @@ from openjiuwen.harness.execution_subject import (
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.member_runtime import MemberRuntime
-    from openjiuwen.agent_teams.interaction.payload import DeliverResult, InteractPayload
+    from openjiuwen.agent_teams.interaction.payload import InteractPayload
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
     from openjiuwen.agent_teams.models.pool import ModelPoolEntry
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
@@ -170,6 +174,30 @@ def team_reviewer_execution_subject(
 # pylint: disable=too-many-public-methods
 
 
+def _interrupt_runtime_unavailable(exc: BaseError) -> bool:
+    """Return whether a resume failed because the runtime cannot accept it yet."""
+    params = getattr(exc, "params", None)
+    error_msg = str(params.get("error_msg") or "") if isinstance(params, dict) else ""
+    if exc.status == StatusCode.AGENT_TEAM_EXECUTION_ERROR and "before start" in error_msg:
+        return True
+    return exc.status == StatusCode.DEEPAGENT_RUNTIME_ERROR and (
+        "already stopped" in error_msg or "not started" in error_msg
+    )
+
+
+def _interrupt_admission_failure_reason(exc: BaseError, admission_reasons: set[str]) -> str | None:
+    """Return the reason when a resume error is a recognized admission rejection."""
+    details = exc.details
+    if exc.status != StatusCode.DEEPAGENT_RUNTIME_ERROR or not isinstance(details, dict):
+        return None
+    if details.get("operation") != "interrupt_admission":
+        return None
+    reason = details.get("reason")
+    if not isinstance(reason, str) or reason not in admission_reasons:
+        return None
+    return reason
+
+
 class TeamAgent(BaseAgent):
     """One implementation that can act as leader or teammate.
 
@@ -214,7 +242,10 @@ class TeamAgent(BaseAgent):
             task_board_probe=self.is_task_board_settled,
             model_group_label_getter=self._model_group_label,
             served_model_recorder=self._record_served_model,
+            team_quiet_callback=self._on_team_quiet,
         )
+        # Goal mode wiring, built in ``_setup_agent`` when this member has it on.
+        self._goal: TeamGoalCoordinator | None = None
         self._coordination = CoordinationKernel(self)
         self._user_input_delivered: asyncio.Event | None = None
 
@@ -246,9 +277,16 @@ class TeamAgent(BaseAgent):
     def build_context(self):
         """Return the assembly BuildContext, or None before configure()."""
         harness = self.harness
-        if harness is not None:
-            return harness.build_context
-        return None
+        if harness is None:
+            return None
+        from openjiuwen.agent_teams.external.member_runtime import ExternalHarnessMemberRuntime
+
+        if isinstance(harness, ExternalHarnessMemberRuntime):
+            # A third-party harness assembles nothing locally; what the team
+            # was assembled with is the spec's own context.
+            blueprint = self._configurator.blueprint
+            return blueprint.spec.build_context if blueprint is not None else None
+        return harness.build_context
 
     @property
     def tiny_agent_model_resolver(self):
@@ -555,6 +593,37 @@ class TeamAgent(BaseAgent):
         self._user_input_delivered = asyncio.Event()
         return self._user_input_delivered
 
+    async def open_user_goal(self, request: Any) -> None:
+        """Make a user request the leader's goal; no-op without goal mode."""
+        if self._goal is not None:
+            await self._goal.open_user_goal(request)
+
+    def goal_holds_completion(self) -> bool:
+        """Whether the leader's open goal forbids declaring the team complete."""
+        return self._goal is not None and self._goal.holds_completion()
+
+    def _on_team_quiet(self) -> None:
+        """The roster held still for the debounce window."""
+        if self._goal is not None:
+            self._goal.on_team_quiet()
+
+    def _setup_goal(self, ctx: TeamRuntimeContext) -> None:
+        """Wire goal mode onto the harness the configurator just built."""
+        harness = self._configurator.harness
+        self._goal = None
+        if not isinstance(harness, TeamHarness) or not harness.goal_enabled:
+            return
+        self._goal = TeamGoalCoordinator(
+            role=ctx.role,
+            member_name=ctx.member_name or "",
+            harness=harness,
+            task_manager_getter=lambda: self._configurator.task_manager,
+            message_manager_getter=lambda: self._configurator.message_manager,
+            registry_getter=lambda: self._state.member_registry,
+            leader_name_getter=lambda: ctx.team_spec.leader_member_name if ctx.team_spec else None,
+            emit_blocked=self._stream_controller.emit_goal_blocked,
+        )
+
     def note_user_input_delivered(self) -> None:
         """Mark that a user sentence has reached this leader."""
         event = getattr(self, "_user_input_delivered", None)
@@ -613,6 +682,14 @@ class TeamAgent(BaseAgent):
 
     def has_pending_interrupt(self) -> bool:
         return self._stream_controller.has_pending_interrupt()
+
+    def owns_pending_interrupt_answer(self, user_input: Any) -> bool:
+        """Return whether this member's pending interrupt fully matches the answer.
+
+        The check only chooses which existing ``resume_interrupt`` to call.
+        Admission is still decided by that call's ``DeliverResult``.
+        """
+        return self._stream_controller.is_valid_interrupt_resume(user_input)
 
     async def start_agent(self, content: str) -> None:
         await self._start_agent(content)
@@ -699,18 +776,45 @@ class TeamAgent(BaseAgent):
         user_input: Any,
         *,
         run_context: RunContext | None = None,
-    ) -> None:
-        if not self._stream_controller.is_valid_interrupt_resume(user_input):
-            team_logger.info("[{}] dropping stale interrupt resume input", self._member_name() or "?")
-            return
-        # The supervisor serialises the resume: send() either starts the resume
-        # round (idle) or steers it into the active one — no pending queue.
+    ) -> DeliverResult:
+        """Report actual answer admission, not completion of the resumed tool."""
         harness = self.harness
-        if harness is not None:
+        if harness is None:
+            return DeliverResult.failure("interrupt_resume_unavailable")
+        if isinstance(harness, TeamHarness):
+            try:
+                await harness.resume_interrupt(user_input, run_context=run_context)
+            except BaseError as exc:
+                admission_reasons = {
+                    "interrupt_resume_busy",
+                    "interrupt_resume_unavailable",
+                    "interrupt_already_resolved",
+                    "unsupported_interactive_input",
+                }
+                reason = _interrupt_admission_failure_reason(exc, admission_reasons)
+                if reason is not None:
+                    return DeliverResult.failure(reason)
+                if _interrupt_runtime_unavailable(exc):
+                    return DeliverResult.failure("interrupt_resume_unavailable")
+                raise
+        else:
+            # External providers retain their own matching and running-input semantics.
+            if not self._stream_controller.is_valid_interrupt_resume(user_input):
+                return DeliverResult.failure("unsupported_interactive_input")
             if run_context is None:
                 await harness.send(user_input)
             else:
                 await harness.send(user_input, run_context=run_context)
+        return DeliverResult.success()
+
+    async def resume_plan_interrupt(self, user_input: Any) -> None:
+        """Preserve plan-event delivery, which has no durable approval-mail retry."""
+        if not self._stream_controller.is_valid_interrupt_resume(user_input):
+            team_logger.info("[{}] dropping stale interrupt resume input", self._member_name() or "?")
+            return
+        harness = self.harness
+        if harness is not None:
+            await harness.send(user_input)
 
     # ------------------------------------------------------------------
     # BaseAgent abstract method: configure
@@ -754,6 +858,8 @@ class TeamAgent(BaseAgent):
                 team_backend.set_store_checkpoint_fn(self.set_checkpoint)
                 team_backend.set_checkpoint_list_fn(lambda: self._named_checkpoints)
                 team_backend.set_member_model_fn(self._apply_member_model)
+                if spec.enable_fork and spec.spawn_mode == "inprocess":
+                    team_backend.set_expert_fork_capture(self._capture_expert_fork)
 
     def _setup_agent(
         self,
@@ -770,6 +876,13 @@ class TeamAgent(BaseAgent):
             ctx,
             member_runtime=member_runtime,
         )
+        if ctx.role == TeamRole.LEADER and ctx.cli_agent:
+            # The leader's third-party harness was built by the configurator;
+            # its team tools and context tracker need this agent's backend.
+            from openjiuwen.agent_teams.spawn.external_leader import bind_external_leader
+
+            bind_external_leader(self, spec, ctx)
+        self._setup_goal(ctx)
 
         # Build the member handle once for every role. ``create_member_handle``
         # is a pure constructor: it only needs the bound ``team_backend``
@@ -1499,16 +1612,20 @@ class TeamAgent(BaseAgent):
 
         # ── Resolve fork context ──
         fork_ctx: ForkContext | None = None
+        fork_info = None
         if self.team_backend is not None:
-            fork_info = self.team_backend.consume_fork_on_spawn(teammate_id)
+            fork_info = self.team_backend.pending_fork_on_spawn(teammate_id)
             team_logger.debug(
-                "[fork] _on_teammate_created: member=%s fork_info=%s checkpoints=%s spawned_handles=%s",
+                "[fork] _on_teammate_created: member=%s requested=%s checkpoints=%s spawned_handles=%s",
                 teammate_id,
-                fork_info,
+                bool(fork_info),
                 list(self._named_checkpoints.keys()),
                 list(self._spawn_manager.spawned_handles.keys()),
             )
-            if fork_info:
+            if fork_info and "snapshot" in fork_info:
+                if fork_info["session_id"] == self.session_id:
+                    fork_ctx = fork_info["snapshot"]
+            elif fork_info:
                 try:
                     native = self._resolve_fork_native(fork_info.get("source"))
                     team_logger.debug(
@@ -1656,22 +1773,38 @@ class TeamAgent(BaseAgent):
             spawn_config=SpawnConfig(health_check_timeout=30, health_check_interval=50),
             fork_from=fork_ctx,
         )
+        if fork_info:
+            self.team_backend.consume_fork_on_spawn(teammate_id)
+
+    def _capture_expert_fork(self, source_name: str) -> ForkContext:
+        """Capture self live, or fork another native member at its completed turn."""
+        native = self._resolve_fork_native(source_name)
+        if native is None:
+            raise ValueError(f"Fork source '{source_name}' must be a running in-process native member")
+        if source_name != self._member_name():
+            try:
+                return native.capture_completed_turn_fork()
+            except ValueError as exc:
+                raise ValueError(f"Fork source '{source_name}': {exc}") from exc
+        snapshot = ForkContext.from_agent(native)
+        if snapshot.is_empty():
+            raise ValueError(f"Fork source '{source_name}' has no conversation context to inherit")
+        return snapshot
 
     def _resolve_fork_native(self, source_name: str | None):
         """Return the DeepAgent of a named member, or leader's own."""
         if source_name is None or source_name == self._member_name():
-            return self.resources.harness.get_deep_agent()
-
-        handle = self._spawn_manager.spawned_handles.get(source_name)
-        if handle and hasattr(handle, "agent_ref"):
-            agent = handle.agent_ref
-            if hasattr(agent, "resources") and agent.resources.harness:
-                return agent.resources.harness.get_deep_agent()
+            agent = self
+        else:
+            agent = self._spawn_manager.lookup_inprocess_agent(source_name)
+        if agent is not None:
+            get_deep_agent = getattr(agent.resources.harness, "get_deep_agent", None)
+            if get_deep_agent is not None:
+                return get_deep_agent()
 
         team_logger.warning(
             "[fork] fork source '%s' not found or not in-process "
-            "(leader=%s, spawned=%s); fork inheritance will be SKIPPED — "
-            "member starts without inherited context",
+            "(leader=%s, spawned=%s)",
             source_name,
             self._member_name() or "?",
             list(self._spawn_manager.spawned_handles.keys()),
@@ -2063,7 +2196,9 @@ class TeamAgent(BaseAgent):
             runtime_spec: Optional live spec from the current process. Used to
                 reinject ``build_context`` and ``memory.embedding_config``, which
                 are ``Field(exclude=True)`` and never survive the checkpoint
-                round-trip. When omitted the recovered spec is used as-is
+                round-trip. Its context seed replaces the checkpoint seed too,
+                so later process spawns reconstruct the same platform context.
+                When omitted the recovered spec is used as-is
                 (rebuilding context from its seed).
 
         Raises:
@@ -2083,12 +2218,18 @@ class TeamAgent(BaseAgent):
         if spec_data is None:
             raise ValueError(f"No leader spec found for team '{team_name}'")
         spec = TeamAgentSpec.model_validate(spec_data)
+        # An explicit host setting also applies when an older team is rebuilt.
+        if runtime_spec is not None and "enable_fork" in runtime_spec.model_fields_set:
+            spec.enable_fork = runtime_spec.enable_fork
         # build_context is Field(exclude=True) and dropped on the checkpoint
         # round-trip. Prefer the live runtime spec's context on warm recovery;
         # otherwise rebuild it from the serializable seed so provider-based
         # members survive a cold restart. No-op for legacy.
         if runtime_spec is not None and runtime_spec.build_context is not None:
             spec.build_context = runtime_spec.build_context
+            # Process-spawn payloads exclude the live context. Keep its seed in
+            # sync so recovered members do not reconstruct checkpoint-era policy.
+            spec.build_context_seed = copy.deepcopy(runtime_spec.build_context_seed)
         # embedding_config is also Field(exclude=True) — reinject from the
         # live spec so resolve_embedding_config can find it during configure.
         if runtime_spec is not None and runtime_spec.memory and runtime_spec.memory.embedding_config:

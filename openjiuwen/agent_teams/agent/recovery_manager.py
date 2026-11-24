@@ -85,9 +85,13 @@ class RecoveryManager:
             # Paired with the structural guard in ``SpawnManager.spawn_teammate``
             # (F_14 whitelist-drift lesson: one skip point per layer, each
             # pointing at the other, so a future drift is grep-able).
-            if await team_backend.is_passive_human(member.member_name):
+            member_state = await team_backend.get_member(member.member_name)
+            if member_state is None:
+                continue
+            if (member_state.role == TeamRole.HOST_MANAGED.value
+                    or await team_backend.is_passive_human(member.member_name)):
                 team_logger.debug(
-                    "[{}] passive human {} has no runtime; skip recover restart",
+                    "[{}] identity-only member {} has no runtime; skip recover restart",
                     member_name or "?",
                     member.member_name,
                 )

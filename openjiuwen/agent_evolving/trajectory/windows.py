@@ -24,20 +24,34 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import Any, TypeGuard
+from typing import TYPE_CHECKING, Any, TypeGuard
 
+from openjiuwen.agent_evolving.trajectory import spans as trajectory_spans
+from openjiuwen.agent_evolving.trajectory.serialization import to_json_compatible
 from openjiuwen.agent_evolving.trajectory.spans import (
     Span,
+    SpanIdentity,
+    _merge_normalized_payloads,
+    _merge_payload_groups,
+    _normalized_span_identity,
+    _trim_payload,
     attributes_from_map,
-    iter_spans,
+    attributes_to_map,
+    compact_payload_for,
+    iter_payload_spans,
+    iter_compact_spans,
     normalize_otlp,
     span_attributes,
+    span_identity,
     span_sort_key,
-    trim_trajectory,
+    trim_compact_trajectory,
 )
 from openjiuwen.extensions.observability import semconv
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_evolving.trajectory.model import Trajectory
 
 CONTEXT_WINDOW_COMMIT = "context.window.commit"
 COMPACTION_COMPLETED = "compaction.completed"
@@ -134,7 +148,15 @@ def read_trajectory_event(span: Mapping[str, Any]) -> TrajectoryEvent | None:
     event whose envelope is incomplete is still not readable and returns None.
     """
 
-    attributes = span_attributes(span)
+    attributes = span_attributes(span, keys=(
+        semconv.OJ_TRAJECTORY_EVENT_KIND,
+        semconv.OJ_TRAJECTORY_EVENT_ID,
+        semconv.OJ_TRAJECTORY_SUBJECT_ID,
+        semconv.OJ_TRAJECTORY_SEQUENCE_EPOCH,
+        semconv.OJ_TRAJECTORY_SUBJECT_SEQUENCE,
+        semconv.OJ_TRAJECTORY_RECORDED_AT_UNIX_NANO,
+        semconv.OJ_TRAJECTORY_PAYLOAD,
+    ))
     event_kind = attributes.get(semconv.OJ_TRAJECTORY_EVENT_KIND)
     if not isinstance(event_kind, str) or not event_kind:
         return None
@@ -172,7 +194,14 @@ def iter_trajectory_events(value: Any) -> list[TrajectoryEvent]:
     reads with its owner's attributes under its own, as the viewer reads it.
     """
 
-    spans = iter_spans(value) if not _is_span_iterable(value) else value
+    events = _iter_compact_trajectory_events(value)
+    if _is_span_iterable(value):
+        return events
+    return [replace(event, span=to_json_compatible(event.span)) for event in events]
+
+
+def _iter_compact_trajectory_events(value: Any) -> list[TrajectoryEvent]:
+    spans = iter_compact_spans(value) if not _is_span_iterable(value) else value
     events: list[TrajectoryEvent] = []
     for span in spans:
         event = read_trajectory_event(span)
@@ -187,7 +216,11 @@ def iter_trajectory_events(value: Any) -> list[TrajectoryEvent]:
                     **span,
                     "name": span_event.get("name"),
                     "attributes": attributes_from_map(
-                        {**span_attributes(span), **span_attributes(span_event)}
+                        {
+                            **attributes_to_map(span.get("attributes"), preserve_sequences=True),
+                            **span_attributes(span_event),
+                        },
+                        preserve_sequences=True,
                     ),
                     "events": [],
                 }
@@ -522,7 +555,7 @@ def replay_windows(value: Any) -> WindowReplay:
     """
 
     by_subject: dict[str, list[TrajectoryEvent]] = {}
-    for event in iter_trajectory_events(value):
+    for event in _iter_compact_trajectory_events(value):
         by_subject.setdefault(event.subject_id, []).append(event)
     windows: dict[str, dict[str, tuple[dict[str, Any], ...]]] = {}
     by_inference: dict[str, tuple[dict[str, Any], ...]] = {}
@@ -552,7 +585,7 @@ def _trim_baseline_span(
 ) -> Span:
     """Restate the window a retained commit applies onto as a baseline event."""
 
-    attributes = span_attributes(first.span)
+    attributes = attributes_to_map(first.span.get("attributes"), preserve_sequences=True)
     payload = {
         "window_id": base_window_id,
         "base_window_id": None,
@@ -578,7 +611,7 @@ def _trim_baseline_span(
         "kind": first.span.get("kind", "SPAN_KIND_INTERNAL"),
         "startTimeUnixNano": str(start),
         "endTimeUnixNano": str(start),
-        "attributes": attributes_from_map(attributes),
+        "attributes": attributes_from_map(attributes, preserve_sequences=True),
         "status": {"code": "STATUS_CODE_OK"},
     }
     return span
@@ -600,9 +633,17 @@ def rebase_window_chain(history: Any, retained: Any) -> Any:
 
     from openjiuwen.agent_evolving.trajectory.model import Trajectory
 
-    retained_events = iter_trajectory_events(retained)
-    if not any(event.event_kind == CONTEXT_WINDOW_COMMIT for event in retained_events):
+    additions = _window_baselines(history, retained)
+    if not additions:
         return retained
+    payload = normalize_otlp(compact_payload_for(retained))
+    return Trajectory.from_otlp(_prepend_baselines(payload, additions))
+
+
+def _window_baselines(history: Any, retained: Any) -> list[Span]:
+    retained_events = _iter_compact_trajectory_events(retained)
+    if not any(event.event_kind == CONTEXT_WINDOW_COMMIT for event in retained_events):
+        return []
     history_replay: WindowReplay | None = None
     additions: list[Span] = []
     by_subject: dict[str, list[TrajectoryEvent]] = {}
@@ -625,23 +666,27 @@ def rebase_window_chain(history: Any, retained: Any) -> Any:
             event.sequence for event in ordered if event.sequence_epoch == first_commit.sequence_epoch
         ]
         additions.append(_trim_baseline_span(first_commit, base_window_id, window, min(epoch_sequences) - 1))
-    if not additions:
-        return retained
-    payload = normalize_otlp(retained.to_otlp() if hasattr(retained, "to_otlp") else retained)
-    resource_spans = payload.get("resourceSpans") or []
-    if not resource_spans:
-        return retained
-    scopes = resource_spans[0].setdefault("scopeSpans", [])
-    if not scopes:
-        scopes.append({"scope": {}, "spans": []})
-    scopes[0]["spans"] = sorted([*additions, *scopes[0].get("spans", [])], key=span_sort_key)
-    return Trajectory.from_otlp(payload)
+    return additions
+
+
+def _prepend_baselines(payload: dict[str, Any], additions: list[Span]) -> dict[str, Any]:
+    resources = payload["resourceSpans"]
+    if not resources:
+        return payload
+    first = resources[0]
+    scopes = first["scopeSpans"] or [{"scope": {}, "spans": []}]
+    group = scopes[0]
+    updated_spans = sorted([*additions, *group["spans"]], key=span_sort_key)
+    updated_first = {**first, "scopeSpans": [{**group, "spans": updated_spans}, *scopes[1:]]}
+    return {**payload, "resourceSpans": [updated_first, *resources[1:]]}
 
 
 def is_trajectory_event_span(span: Mapping[str, Any]) -> bool:
     """Whether a span is a v2 trajectory event rather than work."""
 
-    attributes = span_attributes(span)
+    attributes = span_attributes(span, keys=(
+        semconv.OJ_TRAJECTORY_RECORD_KIND, semconv.OJ_TRAJECTORY_EVENT_KIND
+    ))
     return (
         attributes.get(semconv.OJ_TRAJECTORY_RECORD_KIND) == "event"
         or semconv.OJ_TRAJECTORY_EVENT_KIND in attributes
@@ -656,8 +701,79 @@ def trim_trajectory_window(value: Any, max_spans: int | None) -> Any:
     baseline, so the bounded window still replays every request it keeps.
     """
 
-    trimmed = trim_trajectory(value, max_spans, uncounted=is_trajectory_event_span)
+    trimmed = trim_compact_trajectory(compact_payload_for(value), max_spans, uncounted=is_trajectory_event_span)
     return rebase_window_chain(value, trimmed)
+
+
+def trim_canonical_window(payload: dict[str, Any], max_spans: int | None) -> dict[str, Any]:
+    """Trim canonical groups and repair the retained context commit chains."""
+
+    trimmed = _trim_payload(payload, max_spans, uncounted=is_trajectory_event_span)
+    additions = _window_baselines(list(iter_payload_spans(payload)), list(iter_payload_spans(trimmed)))
+    return _prepend_baselines(trimmed, additions) if additions else trimmed
+
+
+@dataclass(frozen=True, slots=True)
+class OnlineTrajectoryWindow:
+    """One immutable revision of a Rail's clean window, with a scope-wide index."""
+
+    _payload: dict[str, Any] | None = None
+    _identities: frozenset[SpanIdentity] = frozenset()
+    _can_reuse_groups: bool = False
+
+    def updated(self, increment: Trajectory, max_spans: int | None) -> OnlineTrajectoryWindow:
+        """Stage a new revision without mutating any previously retained spans."""
+
+        incoming = increment.copy_compact_payload()
+        current = self._payload
+        if current is None:
+            # The first write has always retained all source groups and
+            # allowed duplicate identities through to the capacity trim.
+            merged = normalize_otlp(incoming)
+        else:
+            if self._can_reuse_groups:
+                groups = current["resourceSpans"][0]["scopeSpans"]
+            else:
+                # The first merge collapses resources and deduplicates the
+                # survivors of the first trim in source traversal order.
+                collapsed = _merge_normalized_payloads([current])
+                groups = collapsed["resourceSpans"][0]["scopeSpans"]
+
+            admitted: set[SpanIdentity] = set()
+
+            def admit(span: Span) -> Span | None:
+                identity = _normalized_span_identity(span)
+                if identity is not None:
+                    if identity in self._identities or identity in admitted:
+                        return None
+                    admitted.add(identity)
+                return trajectory_spans.normalize_span(span)
+
+            merged = _merge_payload_groups(current, groups, (incoming,), admit)
+
+        payload = trim_canonical_window(merged, max_spans)
+        identities: set[SpanIdentity] = set()
+        has_duplicates = False
+        for span in iter_payload_spans(payload):
+            identity = span_identity(span)
+            if identity is not None:
+                has_duplicates |= identity in identities
+                identities.add(identity)
+        return OnlineTrajectoryWindow(payload, frozenset(identities), current is not None and not has_duplicates)
+
+    def snapshot(self, metadata: Mapping[str, Any]) -> Trajectory:
+        """Add the scope envelope while taking a detached copy through Trajectory."""
+
+        from openjiuwen.agent_evolving.trajectory.model import Trajectory
+
+        if self._payload is None:
+            raise ValueError("cannot snapshot an empty trajectory window")
+        attributes = attributes_from_map(metadata)
+        resources = [
+            {**resource, "resource": {**resource["resource"], "attributes": attributes}}
+            for resource in self._payload["resourceSpans"]
+        ]
+        return Trajectory.from_otlp({**self._payload, "resourceSpans": resources})
 
 
 __all__ = [

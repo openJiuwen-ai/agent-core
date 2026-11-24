@@ -899,7 +899,7 @@ Plugin authors declare it in their package's `pyproject.toml`:
 my_backend = "my_package.my_vector_store:MyVectorStore"
 ```
 
-After `pip install my-package`, users call `create_vector_store("my_backend", ...)` to obtain an instance. Full authoring guide: [Store Plugin Development](../../../Advanced%20Usage/Store%20Plugin%20Development.md).
+After `pip install my-package`, users call `create_vector_store("my_backend", ...)` to obtain an instance. Full authoring guide: [Store Plugin Development](../../../../Advanced%20Usage/Store%20Plugin%20Development.md).
 
 ---
 

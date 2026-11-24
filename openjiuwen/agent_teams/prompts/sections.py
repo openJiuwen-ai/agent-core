@@ -258,6 +258,66 @@ def build_leader_prebuilt_section(
     )
 
 
+def build_leader_static_sections(
+    *,
+    bootstrap_mode: str = "leader",
+    swarmflow_enabled: bool = False,
+    recovered: bool = False,
+    bound_group_name: str | None = None,
+    base_prompt: str | None = None,
+    language: str = "cn",
+    loader: TemplateLoader = load_template,
+) -> list[PromptSection]:
+    """Build the leader's system-prompt prefix: an opening section plus the caller's own prompt.
+
+    The opening section is ``team_bootstrap`` (route to ``build_team``) or,
+    for a framework-built team (F_122), ``team_prebuilt`` (the team exists,
+    the policy arrives as a ``<team-policy>`` block). The extra section
+    stays here rather than moving into the policy disclosure because it is
+    not team policy: it is what the SDK caller told *this* leader to do,
+    and it has to be in force before the team exists -- it may well be the
+    instruction that decides what team to build.
+
+    One assembly for both kinds of leader: the policy rail of an in-process
+    leader and the system prompt of a leader driven by a third-party harness.
+
+    Args:
+        bootstrap_mode: Who materializes the team ("leader" / "framework").
+        swarmflow_enabled: Whether the leader holds the ``swarmflow`` tool.
+        recovered: The leader continues a conversation that already holds the
+            policy; picks the bootstrap variant that does not route to
+            ``build_team``. Ignored for a framework-built team.
+        bound_group_name: The bound AgentGroup's name when the expert tools
+            are wired under scheduled dispatch, else ``None``.
+        base_prompt: The caller's own instruction for this leader.
+        language: Prompt language ('cn' or 'en').
+        loader: Template loader (the per-team workspace loader, or the
+            framework default).
+
+    Returns:
+        The leader's static sections, in mount order.
+    """
+    if bootstrap_mode == "framework":
+        opening = build_leader_prebuilt_section(language=language, loader=loader)
+    else:
+        opening = build_leader_bootstrap_section(
+            swarmflow_enabled=swarmflow_enabled,
+            language=language,
+            loader=loader,
+            recovered=recovered,
+        )
+    sections = [opening]
+    # Scheduled dispatch with a bound AgentGroup (F_125 decision 14): name
+    # the group so the leader looks for experts there first -- the same
+    # signal that scopes ``view_experts`` to it.
+    if bound_group_name is not None:
+        sections.append(build_leader_bound_group_section(group=bound_group_name, language=language, loader=loader))
+    extra = build_team_extra_section(base_prompt=base_prompt, language=language)
+    if extra is not None:
+        sections.append(extra)
+    return sections
+
+
 def build_team_role_section(
     *,
     role: TeamRole,
@@ -926,6 +986,7 @@ def build_team_member_system_prompt(
     workspace_prompt_variant: Literal["native", "external"] = "native",
     mcp_server_name: str | None = None,
     loader: TemplateLoader = load_template,
+    sections: tuple[PromptSection, ...] | None = None,
 ) -> str:
     """Render a member's team sections into a single standalone system prompt.
 
@@ -956,12 +1017,24 @@ def build_team_member_system_prompt(
         mcp_server_name: The MCP server providing the team's tools, when the
             member reaches them through MCP. ``None`` (an in-process member,
             which calls its tools by the bare name) renders the policy alone.
+        sections: Pre-built sections to render instead of assembling the
+            default set here. The extension-wired external-CLI path passes
+            the ``team.build_policy`` chain output this way, so handler
+            rewrites reach the CLI member's prompt; ``None`` (the default)
+            builds the default set from the remaining args.
 
     Other args mirror :func:`build_team_static_sections`.
 
     Returns:
         The rendered system prompt, or ``""`` when no section produced content.
     """
+    if sections is not None:
+        return _render_extension_sections(
+            sections,
+            language=language,
+            mcp_server_name=mcp_server_name,
+            loader=loader,
+        )
     sections = build_team_static_sections(
         role=role,
         member_name=member_name,
@@ -978,6 +1051,76 @@ def build_team_member_system_prompt(
         workspace_prompt_variant=workspace_prompt_variant,
         loader=loader,
     )
+    return _render_standalone_prompt(sections, language=language, mcp_server_name=mcp_server_name, loader=loader)
+
+
+def build_leader_system_prompt(
+    *,
+    bootstrap_mode: str = "leader",
+    swarmflow_enabled: bool = False,
+    recovered: bool = False,
+    bound_group_name: str | None = None,
+    base_prompt: str | None = None,
+    language: str = "cn",
+    mcp_server_name: str | None = None,
+    loader: TemplateLoader = load_template,
+) -> str:
+    """Render the leader's team sections into a single standalone system prompt.
+
+    The leader counterpart of :func:`build_team_member_system_prompt`, for a
+    leader whose brain is a third-party harness. It carries the same prefix an
+    in-process leader gets from its policy rail (see
+    :func:`build_leader_static_sections`); the rest of the collaboration
+    policy reaches it the same way too -- in the ``build_team`` result, or as
+    a ``<team-policy>`` block for a framework-built team.
+
+    Args:
+        mcp_server_name: The MCP server providing the team's tools, when the
+            leader reaches them through MCP; ``None`` renders the policy alone.
+
+    Other args mirror :func:`build_leader_static_sections`.
+
+    Returns:
+        The rendered system prompt.
+    """
+    sections = build_leader_static_sections(
+        bootstrap_mode=bootstrap_mode,
+        swarmflow_enabled=swarmflow_enabled,
+        recovered=recovered,
+        bound_group_name=bound_group_name,
+        base_prompt=base_prompt,
+        language=language,
+        loader=loader,
+    )
+    return _render_standalone_prompt(sections, language=language, mcp_server_name=mcp_server_name, loader=loader)
+
+
+def _render_standalone_prompt(
+    sections: list[PromptSection],
+    *,
+    language: str,
+    mcp_server_name: str | None,
+    loader: TemplateLoader,
+) -> str:
+    """Join team sections into one prompt, declaring the tool namespace when there is one."""
+    builder = SystemPromptBuilder(language=language)
+    for section in sections:
+        builder.add_section(section)
+    prompt = builder.build()
+    if not prompt or not mcp_server_name:
+        return prompt
+    note = loader("tool_namespace", language).format({"server": mcp_server_name}).content.strip()
+    return render_team_policy(body=prompt, tools=mcp_server_name, note=note)
+
+
+def _render_extension_sections(
+    sections: tuple[PromptSection, ...],
+    *,
+    language: str,
+    mcp_server_name: str | None,
+    loader: TemplateLoader,
+) -> str:
+    """Render an extension result without running the default section builders."""
     builder = SystemPromptBuilder(language=language)
     for section in sections:
         builder.add_section(section)
@@ -994,6 +1137,8 @@ __all__ = [
     "build_leader_bound_group_section",
     "build_leader_policy_disclosure",
     "build_leader_prebuilt_section",
+    "build_leader_static_sections",
+    "build_leader_system_prompt",
     "build_team_bridge_section",
     "build_team_dispatch_section",
     "build_team_extra_section",

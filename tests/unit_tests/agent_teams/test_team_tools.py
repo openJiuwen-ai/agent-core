@@ -1921,6 +1921,48 @@ class TestViewTaskToolV2:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
+    async def test_open_task_reports_assignee_status(self, agent_team, t, sample_agent_card):
+        """list and get both name the owner of an open task with its member status"""
+        await agent_team.spawn_member(member_name="member1", display_name="Member One", agent_card=sample_agent_card)
+        tm = agent_team.task_manager
+        task = await tm.add(title="Owned", content="Content")
+        assert (await tm.assign(task.task_id, "member1")).ok
+
+        tool = ViewTaskToolV2(tm, t)
+        listed = await tool.invoke({"action": "list"})
+        summary = listed.data["tasks"][0]
+        assert summary["assignee"] == "member1"
+        assert summary["assignee_status"] == MemberStatus.UNSTARTED.value
+        assert "assignee=member1[unstarted]" in tool.render_for_llm(listed)
+
+        detail = await tool.invoke({"action": "get", "task_id": task.task_id})
+        assert detail.data["assignee_status"] == MemberStatus.UNSTARTED.value
+        assert "Assignee: member1[unstarted]" in tool.render_for_llm(detail)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_terminal_task_omits_assignee_status(self, agent_team, t, sample_agent_card):
+        """A finished task keeps its assignee but drops the member status"""
+        await agent_team.spawn_member(member_name="member1", display_name="Member One", agent_card=sample_agent_card)
+        tm = agent_team.task_manager
+        task = await tm.add(title="Owned", content="Content")
+        assert (await tm.assign(task.task_id, "member1")).ok
+        assert await tm.cancel(task.task_id)
+
+        tool = ViewTaskToolV2(tm, t)
+        listed = await tool.invoke({"action": "list"})
+        summary = listed.data["tasks"][0]
+        assert summary["assignee"] == "member1"
+        assert summary["assignee_status"] is None
+        rendered = tool.render_for_llm(listed)
+        assert "assignee=member1 " in rendered
+        assert "[unstarted]" not in rendered
+
+        detail = await tool.invoke({"action": "get", "task_id": task.task_id})
+        assert "assignee_status" not in detail.data
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_list_tasks_by_status(self, agent_team, t, db):
         """Test list action returns summary with blocked_by, no content"""
         await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
@@ -2041,6 +2083,82 @@ class TestClaimTaskTool:
         assert result.success is False
         assert result.error == "Task not found"
 
+    @staticmethod
+    async def _assigned_pending_task(
+        agent_team,
+        db,
+        message_bus,
+        sample_agent_card,
+        *,
+        member: str = "dev1",
+        task_id: str = "t-1",
+        mode: str = MemberMode.BUILD_MODE.value,
+    ) -> TeamTaskManager:
+        """Assign a pending task to a fresh member; return that member's task manager."""
+        from openjiuwen.agent_teams.schema.task import TaskGraphSpec
+
+        await db.member.create_member(
+            member_name=member,
+            team_name="test_team",
+            display_name=member,
+            agent_card=sample_agent_card.model_dump_json(),
+            status=MemberStatus.READY,
+            mode=mode,
+        )
+        created = await agent_team.task_manager.add_graph(
+            [TaskGraphSpec(task_id=task_id, title="T", content="c", assignee=member)]
+        )
+        assert created.ok
+        return TeamTaskManager(team_name="test_team", member_name=member, db=db, messager=message_bus)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_complete_unstarted_assignment_names_the_claim_call(
+        self, agent_team, t, db, message_bus, sample_agent_card
+    ):
+        """Completing an assigned task that was never claimed tells the member the exact call to run.
+
+        Following the hint (claim, then complete again) finishes the task.
+        """
+        tm = await self._assigned_pending_task(agent_team, db, message_bus, sample_agent_card)
+        tool = ClaimTaskTool(tm, t)
+
+        rejected = await tool.invoke({"task_id": "t-1", "status": "completed", "summary": "done"})
+
+        assert rejected.success is False
+        assert rejected.error.startswith("Task t-1 cannot be completed from status 'pending' (must be in_progress)")
+        assert "claim_task(task_id='t-1', status='claimed')" in rejected.error
+        assert (await tool.invoke({"task_id": "t-1", "status": "claimed"})).success is True
+        completed = await tool.invoke({"task_id": "t-1", "status": "completed", "summary": "done"})
+        assert completed.success is True
+        assert completed.data["status_change"]["to"] == "completed"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_complete_unstarted_assignment_hint_withheld_when_claim_would_fail(
+        self, agent_team, t, db, message_bus, sample_agent_card
+    ):
+        """No claim hint for a plan-mode member or one already holding another active task."""
+        from openjiuwen.agent_teams.schema.task import TaskGraphSpec
+
+        plan_tm = await self._assigned_pending_task(
+            agent_team, db, message_bus, sample_agent_card, member="planner", mode=MemberMode.PLAN_MODE.value
+        )
+        plan_result = await ClaimTaskTool(plan_tm, t).invoke({"task_id": "t-1", "status": "completed"})
+        assert plan_result.success is False
+        assert "claim_task(" not in plan_result.error
+
+        busy_tm = await self._assigned_pending_task(
+            agent_team, db, message_bus, sample_agent_card, member="busy", task_id="t-2"
+        )
+        await agent_team.task_manager.add_graph(
+            [TaskGraphSpec(task_id="t-busy", title="B", content="b", assignee="busy")]
+        )
+        assert (await busy_tm.claim("t-busy")).ok
+        busy_result = await ClaimTaskTool(busy_tm, t).invoke({"task_id": "t-2", "status": "completed"})
+        assert busy_result.success is False
+        assert "claim_task(" not in busy_result.error
+
 
 # ========== Result Mapping ==========
 
@@ -2103,7 +2221,7 @@ class TestRenderForLlm:
         )
         result = tool.render_for_llm(output)
         assert "#t1 [pending] Fix bug" in result
-        assert "(dev-1)" in result
+        assert "assignee=dev-1 " in result
         assert "[blocked by #t1]" in result
         # t2 carries updated_at → its line shows the absolute local time;
         # t1 has no updated_at → the None guard skips time rendering.

@@ -18,6 +18,7 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.callback.events import LLMCallEvents
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.runtime import ObservabilityRuntime
+from openjiuwen.extensions.observability.sequence_registry import materialize_stated_value
 from openjiuwen.extensions.observability.semconv import (
     GEN_AI_OPERATION_NAME,
     OJ_EXECUTION_SUBJECT_ID,
@@ -195,8 +196,8 @@ async def test_canonical_request_and_v2_event_survive_legacy_attribute_pressure(
         for span in exporter.get_finished_spans()
         if _attrs(span).get(GEN_AI_OPERATION_NAME) == "chat"
     )
-    instructions = json.loads(_attrs(llm_span)[GEN_AI_SYSTEM_INSTRUCTIONS])
-    history = json.loads(_attrs(llm_span)[GEN_AI_INPUT_MESSAGES])
+    instructions = json.loads(materialize_stated_value(_attrs(llm_span)[GEN_AI_SYSTEM_INSTRUCTIONS]))
+    history = json.loads(materialize_stated_value(_attrs(llm_span)[GEN_AI_INPUT_MESSAGES]))
     assert len(instructions) + len(history) == 111
     assert not any(key.startswith("gen_ai.prompt.") for key in _attrs(llm_span))
 
@@ -352,7 +353,8 @@ def test_context_window_delta_uses_occurrence_identity_and_preserves_history() -
     assert [message["message_id"] for message in payloads[0]["messages"]] == ["a", "b", "c"]
 
 
-def test_compaction_request_does_not_enter_the_conversation_chain() -> None:
+@pytest.mark.parametrize("purpose", ["compaction", "goal_assessment"])
+def test_auxiliary_request_does_not_enter_the_conversation_chain(purpose: str) -> None:
     """A compaction summarizes the conversation; its prompt is not part of it.
 
     Committing one spliced a foreign window into the chain, so the next real
@@ -390,7 +392,7 @@ def test_compaction_request_does_not_enter_the_conversation_chain() -> None:
             tracer=tracer, llm_span=parent, messages=turn_one, request_purpose="assistant"
         )
         skipped = emit_context_window_commit(
-            tracer=tracer, llm_span=parent, messages=summary_prompt, request_purpose="compaction"
+            tracer=tracer, llm_span=parent, messages=summary_prompt, request_purpose=purpose
         )
         emit_context_window_commit(
             tracer=tracer, llm_span=parent, messages=turn_two, request_purpose="assistant"
@@ -788,3 +790,48 @@ def test_langfuse_only_span_is_not_a_native_v2_event() -> None:
     assert OJ_TRAJECTORY_SCHEMA_VERSION not in attrs
     assert OJ_TRAJECTORY_EVENT_KIND not in attrs
     assert OJ_TRAJECTORY_PAYLOAD not in attrs
+
+
+@pytest.mark.asyncio
+async def test_goal_assessment_is_recorded_without_advancing_its_owner_window() -> None:
+    from openjiuwen.core.foundation.llm.call_scope import llm_observation_scope
+    from openjiuwen.extensions.observability.semconv import (
+        OJ_GOAL_ID, OJ_GOAL_ATTEMPT_NUMBER, OJ_GOAL_ASSESSMENT_ID, OJ_REQUEST_PURPOSE,
+    )
+    exporter = InMemorySpanExporter()
+    runtime = ObservabilityRuntime()
+    runtime.initialize(
+        ObservabilityConfig(enabled=True, service_name="goal-assessment-test", exporter="otlp_grpc"),
+        span_exporter_override=exporter,
+    )
+    root = runtime.get_tracer("goal-test").start_span("owner", attributes={
+        GEN_AI_CONVERSATION_ID: "assessment-session", OJ_EXECUTION_SUBJECT_ID: "leader",
+        OJ_EXECUTION_SUBJECT_KIND: "team_leader", OJ_TURN_NUMBER: 6,
+    })
+    set_root_span(root, session_id="assessment-session")
+    facts = {OJ_GOAL_ID: "g1", OJ_GOAL_ATTEMPT_NUMBER: 2, OJ_GOAL_ASSESSMENT_ID: "assessment-1"}
+    framework = Runner.callback_framework
+    try:
+        with llm_observation_scope("goal_assessment", attributes=facts):
+            await framework.trigger(LLMCallEvents.LLM_INVOKE_INPUT, messages=[{"role": "user", "content": "judge"}])
+            await framework.trigger(LLMCallEvents.LLM_INPUT, messages=[{"role": "user", "content": "judge"}])
+            await framework.trigger(LLMCallEvents.LLM_INVOKE_OUTPUT, result=AssistantMessage(content='{"status":"continue"}'))
+        await framework.trigger(LLMCallEvents.LLM_INVOKE_INPUT, messages=[{"role": "user", "content": "continue work"}])
+        await framework.trigger(LLMCallEvents.LLM_INPUT, messages=[{"role": "user", "content": "continue work"}])
+        await framework.trigger(LLMCallEvents.LLM_INVOKE_OUTPUT, result=AssistantMessage(content="done"))
+    finally:
+        root.end()
+        clear_root_span(session_id="assessment-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+    calls = [s for s in exporter.get_finished_spans() if _attrs(s).get(GEN_AI_OPERATION_NAME) == "chat"]
+    assert len(calls) == 2
+    assessment = next(s for s in calls if _attrs(s)[OJ_REQUEST_PURPOSE] == "goal_assessment")
+    assert all(_attrs(assessment)[k] == v for k, v in facts.items())
+    assert _attrs(assessment)[OJ_EXECUTION_SUBJECT_ID] == "leader"
+    assert "judge" in _attrs(assessment)[GEN_AI_INPUT_MESSAGES]
+    commits = [s for s in exporter.get_finished_spans() if s.name == "context.window.commit"]
+    assert len(commits) == 1
+    assert _payload(commits[0])["base_window_id"] is None
+    assert "continue work" in json.dumps(_payload(commits[0]))
+    assert "judge" not in json.dumps(_payload(commits[0]))

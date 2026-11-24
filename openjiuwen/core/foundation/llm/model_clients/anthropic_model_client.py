@@ -52,6 +52,7 @@ from openjiuwen.core.foundation.llm.reasoning import (
 )
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+from openjiuwen.core.foundation.llm.utils.request_parameter_fallback import RequestParameterFallback
 from openjiuwen.core.foundation.llm.schema import (
     AudioGenerationResponse,
     ImageGenerationResponse,
@@ -631,6 +632,9 @@ class AnthropicModelClient(BaseModelClient):
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
         self._base_headers = build_base_headers(custom_headers=model_client_config.custom_headers)
+        self._request_fallback = RequestParameterFallback(
+            model_client_config.client_provider, "Anthropic-compatible",
+        )
 
     def _validate_config(self):
         super()._validate_config()
@@ -905,19 +909,22 @@ class AnthropicModelClient(BaseModelClient):
 
         # Manual thinking.budget_tokens shares the response ceiling with the
         # final answer. Official Anthropic and compatible gateways require
-        # max_tokens > budget_tokens; raise the ceiling instead of silently
-        # shrinking the requested thinking depth.
+        # max_tokens > budget_tokens. The fallback is deliberately bounded to
+        # a safe model output limit, so do not synthesize a larger value when
+        # a thinking budget exhausts it. Callers need to choose a compatible
+        # output cap or a smaller thinking budget.
         thinking_cfg = params.get("thinking")
         if isinstance(thinking_cfg, Mapping):
             budget = thinking_cfg.get("budget_tokens")
             if isinstance(budget, int) and params["max_tokens"] <= budget:
-                llm_logger.debug(
-                    "Anthropic: raising max_tokens from %s to %s so it exceeds "
-                    "thinking.budget_tokens.",
-                    params["max_tokens"],
-                    budget + 1024,
+                raise build_error(
+                    StatusCode.MODEL_CONFIG_ERROR,
+                    error_msg=(
+                        "Anthropic max_tokens must be greater than "
+                        f"thinking.budget_tokens (max_tokens={params['max_tokens']}, "
+                        f"thinking.budget_tokens={budget})."
+                    ),
                 )
-                params["max_tokens"] = budget + 1024
 
         # Compatible gateways may add fields that are not keyword parameters
         # in the Anthropic SDK. Send them through extra_body so the SDK merges
@@ -1033,6 +1040,7 @@ class AnthropicModelClient(BaseModelClient):
         if effective_headers:
             params["extra_headers"] = effective_headers
 
+        params = self._request_fallback.apply_cached(params)
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
@@ -1056,7 +1064,11 @@ class AnthropicModelClient(BaseModelClient):
             if timeout is not None:
                 params["timeout"] = timeout
 
-            response = await async_client.messages.create(**params)
+            response = await self._request_fallback.call(
+                async_client.messages.create,
+                params,
+                is_stream=False,
+            )
 
             llm_logger.info(
                 "Anthropic API response received.",
@@ -1175,6 +1187,9 @@ class AnthropicModelClient(BaseModelClient):
             # retains thinking signatures so the next agent iteration can replay
             # the assistant turn exactly as Anthropic returned it.
             tool_use_acc: dict[int, dict] = {}
+            # Served model seen on message_start; message_delta's usage does
+            # not carry the model field, so the aggregate keeps this value.
+            served_model_acc: list[str] = []
             last_usage: Optional[UsageMetadata] = None
             final_stop_reason: Optional[str] = None
             accumulated_for_parser = ""
@@ -1188,7 +1203,7 @@ class AnthropicModelClient(BaseModelClient):
                     retry_count=self._sdk_retry_count(getattr(response_stream, "response", None)),
                 )
                 async for event in response_stream:
-                    chunk = self._event_to_chunk(event, tool_use_acc)
+                    chunk = self._event_to_chunk(event, tool_use_acc, served_model_acc)
                     if chunk is None:
                         continue
                     if chunk.usage_metadata is not None:
@@ -1318,7 +1333,10 @@ class AnthropicModelClient(BaseModelClient):
             if isinstance(extra_reasoning, str) and extra_reasoning:
                 reasoning_content = extra_reasoning
 
-        usage_metadata = self._usage_from_anthropic(getattr(response, "usage", None))
+        usage_metadata = self._usage_from_anthropic(
+            getattr(response, "usage", None),
+            self._served_model_name(response),
+        )
 
         parser_content = None
         if parser and content:
@@ -1335,9 +1353,14 @@ class AnthropicModelClient(BaseModelClient):
                 )
 
         stop_reason = getattr(response, "stop_reason", None) or ""
-        finish_reason = "tool_calls" if tool_calls else (
-            "stop" if stop_reason in ("end_turn", "stop_sequence", "max_tokens") else (stop_reason or "stop")
-        )
+        if stop_reason == "max_tokens":
+            finish_reason = "max_tokens"
+        elif tool_calls:
+            finish_reason = "tool_calls"
+        elif stop_reason in ("end_turn", "stop_sequence"):
+            finish_reason = "stop"
+        else:
+            finish_reason = stop_reason or "stop"
 
         provider_metadata_candidates = (
             ("stop_reason", getattr(response, "stop_reason", None)),
@@ -1365,12 +1388,18 @@ class AnthropicModelClient(BaseModelClient):
             provider_metadata=provider_metadata,
         )
 
-    def _usage_from_anthropic(self, usage: Any) -> Optional[UsageMetadata]:
+    def _usage_from_anthropic(
+            self, usage: Any, served_model: str = ""
+    ) -> Optional[UsageMetadata]:
         """Build ``UsageMetadata`` from Anthropic's usage object.
 
         OJ's ``input_tokens`` field is treated as the total prompt seen by the
         model (uncached + cache-read + cache-write). ``cache_tokens`` is the
         read count (the cheap part).
+
+        ``served_model`` is the model reported by the response body; when
+        present it wins over the request-side config for ``model_name``
+        (gen_ai.response.model semantics).
         """
         if usage is None:
             return None
@@ -1393,7 +1422,8 @@ class AnthropicModelClient(BaseModelClient):
         cache_miss = uncached + cache_write
 
         return UsageMetadata(
-            model_name=self.model_config.model_name,
+            # Served model wins; see docstring for the semantics.
+            model_name=served_model or self.model_config.model_name,
             input_tokens=total_input,
             output_tokens=output,
             total_tokens=total_input + output,
@@ -1420,6 +1450,7 @@ class AnthropicModelClient(BaseModelClient):
             self,
             event: Any,
             tool_use_acc: dict[int, dict],
+            served_model_acc: list[str] | None = None,
     ) -> Optional[AssistantMessageChunk]:
         """Map an Anthropic SSE event to ``AssistantMessageChunk``.
 
@@ -1433,7 +1464,10 @@ class AnthropicModelClient(BaseModelClient):
         if etype == "message_start":
             msg = getattr(event, "message", None)
             usage = getattr(msg, "usage", None) if msg is not None else None
-            usage_metadata = self._usage_from_anthropic(usage)
+            served_model = self._served_model_name(msg)
+            if served_model and served_model_acc is not None:
+                served_model_acc.append(served_model)
+            usage_metadata = self._usage_from_anthropic(usage, served_model)
             return AssistantMessageChunk(
                 content="",
                 reasoning_content=None,
@@ -1575,11 +1609,19 @@ class AnthropicModelClient(BaseModelClient):
             finish_reason = "stop"
             if stop_reason == "tool_use":
                 finish_reason = "tool_calls"
-            elif stop_reason in ("end_turn", "stop_sequence", "max_tokens"):
+            elif stop_reason in ("end_turn", "stop_sequence"):
                 finish_reason = "stop"
             elif stop_reason:
                 finish_reason = stop_reason
-            usage_metadata = self._usage_from_anthropic(usage) if usage is not None else None
+            # message_delta's usage block does not carry the model field;
+            # reuse the served model captured on message_start so the
+            # aggregate keeps the response-reported name.
+            served_model = served_model_acc[0] if served_model_acc else ""
+            usage_metadata = (
+                self._usage_from_anthropic(usage, served_model)
+                if usage is not None
+                else None
+            )
             return AssistantMessageChunk(
                 content="",
                 reasoning_content=None,
