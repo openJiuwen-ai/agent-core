@@ -8,6 +8,7 @@ of letting ``AgentCard`` generate one.
 """
 import os
 
+from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
 from tests.unit_tests.core.single_agent.rail.test_rail import (
@@ -18,7 +19,12 @@ from tests.unit_tests.core.single_agent.rail.test_rail import (
 )
 
 
-def make_step_agent(card_id: str, *, max_iterations: int = 5) -> ReActAgent:
+def make_step_agent(
+    card_id: str,
+    *,
+    max_iterations: int = 5,
+    enable_iteration_checkpoint: bool = True,
+) -> ReActAgent:
     """Create a ReActAgent whose agent id equals ``card_id``."""
     os.environ.setdefault("LLM_SSL_VERIFY", "false")
     card = AgentCard(id=card_id, description="step resume")
@@ -27,6 +33,9 @@ def make_step_agent(card_id: str, *, max_iterations: int = 5) -> ReActAgent:
         model_client_config=_create_client_config(),
         prompt_template=_create_prompt_template(),
         max_iterations=max_iterations,
+        context_engine_config=ContextEngineConfig(
+            enable_iteration_checkpoint=enable_iteration_checkpoint
+        ),
     )
     agent = ReActAgent(card=card).configure(config)
     tool = _create_add_tool()

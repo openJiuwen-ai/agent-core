@@ -286,3 +286,32 @@ async def test_card_less_session_stream_does_not_crash(monkeypatch):
         assert chunks
     finally:
         CheckpointerFactory.set_default_checkpointer(original)
+
+
+@pytest.mark.asyncio
+async def test_switch_off_writes_no_step_records(monkeypatch):
+    """With enable_iteration_checkpoint off the loop keeps its pre-feature behavior."""
+    from openjiuwen.core.session.checkpointer import CheckpointerFactory
+    from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointer
+    from tests.unit_tests.core.session.checkpointer.test_persistence_storage import MockKVStore
+
+    kv = MockKVStore()
+    cp = PersistenceCheckpointer(kv)
+    original = CheckpointerFactory._default_checkpointer
+    CheckpointerFactory.set_default_checkpointer(cp)
+    try:
+        llm = MockLLMModel()
+        llm.set_responses([
+            create_tool_call_response("add", '{"a": 1, "b": 2}'),
+            create_text_response("3"),
+        ])
+        agent = make_step_agent("step-switch-off", enable_iteration_checkpoint=False)
+        session = create_agent_session(session_id="sess-switch-off", card=agent.card)
+        monkeypatch.setattr(agent, "_get_llm", lambda: llm)
+
+        result = await agent.invoke({"query": "1+2?"}, session=session)
+
+        assert result["result_type"] == "answer"
+        assert [k for k in kv._store if "agent-step" in k] == []
+    finally:
+        CheckpointerFactory.set_default_checkpointer(original)
