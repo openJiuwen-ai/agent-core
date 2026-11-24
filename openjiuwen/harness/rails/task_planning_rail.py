@@ -307,9 +307,10 @@ class TaskPlanningRail(DeepAgentRail):
         """Snapshot todo.json so an unpersisted round can be rolled back.
 
         Runs before the step record is written, so the snapshot lands in the
-        same increment as the iteration that produced it.
+        same increment as the iteration that produced it. Only active when the
+        agent persists per-iteration checkpoints.
         """
-        if ctx.session is None:
+        if ctx.session is None or not self._iteration_checkpoint_enabled(ctx):
             return
         tool = self._find_todo_tool()
         if tool is None:
@@ -377,6 +378,13 @@ class TaskPlanningRail(DeepAgentRail):
             )
             return
         self._todos_cache.pop(session_id, None)
+
+    @staticmethod
+    def _iteration_checkpoint_enabled(ctx: AgentCallbackContext) -> bool:
+        """Whether the agent run persists step checkpoints (default off)."""
+        config = getattr(getattr(ctx, "agent", None), "_config", None)
+        engine_config = getattr(config, "context_engine_config", None)
+        return bool(getattr(engine_config, "enable_iteration_checkpoint", False))
 
     @staticmethod
     async def _read_todo_file(tool, path: str) -> Optional[tuple[bool, str]]:
