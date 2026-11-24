@@ -400,6 +400,9 @@ For a parent with a configured browser subagent, `ContextProcessorRail` uses the
 offloader's protected tool/argument pattern to keep this bounded task result inline. It does
 not protect other subagent results or disable whole-context compression. `TaskTool` renders
 the browser result once, without duplicating it through `resume_context`.
+A task that the worker ends with a `browser_progress` tool call takes the text of that model
+response as its final text and as the summary for the parent, when `browser_progress` is the
+only tool call of the response and the response did not stop at the output limit.
 
 Failed model attempts are handled by the existing exception/retry rail; the after callback
 only checks an actually returned response. A successful stream ending with no answer or tool

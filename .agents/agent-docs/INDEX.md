@@ -44,6 +44,7 @@ generated: true
 | [harness/subagents](#module-harness-subagents) |
 | [harness/tools/browser_move](#module-harness-tools-browser_move) |
 | [harness/tools/browser_move/decision](#module-harness-tools-browser_move-decision) |
+| [harness/tools/browser_move/playwright_runtime](#module-harness-tools-browser_move-playwright_runtime) |
 | [harness/tools/subagent](#module-harness-tools-subagent) |
 | [harness_providers](#module-harness_providers) |
 | [symphony/shared/fingerprint](#module-symphony-shared-fingerprint) |
@@ -628,6 +629,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261102_1733_browser-pr-contract-review](bugfix/harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
+
+<a id="module-harness-tools-browser_move-playwright_runtime"></a>
+
+## harness/tools/browser_move/playwright_runtime
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261119_2310_browser-progress-final-text](bugfix/harness/B_20261119_2310_browser-progress-final-text.md) | B | A browser_progress tool call ends the task with the text of its model response | opPO333 | 无独立 D：Gives the existing progress-tool path the final text the other worker-report paths already pass; no new field or terminal reason. |
 
 <a id="module-harness-tools-subagent"></a>
 

@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-11-05 |
+| 最近一次修订日期 | 2026-11-20 |
 | 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md`、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_21_cua-desktop-subagent、F_23_progressive-tool-discovery-metadata、F_20261104_1720_tool-execution-environment |
 
 ## 范围 / 边界
@@ -780,6 +780,15 @@ See F_27 for replay boundaries and validation results.
 7. Targetless URL navigation validates the current page/document, arguments and any observed
    link/order provenance, but does not depend on unchanged viewport/scroll geometry. Node
    actions retain their exact node and actionability checks. See F_29 for lifecycle regressions.
+
+### Final text of the progress-tool path (2026-11-20)
+
+The `browser_progress` tool hook passes the text of the model response that made the call as the
+worker's final text, with its `<browser_progress>` block taken out. Only a response whose single tool
+call is `browser_progress` and that did not stop at the output limit gives a text; any other response
+gives an empty text. The text of the report stays the summary for the parent after the task ended.
+A response without text completes only on typed evidence, and page metadata answers nothing. A text
+that announces a tool call ends as model_tool_protocol_error. See B_20261119_2310_browser-progress-final-text (#2829).
 
 ### Browser dispatch contract compatibility (F30)
 

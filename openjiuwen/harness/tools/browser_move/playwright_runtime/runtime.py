@@ -98,6 +98,11 @@ _BROWSER_SCREENSHOT_TOOL_NAMES = frozenset({"browser_take_screenshot"})
 _BROWSER_LOG_CONTEXT_TOKEN_KEY = "__browser_agent_log_context_token__"
 _BROWSER_TOOL_RUNTIME_STATE_KEY = "__browser_tool_runtime_state__"
 _BROWSER_ACTION_GROUP_BY_CALL_KEY = "__browser_action_group_by_call__"
+# The finish reasons of a reply that stopped at the output limit.
+_CUT_FINISH_REASONS = frozenset({"length", "max_tokens"})
+# The text of the latest model response whose only tool call is browser_progress, with the id of that call, kept in
+# the callback extra of the invoke. The browser_progress tool hook reads it as the worker's final text.
+_BROWSER_PROGRESS_REPORT_KEY = "__browser_progress_report__"
 _BROWSER_ACTION_GROUP_RESULTS_KEY = "__browser_action_group_results__"
 _BROWSER_SKIP_TOOL_CALLS_KEY = "_skip_tool_calls"
 _BROWSER_TASK_DEADLINE_KEY = "__browser_task_deadline__"
@@ -3002,6 +3007,7 @@ class BrowserRuntimeRail(AgentRail):
         response = getattr(getattr(ctx, "inputs", None), "response", None)
         tool_calls = list(getattr(response, "tool_calls", None) or [])
         session = getattr(ctx, "session", None)
+        self._record_progress_report(ctx, response, tool_calls)
         state = session.get_state(_BROWSER_PHASE_STATE_KEY) if session is not None else None
         if (
             tool_calls
@@ -3041,6 +3047,35 @@ class BrowserRuntimeRail(AgentRail):
             "expected": call_ids,
             "completed": [],
         }
+
+    @staticmethod
+    def _is_progress_tool_name(name: str) -> bool:
+        name = str(name or "").strip().lower()
+        return name == "browser_progress" or name.endswith("_browser_progress")
+
+    @classmethod
+    def _record_progress_report(cls, ctx: AgentCallbackContext, response: Any, tool_calls: list[Any]) -> None:
+        extra = getattr(ctx, "extra", None)
+        if not isinstance(extra, dict):
+            return
+        extra.pop(_BROWSER_PROGRESS_REPORT_KEY, None)
+        finish_reason = str(getattr(response, "finish_reason", "") or "").strip().lower()
+        if len(tool_calls) != 1 or finish_reason in _CUT_FINISH_REASONS:
+            return
+        call = tool_calls[0]
+        if not cls._is_progress_tool_name(str(getattr(call, "name", "") or "")):
+            return
+        text, _ = cls._extract_progress_payload(str(getattr(response, "content", "") or ""))
+        extra[_BROWSER_PROGRESS_REPORT_KEY] = {"call_id": str(getattr(call, "id", "") or ""), "text": text}
+
+    @staticmethod
+    def _progress_report_text(ctx: AgentCallbackContext, call_id: str) -> str:
+        """The text of the response that made this browser_progress call as its only tool call, else ""."""
+        extra = getattr(ctx, "extra", None)
+        record = extra.get(_BROWSER_PROGRESS_REPORT_KEY) if isinstance(extra, dict) else None
+        if not isinstance(record, dict) or not call_id or record.get("call_id") != call_id:
+            return ""
+        return str(record.get("text") or "")
 
     @staticmethod
     def _has_unfinished_tool_intent(response_text: str) -> bool:
@@ -3468,7 +3503,7 @@ class BrowserRuntimeRail(AgentRail):
     def _handle_progress_tool_alias(self, ctx: AgentCallbackContext) -> bool:
         inputs = getattr(ctx, "inputs", None)
         tool_name = str(getattr(inputs, "tool_name", "") or "").strip().lower()
-        if tool_name != "browser_progress" and not tool_name.endswith("_browser_progress"):
+        if not self._is_progress_tool_name(tool_name):
             return False
         session = getattr(ctx, "session", None)
         if session is None:
@@ -3487,7 +3522,8 @@ class BrowserRuntimeRail(AgentRail):
                 ),
             )
             return True
-        self._apply_worker_progress_to_task_state(session, payload, "")
+        call_id = str(getattr(getattr(inputs, "tool_call", None), "id", "") or "")
+        self._apply_worker_progress_to_task_state(session, payload, self._progress_report_text(ctx, call_id))
         state = session.get_state(_BROWSER_PHASE_STATE_KEY)
         state = state if isinstance(state, dict) else {}
         ctx.request_force_finish(self._structured_terminal_result(state))
@@ -4760,13 +4796,13 @@ class BrowserRuntimeRail(AgentRail):
         next_action = payload.get("next_action") or payload.get("next_step")
         if next_action:
             state["worker_reported_next_action"] = str(next_action)[:200]
-        if final:
-            state["last_worker_final"] = str(final)[:8_000]
-
         current_status = str(state.get("status") or "in_progress").strip().lower()
         if current_status in _BROWSER_TERMINAL_STATUSES:
+            # The text of the report that ended the task stays; a later call passes the rail's own result here.
             save_phase(session, state)
             return
+        if final:
+            state["last_worker_final"] = str(final)[:8_000]
 
         if cls._has_unfinished_tool_intent(final):
             state["status"] = "partial"
