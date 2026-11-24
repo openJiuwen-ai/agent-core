@@ -92,6 +92,63 @@ class StepRecord:
 
 # --- snapshot <-> session state ---
 
+def split_step_state(
+    full_state: dict, *, owned: bool = False, live: bool = False
+) -> tuple[dict, dict]:
+    """Split a full state into raw contexts and the state without them.
+
+    Args:
+        full_state: ``{"global_state": {...}, "agent_state": {...}}``.
+        owned: The caller hands over a detached copy it will not reuse, so the
+            state dict may be built from it in place instead of deep copying.
+        live: ``full_state`` is the session's own state (``get_state(copied=False)``);
+            contexts are only read, and the state part is copied so the caller
+            keeps no references into live state. Callers must finish reading
+            before their first ``await``.
+
+    Returns:
+        ``(contexts, state)``: the raw per-context ``save_state()`` dicts, and
+        the state with ``global_state["context"]`` removed and
+        ``STEP_WINDOW_KEY`` added at its top level.
+    """
+    full = full_state if isinstance(full_state, dict) else {}
+    global_state = full.get(GLOBAL_STATE_KEY)
+    contexts = {}
+    if isinstance(global_state, dict):
+        contexts = global_state.get(CONTEXT_KEY) or {}
+    window = {
+        cid: (cstate or {}).get("last_context_window_access_at")
+        for cid, cstate in contexts.items()
+    }
+
+    if live:
+        # Copy everything except the context track: the contexts are read once
+        # and encoded right away, and copying them here is the cost this path
+        # exists to avoid.
+        state = {
+            key: value if key == STEP_WINDOW_KEY else deepcopy(value)
+            for key, value in full.items()
+            if key != GLOBAL_STATE_KEY
+        }
+        global_state = full.get(GLOBAL_STATE_KEY)
+        if isinstance(global_state, dict):
+            state[GLOBAL_STATE_KEY] = deepcopy({
+                key: value for key, value in global_state.items()
+                if key != CONTEXT_KEY
+            })
+        elif global_state is not None:
+            state[GLOBAL_STATE_KEY] = deepcopy(global_state)
+        state[STEP_WINDOW_KEY] = window
+        return contexts, state
+
+    state = full if owned else deepcopy(full)
+    stripped_global = state.get(GLOBAL_STATE_KEY)
+    if isinstance(stripped_global, dict):
+        stripped_global.pop(CONTEXT_KEY, None)
+    state[STEP_WINDOW_KEY] = window
+    return contexts, state
+
+
 def build_step_snapshot(full_state: dict) -> dict:
     """Split a ``session.state().get_state()`` result into ``{context, state}``.
 
@@ -104,19 +161,11 @@ def build_step_snapshot(full_state: dict) -> dict:
         the full state with ``global_state["context"]`` removed and
         ``STEP_WINDOW_KEY`` added at its top level.
     """
-    full = deepcopy(full_state) if full_state else {}
-    global_state = full.get(GLOBAL_STATE_KEY)
-    contexts = {}
-    if isinstance(global_state, dict):
-        contexts = global_state.pop(CONTEXT_KEY, None) or {}
-    encoded_context = {}
-    window: dict[str, Any] = {}
-    for cid, cstate in contexts.items():
-        cstate = cstate or {}
-        window[cid] = cstate.get("last_context_window_access_at")
-        encoded_context[cid] = encode_context_state(cstate)
-    full[STEP_WINDOW_KEY] = window
-    return {"context": encoded_context, "state": full}
+    contexts, state = split_step_state(full_state)
+    encoded_context = {
+        cid: encode_context_state(cstate or {}) for cid, cstate in contexts.items()
+    }
+    return {"context": encoded_context, "state": state}
 
 
 def restore_full_state(snapshot: dict) -> dict:
