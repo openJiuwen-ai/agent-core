@@ -732,6 +732,7 @@ _DEFAULT_SANDBOX_RECREATE_RETRIES = 3
 _SANDBOX_RECREATE_RETRY_SLEEP_SECONDS = 1.0
 _SANDBOX_DELETE_MAX_ATTEMPTS = 3
 _SANDBOX_DELETE_RETRY_SLEEP_SECONDS = 1.0
+_SCOPE_RELEASE_TIMEOUT_SECONDS = 30.0
 
 
 def _resolve_recreate_retries() -> int:
@@ -787,7 +788,7 @@ class _JiuwenBoxProviderMixin:
     # A bulk cleanup must also drain creates that have not published an ID yet.
     _bulk_deletions: ClassVar[int] = 0
     _inflight_recreations: ClassVar[set[asyncio.Task[str]]] = set()
-    _scope_releases: ClassVar[Dict[str, int]] = {}
+    _scope_releases: ClassVar[Dict[str, asyncio.Task[list[str]]]] = {}
     _policy_updates: ClassVar[int] = 0
     # Lazy class-level asyncio.Lock serializes sandbox recreate under concurrent ops.
     _recreate_lock: ClassVar[Optional[asyncio.Lock]] = None
@@ -1206,7 +1207,7 @@ class _JiuwenBoxProviderMixin:
                     entry = self._acl_cleanup_details.get(identity)
                     if identity not in self._pending_deletions or entry is None or entry[1] != epoch:
                         continue
-                    if self._bulk_deletions or self._policy_updates:
+                    if self._bulk_deletions or self._policy_updates or self._scope_releases.get(key):
                         continue
                 _, sandbox_id = identity
                 try:
@@ -1472,10 +1473,20 @@ class _JiuwenBoxProviderMixin:
         """Drain creation and strictly delete the final holder's scope."""
         shared_key = build_jiuwenbox_shared_scope_key(base_url, isolation_key)
         with cls._shared_lock:
-            cls._scope_releases[shared_key] = cls._scope_releases.get(shared_key, 0) + 1
-        lock = None
+            task = cls._scope_releases.get(shared_key)
+            if task is None:
+                task = asyncio.create_task(cls._finish_scope_release(base_url, isolation_key, shared_key))
+                cls._scope_releases[shared_key] = task
+                task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        return await asyncio.shield(task)
+
+    @classmethod
+    async def _finish_scope_release(cls, base_url: str, isolation_key: str, shared_key: str) -> list[str]:
         try:
+            # Drain already admitted creators. The registered release task
+            # blocks fresh acquisitions without holding this lock over DELETE.
             lock = await cls.acquire_scope_lifecycle_lock(shared_key)
+            lock.release()
             deleted = await cls.delete_cached_sandboxes(
                 shared_key=shared_key, reason="session_released", raise_on_error=True,
             )
@@ -1488,12 +1499,8 @@ class _JiuwenBoxProviderMixin:
             cls.pop_lifecycle_hook(shared_key)
             return deleted
         finally:
-            if lock is not None:
-                lock.release()
             with cls._shared_lock:
-                cls._scope_releases[shared_key] -= 1
-                if not cls._scope_releases[shared_key]:
-                    del cls._scope_releases[shared_key]
+                cls._scope_releases.pop(shared_key, None)
 
     @classmethod
     async def delete_cached_sandboxes(
@@ -1875,12 +1882,20 @@ async def get_live_jiuwenbox_scopes() -> set[str]:
 
 
 async def release_jiuwenbox_scope(base_url: str, isolation_key: str) -> list[str]:
-    """Release a final owner's scope without cancelling in-flight delete workers."""
+    """Bound the caller's wait while the scope release completes in the background."""
     if not base_url or not isolation_key:
         raise ValueError("base_url and isolation_key are required for scope release")
-    task = asyncio.create_task(_JiuwenBoxProviderMixin.release_scope(base_url, isolation_key))
-    task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
-    return await asyncio.shield(task)
+
+    deadline = asyncio.timeout(_SCOPE_RELEASE_TIMEOUT_SECONDS)
+    try:
+        async with deadline:
+            return await _JiuwenBoxProviderMixin.release_scope(base_url, isolation_key)
+    except TimeoutError as exc:
+        if not deadline.expired():
+            raise
+        raise TimeoutError(
+            f"JiuwenBox scope {isolation_key} release timed out after {_SCOPE_RELEASE_TIMEOUT_SECONDS:g}s"
+        ) from exc
 
 
 async def retire_jiuwenbox_service(base_url: str) -> list[str]:

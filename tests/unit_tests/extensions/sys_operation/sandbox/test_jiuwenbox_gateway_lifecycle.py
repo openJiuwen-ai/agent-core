@@ -33,7 +33,7 @@ def remote(monkeypatch):
     monkeypatch.setattr(SandboxGateway, "_instance", gateway)
     state = SimpleNamespace(
         gateway=gateway, requests=[], created=[], active=set(), fail_delete=False, delete_failures=0, block_create=False,
-        entered=threading.Event(), release=threading.Event(), clients=[], lost=set(), inventory=None,
+        entered=threading.Event(), release=threading.Event(), clients=[], lost=set(), inventory=None, block_delete=False,
         delete_receipt=None, delete_status=409, acl_epoch="", create_acl_error=None,
     )
 
@@ -56,6 +56,9 @@ def remote(monkeypatch):
             return httpx.Response(201, json={"id": sid})
         sid = request.url.path.split("/")[4]
         if request.method == "DELETE":
+            if state.block_delete:
+                state.entered.set()
+                assert state.release.wait(5), "deletion was not released"
             if state.fail_delete or state.delete_failures:
                 state.delete_failures = max(0, state.delete_failures - 1)
                 if state.delete_receipt is not None:
@@ -131,6 +134,64 @@ async def test_release_scope_failure_blocks_reuse_until_retry(remote):
     assert await jb.release_jiuwenbox_scope("http://localhost:8321", owned.isolation_key_template) == ["sandbox-1"]
     assert not remote.active
     assert not jb._JiuwenBoxProviderMixin._pending_deletions
+
+
+@pytest.mark.asyncio
+async def test_release_timeout_finishes_scope_without_another_release(remote, monkeypatch):
+    owned = operation()
+    await owned.fs().read_file("/probe")
+    key = owned.isolation_key_template
+    shared_key = f"http://localhost:8321|{key}"
+    identity = (shared_key, "sandbox-1")
+    cls = jb._JiuwenBoxProviderMixin
+    provider = remote.gateway._provider_cache[f"{key}:fs"]
+    invalidate = remote.gateway.invalidate_sandbox_cache
+    invalidation_started, finish_invalidation = asyncio.Event(), asyncio.Event()
+
+    async def delayed_invalidate(*args, **kwargs):
+        invalidation_started.set()
+        await finish_invalidation.wait()
+        return await invalidate(*args, **kwargs)
+
+    monkeypatch.setattr(remote.gateway, "invalidate_sandbox_cache", delayed_invalidate)
+    remote.block_delete = True
+    monkeypatch.setattr(jb, "_SCOPE_RELEASE_TIMEOUT_SECONDS", 0.1)
+
+    release = None
+    try:
+        with pytest.raises(TimeoutError, match="scope .* release timed out"):
+            await jb.release_jiuwenbox_scope("http://localhost:8321", key)
+        assert await asyncio.to_thread(remote.entered.wait, 2)
+        worker = cls._delete_tasks[identity]
+        release = cls._scope_releases[shared_key]
+        assert not worker.done()
+        assert not cls.scope_lifecycle_lock(shared_key).locked()
+        assert (await owned.fs().read_file("/probe")).code != 0
+
+        with pytest.raises(TimeoutError, match="scope .* release timed out"):
+            await jb.release_jiuwenbox_scope("http://localhost:8321", key)
+        assert cls._delete_tasks[identity] is worker
+        assert cls._scope_releases[shared_key] is release
+
+        remote.release.set()
+        await asyncio.wait_for(invalidation_started.wait(), 2)
+        assert identity not in cls._pending_deletions
+        assert shared_key in cls._scope_releases
+        assert await remote.gateway._store.get(key) is not None
+        assert (await owned.fs().read_file("/probe")).code != 0
+    finally:
+        remote.release.set()
+        finish_invalidation.set()
+        if release is not None:
+            await asyncio.wait_for(asyncio.shield(release), 2)
+
+    assert await remote.gateway._store.get(key) is None
+    assert f"{key}:fs" not in remote.gateway._provider_cache
+    assert provider._sandbox_id is None
+    assert "sandbox_id" not in owned._run_config.config.launcher_config.extra_params
+    assert shared_key not in cls._scope_releases
+    assert (await owned.fs().read_file("/probe")).data.content == "sandbox-2"
+    assert sum(method == "DELETE" for method, _ in remote.requests) == 1
 
 
 @pytest.mark.asyncio
