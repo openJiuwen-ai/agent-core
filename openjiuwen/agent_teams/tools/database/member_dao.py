@@ -310,6 +310,18 @@ class MemberDao:
             )
             return result.scalar_one_or_none()
 
+    async def count_members_by_team(self) -> dict[str, int]:
+        """Count members per team across the static roster in one query.
+
+        Teams with no members are absent from the mapping; callers treat a
+        missing key as zero.
+        """
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(TeamMember.team_name, func.count()).group_by(TeamMember.team_name)
+            )
+            return {team_name: count for team_name, count in result.all()}
+
     async def get_team_members(self, team_name: str, status: str | None = None) -> List[TeamMember]:
         """Get members for a team, optionally filtered by status.
 
