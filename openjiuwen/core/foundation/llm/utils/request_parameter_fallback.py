@@ -25,6 +25,8 @@ _UNSUPPORTED_DISABLED_THINKING_MARKERS = (
     "doesn't support",
     "cannot disable",
     "can't disable",
+    "cannot be disabled",
+    "can't be disabled",
     "不支持",
     "不能关闭",
     "不允许关闭",

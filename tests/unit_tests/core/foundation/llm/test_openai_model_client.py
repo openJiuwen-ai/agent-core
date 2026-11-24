@@ -607,6 +607,35 @@ class TestDisabledThinkingIntent:
         assert sdk_client.chat.completions.create.call_count == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Reasoning is mandatory for this endpoint and cannot be disabled.",
+            "Reasoning is mandatory for this endpoint and can't be disabled.",
+        ],
+    )
+    async def test_symphony_fallback_retries_passive_cannot_be_disabled_refusal(self, message):
+        client = _make_client()
+        sdk_client = _mock_sdk_client(
+            _OpenAIStyleError(
+                f"Error code: 400 - {{'error': {{'message': '{message}', 'code': 400}}}}",
+                status_code=400,
+                body={"error": {"message": message, "code": 400}},
+            ),
+            _response("retried"),
+        )
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            with disabled_thinking_fallback_scope():
+                result = await client.invoke("hello", **self._disabled_request_kwargs())
+
+        assert result.content == "retried"
+        sent_calls = [call.kwargs for call in sdk_client.chat.completions.create.call_args_list]
+        assert len(sent_calls) == 2
+        assert sent_calls[0]["reasoning_effort"] == "off"
+        assert "reasoning_effort" not in sent_calls[1]
+
+    @pytest.mark.asyncio
     async def test_symphony_fallback_does_not_retry_a_failed_retry(self):
         client = _make_client()
         sdk_client = _mock_sdk_client(
