@@ -10,6 +10,7 @@ files:
 - openjiuwen/agent_teams/tools/database/task_dao.py
 - openjiuwen/agent_teams/tools/database/member_dao.py
 - openjiuwen/agent_teams/tools/database/message_dao.py
+- openjiuwen/agent_teams/tools/database/engine.py
 - openjiuwen/agent_teams/organization/db.py
 - openjiuwen/agent_teams/tools/AGENTS.md
 - tests/unit_tests/agent_teams/test_db_sessions_watchdog.py
@@ -163,6 +164,19 @@ import engine as engine_module`。三个用例已改用 `sessions._watchdog_seco
 `WHERE status=...`，整 JSON / 整行 read-modify-write 走 `SELECT ... FOR UPDATE`。
 新增读改写入口前先归类属于哪一类，套用对应模式，不要默认走普通
 SELECT-then-UPDATE。已把这条写进 `tools/AGENTS.md` 的 `DbSessions` 段落。
+
+### 第四轮检视追加：engine.py 四处 DDL helper docstring
+
+第四轮检视指出 engine.py 四处 DDL helper 的 docstring 仍声称「runs inside
+`DbSessions.write()` so ... serialises with every DAO write」——这条理由在
+91ad1d944 之后对 PG/MySQL 已不成立（`write()` 跳过进程级写锁）。本次修复把四处
+docstring（`create_cur_session_tables` / `drop_cur_session_tables` /
+`cleanup_all_runtime_state` / `drop_session_tables_by_id`）统一改为「On SQLite
+the per-write lock serialises ... with every DAO write; on PostgreSQL / MySQL
+`write()` skips the process-level lock, so DDL-vs-DAO-write is guarded by the
+DB's own table-level DDL lock ... `ddl_lock()` serialises ... with every other
+DDL helper on all backends」。与 `organization/db.py` 的 `_ensure_org_schema`
+docstring（53f1d5e38 已更新）措辞一致。
 
 ## 遗留与后续
 

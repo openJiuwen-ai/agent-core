@@ -1052,12 +1052,19 @@ async def _ensure_session_tables(session: AsyncSession) -> None:
 async def create_cur_session_tables(sessions: DbSessions) -> bool:
     """Create dynamic tables for current session under the DDL + write lock.
 
-    Runs inside ``DbSessions.write()`` so bind-time DDL serialises with every
-    DAO write of this instance, **and** holds ``sessions.ddl_lock()`` so two
-    concurrent binds of the same instance's tables cannot interleave. The
-    engine-level variant (``engine.begin()``) bypassed both: two teammates
-    binding concurrently could hold BOTH write-pool connections while their
-    DDL parked on the SQLite file lock, exhausting the 2-connection pool
+    Runs inside ``DbSessions.write()`` **and** holds ``sessions.ddl_lock()``.
+    On SQLite the per-write lock serialises bind-time DDL with every DAO
+    write of this instance; on PostgreSQL / MySQL ``write()`` skips the
+    process-level lock (the DB is the write arbiter), so DDL-vs-DAO-write
+    is guarded by the DB's own table-level DDL lock
+    (AccessExclusiveLock / metadata lock) — a DROP blocks until in-flight
+    writes commit, and a write that starts after the DROP completes sees
+    "table does not exist". ``ddl_lock()`` adds DDL-vs-DDL protection on
+    all backends: two concurrent binds of the same instance's tables
+    cannot interleave. The engine-level variant (``engine.begin()``)
+    bypassed both ``ddl_lock()`` and ``write()``: two teammates binding
+    concurrently could hold BOTH write-pool connections while their DDL
+    parked on the SQLite file lock, exhausting the 2-connection pool
     (``QueuePool limit of size 2`` teammate crashes).
 
     The session_id is obtained from context via get_session_id().
@@ -1099,10 +1106,16 @@ async def create_cur_session_tables(sessions: DbSessions) -> bool:
 async def drop_cur_session_tables(sessions: DbSessions) -> None:
     """Drop dynamic tables for current session under the DDL + write lock.
 
-    Runs inside ``DbSessions.write()`` and ``sessions.ddl_lock()`` so the
-    drop serialises with ``create_cur_session_tables``, every other DDL
-    helper, and every DAO write of this instance; a bare ``engine.begin()``
-    let a drop interleave with an in-flight bind or write.
+    Runs inside ``DbSessions.write()`` **and** ``sessions.ddl_lock()``.
+    On SQLite the per-write lock serialises the drop with every DAO write
+    of this instance; on PostgreSQL / MySQL ``write()`` skips the
+    process-level lock, so DDL-vs-DAO-write is guarded by the DB's own
+    table-level DDL lock — a DROP blocks until in-flight writes commit,
+    and a write that starts after the DROP completes sees
+    "table does not exist". ``ddl_lock()`` serialises the drop with
+    ``create_cur_session_tables`` and every other DDL helper on all
+    backends. A bare ``engine.begin()`` bypassed both and let a drop
+    interleave with an in-flight bind or write.
 
     The session_id is obtained from context via get_session_id().
     """
@@ -1137,8 +1150,13 @@ async def cleanup_all_runtime_state(
     """Delete all dynamic team tables and clear static team tables.
 
     This cleanup is storage-level and does not depend on an active
-    agent instance or the current session context. Runs under the
-    ``DbSessions`` write lock **and** ``sessions.ddl_lock()``, same as
+    agent instance or the current session context. Runs inside
+    ``DbSessions.write()`` **and** ``sessions.ddl_lock()``. On SQLite
+    the per-write lock serialises the cleanup with every DAO write of
+    this instance; on PostgreSQL / MySQL ``write()`` skips the
+    process-level lock, so DDL-vs-DAO-write is guarded by the DB's own
+    table-level DDL lock. ``ddl_lock()`` serialises the cleanup with
+    every other DDL helper on all backends. Same shape as
     ``drop_cur_session_tables``.
     """
     if sessions is None:
@@ -1177,8 +1195,13 @@ async def drop_session_tables_by_id(sessions: DbSessions, session_id: str) -> li
 
     This is used by Runner.release(session_id) to clean up per-session
     tables when the session context is not active (e.g. after the agent
-    has finished executing). Runs under the ``DbSessions`` write lock
-    **and** ``sessions.ddl_lock()``, same as ``drop_cur_session_tables``.
+    has finished executing). Runs inside ``DbSessions.write()`` **and**
+    ``sessions.ddl_lock()``. On SQLite the per-write lock serialises
+    the drop with every DAO write of this instance; on PostgreSQL /
+    MySQL ``write()`` skips the process-level lock, so DDL-vs-DAO-write
+    is guarded by the DB's own table-level DDL lock. ``ddl_lock()``
+    serialises the drop with every other DDL helper on all backends.
+    Same shape as ``drop_cur_session_tables``.
 
     Args:
         sessions: Read/write session provider of the database.
