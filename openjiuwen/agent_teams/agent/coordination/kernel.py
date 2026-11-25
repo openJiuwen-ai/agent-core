@@ -332,6 +332,12 @@ class CoordinationKernel:
         # stop_coordination has already torn things down.
         if self._lifecycle_state != "running":
             return
+        if self._dispatcher is not None:
+            bus_was_running = self.is_running
+            await self._dispatcher.team_completion.wait_for_completion_publish()
+            # An explicit stop can cancel the publish before finishing teardown.
+            if self._lifecycle_state != "running" or (bus_was_running and not self.is_running):
+                return
         host = self._host
         team_logger.info("[{}] coordination pausing (persistent)", host.member_name or "?")
         if self._scheduler is not None:

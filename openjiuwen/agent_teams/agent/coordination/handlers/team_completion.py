@@ -24,9 +24,11 @@ so the periodic idle tick is the reliable leader-idle hook.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Awaitable, Callable, ClassVar
 
 from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
+from openjiuwen.agent_teams.agent.coordination import event_bus
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventMessage,
     InnerEventType,
@@ -69,6 +71,8 @@ class TeamCompletionHandler(BaseCoordinationHandler):
         # single-leader state — a leader restart re-arms it, and a re-emitted
         # event is harmless since consumers treat the event as at-least-once.
         self._team_completed_emitted = False
+        self._completion_publish_done = asyncio.Event()
+        self._completion_publish_done.set()
         # Callbacks fired on TASK_LIST_DRAINED. Populated once after the
         # DeepAgent is built (TeamAgent._register_team_completion_callbacks)
         # — e.g. TeamSkillRail.notify_team_completed. Empty on members that
@@ -92,6 +96,10 @@ class TeamCompletionHandler(BaseCoordinationHandler):
         to leave and re-enter the completed state.
         """
         self._team_completed_emitted = False
+
+    async def wait_for_completion_publish(self) -> None:
+        """Wait for the current persistent completion publish attempt, if any."""
+        await self._completion_publish_done.wait()
 
     async def on_poll_task(self, event: InnerEventMessage) -> None:
         """Leader-idle tick: evaluate the three completion conditions.
@@ -142,8 +150,22 @@ class TeamCompletionHandler(BaseCoordinationHandler):
             )
             if not concluded:
                 return
-            # Commit before publishing: pause can cancel this best-effort notice.
+            # Record the publish before the stream reader can start auto-pause.
             self._team_completed_emitted = True
+            self._completion_publish_done.clear()
+            timeout = 2 * event_bus.EVENT_BUS_STOP_TIMEOUT_SECONDS
+            try:
+                async with asyncio.timeout(timeout):
+                    await self._publish_team_completed(team_backend.team_name, snapshot)
+            except TimeoutError:
+                team_logger.warning(
+                    "Publishing TEAM_COMPLETED for team {} timed out after {}s",
+                    team_backend.team_name,
+                    timeout,
+                )
+            finally:
+                self._completion_publish_done.set()
+            return
         await self._publish_team_completed(team_backend.team_name, snapshot)
         self._team_completed_emitted = True
 
