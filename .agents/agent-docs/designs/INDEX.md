@@ -65,6 +65,7 @@ generated: true
 |---|---|---|---|---|---|
 | [D-20261110-1839-leader-external-harness](active/D-20261110-1839-leader-external-harness/design.md) | Leader 三方 Harness 插拔设计方案 | in-development | alan_cheng | harness | 2026-11-10 |
 | [D-20261110-1903-team-goal-mode](active/D-20261110-1903-team-goal-mode/design.md) | Team Leader 与成员 Goal 模式设计方案 | in-development | alan_cheng | harness | 2026-11-10 |
+| [D-20261125-1414-team-stopped-approval-recovery](active/D-20261125-1414-team-stopped-approval-recovery/design.md) | 恢复阻塞持久化团队完成的审批邮箱 | in-development | MaxMadMax | protocol | 2026-11-25 |
 
 ### 开发后 (archive)
 
