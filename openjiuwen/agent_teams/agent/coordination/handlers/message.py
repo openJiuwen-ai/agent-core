@@ -47,6 +47,7 @@ from openjiuwen.agent_teams.schema.external_runtime_reliability import ExternalR
 from openjiuwen.agent_teams.schema.status import MemberStatus, retire_target
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.timefmt import format_absolute_time
+from openjiuwen.agent_teams.tools.message_manager import parse_approval_message, validate_approval_payload
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session import InteractiveInput
 
@@ -258,7 +259,7 @@ class MessageHandler(BaseCoordinationHandler):
                     seen_ids.add(msg.message_id)
                     approval_data = self._try_parse_approval_payload(msg)
                     if approval_data is not None:
-                        approval_data = self._validate_approval_payload(approval_data)
+                        approval_data = validate_approval_payload(approval_data)
                         leader = None
                         if approval_data is not None:
                             if backend is not None:
@@ -786,38 +787,9 @@ class MessageHandler(BaseCoordinationHandler):
             note_text=note_text,
         )
 
-    def _try_parse_approval_payload(self, msg: Any) -> dict | None:
-        """Recognize control mail independently of its validity and sender."""
-        if msg.protocol != "json" or not msg.content or msg.broadcast:
-            return None
-        try:
-            data = json.loads(msg.content)
-        except (json.JSONDecodeError, TypeError):
-            return None
-        if not isinstance(data, dict) or data.get("type") != "tool_approval_result":
-            return None
-        return data
-
     @staticmethod
-    def _validate_approval_payload(data: dict) -> dict | None:
-        """Keep historical optional nulls compatible without coercing decisions."""
-        tool_call_id = data.get("tool_call_id")
-        if not isinstance(tool_call_id, str) or not tool_call_id.strip() or not isinstance(data.get("approved"), bool):
-            return None
-        feedback = data.get("feedback", "")
-        auto_confirm = data.get("auto_confirm", False)
-        if feedback is None:
-            feedback = ""
-        if auto_confirm is None:
-            auto_confirm = False
-        if not isinstance(feedback, str) or not isinstance(auto_confirm, bool):
-            return None
-        return {
-            "tool_call_id": tool_call_id,
-            "approved": data["approved"],
-            "feedback": feedback,
-            "auto_confirm": auto_confirm,
-        }
+    def _try_parse_approval_payload(msg: Any) -> dict | None:
+        return parse_approval_message(msg)
 
     @staticmethod
     def _render_external_runtime_failed(msg: Any) -> str | None:

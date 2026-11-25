@@ -2043,6 +2043,12 @@ class TeamBackend:
             A ``TeamCompletionSnapshot`` when the team is complete,
             otherwise ``None``.
         """
+        snapshot = await self._settled_completion_snapshot()
+        if snapshot is None or await self.message_manager.has_unread_messages(include_broadcast=True):
+            return None
+        return snapshot
+
+    async def _settled_completion_snapshot(self) -> TeamCompletionSnapshot | None:
         tasks = await self.task_manager.list_tasks()
         if not tasks:
             return None
@@ -2053,9 +2059,6 @@ class TeamBackend:
         if not members:
             return None
         if any(member.status not in MEMBER_SETTLED_STATUSES for member in members):
-            return None
-
-        if await self.message_manager.has_unread_messages(include_broadcast=True):
             return None
 
         return TeamCompletionSnapshot(member_count=len(members), task_count=len(tasks))
