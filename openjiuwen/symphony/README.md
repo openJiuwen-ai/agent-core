@@ -93,7 +93,7 @@ async def plan_invoice(model):
 - 迁移自动结果的消费者时，改读 `execution_route.strategy`；原 `tier`、`execution_mode` 和 `initial_tier` 已移除。单节点计划按实际执行归一为单项能力或单专家，`initial_strategy` 记录归一前的策略。统一入口、显式类型及两类图的接口保持不变。
 - `context` 接受 `PlanningContext` 或等价字典，仅提供可见 `skills/experts/tools` 摘要、必选能力 ID 和宿主策略。省略时从配置目录获取 Skill/专家清单。宿主负责实时可见性，Core 在模型前过滤禁用 Skill 和专家 manifest 范围。自动规划传入 `candidate_ids` 时，路由和后续图规划均以候选与可见能力的交集为范围；省略时才从全部可见能力选择。空列表或无效 ID 不会回退到全目录，必选能力不在有效候选中时在模型调用前报错。候选不代表必选，专家策略仍允许临时角色。
 - `allow_experts=False` 由程序移除专家候选和专家策略，并校验模型不能返回专家策略，包括内联角色。该开关、请求 ID 和重判预算不进入模型上下文。任务和约束写入 `query`，已有资料通过 `inputs` 提供；原 `context.facts/constraints/work_mode` 字段移除，不再复制会话或系统提示词。路由只读取有界目录和输入预览，完整具名输入继续交给规划与执行；只有显式必选能力会附加对应要求。
-- 自动路由一般增加一次模型调用；无效 JSON/决定最多修复一次，规划不可行最多重新判级一次。`execution_route.reconsiderations` 记录已消耗次数，`context.reconsiderations=1` 保留为已消耗预算的兼容输入；Swarm 按需调用时不管理该预算。取消和模型异常向调用方传播。
+- 自动路由与后续规划沿用注入模型的思考设置。构建关系图时，匹配请求仍显式关闭思考。自动路由一般增加一次模型调用；无效 JSON/决定最多修复一次，规划不可行最多重新判级一次。`execution_route.reconsiderations` 记录已消耗次数，`context.reconsiderations=1` 保留为已消耗预算的兼容输入；Swarm 按需调用时不管理该预算。取消和模型异常向调用方传播。
 - `SymphonyGraphEngine.plan(..., prepare_skill_graph=callback)` 在自动选择不含工具的多 Skill 工作流，或显式 `type="skill"` 时请求宿主准备图，再检查技能图并读取动态图快照。其他自动策略不检查技能图。固定图修订或 `task_cluster_id` 要显式使用 `type="skill"`。
 - 显式 `plan(type="skill"|"expert")` 直接选择规划实现，不调用路由模型。`type="expert"` 返回专家任务图，替代早期版本返回专家能力链的行为。迁移原先省略类型的技能图调用时，请补上 `type="skill"`，或者改为消费自动结果的可选图。
 - `plan_skill_graph(query, candidate_ids=...)` 与 `plan(type="skill")` 使用相同的技能规划实现。`candidate_ids=None` 表示使用当前可见候选，传入 ID 列表可指定起始候选。列表为空或所有 ID 均无效时，返回 `no_plan`。动态图、指定修订与禁用技能过滤沿用技能规划契约。

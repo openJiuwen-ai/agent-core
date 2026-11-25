@@ -215,27 +215,26 @@ async def test_graph_engine_build_and_plan_fast_or_beam(tmp_path: Path, mode: st
 
 
 @pytest.mark.asyncio
-async def test_fast_planner_requests_minimal_reasoning_and_disables_thinking(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["fast", "beam"])
+async def test_build_disables_thinking_and_planning_inherits_model_options(tmp_path: Path, mode: str) -> None:
     llm = _FakeLLM()
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
         model=llm,
-        config=OrchestrationConfig(plan={'mode': 'fast'}),
+        config=OrchestrationConfig(plan={"mode": mode}),
     )
     await service.build()
+    assert llm.calls
+    assert all(call["kwargs"]["extra_body"]["thinking"] == {"type": "disabled"} for call in llm.calls)
+    llm.calls.clear()
 
     await service.plan("extract and summarize", type="skill", language="en")
 
-    planning_call = next(
-        call
-        for call in llm.calls
-        if set(json.loads(call["messages"][-1]["content"])) == {"query", "skills", "can_feed_edges"}
-    )
-    system_prompt = planning_call["messages"][0]["content"]
-    assert "Prioritize low latency" in system_prompt
-    assert "minimum internal reasoning" in system_prompt
-    assert planning_call["kwargs"]["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert llm.calls
+    assert all("extra_body" not in call["kwargs"] for call in llm.calls)
+    if mode == "beam":
+        assert any("candidate_plans" in json.loads(call["messages"][-1]["content"]) for call in llm.calls)
 
 
 @pytest.mark.asyncio

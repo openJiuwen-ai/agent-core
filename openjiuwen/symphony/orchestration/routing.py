@@ -10,9 +10,7 @@ from typing import Any, Literal, Mapping, Sequence
 from pydantic import BaseModel, ConfigDict, Field
 
 from openjiuwen.symphony.orchestration.contracts import PlanningInput
-from openjiuwen.symphony.orchestration.model import (
-    invoke_json, model_usage_context, thinking_disabled_request_overrides,
-)
+from openjiuwen.symphony.orchestration.model import invoke_json, model_usage_context
 from openjiuwen.symphony.orchestration.language import planner_language_instruction
 from openjiuwen.symphony.retrieval.search.runtime.lexical import LexicalDocument, LexicalIndex
 
@@ -221,7 +219,6 @@ async def route_task(
                 model, system_prompt=f"{system_prompt}\n{planner_language_instruction(language)}",
                 user_content=json.dumps(payload, ensure_ascii=False),
                 error_context="Symphony task routing", response_observer=observer,
-                request_overrides=thinking_disabled_request_overrides(),
             )
             try:
                 return _validate_route(_RouteDraft.model_validate_json(raw), context)

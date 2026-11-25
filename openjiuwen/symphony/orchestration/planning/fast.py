@@ -25,9 +25,7 @@ from openjiuwen.symphony.orchestration.planning.utils import (
 )
 
 FAST_PLANNER_SYSTEM_PROMPT = """You are Symphony's fast Skill planner.
-Return strict JSON only.
-Prioritize low latency. Decide directly from supplied data with the minimum internal reasoning
-necessary. Do not perform or output step-by-step analysis or chain-of-thought.
+Decide from the supplied data and return strict JSON only.
 
 You receive:
 - The user's query.
@@ -140,9 +138,6 @@ class FastOneShotPlanner:
                 system_prompt=f"{system_prompt}\n{planner_language_instruction(self.language)}",
                 user_content=json.dumps(prompt_payload, ensure_ascii=False),
                 error_context="Symphony one-shot fast planning",
-                request_overrides={
-                    "extra_body": {"thinking": {"type": "disabled"}},
-                },
                 response_observer=self.model_response_observer,
             )
 
