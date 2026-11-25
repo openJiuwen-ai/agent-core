@@ -1338,6 +1338,21 @@ class TestTaskDependencyOperations:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
+    async def test_mutate_dependency_graph_rejects_edges_for_missing_team(self, db):
+        """Adding edges for a non-existent team is rejected with
+        ``_MutationFailure`` before any edge work: the team_info row
+        lock that serialises the cycle check is also a hard precondition
+        for adding edges, so no orphan dependency rows are inserted."""
+        result = await db.task.mutate_dependency_graph(
+            team_name="missing_team",
+            add_edges=[("taskA", "taskB")],
+        )
+        assert result.ok is False
+        assert "missing_team" in result.reason
+        assert "not found" in result.reason.lower()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_mutate_dependency_graph_adds_single_edge(self, db):
         """Adding an edge through mutate_dependency_graph wires it into
         the dependency table; an edge to a COMPLETED target is born

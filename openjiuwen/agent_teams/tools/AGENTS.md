@@ -61,10 +61,19 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
   (3) 整 JSON / 整行 read-modify-write（`update_member_worktree` /
   `update_member_builtin_model` / `update_member_served_model` /
   `promote_member_fallback_model` / `update_task` / `reset_task` / `approve_plan_task` /
-  `_refresh_status_in_session` / `_check_cycle_and_compute_new_edges` /
-  `_mark_read_in_session` 广播水位）走 `SELECT ... FOR UPDATE`——SQLite 方言剥离
-  `FOR UPDATE`（进程级写锁兜底），PG/MySQL 靠行锁串行化读改写。**新增读改写入口前
-  先归类属于哪一类（DDL / CAS / FOR UPDATE），不要默认走普通 SELECT-then-UPDATE。**
+  `_refresh_status_in_session` / `_mark_read_in_session` 广播水位）走
+  `SELECT ... FOR UPDATE`——SQLite 方言剥离 `FOR UPDATE`（进程级写锁兜底），
+  PG/MySQL 靠行锁串行化读改写。**新增读改写入口前先归类属于哪一类（DDL / CAS /
+  FOR UPDATE），不要默认走普通 SELECT-then-UPDATE。**
+  (4) 依赖图环校验的串行化锁不是 (3) 类：`mutate_dependency_graph` 在
+  `add_edges` 非空时取 `select(Team).where(...).with_for_update()` 的 **team_info**
+  行锁——dep 表的 SELECT 是普通 SELECT（不是 FOR UPDATE），否则与
+  `_terminate_task_in_session` 的 task→dep 行锁序反向死锁。team_info 行是单点
+  短锁，`_terminate_task_in_session` 锁 task+dep、不锁 team_info，两者无冲突。
+  该锁使 team_info 行成为加边的硬前置条件：team 不存在则 `mutate_dependency_graph`
+  直接 `_MutationFailure("Team ... not found")`，不插孤儿边。`_check_cycle_and_compute_new_edges`
+  本身不取锁——它是 `mutate_dependency_graph` 的纯计算子步骤，串行化由调用方
+  在加边前取 team 行锁保证。
   **bind-time 动态表 DDL 同样在 `write()` 内执行**（
   `create_cur_session_tables(sessions)` 收 `DbSessions` 不收 engine）；经
   `engine.begin()` 直连会绕过 `ddl_lock()` + `write()`，并发 bind 占满写池（F_83）。

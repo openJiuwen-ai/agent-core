@@ -1585,6 +1585,14 @@ class TaskDao:
         ``suspend_parent`` is ``(task_id, owner)``: that ``IN_PROGRESS`` task
         is parked at ``BLOCKED`` in the same transaction, before its new
         edges are validated (member subtasks, F_128).
+
+        When ``add_edges`` is non-empty, a ``SELECT ... FOR UPDATE`` on the
+        ``team_info`` row serialises concurrent graph mutations on the same
+        team (cycle-check / lock-ordering rationale documented at the lock
+        site). This makes a present ``team_info`` row a hard precondition
+        for adding edges: a missing team is rejected with
+        ``_MutationFailure("Team ... not found")`` before any edge work,
+        so no orphan edges are inserted.
         """
         new_tasks = list(new_tasks or [])
         add_edges = list(add_edges or [])
@@ -1612,13 +1620,17 @@ class TaskDao:
                 # team_info row. This prevents two concurrent
                 # mutate_dependency_graph calls from each reading a stale edge
                 # set, each passing the cycle check, and together forming a
-                # cycle (the dep SELECT's FOR UPDATE is not enough: on an
-                # empty edge set it acquires zero locks). It also avoids the
-                # lock-ordering deadlock that a dep-row FOR UPDATE would
-                # create with _terminate_task_in_session (which locks task
-                # rows, then dep rows — the opposite order). The team row is
-                # a single short-lived lock and does not conflict with
+                # cycle. The dep SELECT itself is a plain SELECT (no FOR
+                # UPDATE): on an empty edge set a dep-row FOR UPDATE would
+                # acquire zero locks, and even on a non-empty set it would
+                # deadlock with _terminate_task_in_session (which locks task
+                # rows, then dep rows — the opposite order). The team_info
+                # row is a single short-lived lock and does not conflict with
                 # _terminate_task_in_session (which never locks team_info).
+                # Side effect: a present team_info row becomes a hard
+                # precondition for adding edges — a missing team is rejected
+                # with _MutationFailure before any edge work, so no orphan
+                # edges are inserted.
                 if add_edges:
                     team_result = await session.execute(
                         select(Team).where(Team.team_name == team_name).with_for_update()

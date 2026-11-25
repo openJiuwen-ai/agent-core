@@ -492,3 +492,90 @@ async def test_add_column_idempotent_swallows_duplicate_column() -> None:
         assert rows.fetchone()[0] == "x"
 
     await database.close()
+
+
+def test_add_column_idempotent_mysql_skips_savepoint_and_rechecks(monkeypatch):
+    """On MySQL _add_column_idempotent does not wrap the ALTER in a
+    SAVEPOINT — DDL implicitly commits *whether the DDL succeeds or
+    fails*, so the savepoint is destroyed before ``begin_nested`` can
+    roll back to it, and the savepoint's exit-time ROLLBACK would raise a
+    second ``DBAPIError`` that masks the original "Duplicate column name"
+    error.
+
+    The helper instead runs the ALTER bare and, when a duplicate-column
+    error is swallowed, follows it with an ``inspect`` re-check that
+    confirms the column is actually present (the implicit commit makes
+    the post-ALTER state the ground truth).
+
+    This test drives the MySQL branch with a hand-rolled fake connection:
+    the real implicit-commit behaviour cannot be reproduced on SQLite, so
+    we verify the helper takes the right branch (no ``begin_nested``,
+    ALTER issued, ``inspect`` re-check on swallow).
+    """
+    from unittest.mock import MagicMock, patch
+
+    from sqlalchemy.exc import OperationalError  # OperationalError is a DBAPIError subclass
+
+    from openjiuwen.agent_teams.organization import db as org_db
+
+    fake_conn = MagicMock()
+    fake_conn.dialect.name = "mysql"
+
+    # The ALTER raises a duplicate-column error (the column was added by a
+    # concurrent process). The helper must swallow this on the MySQL path.
+    fake_conn.exec_driver_sql.side_effect = OperationalError(
+        "ALTER TABLE t ADD COLUMN c TEXT",
+        {},
+        Exception("Duplicate column name 'c'"),
+    )
+
+    # begin_nested must NOT be called on the MySQL path; if it is, the
+    # AssertionError fails the test loudly.
+    fake_conn.begin_nested.side_effect = AssertionError("MySQL path must not call begin_nested")
+
+    # inspect(sync_conn).get_columns(table) returns the column, confirming
+    # a concurrent process added it; the re-check passes and the helper
+    # returns without re-raising.
+    fake_inspector = MagicMock()
+    fake_inspector.get_columns.return_value = [{"name": "c"}]
+
+    with patch.object(org_db, "inspect", return_value=fake_inspector):
+        org_db._add_column_idempotent(fake_conn, "t", "c", "TEXT")
+
+    fake_conn.begin_nested.assert_not_called()
+    fake_conn.exec_driver_sql.assert_called_once()
+    fake_inspector.get_columns.assert_called_once_with("t")
+
+
+def test_add_column_idempotent_mysql_reraises_when_column_still_missing(monkeypatch):
+    """On MySQL, if the duplicate-column error is swallowed but the
+    ``inspect`` re-check finds the column still missing (an inconsistent
+    state — the column should have been added by a concurrent process),
+    the helper re-raises rather than silently leaving the column absent.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from sqlalchemy.exc import OperationalError
+
+    from openjiuwen.agent_teams.organization import db as org_db
+
+    fake_conn = MagicMock()
+    fake_conn.dialect.name = "mysql"
+
+    fake_conn.exec_driver_sql.side_effect = OperationalError(
+        "ALTER TABLE t ADD COLUMN c TEXT",
+        {},
+        Exception("Duplicate column name 'c'"),
+    )
+
+    # inspect reports the column is NOT present — inconsistent with the
+    # "Duplicate column name" error. The helper must surface this.
+    fake_inspector = MagicMock()
+    fake_inspector.get_columns.return_value = [{"name": "other"}]
+
+    with patch.object(org_db, "inspect", return_value=fake_inspector):
+        with pytest.raises(OperationalError):
+            org_db._add_column_idempotent(fake_conn, "t", "c", "TEXT")
+
+    fake_conn.begin_nested.assert_not_called()
+    fake_inspector.get_columns.assert_called_once_with("t")

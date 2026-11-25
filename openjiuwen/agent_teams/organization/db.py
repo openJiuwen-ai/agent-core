@@ -44,29 +44,47 @@ def _add_column_idempotent(sync_conn, table: str, column: str, col_type: str) ->
     ``ALTER TABLE ... ADD COLUMN``. The DB's own DDL lock serialises the
     two ALTERs, but the second one fails:
     - SQLite: ``OperationalError`` "duplicate column name".
-    - PostgreSQL: ``ProgrammingError`` (SQLSTATE 42701) "column ... already exists".
-      PG also puts the transaction into an aborted state after the failed
-      statement, so the outer ``session.commit()`` would later raise
+    - PostgreSQL: ``ProgrammingError`` (SQLSTATE 42701) "column ... already
+      exists". PG also puts the transaction into an aborted state after the
+      failed statement, so the outer ``session.commit()`` would later raise
       ``InFailedSQLTransaction``.
     - MySQL: ``OperationalError`` (1060) "Duplicate column name".
 
-    Wrap the ALTER in a SAVEPOINT (``begin_nested``) and catch
-    ``DBAPIError`` (the common base of ``OperationalError`` and
-    ``ProgrammingError``): on a "duplicate column" / "already exists"
-    message the savepoint rolls back to the pre-ALTER state, leaving the
-    outer transaction clean and committable. Non-duplicate errors re-raise.
-    On MySQL DDL implicitly commits, so the savepoint is a no-op for
-    rollback, but the error is still swallowed — MySQL's ALTER either
-    succeeded (column added) or failed with "Duplicate column name", both
-    of which leave the column present, the desired end state.
+    On SQLite / PostgreSQL the ALTER is wrapped in a SAVEPOINT
+    (``begin_nested``) so the outer transaction stays committable when the
+    duplicate-column error is swallowed — the savepoint rolls back to the
+    pre-ALTER state, restoring the transaction to a healthy state.
+
+    On MySQL the SAVEPOINT is skipped: MySQL's DDL implicitly commits
+    *whether the DDL succeeds or fails*, which destroys any active
+    SAVEPOINT before ``begin_nested`` can roll back to it. The savepoint's
+    exit-time ``ROLLBACK TO SAVEPOINT`` would then raise a second
+    ``DBAPIError`` ("SAVEPOINT does not exist"), masking the original
+    "Duplicate column name" error and bypassing the message check below.
+    The implicit commit also leaves the post-ALTER state as the ground
+    truth, so a swallowed duplicate-column error is followed by an
+    ``inspect`` re-check confirming the column is actually present.
     """
+    use_savepoint = sync_conn.dialect.name != "mysql"
     try:
-        with sync_conn.begin_nested():
+        if use_savepoint:
+            with sync_conn.begin_nested():
+                sync_conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+        else:
             sync_conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
     except DBAPIError as exc:
         msg = str(exc).lower()
         if "duplicate column" not in msg and "already exists" not in msg:
             raise
+        if not use_savepoint:
+            # MySQL: the implicit commit destroyed the savepoint, so
+            # re-verify the column actually exists — a concurrent process
+            # should have added it (that is why we got "Duplicate column
+            # name"); if it is somehow still missing, surface the
+            # inconsistency rather than silently leaving the column absent.
+            inspector = inspect(sync_conn)
+            if column not in {col["name"] for col in inspector.get_columns(table)}:
+                raise
 
 
 def ensure_org_static_tables(sync_conn) -> None:
