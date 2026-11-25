@@ -41,7 +41,12 @@ from openjiuwen.core.single_agent.interrupt.state import (
     match_answers,
     pending_interrupts,
 )
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    AgentTerminationReason,
+    InvokeInputs,
+    record_termination_reason,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
@@ -282,6 +287,8 @@ class ToolInterruptHandler:
             "result_type": "interrupt",
             "state": state_outputs,
             "interrupt_ids": interrupt_ids,
+            # The HITL interrupt dict carries the termination reason.
+            "termination_reason": AgentTerminationReason.TOOL_INTERRUPT.value,
         }
 
     async def commit_interrupt(
@@ -293,6 +300,8 @@ class ToolInterruptHandler:
             sub_agent_outputs: list = None,
     ) -> Dict[str, object]:
         """Persist tool interruption state and return interrupt dict."""
+        # Record the reason at the commit point.
+        record_termination_reason(AgentTerminationReason.TOOL_INTERRUPT)
         await self._agent.context_engine.save_contexts(session)
         self.save(state, session)
         result = self.build_interrupt_result(sub_agent_outputs)
