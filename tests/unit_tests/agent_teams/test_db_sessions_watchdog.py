@@ -15,7 +15,6 @@ import asyncio
 
 import pytest
 
-from openjiuwen.agent_teams.tools.database import engine as engine_module
 from openjiuwen.agent_teams.tools.database.engine import DbSessions
 
 

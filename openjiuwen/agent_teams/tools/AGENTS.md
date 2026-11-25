@@ -44,18 +44,34 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
   （也被 DDL helper 用到）；`read_engine` / `read_session_local` 是读者池。
 - **`DbSessions`（`database/engine.py`）** —— 四个 DAO 共享的一个 provider，
   暴露分别绑定到读者 / 写者工厂的 `read()` / `write()` async-context 访问器。
-  `write()` 持有一把进程级 `asyncio.Lock`；`read()` 不持锁。这正是多成员负载下
-  阻止 `QueuePool limit ... timed out` 耗尽的东西。写锁是**不可重入**的：当一个公开
+  SQLite（file / `:memory:`）上 `write()` 持有一把进程级 `asyncio.Lock`；`read()` 不持锁。
+  PostgreSQL / MySQL（client/server 后端）上 `write()` **跳过**进程级写锁——这些
+  后端的原生写并发（行锁 + MVCC）才是写仲裁者，进程内串行化只会拖吞吐（issue #115
+  5 路 advocate 负载下 30s 看门狗堆积）。写锁是**不可重入**的：当一个公开
   写委托给另一个（`verify_and_fix_task_consistency` →
   `_verify_and_fix_blocked_tasks`）时，只有最内层的 session opener 取锁。
+  **跳过进程级写锁后，并发正确性由「DDL 锁 + CAS + 行锁」三件套保证**：
+  (1) DDL / cleanup helper（`create_cur_session_tables` / `drop_cur_session_tables` /
+  `cleanup_all_runtime_state` / `drop_session_tables_by_id`）及组织表迁移
+  （`_ensure_org_schema`）额外取 `sessions.ddl_lock()`，DDL-vs-DDL 在所有后端串行；
+  DDL-vs-写由 DB 自身的表级 DDL 锁守护（PG `AccessExclusiveLock` / MySQL metadata lock）。
+  (2) 状态翻转 / 删除走 CAS（`UPDATE/DELETE ... WHERE status=...` 看 `rowcount`）：
+  `update_task_status` / `delete_task` / `cancel_task`（经 `_terminate_task_in_session`）/
+  `delete_team` / `claim_task` / `reassign_task` / `start_task` / `observe_revision` 等。
+  (3) 整 JSON / 整行 read-modify-write（`update_member_worktree` /
+  `update_member_builtin_model` / `update_member_served_model` /
+  `promote_member_fallback_model` / `update_task` / `reset_task` / `approve_plan_task` /
+  `_refresh_status_in_session` / `_check_cycle_and_compute_new_edges` /
+  `_mark_read_in_session` 广播水位）走 `SELECT ... FOR UPDATE`——SQLite 方言剥离
+  `FOR UPDATE`（进程级写锁兜底），PG/MySQL 靠行锁串行化读改写。**新增读改写入口前
+  先归类属于哪一类（DDL / CAS / FOR UPDATE），不要默认走普通 SELECT-then-UPDATE。**
   **bind-time 动态表 DDL 同样在 `write()` 内执行**（
-  `create_cur_session_tables(sessions)` 收 `DbSessions` 不收 engine）——DDL 与
-  DAO 写同锁串行；经 `engine.begin()` 直连会绕过锁、并发 bind 占满写池（F_83）。
-  DROP 路径（`drop_cur_session_tables`）暂未收编，见 F_83 已知遗留。
+  `create_cur_session_tables(sessions)` 收 `DbSessions` 不收 engine）；经
+  `engine.begin()` 直连会绕过 `ddl_lock()` + `write()`，并发 bind 占满写池（F_83）。
   **同库的其它存储也复用这一个 provider**：组织层 `OrgDbContext` 不缓存 provider，每次都经
-  `TeamDatabase.sessions` 读取同一个 `DbSessions`；`org_*` 静态表 DDL 在 `write()` 内执行、
-  每个 provider 只做一次。新建第二个 `DbSessions` 就等于第二把写锁，写操作会和 DAO 写争池
-  （B_20261031_1134_org-ddl-bypasses-write-lock）。
+  `TeamDatabase.sessions` 读取同一个 `DbSessions`；`org_*` 静态表 DDL 在 `write()` +
+  `ddl_lock()` 内执行、每个 provider 只做一次。新建第二个 `DbSessions` 就等于第二把写锁，
+  写操作会和 DAO 写争池（B_20261031_1134_org-ddl-bypasses-write-lock）。
 - **`TeamDatabase` 生命周期** —— `sessions` 只在 `initialize()` 全部完成后才发布，中途失败会
   释放已建好的 engine 再抛出，可以重试；`initialize_engine` 自己的静态表 DDL 失败时也会先
   dispose 刚建的读写 engine 再抛出（engine 还没交给调用方，别人没法释放）。`close()` 持

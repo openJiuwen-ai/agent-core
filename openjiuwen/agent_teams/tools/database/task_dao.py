@@ -415,7 +415,9 @@ async def _check_cycle_and_compute_new_edges(
             select(
                 task_dependency_model.task_id,
                 task_dependency_model.depends_on_task_id,
-            ).where(task_dependency_model.team_name == team_name)
+            )
+            .where(task_dependency_model.team_name == team_name)
+            .with_for_update()
         )
     ).all()
     existing_edge_set: set[tuple[str, str]] = {(row[0], row[1]) for row in existing_edges_rows}
@@ -1050,7 +1052,11 @@ class TaskDao:
         """
         team_task_model = _get_task_model()
         async with self._sessions.write() as session:
-            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+            result = await session.execute(
+                select(team_task_model)
+                .where(team_task_model.task_id == task_id)
+                .with_for_update()
+            )
             task = result.scalar_one_or_none()
             if not task:
                 team_logger.error("Task %s not found", task_id)
@@ -1289,7 +1295,11 @@ class TaskDao:
         """
         team_task_model = _get_task_model()
         async with self._sessions.write() as session:
-            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+            result = await session.execute(
+                select(team_task_model)
+                .where(team_task_model.task_id == task_id)
+                .with_for_update()
+            )
             task = result.scalar_one_or_none()
             if not task:
                 team_logger.error("Task %s not found", task_id)
@@ -1417,7 +1427,11 @@ class TaskDao:
         """
         team_task_model = _get_task_model()
         async with self._sessions.write() as session:
-            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+            result = await session.execute(
+                select(team_task_model)
+                .where(team_task_model.task_id == task_id)
+                .with_for_update()
+            )
             task = result.scalar_one_or_none()
             if not task:
                 team_logger.error("Task %s not found", task_id)

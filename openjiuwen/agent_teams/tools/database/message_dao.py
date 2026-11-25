@@ -633,10 +633,12 @@ class MessageDao:
 
         if message.broadcast:
             read_result = await session.execute(
-                select(read_status_model).where(
+                select(read_status_model)
+                .where(
                     read_status_model.member_name == member_name,
                     read_status_model.team_name == message.team_name,
                 )
+                .with_for_update()
             )
             read_status = read_result.scalar_one_or_none()
             if read_status is None:

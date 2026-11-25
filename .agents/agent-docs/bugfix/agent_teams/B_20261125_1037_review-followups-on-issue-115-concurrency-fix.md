@@ -1,6 +1,6 @@
 ---
 id: B_20261125_1037_review-followups-on-issue-115-concurrency-fix
-title: issue #115 第二轮检视三条遗留并发洞的修复
+title: issue #115 第二、三轮检视遗留并发洞的修复
 type: B
 author: DaiYuxin511
 author_email: 455472400@qq.com
@@ -9,174 +9,170 @@ modules:
 files:
 - openjiuwen/agent_teams/tools/database/task_dao.py
 - openjiuwen/agent_teams/tools/database/member_dao.py
+- openjiuwen/agent_teams/tools/database/message_dao.py
 - openjiuwen/agent_teams/organization/db.py
+- openjiuwen/agent_teams/tools/AGENTS.md
+- tests/unit_tests/agent_teams/test_db_sessions_watchdog.py
 designs: []
-design_note: 91ad1d944 把锁的边界从「全写锁」收窄到「DDL 锁 + CAS + 行锁」时漏掉的三个入口；本修复把同一套并发模型补齐到剩余的读改写路径，不引入新设计
+design_note: 91ad1d944 把锁的边界从「全写锁」收窄到「DDL 锁 + CAS + 行锁」时漏掉的入口；本修复把同一套并发模型补齐到所有剩余读改写路径，不引入新设计
 ---
 
-# issue #115 第二轮检视三条遗留并发洞的修复记录
+# issue #115 第二、三轮检视遗留并发洞的修复记录
 
 ## 现象与影响
 
 91ad1d944（`fix(swarm): restore DDL mutex + CAS-guard non-CAS DAO writes under
 PG/MySQL`）把 PostgreSQL / MySQL 上的进程级写锁去掉、改为「DDL 锁 + CAS + 行锁」
-三件套。第二轮代码检视发现这套模型在三个入口上没收齐：
+三件套。第二、三轮代码检视发现这套模型在多个入口上没收齐，并伴随契约文本失真与
+一处死引用。
+
+### 第二轮检视（三条，commit 53f1d5e38 已修）
 
 1. **下游任务卡在 BLOCKED**：MySQL `READ COMMITTED` 下两个上游并发完成，下游 C
    （同时依赖 A 与 B）的 `BLOCKED` 状态无法被任一上游翻成 `PENDING`。
 2. **`options` JSON 丢更新**：`update_member_builtin_model` /
    `update_member_served_model` / `promote_member_fallback_model` 三个 options 写入
    入口仍是普通 SELECT-then-overwrite，与已加 `FOR UPDATE` 的
-   `update_member_worktree` 不一致。两个并发写入各读旧 JSON、各自回写整列，会
-   互相覆盖对方刚写入的字段。
-3. **`_ensure_org_schema` 重复 ALTER 报错**：组织表迁移入口仍只靠 `sessions.write()`
-   串行，PG/MySQL 跳过写锁后两个首次访问可同时通过 `_ORG_SCHEMA_READY` 复查、
-   同时执行 `ALTER TABLE ... ADD COLUMN`，第二次命中「duplicate column」失败。
+   `update_member_worktree` 不一致。
+3. **`_ensure_org_schema` 重复 ALTER 报错**：组织表迁移入口未取 `ddl_lock()`，PG/MySQL
+   跳过写锁后两个首次访问可同时通过 `_ORG_SCHEMA_READY` 复查、同时执行
+   `ALTER TABLE ... ADD COLUMN`，第二次命中「duplicate column」失败。
 
-三条共同特征：**91ad1d944 把锁的边界从「全写锁」收窄到「DDL 锁 + CAS + 行锁」
-时漏掉了三个应该一并改的入口**。本修复把同一套并发模型补齐到剩余路径，不退回
-到全写锁，也不引入新机制。
+### 第三轮检视（两条，本次修复）
+
+4. **PG/MySQL 仍跳过进程级写锁，未覆盖的跨语句读改写路径失去串行化**
+   （审查意见 #1，P2）：第二轮的 `ddl_lock` 只闭合 DDL-vs-DDL，仍有两类读改写路径
+   未覆盖：
+   - `update_task` 的 revision 自增（SELECT task → Python 改 revision → commit）
+   - `add_graph` / `mutate_dependency_graph` 的环校验（SELECT existing edges →
+     Python 算 adjacency → INSERT new edges）
+   未修改的契约文本（`tools/AGENTS.md` 的 `DbSessions` 段落）仍以「`write()` 持有
+   一把进程级 `asyncio.Lock`」为前提，与 91ad1d944 后 PG/MySQL 跳过写锁的实际行为
+   不符。
+
+   系统排查发现**另外 4 个同构入口**也未被覆盖（审查意见未点名，但不修会来下一轮）：
+   - `reset_task`（SELECT task → Python 改 status/assignee/summary/note → commit）：
+     与并发 `cancel_task` CAS 之间会丢更新，已取消的任务被复活。
+   - `approve_plan_task`（SELECT task → Python 改 status → commit）：同构。
+   - `_mark_read_in_session` 广播分支（SELECT read_status → Python 改 read_at →
+     commit）：水位回退，已读的广播被重新标记未读。
+   - `mark_messages_read` 批量路径共用 `_mark_read_in_session`，同构。
+
+5. **`test_db_sessions_watchdog.py:18` 死引用**（审查意见 #2，P3）：三个用例改用
+   实例属性（`sessions._watchdog_seconds` / `sessions._write_lock`）后，
+   `from ... import engine as engine_module` 成为死引用，触发 F401 lint。
 
 ## 根因与修复决策
 
-### 1. `_refresh_status_in_session` 下游 BLOCKED 卡死
+### 第二轮（已在 53f1d5e38 修复，此处仅记录要点）
 
-`_terminate_task_in_session`（task_dao.py:162-250）流程：CAS 翻终态 →
-`UPDATE dependencies SET resolved=True WHERE depends_on_task_id=<本任务>` →
-拉 downstream_ids → 调 `_refresh_status_in_session`（task_dao.py:112-159）。
+- **#1**：`_refresh_status_in_session` 候选任务 SELECT 加 `with_for_update()`。
+- **#2**：3 个 member options 写入口 SELECT 加 `with_for_update()`。
+- **#3**：`_ensure_org_schema` 的 `_ddl_once` 用 `sessions.ddl_lock()` 外层包裹
+  `sessions.write()`，docstring 同步更新。
 
-`_refresh_status_in_session` 是「SELECT COUNT(未解决依赖) → 判断要不要 UPDATE」
-的读改写模式。READ COMMITTED 下：
+### 第三轮（本次修复）
 
-- 事务 A 把 A→C 标 `resolved=True`（未提交），自己读 C 的未解决依赖 count=1
-  （只剩 B→C），判断 C 仍 BLOCKED，不改。
-- 事务 B 同理，自己读 count=1（只剩 A→C），判断 C 仍 BLOCKED，不改。
-- 两者提交后 C 实际两条依赖都已 resolved，但行上 status 仍是 BLOCKED。
+#### #4 未覆盖的读改写路径
 
-`_terminate_task_in_session` 的终态 CAS（task_dao.py:187-194）只防终态翻转竞争，
-**不覆盖下游刷新的读改写**。
+修复策略：所有「SELECT 同表行 → Python 改属性 → commit」的入口统一加 `with_for_update()`，
+与第二轮 `update_member_worktree` / `_refresh_status_in_session` 同模式。SQLite 方言
+剥离 `FOR UPDATE`（进程级写锁兜底），PG/MySQL 靠行锁串行化读改写。
 
-修复：给 `_refresh_status_in_session` 候选任务 SELECT 加 `with_for_update()`
-（task_dao.py:139-143）。事务 A 持 C 行锁 → 读 deps（看到 1 未解决）→ 不改 →
-释放锁 → 提交；事务 B 此时才拿到 C 锁，**此时 A 已提交，B 在 READ COMMITTED 下
-能看到 A 的 `resolved=True`**，读 deps count=0 → 翻 C 为 PENDING。与
-`update_member_worktree` 的 `FOR UPDATE` 修复同模式。
-
-`_refresh_status_in_session` 的三个调用点（task_dao.py:249 / 1589 / 1824）都在
-`sessions.write()` 块内，FOR UPDATE 安全：写 session 已持连接，FOR UPDATE 在
-SQLite 被剥离、在 PG/MySQL 取行锁，行与同事务里后续 UPDATE 是同一行，不存在
-锁升级死锁。
-
-### 2. options JSON 丢更新
-
-`member_dao.py` 里 4 个 options 写入入口，只有 `update_member_worktree` 加了
-`with_for_update()`（91ad1d944 引入）。其余 3 个仍是普通 SELECT：
-
-| 方法 | 行 | options 改写 |
+| 入口 | 文件:行 | 修法 |
 |---|---|---|
-| `update_member_worktree` | 755-795 | `set_member_worktree_options`（已加锁） |
-| `update_member_builtin_model` | 797-817 | `set_member_builtin_model` |
-| `update_member_served_model` | 819-854 | `append_member_served_model` |
-| `promote_member_fallback_model` | 856-878 | `promote_member_fallback_model` |
+| `update_task`（revision 自增） | task_dao.py:1419 | task SELECT 加 `.with_for_update()` |
+| `_check_cycle_and_compute_new_edges`（环校验） | task_dao.py:413 | existing edges SELECT 加 `.with_for_update()` |
+| `reset_task` | task_dao.py:1052 | task SELECT 加 `.with_for_update()` |
+| `approve_plan_task` | task_dao.py:1291 | task SELECT 加 `.with_for_update()` |
+| `_mark_read_in_session` 广播分支 | message_dao.py:635 | read_status SELECT 加 `.with_for_update()` |
 
-后 3 个都是「读旧 options JSON → Python 里改 → 写回整列」的 read-modify-write。
-READ COMMITTED 下两个并发调用各自读到旧 JSON、各自构造完整 options、各自的
-UPDATE 把对方刚写的字段抹掉。例如 `update_member_builtin_model` 与
-`update_member_worktree` 并发时，前者写回时把 `member.options` 整列覆盖，会顺手
-覆盖掉后者刚写入的 `worktree` 字段。
+`_check_cycle_and_compute_new_edges` 的 `FOR UPDATE` 会锁住该 team 的所有
+`task_dependency` 行——`add_graph` 不是高频操作，锁全队边集的代价可接受；两个并发
+`add_graph` 串行化后，第二个读到的边集已包含第一个提交的新边，环校验在 union 集上
+运行，不会漏检。
 
-修复：3 个方法的 SELECT 都补上 `.with_for_update()`，让同一成员的 options 串行化。
-`update_member_worktree` 的 docstring（member_dao.py:764-773）已经讲清「SQLite
-dialect 自动剥离 FOR UPDATE、靠进程级写锁兜底；PG/MySQL 靠行锁」——这套理由对
-另外 3 个方法同样适用，照搬即可。
+不改 CAS 的原因：`update_task` / `reset_task` / `approve_plan_task` 的 Python 改写
+涉及多列（title/content/revision/change_notes/assignee/summary/note/...），CAS UPDATE
+需要把所有列写进 `values()`，且 `reset_task` 的 `observed_revision = task.revision`
+需要读当前 revision——SQL 列引用列在 SQLAlchemy `values()` 里不直观。`FOR UPDATE`
+与第二轮已建立的修复模式一致，统一性优先。CAS 风格保留给纯状态翻转
+（`update_task_status` / `delete_task` / `cancel_task` / `delete_team`）与无前置 SELECT
+的原子写（`start_task` / `claim_task` / `reassign_task` / `observe_revision` 等）。
 
-不补 `update_member_status` / `update_member_execution_status`（行 434 / 556）：
-它们是 CAS 风格的状态翻转（已有 `WHERE status=...` guard），不是整 JSON 重写。
+#### 契约文本同步
 
-### 3. `_ensure_org_schema` 重复 ALTER
+`tools/AGENTS.md` 的 `DbSessions` 段落（原 47-58 行）改写：
+- 「`write()` 持有一把进程级 `asyncio.Lock`」→「SQLite 上 `write()` 持有进程级
+  `asyncio.Lock`；PG/MySQL 跳过进程级写锁，原生写并发才是写仲裁者」。
+- 新增「DDL 锁 + CAS + 行锁」三件套的完整说明，列出每类入口的代表方法。
+- 新增「新增读改写入口前先归类属于哪一类（DDL / CAS / FOR UPDATE）」的防错指引。
+- 删除「DROP 路径暂未收编，见 F_83 已知遗留」（91ad1d944 已收编 DROP 路径）。
+- 组织表 DDL 改为「在 `write()` + `ddl_lock()` 内执行」。
 
-`organization/db.py:107-115` 的 `_ddl_once`：
+#### #5 死引用
 
-```python
-async def _ddl_once() -> None:
-    async with sessions.write() as session:          # PG/MySQL 上不互斥
-        if sessions in _ORG_SCHEMA_READY:            # 弱集合，无锁
-            return
-        conn = await session.connection()
-        await conn.run_sync(ensure_org_static_tables)
-        await session.commit()
-    _ORG_SCHEMA_READY.add(sessions)
-```
-
-注释「Re-check under the lock」的「the lock」在 91ad1d944 之后名存实亡——PG/MySQL
-跳过 `_write_lock`，所以 `sessions.write()` 不再是互斥区。两个首次访问可以同时
-进 `_ddl_once`、同时通过 re-check、同时走到 `ensure_org_static_tables`。
-`ensure_org_task_columns`（db.py:51-68）里虽然有 `if name not in columns` 检查
-（行 59），但 check 与 ALTER 是分两条语句，两条之间没有锁保护。两个事务都看到列
-缺失 → 都执行 `ALTER TABLE org_task ADD COLUMN ...` → 第二条命中「Duplicate
-column name」失败。`retry_on_transient` 只重试 `locked`/`busy`/池超时类异常，
-**不重试 schema 冲突**，会直接抛出，组织表初始化失败。
-
-修复：与 `create_cur_session_tables` / `drop_cur_session_tables` /
-`cleanup_all_runtime_state` / `drop_session_tables_by_id` 完全同模式，把
-`sessions.write()` 包进 `sessions.ddl_lock()`（db.py:113-123）。事务 A 抢到
-ddl_lock → 跑 DDL → 加进 WeakSet → 释放锁、提交；事务 B 这时才进 → re-check
-命中 WeakSet → 直接 return。
-
-同步把 docstring 里「The DDL runs inside `sessions.write()` so it serialises
-with every DAO write of the same TeamDatabase」（db.py:92-100）改掉，这条理由在
-91ad1d944 之后对 PG/MySQL 已经不成立；改为「runs inside `sessions.write()`
-**and** `sessions.ddl_lock()` so it serialises with the four DDL / cleanup
-helpers」，与 engine.py 里那四个 helper 的 docstring 措辞对齐。
+`test_db_sessions_watchdog.py:18` 删除 `from openjiuwen.agent_teams.tools.database
+import engine as engine_module`。三个用例已改用 `sessions._watchdog_seconds` /
+`sessions._write_lock` 实例属性，`engine_module` 不再被引用。
 
 ## 考虑过但未采用
 
-- **意见 #1**：给 `complete_task` / `cancel_task` 提交后追加一次
-  `_verify_and_fix_blocked_tasks` 兜底。已有这套基础设施（task_dao.py:1809-1826），
-  但兜底扫描是「事后纠偏」，不能替代并发互斥本身；`FOR UPDATE` 是把根因堵住。
-  保留兜底作为后续可选加固，不在本次修复范围。
-- **意见 #1**：把 `_refresh_status_in_session` 改成单条 `UPDATE ... WHERE
-  unresolved_count = 0`（SQL 端 CAS，不取行锁）。改造面更大，且与
-  `update_member_worktree` 的 `FOR UPDATE` 模式不一致；本次按检视意见
-  「让同一 JSON 的所有读改写入口采用一致的并发控制」的精神，统一走
-  `FOR UPDATE`。
-- **意见 #3**：把 `_ORG_SCHEMA_READY` 的复查改成「持 ddl_lock 后复查 + 加 schema
-  exists 检查」。当前实现已足够：持锁后复查 WeakSet，A 跑完 DDL 后 B 直接 return，
-  不需要再 SQL 端查一次表存在性。`ensure_org_static_tables` 内部的
-  `if name not in columns` 是单事务内的 check-then-alter，持锁后只有一个事务
-  能进到这里，不存在 race。
+- **退回 PG/MySQL 进程级写锁**：会重新引入 issue #115 的 30s 看门狗堆积问题
+  （91ad1d944 的修复动机）。审查意见 #1 也说「改动方向正确」，方向不退。
+- **`reset_task` / `approve_plan_task` 改 CAS**：这两个是状态翻转，CAS 可行；但
+  `reset_task` 还要清空 `summary` / `note` / `resume_pending` / `observed_revision`
+  等多列，CAS UPDATE 需要把所有列写进 `values()`，且 `observed_revision = revision`
+  需要读当前 revision。`FOR UPDATE` 与第二轮已建立的修复模式一致，统一性优先。
+- **`_check_cycle_and_compute_new_edges` 用 team 级 advisory lock**：PG/MySQL 有
+  `pg_advisory_xact_lock` / `GET_LOCK`，但 SQLite 没有，需要分后端分支。`FOR UPDATE`
+  锁全队边集在三后端统一生效，且 `add_graph` 低频，代价可接受。
+- **`mark_message_read` 调用方已串行**：`MessageHandler` 按成员逐个串行 flush，单成员
+  并发概率低；但严格按「PG/MySQL 跳过写锁后所有读改写入口必须显式串行化」的契约，
+  `FOR UPDATE` 是正确的，不依赖调用方的串行假设。
 
 ## 回归证据与适用范围
 
-候选：`fix/issue-115-enterprise`（基于 91ad1d944）。
+候选：`fix/issue-115-enterprise`（基于 53f1d5e38）。
 
-- 现有 SQLite 测试 `tests/unit_tests/agent_teams/organization/test_org_db.py`：
-  - `test_org_static_ddl_runs_under_team_database_write_lock`：SQLite 上 `write()`
-    仍持进程级写锁，加 `ddl_lock()` 不影响 `write_locked` 在 DDL 期间为 True，断言
-    仍通过。
-  - `test_org_static_ddl_runs_for_each_new_database` /
-    `test_find_organization_ids_runs_static_ddl_once_per_database`：WeakSet 复查
-    行为不变（ddl_lock 内复查与原 write_lock 内复查逻辑一致），断言仍通过。
-- 未新增显式并发测试：91ad1d944 处理 CAS / FOR UPDATE 改动时也未新增并发用例，
-  本次沿用同一模式（review 主导 + 现有测试不回归）。`FOR UPDATE` 在 SQLite 上
-  被剥离，所以 SQLite 单测无法直接验证 PG/MySQL 行锁行为；真实并发场景需在
-  PG/MySQL 后端按检视意见描述的屏障构造复现。
+```bash
+# 死引用删除 + org schema（覆盖 #3 #5）
+.venv/bin/python -m pytest tests/unit_tests/agent_teams/test_db_sessions_watchdog.py \
+    tests/unit_tests/agent_teams/organization/test_org_db.py -x -q
+# → 19 passed
 
-未验证：未在真实 PostgreSQL / MySQL 后端按屏障构造跑过端到端复现。需要 swarm
-侧用 PG/MySQL 后端在同样场景下复测，确认下游不再卡 BLOCKED、options 不再丢更新、
-组织表迁移不再报 duplicate column。
+# database + task_manager + message_manager（覆盖 #1 #2 #4）
+.venv/bin/python -m pytest tests/unit_tests/agent_teams/test_database.py \
+    tests/unit_tests/agent_teams/test_task_manager.py \
+    tests/unit_tests/agent_teams/test_message_manager.py -x -q
+# → 255 passed
+
+# 广域回归
+.venv/bin/python -m pytest tests/unit_tests/agent_teams/ -x -q \
+    -k "member or task or database or message or team"
+# → 4601 passed, 36 skipped, 2 xfailed
+```
+
+`FOR UPDATE` 在 SQLite 上被剥离，所以 SQLite 单测无法直接验证 PG/MySQL 行锁行为；
+真实并发场景需在 PG/MySQL 后端按检视意见描述的屏障构造复现。
 
 ## 防错模式与资料同步
 
 模式：91ad1d944 引入「DDL 锁 + CAS + 行锁」三件套后，凡是对同一行/同一 JSON 的
 读改写入口都必须采用一致的并发控制——DDL 走 `ddl_lock()`，状态翻转走 CAS
-`WHERE status=...`，整 JSON 重写走 `SELECT ... FOR UPDATE`。新增读改写入口前
-先归类属于哪一类，套用对应模式，不要默认走普通 SELECT-then-UPDATE。
+`WHERE status=...`，整 JSON / 整行 read-modify-write 走 `SELECT ... FOR UPDATE`。
+新增读改写入口前先归类属于哪一类，套用对应模式，不要默认走普通
+SELECT-then-UPDATE。已把这条写进 `tools/AGENTS.md` 的 `DbSessions` 段落。
 
 ## 遗留与后续
 
 - 三条修复的并发正确性依赖 PG/MySQL 的 `READ COMMITTED` 行为：A 提交后 B 才能看
   到 A 的写入。若后端配置成 `READ UNCOMMITTED`（脏读）或更弱的隔离级别，行为不
   保证——但项目 DB 配置默认 `READ COMMITTED`，不在本次范围。
-- 意见 #1 的可选加固（complete 后追加 `_verify_and_fix_blocked_tasks` 兜底）未做，
-  留作后续若发现 FOR UPDATE 在某些极端调度下仍漏的兜底。
+- 未在真实 PostgreSQL / MySQL 后端按屏障构造跑过端到端复现。需 swarm 侧用
+  PG/MySQL 后端复测，确认下游不再卡 BLOCKED、options 不再丢更新、组织表迁移不再
+  报 duplicate column、`update_task` revision 不再丢增、`add_graph` 不再漏检环、
+  `reset_task` / `approve_plan_task` 不再被并发 `cancel_task` 复活、广播水位不再
+  回退。
+- 排查报告确认的「无风险」入口（纯 INSERT / 纯 CAS / 已加 FOR UPDATE / 只读）未
+  在本记录逐一列出，详见排查报告。
