@@ -1353,6 +1353,36 @@ class TestTaskDependencyOperations:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
+    async def test_mutate_dependency_graph_rejects_new_tasks_for_missing_team(self, db):
+        """A new_tasks-only call against a missing team is rejected with
+        ``_MutationFailure`` before any row is staged, rather than letting the
+        commit-time FK reject (or, on SQLite without FK enforcement, silently
+        leave orphan task rows). The team_info row check runs whenever there
+        is work to do (new tasks or edges), so both paths fail fast and
+        consistently."""
+        from openjiuwen.agent_teams.schema.status import TaskStatus
+        from openjiuwen.agent_teams.tools.database.task_dao import NewTaskSpec
+
+        result = await db.task.mutate_dependency_graph(
+            team_name="missing_team",
+            new_tasks=[
+                NewTaskSpec(
+                    task_id="orphan-task",
+                    title="t",
+                    content="c",
+                    initial_status=TaskStatus.PENDING.value,
+                )
+            ],
+        )
+        assert result.ok is False
+        assert "missing_team" in result.reason
+        assert "not found" in result.reason.lower()
+        # The orphan task row must not have been staged.
+        task = await db.task.get_task("orphan-task")
+        assert task is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_mutate_dependency_graph_adds_single_edge(self, db):
         """Adding an edge through mutate_dependency_graph wires it into
         the dependency table; an edge to a COMPLETED target is born

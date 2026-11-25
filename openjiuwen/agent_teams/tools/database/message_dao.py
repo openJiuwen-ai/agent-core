@@ -667,14 +667,22 @@ class MessageDao:
                 )
                 # Re-load the row the upsert materialised (ours or the
                 # concurrent winner's) and advance the watermark if the
-                # incoming broadcast is newer. The upsert seeded read_at
-                # with message.timestamp, so the common case is a no-op.
+                # incoming broadcast is newer. The re-SELECT takes FOR UPDATE
+                # so two concurrent upserters serialise on the now-existing
+                # row: the second blocks until the first commits, then sees
+                # the first's committed read_at (READ COMMITTED gives each
+                # statement a fresh snapshot) and only advances forward.
+                # Without the lock both would re-SELECT the same read_at,
+                # both compute the same new value, and last-writer-wins could
+                # lose an update.
                 read_status = (
                     await session.execute(
-                        select(read_status_model).where(
+                        select(read_status_model)
+                        .where(
                             read_status_model.member_name == member_name,
                             read_status_model.team_name == message.team_name,
                         )
+                        .with_for_update()
                     )
                 ).scalar_one()
             if read_status.read_at is None or message.timestamp > read_status.read_at:
@@ -705,6 +713,7 @@ class MessageDao:
         the row and advances ``read_at`` forward-only if the incoming
         broadcast is newer.
         """
+        from sqlalchemy import func
         from sqlalchemy.dialects.mysql import insert as mysql_insert
         from sqlalchemy.dialects.postgresql import insert as pg_insert
         from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -716,15 +725,20 @@ class MessageDao:
             "read_at": read_at,
         }
         if dialect_name == "mysql":
+            # ON DUPLICATE KEY UPDATE with GREATEST so the watermark only moves
+            # forward: a concurrent INSERT that carries an OLDER broadcast
+            # timestamp cannot regress read_at below its current value. Without
+            # GREATEST a bare ``read_at = VALUES(read_at)`` would overwrite a
+            # newer watermark with the incoming (older) one.
             stmt = mysql_insert(read_status_model).values(**values).on_duplicate_key_update(
-                read_at=read_at,
+                read_at=func.greatest(read_status_model.read_at, read_at),
             )
         else:
             insert_fn = pg_insert if dialect_name == "postgresql" else sqlite_insert
             # ON CONFLICT DO NOTHING: the winner seeds read_at, the loser's
-            # INSERT is dropped. The caller re-SELECTs and advances read_at
-            # forward-only, so a newer concurrent broadcast still wins via
-            # the subsequent UPDATE.
+            # INSERT is dropped. The caller re-SELECTs (with FOR UPDATE) and
+            # advances read_at forward-only, so a newer concurrent broadcast
+            # still wins via the subsequent UPDATE.
             stmt = insert_fn(read_status_model).values(**values).on_conflict_do_nothing(
                 index_elements=["member_name", "team_name"],
             )

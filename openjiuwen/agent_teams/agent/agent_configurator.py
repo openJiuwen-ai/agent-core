@@ -681,7 +681,18 @@ class AgentConfigurator:
         # leaving ``ctx.member_model`` ``None`` lets ``AgentConfigurator``'s
         # ``ctx.member_model or agent_spec.model`` fall through to the current
         # spec on every recovery instead.
-        if ctx.member_model is None and model_config is not None and spec.model_pool:
+        #
+        # Use the *expanded* pool on ``ctx.team_spec`` rather than the
+        # blueprint ``spec.model_pool``: ``model_router`` /
+        # ``model_intelli_router`` are convenience inputs that expand into
+        # ``team_spec.model_pool`` at ``build()`` time (blueprint.py), leaving
+        # ``spec.model_pool`` empty for router / intelli_router teams. Checking
+        # the blueprint field would skip the write-back for exactly those teams
+        # and re-open 现象 5. ``ctx.team_spec.model_pool`` is the authoritative
+        # post-expansion answer (mirrors ``spawn_manager.py``'s
+        # ``has_model_pool = team_spec is not None and bool(team_spec.model_pool)``).
+        has_model_pool = ctx.team_spec is not None and bool(ctx.team_spec.model_pool)
+        if ctx.member_model is None and model_config is not None and has_model_pool:
             ctx.member_model = model_config
 
         sys_operation_spec = agent_spec.sys_operation or SysOperationSpec(

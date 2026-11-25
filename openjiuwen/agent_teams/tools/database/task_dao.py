@@ -1638,11 +1638,16 @@ class TaskDao:
                 # rows, then dep rows — the opposite order). The team_info
                 # row is a single short-lived lock and does not conflict with
                 # _terminate_task_in_session (which never locks team_info).
-                # Side effect: a present team_info row becomes a hard
-                # precondition for adding edges — a missing team is rejected
-                # with _MutationFailure before any edge work, so no orphan
-                # edges are inserted.
-                if add_edges:
+                # Side effect: a present team_info row is a hard precondition
+                # for ANY graph mutation (new tasks or edges). The check runs
+                # whenever there is work to do — not only under ``add_edges``
+                # — so a new_tasks-only call against a missing team fails fast
+                # with _MutationFailure instead of staging rows that the
+                # commit-time FK would reject (or, on SQLite without FK
+                # enforcement, silently leave as orphans). New_tasks + edges
+                # for a missing team therefore rolls back together as one
+                # atomic unit, matching the caller's all-or-nothing contract.
+                if new_tasks or add_edges:
                     team_result = await session.execute(
                         select(Team).where(Team.team_name == team_name).with_for_update()
                     )
