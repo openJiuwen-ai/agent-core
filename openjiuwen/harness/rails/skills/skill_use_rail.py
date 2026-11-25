@@ -4,8 +4,12 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextvars import ContextVar
+import itertools
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -56,6 +60,22 @@ def _read_skill_refresh_ttl() -> float:
         return max(0.0, float(os.environ.get("SKILL_REFRESH_TTL_SECONDS", "0") or 0))
     except ValueError:
         return 0.0
+
+
+# Per-coroutine outcome slot set while ``before_invoke`` or
+# ``_refresh_skill_prompt_if_changed`` awaits the public
+# ``refresh_skill_prompt(ctx) -> None``. Keeps the public ``None`` return
+# contract for delegating subclasses while carrying either the exact
+# ``(generation, scan_seq)`` token that committed or ``False`` on abort so
+# even post-``super()`` awaits inside an override are validated cleanly.
+_REFRESH_OUTCOME: ContextVar[Optional[List[Any]]] = ContextVar(
+    "_skill_use_rail_refresh_outcome", default=None
+)
+# Active scan language carried out-of-band so existing 2-argument
+# ``_load_skill(skill_dir, update_at)`` subclass overrides keep working unchanged.
+_SCAN_LANGUAGE: ContextVar[Optional[str]] = ContextVar(
+    "_skill_use_rail_scan_language", default=None
+)
 
 
 class SkillUseRail(DeepAgentRail):
@@ -140,6 +160,34 @@ class SkillUseRail(DeepAgentRail):
         self._skill_cache: Dict[str, Skill] = {}
         self._skill_update_at: Dict[str, float] = {}
         self._skill_order: List[str] = []
+        # The prompt language the cached descriptions were localized for, and
+        # a counter that clear_skills() bumps. A refresh compares the counter
+        # before publishing, so a read that finishes after the cache was
+        # cleared (backend rebound, language switched, root unmounted) cannot
+        # write its stale result back.
+        self._cached_language: Optional[str] = None
+        self._cache_generation: int = 0
+        # Monotonic counter & opaque in-process token bumped only when
+        # ``set_sys_operation`` switches from one bound backend to another on
+        # this rail instance. Persisted on session reconciliation so wrapper
+        # recreation across turns never rewrites the baseline a second time
+        # while retaining zero session references in memory on the rail.
+        self._binding_epoch: int = 0
+        self._binding_token: Optional[str] = None
+        # Scans are numbered as well: an older scan that resumes after a
+        # newer one started must not commit over the newer result even when
+        # neither the backend nor the language changed in between. The
+        # discovery snapshot of the scan that last committed the cache is
+        # kept with it, so the signature stamped for the cache is the walk
+        # that produced it, not a later one.
+        self._scan_seq: int = 0
+        self._committed_snapshot_signature: Optional[Tuple[Tuple[str, float], ...]] = None
+        self._override_discovery_signature: Optional[Tuple[Tuple[str, float], ...]] = None
+        self._visibility_conflict: bool = False
+        self._attachment_needs_sync: bool = False
+        self._current_gen_attachment_sessions: Set[str] = set()
+        # ``(generation, scan)`` of the refresh that last committed.
+        self._last_committed_refresh_token: Optional[Tuple[int, int]] = None
 
         # Cache evolution experience texts per skill name.
         self._evolution_texts: Dict[str, str] = {}
@@ -168,11 +216,32 @@ class SkillUseRail(DeepAgentRail):
         """Return all managed skills."""
         return list(self.skills)
 
+    async def _refresh_view(self) -> Optional[Tuple[int, int]]:
+        """Scan the skill roots, fetch the evolution texts and stamp the signature.
+
+        Returns:
+            The ``(generation, scan)`` of the scan that committed, or None
+            when the backend or language changed, or a newer scan started,
+            while a read was awaited: nothing is stamped and the caller
+            publishes nothing.
+        """
+        target_lang = self._current_description_language()
+        scan = await self._prepare_skills()
+        if scan is None:
+            return None
+        await self._fetch_evolution_texts()
+        # The evolution store is awaited too, so the backend, language, or a
+        # newer scan can still change after the skills were read. Re-check
+        # before stamping, or the next model call would see an unchanged
+        # signature and skip discovery with no skills visible.
+        if not self._scan_still_current(scan, target_lang):
+            return None
+        self._stamp_committed_signature()
+        return scan
+
     async def reload_skills(self) -> None:
         """Refresh managed skills immediately after skills_dir changes."""
-        await self._prepare_skills()
-        await self._fetch_evolution_texts()
-        self._skills_snapshot_signature = self._build_skills_snapshot_signature()
+        await self._refresh_view()
 
     def clear_skills(self) -> None:
         """Clear loaded skills and the public rail-managed cache."""
@@ -182,6 +251,86 @@ class SkillUseRail(DeepAgentRail):
         self.skills = []
         self._skills_snapshot_signature = None
         self._last_full_refresh_ts = None
+        self._cached_language = None
+        self._cache_generation += 1
+        self._committed_snapshot_signature = None
+        self._override_discovery_signature = None
+        self._visibility_conflict = False
+        self._attachment_needs_sync = True
+        self._current_gen_attachment_sessions.clear()
+        self._last_committed_refresh_token = None
+        if self.system_prompt_builder is not None:
+            self.system_prompt_builder.remove_section(SectionName.SKILLS)
+
+    def _current_description_language(self) -> str:
+        """Return the prompt language the cached descriptions must follow."""
+        return str(getattr(self.system_prompt_builder, "language", "cn") or "cn").strip().lower()
+
+    def _invalidate_if_language_changed(self) -> None:
+        """Drop the cache when the prompt language no longer matches it.
+
+        ``DeepAgent`` pushes ``system_prompt_builder`` onto a pending rail
+        *before* ``init`` runs, and hot reconfiguration swaps the builder
+        without calling ``init`` again, so a language switch is not visible
+        inside ``init``. The language that produced the cache is tracked
+        instead and re-checked before any cached state is reused.
+        """
+        if self._cached_language is not None and self._cached_language != self._current_description_language():
+            self.clear_skills()
+
+    def _refresh_still_current(self, generation: int, target_lang: str) -> bool:
+        """Whether a refresh that started as *generation* / *target_lang* is still live."""
+        return self._cache_generation == generation and self._current_description_language() == target_lang
+
+    def _scan_still_current(self, scan: Tuple[int, int], target_lang: str) -> bool:
+        """Whether the scan started as *scan* / *target_lang* is still the live one."""
+        generation, scan_seq = scan
+        return (
+            scan_seq == self._scan_seq
+            and self._cache_generation == generation
+            and self._current_description_language() == target_lang
+        )
+
+    async def _run_refresh_prompt(self, ctx: AgentCallbackContext) -> bool:
+        """Run ``refresh_skill_prompt(ctx)`` and return whether *this* call committed."""
+        generation = self._cache_generation
+        target_lang = self._current_description_language()
+        self._visibility_conflict = False
+        outcome: List[Any] = [None]
+        token = _REFRESH_OUTCOME.set(outcome)
+        try:
+            await self.refresh_skill_prompt(ctx)
+        except Exception:
+            self._last_full_refresh_ts = None
+            raise
+        finally:
+            _REFRESH_OUTCOME.reset(token)
+        result = outcome[0]
+        if result is False:
+            return False
+        if isinstance(result, tuple):
+            return self._scan_still_current(result, target_lang)
+        # Custom override/test replaced refresh_skill_prompt without calling super().
+        if not self._refresh_still_current(generation, target_lang):
+            return False
+        if self._cached_language is None:
+            self._cached_language = target_lang
+        return True
+
+    def set_sys_operation(self, sys_operation: Any) -> None:
+        """Bind sys_operation and clear cached skills when the backend changes."""
+        # A pre-mount reload may have read skills from the local disk (or via a
+        # previous backend); a newly bound sandbox/virtual filesystem must get
+        # the chance to re-read (and possibly reject) them instead of serving
+        # that cached result.
+        prev_operation = self.sys_operation
+        changed = sys_operation is not prev_operation
+        super().set_sys_operation(sys_operation)
+        if changed:
+            if prev_operation is not None and sys_operation is not None:
+                self._binding_epoch += 1
+                self._binding_token = uuid.uuid4().hex
+            self.clear_skills()
 
     def mount_skill_root(self, directory: str | Path) -> SkillRootMount:
         """Append a native discovery root and return its ownership handle."""
@@ -239,45 +388,143 @@ class SkillUseRail(DeepAgentRail):
         if baseline is None or baseline.directory.resolve() != expected:
             raise ValueError(f"conflicts with the session baseline: {name}.")
 
-    async def _prepare_skills(self) -> None:
-        """Refresh skills incrementally from skills_dir and apply filters."""
+    async def _prepare_skills(self) -> Optional[Tuple[int, int]]:
+        """Refresh skills incrementally from skills_dir and apply filters.
+
+        Returns:
+            The ``(generation, scan)`` the refreshed view was published under,
+            for the caller to re-check after its own awaits. None when
+            ``clear_skills()`` ran while a read was in flight (the backend was
+            rebound), the prompt language switched under the refresh, or a
+            newer scan started: nothing is published and the state is left
+            for the next refresh.
+        """
+        self._invalidate_if_language_changed()
+        self._visibility_conflict = False
+        target_lang = self._current_description_language()
+        self._scan_seq += 1
+        scan = (self._cache_generation, self._scan_seq)
+
         if not self.enable_cache:
             self._skill_cache.clear()
             self._skill_update_at.clear()
             self._skill_order.clear()
 
-        await self._refresh_skills_incrementally()
-        self.skills = self._filter_skills(self._collect_skills_in_order())
+        refreshed = await self._refresh_skills_incrementally(scan=scan, language=target_lang)
+        if not refreshed:
+            return None
+        collected = self._collect_skills_in_order()
+        self.skills = self._filter_skills(collected)
+        self._cached_language = target_lang
 
-    async def _refresh_skills_incrementally(self) -> None:
-        """Refresh skills by loading only new or updated SKILL.md files."""
+        # Freeze the full committed signature synchronously right here — using
+        # the exact discovery snapshot that produced the cache and the exact
+        # visibility decision that produced ``self.skills`` — before any
+        # post-filter await (such as ``_fetch_evolution_texts``) can interleave.
+        discovery_sig = self._committed_snapshot_signature or ()
+        if type(self)._build_skills_snapshot_signature is SkillUseRail._build_skills_snapshot_signature:
+            self._committed_snapshot_signature = discovery_sig
+        else:
+            prev_enabled = set(self.enabled_skills)
+            prev_disabled = set(self.disabled_skills)
+            self._override_discovery_signature = discovery_sig
+            try:
+                full_sig = self._build_skills_snapshot_signature()
+            finally:
+                self._override_discovery_signature = None
+            if self.enabled_skills != prev_enabled or self.disabled_skills != prev_disabled:
+                # Visibility shifted during signature build: keep the
+                # subclass-filtered ``self.skills`` from this scan, preserve
+                # the most recent successful provider decision in
+                # ``enabled_skills`` / ``disabled_skills`` for fallback,
+                # invalidate any open TTL window, and leave the signature
+                # unstamped so the next callback polls fresh visibility.
+                self._committed_snapshot_signature = None
+                self._last_full_refresh_ts = None
+                self._visibility_conflict = True
+            else:
+                self._committed_snapshot_signature = full_sig
+        return scan
+
+    async def _refresh_skills_incrementally(
+        self,
+        scan: Optional[Tuple[int, int]] = None,
+        language: Optional[str] = None,
+    ) -> bool:
+        """Refresh skills by loading only new or updated SKILL.md files.
+
+        Args:
+            scan: The ``(cache generation, scan sequence)`` the caller captured
+                when the refresh started. ``clear_skills()`` bumps the
+                generation (the cache was wiped under this refresh) and every
+                ``_prepare_skills()`` bumps the sequence (a newer scan
+                superseded this one), so a scan that resumes after either
+                must not write.
+            language: The prompt language the descriptions must be localized
+                for. Every load in this scan uses it, so a language switch
+                mid-scan cannot yield a mix.
+
+        Returns:
+            False when the scan was superseded while a read was awaited:
+            nothing is written so the caller publishes nothing. True
+            otherwise, with the cache, its order and the discovery snapshot
+            that produced it committed together.
+        """
+        if scan is None:
+            scan = (self._cache_generation, self._scan_seq)
+        if language is None:
+            language = self._current_description_language()
         roots = self._normalize_skill_dirs(self.skills_dir)
         if not roots:
             raise ValueError("skills_dir is empty")
 
-        discovered_keys: Set[str] = set()
+        discovered = self._discover_skill_dirs(roots)
+        # The exact snapshot the loads below are based on. The disk can move
+        # while a read is awaited, and a signature walked later would then
+        # describe files this scan never loaded.
+        discovered_snapshot = self._snapshot_signature(discovered)
+        # One consistent view of the cache for the whole scan: what a newer
+        # scan commits meanwhile is not this scan's to reuse.
+        cache_snapshot = dict(self._skill_cache)
+        update_at_snapshot = dict(self._skill_update_at)
+
         ordered_keys: List[str] = []
+        # Newly loaded skills are staged and written to the cache only once
+        # the whole scan is known to be the live one: a switch mid-scan
+        # leaves no partially mixed cache behind.
+        staged_skills: Dict[str, Skill] = {}
+        staged_update_at: Dict[str, float] = {}
 
-        for item, update_at in self._discover_skill_dirs(roots):
+        for item, update_at in discovered:
             key = str(item.resolve())
-
-            discovered_keys.add(key)
             ordered_keys.append(key)
 
-            cached_skill = self._skill_cache.get(key)
-            cached_update_at = self._skill_update_at.get(key)
+            cached_skill = cache_snapshot.get(key)
+            cached_update_at = update_at_snapshot.get(key)
 
             if cached_skill is None or cached_update_at != update_at:
-                skill = await self._load_skill(item, update_at)
-                self._skill_cache[key] = skill
-                self._skill_update_at[key] = update_at
+                lang_token = _SCAN_LANGUAGE.set(language)
+                try:
+                    skill = await self._load_skill(item, update_at)
+                finally:
+                    _SCAN_LANGUAGE.reset(lang_token)
+                if not self._scan_still_current(scan, language):
+                    return False
+                staged_skills[key] = skill
+                staged_update_at[key] = update_at
 
-        stale_keys = [key for key in self._skill_cache.keys() if key not in discovered_keys]
-        for key in stale_keys:
-            self._skill_cache.pop(key, None)
-            self._skill_update_at.pop(key, None)
-
-        self._skill_order = [key for key in ordered_keys if key in self._skill_cache]
+        if not self._scan_still_current(scan, language):
+            return False
+        merged_skills = {**cache_snapshot, **staged_skills}
+        merged_update_at = {**update_at_snapshot, **staged_update_at}
+        committed_keys = [key for key in ordered_keys if key in merged_skills]
+        self._skill_cache.clear()
+        self._skill_cache.update((key, merged_skills[key]) for key in committed_keys)
+        self._skill_update_at.clear()
+        self._skill_update_at.update((key, merged_update_at[key]) for key in committed_keys)
+        self._skill_order = committed_keys
+        self._committed_snapshot_signature = discovered_snapshot
+        return True
 
     async def _load_skill(self, skill_dir: Path, update_at: float) -> Skill:
         """Load one skill from a skill directory."""
@@ -347,6 +594,10 @@ class SkillUseRail(DeepAgentRail):
         resource-manager key stay consistent. Abilities already owned by another
         rail are left untouched; see the loop comment for why.
         """
+        # Cached descriptions are localized (``description_<lang>``). The
+        # builder is already assigned here (DeepAgent pushes it onto pending
+        # rails before init), so a language switch is detected by tracking the
+        # cached language in ``_invalidate_if_language_changed()`` instead.
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
         self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
 
@@ -448,11 +699,23 @@ class SkillUseRail(DeepAgentRail):
         self._owned_tool_cards.clear()
 
     async def refresh_skill_prompt(self, ctx: AgentCallbackContext) -> None:
-        """Regenerate the skills system prompt"""
+        """Regenerate the skills system prompt.
+
+        Returns None by contract; whether *this* refresh committed — the
+        backend, effective policy, language, and scan sequence were still live
+        after its final await — is reported through the per-coroutine outcome
+        slot so delegating overrides that await ``super()`` keep all callback
+        work while superseded refreshes abort cleanly.
+        """
         _ = ctx
-        await self._prepare_skills()
-        await self._fetch_evolution_texts()
-        self._skills_snapshot_signature = self._build_skills_snapshot_signature()
+        committed = await self._refresh_view()
+        slot = _REFRESH_OUTCOME.get()
+        if committed is not None:
+            self._last_committed_refresh_token = committed
+            if slot is not None:
+                slot[0] = committed
+        elif slot is not None:
+            slot[0] = False
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Prepare skills before invoke.
@@ -465,15 +728,15 @@ class SkillUseRail(DeepAgentRail):
         turn retries immediately. The session baseline and prompt sync still
         run on a cache hit; only the filesystem scan is skipped.
         """
+        self._invalidate_if_language_changed()
         if not self._skill_refresh_within_ttl():
-            try:
-                await self.refresh_skill_prompt(ctx)
-            except Exception:
-                # Do not stamp the TTL: the next turn must scan again instead
-                # of serving whatever partial state the failure left behind.
-                self._last_full_refresh_ts = None
-                raise
-            self._last_full_refresh_ts = time.monotonic()
+            # A refresh that lost its cache or was superseded by a newer scan
+            # leaves the window open and skips session/prompt publication so
+            # stale skills are never frozen into the session baseline.
+            if not await self._run_refresh_prompt(ctx):
+                return
+            if not self._visibility_conflict:
+                self._last_full_refresh_ts = time.monotonic()
         self._ensure_session_baseline(ctx)
         if self.system_prompt_builder is not None:
             await self._sync_skill_prompt_and_attachment(ctx)
@@ -482,6 +745,7 @@ class SkillUseRail(DeepAgentRail):
         """Fetch and cache evolution experience texts from EvolutionStore."""
         if self.evolution_store is None:
             return
+        generation = self._cache_generation
         skills = self.skills if skills is None else skills
         seen_names: Set[str] = set()
         for skill in skills:
@@ -490,13 +754,18 @@ class SkillUseRail(DeepAgentRail):
             seen_names.add(skill.name)
             try:
                 text = await self.evolution_store.format_desc_experience_text(skill.name)
-                self._evolution_texts[skill.name] = text
             except Exception as exc:
                 logger.warning(
                     "[SkillUseRail] failed to fetch evolution text for '%s': %s",
                     skill.name,
                     exc,
                 )
+                continue
+            if self._cache_generation != generation:
+                # The await outlasted a rebind: the text was fetched for a
+                # skill set the rail no longer holds and is obsolete.
+                return
+            self._evolution_texts[skill.name] = text
 
     def _get_skill_description(self, skill: Skill) -> str:
         """Return description with evolution experience text appended if available."""
@@ -520,9 +789,24 @@ class SkillUseRail(DeepAgentRail):
 
         await self._sync_skill_prompt_and_attachment(ctx)
 
+    async def _clear_stale_runtime_skill_attachment(self, ctx: AgentCallbackContext) -> None:
+        """Remove a pending rail-owned runtime attachment left over from a previous source."""
+        if not self._attachment_needs_sync:
+            return
+        manager = self.attachment_manager
+        if manager is None:
+            return
+        writer = manager.bind_context(ctx)
+        if not writer.session_id or writer.session_id in self._current_gen_attachment_sessions:
+            return
+        await writer.clear_section(self._RUNTIME_ATTACHMENT_SECTION)
+        self._current_gen_attachment_sessions.add(writer.session_id)
+
     async def _sync_skill_prompt_and_attachment(self, ctx: AgentCallbackContext) -> None:
         """Refresh the stable skill section and the change-only attachment."""
-        await self._refresh_skill_prompt_if_changed(ctx)
+        if not await self._refresh_skill_prompt_if_changed(ctx):
+            await self._clear_stale_runtime_skill_attachment(ctx)
+            return
         # Evolution records can change without changing the Skill.md snapshot.
         # Refresh them independently so the attachment always contains the
         # latest experience while the system prompt remains stable.
@@ -535,7 +819,16 @@ class SkillUseRail(DeepAgentRail):
             if session_state is not None
             else list(self.skills)
         )
+        generation = self._cache_generation
+        target_lang = self._current_description_language()
         await self._fetch_evolution_texts([*baseline_skills, *self.skills])
+        # Another callback may have rebound the rail and rendered for the new
+        # source while this one was parked on the evolution store. The
+        # baseline captured above is then obsolete, and publishing it would
+        # replace the current prompt section with the previous source's view.
+        if not self._refresh_still_current(generation, target_lang):
+            await self._clear_stale_runtime_skill_attachment(ctx)
+            return
         query = self._extract_query_from_messages(ctx)
         skills_section = self._build_skills_section(baseline_skills, query=query)
         if skills_section is not None:
@@ -554,12 +847,14 @@ class SkillUseRail(DeepAgentRail):
         """
         if not self.enable_cache:
             return False
+        if self._cached_language is not None and self._cached_language != self._current_description_language():
+            return False
         ttl = self._skill_refresh_ttl_s
         if ttl <= 0 or self._last_full_refresh_ts is None:
             return False
         return (time.monotonic() - self._last_full_refresh_ts) < ttl
 
-    async def _refresh_skill_prompt_if_changed(self, ctx: AgentCallbackContext) -> None:
+    async def _refresh_skill_prompt_if_changed(self, ctx: AgentCallbackContext) -> bool:
         """Refresh skills when visible skill directories or SKILL.md mtimes changed.
 
         Inside an opted-in TTL window the signature walk is the same directory
@@ -569,26 +864,34 @@ class SkillUseRail(DeepAgentRail):
         A successful refresh here stamps the TTL so those paths open the
         window instead of rescanning every call.
         """
+        self._invalidate_if_language_changed()
         if self._skill_refresh_within_ttl():
-            return
+            return True
         current_signature = self._build_skills_snapshot_signature()
         if current_signature == self._skills_snapshot_signature:
-            return
+            return True
 
-        try:
-            await self.refresh_skill_prompt(ctx)
-        except Exception:
-            self._last_full_refresh_ts = None
-            raise
-        self._last_full_refresh_ts = time.monotonic()
+        if not await self._run_refresh_prompt(ctx):
+            return False
+        if not self._visibility_conflict:
+            self._last_full_refresh_ts = time.monotonic()
+        return True
 
     def _build_skills_snapshot_signature(self) -> Tuple[Tuple[str, float], ...]:
         """Build the same incremental-refresh signature used by _prepare_skills."""
+        if self._override_discovery_signature is not None:
+            return self._override_discovery_signature
         roots = self._normalize_skill_dirs(self.skills_dir)
-        return tuple(
-            (str(item.resolve()), update_at)
-            for item, update_at in self._discover_skill_dirs(roots)
-        )
+        return self._snapshot_signature(self._discover_skill_dirs(roots))
+
+    @staticmethod
+    def _snapshot_signature(discovered: List[Tuple[Path, float]]) -> Tuple[Tuple[str, float], ...]:
+        """Turn one discovery walk into the signature that represents it."""
+        return tuple((str(item.resolve()), update_at) for item, update_at in discovered)
+
+    def _stamp_committed_signature(self) -> None:
+        """Stamp the exact discovery and visibility signature committed by ``_prepare_skills``."""
+        self._skills_snapshot_signature = self._committed_snapshot_signature
 
     def _build_skills_section(self, skills: Optional[List[Skill]] = None, query: Optional[str] = None):
         """Build the stable system prompt section from session baseline skills.
@@ -742,27 +1045,108 @@ class SkillUseRail(DeepAgentRail):
 
         The persisted baseline is included even if the directory was changed after
         the session started. Newly discovered skills remain available as runtime
-        additions for the current session.
+        additions for the current session. The baseline is reconciled with the
+        source the rail reads from now first, so a backend that was switched
+        without a callback in between cannot keep answering through it.
         """
-        baseline = self._load_session_baseline(session)
+        self._invalidate_if_language_changed()
         if self._load_session_state(session) is None:
             return list(self.skills)
 
-        merged = list(baseline)
+        merged = list(self._reconcile_session_baseline(session) or [])
         known_names = {skill.name for skill in merged}
         merged.extend(skill for skill in self.skills if skill.name not in known_names)
         return merged
 
+    def _reconcile_session_baseline(self, session: Any) -> Optional[List[Skill]]:
+        """Bring the persisted baseline in line with the current rail binding and locale.
+
+        - An unbound prewarm persists a ``provisional=True`` baseline and never
+          overwrites an already-bound or legacy persisted session.
+        - Once a ``sys_operation`` is bound, a ``provisional=True`` baseline is
+          replaced by the bound backend's committed view.
+        - When ``set_sys_operation`` explicitly switches one bound backend to
+          another on this live rail instance (``_binding_token`` is set), each
+          session is reconciled once to the newly bound backend and records the
+          token in session state so wrapper recreation across turns preserves
+          the baseline without retaining session objects on the rail.
+        - A prompt-language switch re-localizes descriptions in place while
+          preserving baseline skill membership and order.
+        """
+        self._invalidate_if_language_changed()
+        state = self._load_session_state(session)
+        if state is None:
+            return None
+
+        if self.sys_operation is None:
+            if state.get("provisional") is False:
+                # Durable bound session: serve current unbound view without overwriting.
+                return list(self.skills)
+            if state.get("provisional") is None:
+                # Legacy schema-v1 state without provenance: preserve untouched.
+                return self._load_session_baseline(session)
+
+        provisional_promoted = state.get("provisional") is True and self.sys_operation is not None
+        live_rebound = (
+            self.sys_operation is not None
+            and self._binding_token is not None
+            and state.get("rebind_token") != self._binding_token
+        )
+
+        if provisional_promoted or live_rebound:
+            if self._cached_language is not None:
+                self._save_session_baseline(
+                    session,
+                    self.skills,
+                    provisional=self.sys_operation is None,
+                    language=self._cached_language,
+                )
+            return list(self.skills)
+
+        if (
+            state.get("language") is not None
+            and self._cached_language is not None
+            and state.get("language") != self._cached_language
+        ):
+            # Session membership and order stay stable; only the localized
+            # descriptions follow the language the rail has committed.
+            current_by_name = {skill.name: skill for skill in self.skills}
+            rebased = []
+            for skill in self._load_session_baseline(session):
+                current = current_by_name.get(skill.name)
+                rebased.append(
+                    Skill(
+                        name=skill.name,
+                        description=current.description if current is not None else skill.description,
+                        directory=skill.directory,
+                    )
+                )
+            self._save_session_baseline(
+                session,
+                rebased,
+                provisional=state.get("provisional", False),
+                language=self._cached_language,
+            )
+            return rebased
+
+        # Same binding and language, or a legacy state: served as persisted.
+        return self._load_session_baseline(session)
+
     def _get_session_baseline(self, ctx: AgentCallbackContext) -> List[Skill]:
-        return self._load_session_baseline(getattr(ctx, "session", None))
+        return self._reconcile_session_baseline(getattr(ctx, "session", None)) or []
 
     def _ensure_session_baseline(self, ctx: AgentCallbackContext) -> None:
         session = getattr(ctx, "session", None)
         if session is None:
             return
-        if self._load_session_state(session) is not None:
+        self._invalidate_if_language_changed()
+        if self._load_session_state(session) is None:
+            # Only a rail that has committed a view may establish a baseline:
+            # a cleared, not yet refreshed rail must not freeze [].
+            if self._cached_language is not None:
+                self._save_session_baseline(session, self.skills)
             return
-        self._save_session_baseline(session, self.skills)
+        self._reconcile_session_baseline(session)
 
     def _load_session_baseline(self, session: Any) -> List[Skill]:
         state = self._load_session_state(session)
@@ -797,24 +1181,41 @@ class SkillUseRail(DeepAgentRail):
             return None
         return state
 
-    def _save_session_baseline(self, session: Any, skills: List[Skill]) -> None:
+    def _save_session_baseline(
+        self,
+        session: Any,
+        skills: List[Skill],
+        *,
+        provisional: Optional[bool] = None,
+        language: Optional[str] = None,
+    ) -> None:
+        """Persist the session baseline."""
         if not callable(getattr(session, "update_state", None)):
             return
-        session.update_state(
-            {
-                self._SESSION_STATE_KEY: {
-                    "schema_version": self._SESSION_STATE_SCHEMA_VERSION,
-                    "baseline_skills": [
-                        {
-                            "name": skill.name,
-                            "description": skill.description,
-                            "directory": str(skill.directory),
-                        }
-                        for skill in skills
-                    ],
+        if provisional is None:
+            provisional = self.sys_operation is None
+        if language is None:
+            language = (
+                self._cached_language
+                if self._cached_language is not None
+                else self._current_description_language()
+            )
+        payload: Dict[str, Any] = {
+            "schema_version": self._SESSION_STATE_SCHEMA_VERSION,
+            "baseline_skills": [
+                {
+                    "name": skill.name,
+                    "description": skill.description,
+                    "directory": str(skill.directory),
                 }
-            }
-        )
+                for skill in skills
+            ],
+            "provisional": bool(provisional),
+            "language": language,
+        }
+        if not provisional and self._binding_token is not None:
+            payload["rebind_token"] = self._binding_token
+        session.update_state({self._SESSION_STATE_KEY: payload})
 
     async def _update_runtime_skill_attachment(
         self,
@@ -838,6 +1239,8 @@ class SkillUseRail(DeepAgentRail):
         )
         if not content:
             await writer.clear_section(self._RUNTIME_ATTACHMENT_SECTION)
+            if self._attachment_needs_sync:
+                self._current_gen_attachment_sessions.add(writer.session_id)
             return
 
         await writer.add_section(
@@ -846,6 +1249,8 @@ class SkillUseRail(DeepAgentRail):
             kind=PromptAttachmentKind.SKILL,
             source="skill_use_rail",
         )
+        if self._attachment_needs_sync:
+            self._current_gen_attachment_sessions.add(writer.session_id)
 
     def _build_runtime_skill_change_content(
         self,
@@ -961,8 +1366,44 @@ class SkillUseRail(DeepAgentRail):
         """Normalize skill names into a set."""
         return set(cls._normalize_name_list(raw))
 
+    @staticmethod
+    async def _read_local_skill_text(path: Path, *, head: Optional[int] = None) -> str:
+        """Read UTF-8 text straight from the local file at *path*.
+
+        Only used while the rail has no ``sys_operation`` (a standalone
+        ``load_skills_from_dir`` or an unmounted ``reload_skills``). Mirrors
+        ``LocalFS.read_file``: ``head > 0`` keeps the first *head* lines and
+        streams only those (a 64-line probe never reads the whole body),
+        ``head == 0`` or ``None`` means no limit, and a negative *head*
+        yields no lines once the path is validated — before any byte is
+        decoded, so a file that is not valid UTF-8 still returns ``""``.
+
+        Raises:
+            FileNotFoundError: The file is missing, is a directory, or cannot
+                be read as UTF-8.
+        """
+
+        def _read() -> str:
+            if head is not None and head < 0:
+                if not path.is_file():
+                    raise FileNotFoundError(f"read_file failed: {path}")
+                return ""
+            with open(path, mode="r", encoding="utf-8") as handle:
+                if head is not None and head > 0:
+                    return "".join(itertools.islice(handle, head))
+                return handle.read()
+
+        try:
+            return await asyncio.to_thread(_read)
+        except (OSError, UnicodeDecodeError) as exc:
+            raise FileNotFoundError(f"read_file failed: {path}") from exc
+
     async def _read_skill_text(self, path: Path, *, head: Optional[int] = None) -> str:
         """Read SKILL.md text, optionally only its first *head* lines.
+
+        An unmounted rail (``sys_operation`` is ``None``) reads the local file
+        directly. Once a ``sys_operation`` is bound, every read goes through
+        it, so a sandboxed or virtual filesystem stays authoritative.
 
         Args:
             path: Path to the SKILL.md file.
@@ -975,6 +1416,9 @@ class SkillUseRail(DeepAgentRail):
         Raises:
             FileNotFoundError: The read failed or returned no content.
         """
+        if self.sys_operation is None:
+            return await self._read_local_skill_text(path, head=head)
+
         result = await self.sys_operation.fs().read_file(
             str(path),
             mode="text",
@@ -1032,36 +1476,26 @@ class SkillUseRail(DeepAgentRail):
 
     async def _load_yaml(self, path: Path) -> Tuple[Optional[dict], str]:
         """Load YAML front matter and markdown body from SKILL.md."""
-        result = await self.sys_operation.fs().read_file(
-            str(path),
-            mode="text",
-            encoding="utf-8",
-            only_read=True,
-        )
-
-        if getattr(result, "code", 0) != 0:
-            raise FileNotFoundError(
-                getattr(result, "message", f"read_file failed: {path}")
-            )
-
-        data = getattr(result, "data", None)
-        content = getattr(data, "content", None) if data is not None else None
-        if content is None:
-            raise FileNotFoundError(f"read_file content is None: {path}")
-
-        text = content if isinstance(content, str) else str(content)
+        text = await self._read_skill_text(path)
 
         parsed = self._split_front_matter(text)
         return parsed if parsed is not None else (None, text)
 
-    async def _load_description(self, path: Path) -> str:
-        """Load description from YAML front matter."""
+    async def _load_description(self, path: Path, language: Optional[str] = None) -> str:
+        """Load description from YAML front matter.
+
+        Args:
+            path: Path to the SKILL.md file.
+            language: The prompt language to localize for. Defaults to the
+                live builder language; a scan passes the language it started
+                with so a mid-scan switch cannot leak into one skill.
+        """
         yaml_data = await self._load_front_matter(path)
         if yaml_data is None or "description" not in yaml_data:
             raise KeyError("SKILL.md file does not contain a description field")
 
-        builder = getattr(self, "system_prompt_builder", None)
-        language = str(getattr(builder, "language", "cn") or "cn").strip().lower()
+        if language is None:
+            language = _SCAN_LANGUAGE.get() or self._current_description_language()
         localized_key = f"description_{language}"
         description = yaml_data.get(localized_key) or yaml_data.get("description")
         if not description:
