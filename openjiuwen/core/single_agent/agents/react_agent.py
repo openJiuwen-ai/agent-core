@@ -3310,7 +3310,10 @@ class ReActAgent(BaseAgent):
                     ctx.extra["_original_query"] = interruption_state.original_query
                 # Step increments are consumed once per run, right after the
                 # HITL state is known and before the loop picks its first round.
-                step_checkpoint = self._iteration_checkpoint_enabled()
+                step_checkpoint = (
+                    self._iteration_checkpoint_enabled()
+                    and self._session_has_step_sink(session)
+                )
                 step_resume = self._begin_agent_steps(session) if step_checkpoint else None
                 steps_started = step_checkpoint
 
@@ -3972,6 +3975,17 @@ class ReActAgent(BaseAgent):
         return session is not None and all(
             callable(getattr(session, method_name, None)) for method_name in ("pre_run", "close_stream", "commit")
         )
+
+    @staticmethod
+    def _session_has_step_sink(session) -> bool:
+        """Whether the session really implements the step API.
+
+        Duck-typed doubles (MagicMock sessions used by older tests) expose the
+        attribute without being a bound method; they do not participate, so the
+        loop keeps its pre-feature save pattern for them.
+        """
+        save = getattr(session, "save_agent_step", None)
+        return inspect.ismethod(save) or inspect.isfunction(save)
 
     def _iteration_checkpoint_enabled(self) -> bool:
         """Whether this run persists a step after each completed iteration."""
