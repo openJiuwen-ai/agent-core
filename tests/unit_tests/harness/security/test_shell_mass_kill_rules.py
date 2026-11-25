@@ -48,6 +48,7 @@ def _level(command: str, tool: str = "bash"):
     "C:\\Windows\\System32\\taskkill.exe /F /IM python.exe",
     "wmic process where name='python.exe' delete",
     "wmic process where \"name='python.exe'\" call terminate",
+    "wmic path win32_process where name='python.exe' delete",
     "killall python",
     "pkill -9 -f server.py",
     "/usr/bin/pkill python",
@@ -55,6 +56,7 @@ def _level(command: str, tool: str = "bash"):
     "ps aux | grep server.py | grep -v grep | awk '{print $2}' | xargs kill -9",
     "Stop-Process -Name python -Force",
     "Get-Process python | Stop-Process",
+    "Get-Process python | ForEach-Object { $_.Kill() }",
     "ps python | kill",
     INCIDENT_POWERSHELL_KILL,
 ])
@@ -76,6 +78,24 @@ def test_incident_powershell_kill_denied_on_powershell_tool() -> None:
     "tasklist | findstr python",
     "git push origin main",
     "echo hello world",
+    "grep -rn killall openjiuwen/",
+    "pytest -k pkill",
+    "git commit -m \"deny killall\"",
+    "echo \"use xargs kill here\"",
+    "Get-Process -Id 4242 | Stop-Process",
 ])
+
+
 def test_pid_precise_and_unrelated_commands_stay_allowed(command: str) -> None:
     assert _level(command) == PermissionLevel.ALLOW
+
+
+def test_pid_pipeline_method_kill_not_denied_by_mass_kill_rules() -> None:
+    """PID-precise ``ForEach-Object`` Kill must not hit the mass-kill deny rules.
+
+    The tiered policy may still return ASK via the shell-AST unknown-structure
+    floor (tree-sitter parse limits on script blocks) — that is framework
+    behavior outside these rules; the contract here is only ``not DENY``.
+    """
+    level = _level("Get-Process -Id 4242 | ForEach-Object { $_.Kill() }")
+    assert level != PermissionLevel.DENY
