@@ -252,7 +252,13 @@ async def _probe_and_cache(llm, key: tuple[str, str]) -> None:
 
 
 async def _invoke_probe(llm, *, extra_body: Optional[dict]):
-    """Send the probe request, optionally carrying reasoning-off switches."""
+    """Send the probe request, optionally carrying reasoning-off switches.
+
+    The request sets no sampling parameter. Naming one color does not need
+    one, and some models refuse any ``temperature`` with HTTP 400. Such a
+    refusal is not an image rejection, so the verdict would stay unknown and
+    the model would be probed again by every agent that starts.
+    """
     kwargs = {"extra_body": extra_body} if extra_body else {}
     with LlmObservationSuppression():
         return await asyncio.wait_for(
@@ -275,7 +281,6 @@ async def _invoke_probe(llm, *, extra_body: Optional[dict]):
                     }
                 ],
                 max_tokens=_IMAGE_MODALITY_PROBE_MAX_TOKENS,
-                temperature=0,
                 **kwargs,
             ),
             timeout=_IMAGE_MODALITY_PROBE_TIMEOUT_SECONDS,
