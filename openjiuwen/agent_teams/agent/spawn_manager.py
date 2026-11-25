@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.agent_configurator import AgentConfigurator
     from openjiuwen.agent_teams.agent.state import TeamAgentState
     from openjiuwen.agent_teams.fork import ForkContext
+    from openjiuwen.agent_teams.harness.team_harness import _MemberApprovalCheckpoint
     from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
     from openjiuwen.core.runner.spawn.process_manager import SpawnedProcessHandle
     from openjiuwen.core.session.stream.base import OutputSchema
@@ -85,6 +86,9 @@ class SpawnManager:
         # would re-bind the member's transport address and crash.
         self._spawning: set[str] = set()
         self.recovery_tasks: set[asyncio.Task] = set()
+        self._approval_checkpoints: dict[str, _MemberApprovalCheckpoint] = {}
+        self._approval_recovery_open = False
+        self._approval_recovery_attempts: dict[str, asyncio.Task | None] = {}
         self.worktree_lifecycle = TeammateWorktreeLifecycle(configurator)
 
     async def spawn_teammate(
@@ -96,6 +100,7 @@ class SpawnManager:
         spawn_config: Optional[SpawnConfig] = None,
         fork_from: "ForkContext | None" = None,
         resume_external_backend: bool = False,
+        _approval_checkpoint: _MemberApprovalCheckpoint | None = None,
     ) -> Optional[SpawnedProcessHandle]:
         member_name = ctx.member_name
         # Structural guard: a passive human member must never get a runtime,
@@ -141,6 +146,7 @@ class SpawnManager:
                 spawn_config=spawn_config,
                 fork_from=fork_from,
                 resume_external_backend=resume_external_backend,
+                approval_checkpoint=_approval_checkpoint,
             )
         finally:
             self._spawning.discard(member_name)
@@ -154,11 +160,23 @@ class SpawnManager:
         spawn_config: Optional[SpawnConfig] = None,
         fork_from: "ForkContext | None" = None,
         resume_external_backend: bool = False,
+        approval_checkpoint: _MemberApprovalCheckpoint | None = None,
     ) -> SpawnedProcessHandle:
         member_name = ctx.member_name
         team_logger.info("[{}] spawning teammate: {}", self._configurator.member_name or "?", member_name)
 
         spec = self._configurator.spec
+        if approval_checkpoint is not None and (
+            not self._approval_recovery_open
+            or self._approval_checkpoints.get(member_name) is not approval_checkpoint
+            or ctx.cli_agent
+            or spec is None
+            or spec.spawn_mode != "inprocess"
+        ):
+            raise RuntimeError("Member approval recovery is no longer eligible")
+        # Keep the original evidence through bounded handle creation retries.
+        if approval_checkpoint is None:
+            self._approval_checkpoints.pop(member_name, None)
         if ctx.cli_agent:
             # External CLI member: TeamAgent shell runs in-process while the
             # third-party CLI binary is the subprocess driven via stdin.
@@ -182,13 +200,26 @@ class SpawnManager:
         elif spec and spec.spawn_mode == "inprocess":
             from openjiuwen.agent_teams.spawn.inprocess_spawn import inprocess_spawn
 
+            session_id = get_session_id() or session
+            owner_session = self._state.team_session
+            track_checkpoint = (
+                self._configurator.role == TeamRole.LEADER
+                and self._configurator.lifecycle == "persistent"
+                and owner_session is not None
+                and owner_session.get_session_id() == session_id
+            )
             handle = await inprocess_spawn(
                 team_agent=self._get_team_agent(),
                 ctx=ctx,
                 initial_message=initial_message,
-                session_id=get_session_id() or session,
+                session_id=session_id,
                 fork_from=fork_from,
+                track_approval_checkpoint=track_checkpoint,
+                approval_checkpoint=approval_checkpoint,
             )
+            binding = getattr(handle, "approval_checkpoint", None)
+            if binding is not None and owner_session is self._state.team_session:
+                self._approval_checkpoints[member_name] = binding
             # Wire chunk fan-out so the teammate's stream chunks reach
             # the leader's stream_queue. Subprocess teammates skip this
             # because they live in a different process; their chunks
@@ -208,10 +239,7 @@ class SpawnManager:
         self.spawned_handles[member_name] = handle
 
         def _trigger_unhealthy_recovery() -> asyncio.Task:
-            task = asyncio.ensure_future(self.on_teammate_unhealthy(member_name))
-            self.recovery_tasks.add(task)
-            task.add_done_callback(self.recovery_tasks.discard)
-            return task
+            return self._track_recovery_task(asyncio.create_task(self.on_teammate_unhealthy(member_name)))
 
         handle.on_unhealthy = _trigger_unhealthy_recovery
         return handle
@@ -291,13 +319,15 @@ class SpawnManager:
         max_retries: int = 3,
         *,
         on_failed: Callable[[Exception], Awaitable[None]] | None = None,
+        approval_checkpoint: _MemberApprovalCheckpoint | None = None,
     ) -> bool:
         """Re-spawn a teammate, retrying spawn failures.
 
         ``on_failed`` receives the last spawn error once every attempt has
         failed; the error itself is still swallowed and ``False`` returned.
         """
-        await self.cleanup_teammate(member_name)
+        if approval_checkpoint is None:
+            await self.cleanup_teammate(member_name)
 
         # After cleanup, the previous execution context is gone. Reset
         # execution_status back to IDLE so the new lifecycle starts from a
@@ -334,29 +364,100 @@ class SpawnManager:
         for attempt in range(1, max_retries + 1):
             try:
                 team_logger.info("Restarting teammate {} (attempt {}/{})", member_name, attempt, max_retries)
-                await self.spawn_teammate(
+                handle = await self.spawn_teammate(
                     ctx,
                     initial_message=initial_message,
                     session=get_session_id() or None,
                     spawn_config=spawn_config,
                     resume_external_backend=True,
+                    **({"_approval_checkpoint": approval_checkpoint} if approval_checkpoint is not None else {}),
                 )
-                await self.publish_restart_event(member_name, attempt)
-                team_logger.info("Teammate {} restarted successfully", member_name)
-                return True
+                if approval_checkpoint is None:
+                    await self.publish_restart_event(member_name, attempt)
             except Exception as e:
                 last_error = e
                 team_logger.error("Restart attempt {} for {} failed: {}", attempt, member_name, e)
                 if attempt < max_retries:
                     await asyncio.sleep(2**attempt)
+                continue
 
-        if team_backend:
+            if approval_checkpoint is not None and not await self._wait_for_approval_startup(member_name, handle):
+                return False
+            team_logger.info("Teammate {} restarted successfully", member_name)
+            return True
+
+        if team_backend and approval_checkpoint is None:
             team_name = self._configurator.team_name
             if team_name:
                 await team_backend.db.member.update_member_status(member_name, team_name, MemberStatus.ERROR.value)
         if on_failed is not None and last_error is not None:
             await on_failed(last_error)
         return False
+
+    @staticmethod
+    async def _wait_for_approval_startup(member_name: str, handle: InProcessSpawnHandle | None) -> bool:
+        binding = handle.approval_checkpoint if handle is not None else None
+        if binding is None or binding.startup is None:
+            return False
+        await asyncio.wait((binding.startup, handle._task), return_when=asyncio.FIRST_COMPLETED)
+        if handle._task.done():
+            if not handle._task.cancelled() and (error := handle._task.exception()) is not None:
+                team_logger.warning("Approval recovery startup failed for {}: {}", member_name, error)
+            return False
+        return True
+
+    def arm_approval_recovery(self) -> None:
+        self._approval_recovery_attempts.clear()
+        self._approval_recovery_open = True
+
+    def disarm_approval_recovery(self) -> None:
+        self._approval_recovery_open = False
+
+    def clear_approval_checkpoints(self) -> None:
+        self._approval_checkpoints.clear()
+
+    def stopped_approval_checkpoints(self) -> list[_MemberApprovalCheckpoint]:
+        if not self._approval_recovery_open or self._state.team_session is None:
+            return []
+        return [
+            binding
+            for member, binding in self._approval_checkpoints.items()
+            if member not in self._approval_recovery_attempts
+            and member not in self._spawning
+            and not self.has_live_handle(member)
+            and binding.exited
+            and binding.saved_snapshot is not None
+            and binding.current_snapshot() is binding.saved_snapshot
+        ]
+
+    def schedule_approval_recovery(
+        self, checkpoint: _MemberApprovalCheckpoint, recover: Callable[[], Awaitable[None]]
+    ) -> None:
+        member = checkpoint.member_name
+        if (
+            not self._approval_recovery_open
+            or self._approval_checkpoints.get(member) is not checkpoint
+            or member in self._approval_recovery_attempts
+            or member in self._spawning
+            or self.has_live_handle(member)
+        ):
+            return
+        task = self._track_recovery_task(asyncio.create_task(recover()))
+        self._approval_recovery_attempts[member] = task
+
+        def _release_finished_task(done: asyncio.Task) -> None:
+            if self._approval_recovery_attempts.get(member) is done:
+                self._approval_recovery_attempts[member] = None
+
+        task.add_done_callback(_release_finished_task)
+
+    async def cancel_approval_recovery_tasks(self) -> None:
+        await self._cancel_tasks([task for task in self._approval_recovery_attempts.values() if task is not None])
+
+    def _track_recovery_task(self, task: asyncio.Task) -> asyncio.Task:
+        self.recovery_tasks.add(task)
+        task.add_done_callback(self.recovery_tasks.discard)
+        return task
 
     async def on_teammate_unhealthy(self, member_name: str) -> None:
         team_logger.warning("Teammate {} detected as unhealthy, initiating restart", member_name)
@@ -609,12 +710,14 @@ class SpawnManager:
         self.spawned_handles.clear()
 
     async def cancel_recovery_tasks(self) -> None:
-        if self.recovery_tasks:
-            pending = list(self.recovery_tasks)
-            for task in pending:
-                if not task.done():
-                    task.cancel()
-            for task in pending:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
-            self.recovery_tasks.clear()
+        await self._cancel_tasks(list(self.recovery_tasks))
+        self.recovery_tasks.clear()
+
+    @staticmethod
+    async def _cancel_tasks(tasks: list[asyncio.Task]) -> None:
+        for task in tasks:
+            if not task.done() and not task.cancelling():
+                task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task

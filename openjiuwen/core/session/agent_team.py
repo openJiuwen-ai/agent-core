@@ -4,7 +4,7 @@ import uuid
 from typing import Any
 
 from openjiuwen.core.session import Config
-from openjiuwen.core.session.checkpointer import CheckpointerFactory
+from openjiuwen.core.session.checkpointer import Checkpointer, CheckpointerFactory
 from openjiuwen.core.session.internal.agent_team import AgentTeamSession
 from openjiuwen.core.session.stream import (
     BaseStreamMode,
@@ -161,6 +161,7 @@ class Session:
         *,
         share_stream_writer: bool = True,
         member_name: str | None = None,
+        _checkpointer: Checkpointer | None = None,
     ) -> AgentSession:
         if card is None:
             card = AgentCard(id=agent_id or "team_agent", name=agent_id or "team_agent")
@@ -181,6 +182,7 @@ class Session:
             close_stream_on_post_run=False,
             source_metadata=source_metadata,
             kv_cache_runtime=self.get_kv_cache_runtime(),
+            checkpointer=_checkpointer,
         )
         child.set_team_cache_scope(team_id=self._team_id, agent_id=card.id)
         return child

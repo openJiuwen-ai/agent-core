@@ -23,6 +23,8 @@ persisted session id.
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -39,9 +41,12 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.run_context import RunContext
+from openjiuwen.core.session.agent_team import Session as AgentTeamSession
+from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.state import (
     INTERRUPTION_KEY,
+    ToolInterruptionState,
     match_answers,
     pending_interrupts,
 )
@@ -55,6 +60,32 @@ if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
     from openjiuwen.harness.goal.schema import GoalStopConfig
     from openjiuwen.harness.schema.config import DeepAgentConfig
+
+
+@dataclass
+class _MemberApprovalCheckpoint:
+    """Exact saved checkpoint for a single native in-process member."""
+
+    team_name: str
+    member_name: str
+    session_id: str
+    agent_id: str
+    checkpointer: InMemoryCheckpointer
+    restore_snapshot: object | None = None
+    saved_snapshot: object | None = None
+    startup: asyncio.Future[None] | None = None
+    exited: bool = False
+    ready_written: bool = False
+
+    def current_snapshot(self) -> object | None:
+        return self.checkpointer._agent_checkpoint_token(self.session_id, self.agent_id)
+
+    def matches(self, child: Any) -> bool:
+        return (
+            child.get_session_id() == self.session_id
+            and child._checkpoint_agent_id() == self.agent_id
+            and child.checkpointer() is self.checkpointer
+        )
 
 
 class TeamHarness:
@@ -90,6 +121,8 @@ class TeamHarness:
         self._track_completed_turn_fork = track_completed_turn_fork
         self._active_agent_session: Optional[Any] = None
         self._native_session_id: Optional[str] = None
+        self._approval_checkpoint: _MemberApprovalCheckpoint | None = None
+        self._approval_child = None
         self._bg_controller: Optional[Any] = None
         # Runtime features such as Team Organization mount tools after the
         # harness has been built. Keep those instances so a later native
@@ -171,13 +204,37 @@ class TeamHarness:
         self._native.track_completed_turn_fork = self._track_completed_turn_fork
         child = self._make_child_session(team_session)
         kv_cache_harness_session_lifecycle_hook.on_harness_session_created(self, child)
+        binding = self._approval_checkpoint
+        snapshot = binding.restore_snapshot if self._approval_startup_pending() else None
+        bound_child = binding is not None and isinstance(team_session, AgentTeamSession) and binding.matches(child)
+        if snapshot is not None and (not bound_child or binding.current_snapshot() is not snapshot):
+            raise RuntimeError("Original member approval checkpoint is unavailable")
+        if binding is not None:
+            binding.saved_snapshot = None
         await child.pre_run()
+        if snapshot is not None:
+            interruption = child.get_state(INTERRUPTION_KEY)
+            if binding.current_snapshot() is not snapshot or (
+                interruption is not None and not isinstance(interruption, ToolInterruptionState)
+            ):
+                raise RuntimeError("Original member approval checkpoint could not be verified")
         await self._native.start(session=child)
         if self._on_goal is not None:
             await self._native.subscribe(on_goal=self._on_goal)
         self._native_session_id = self._session_id_of(team_session)
         self._active_agent_session = child
+        if bound_child:
+            self._approval_child = child
         self._seed_initial_plan_mode(child)
+
+    def _approval_startup_pending(self) -> bool:
+        binding = self._approval_checkpoint
+        return binding is not None and binding.startup is not None and not binding.startup.done()
+
+    def _confirm_approval_startup(self) -> None:
+        binding = self._approval_checkpoint
+        if binding is not None and binding.startup is not None and not binding.startup.done():
+            binding.startup.set_result(None)
 
     async def stop(self) -> None:
         """Stop the native supervisor; keep the (terminated) native for config reads.
@@ -189,11 +246,26 @@ class TeamHarness:
         round recycle must not stop them (only :meth:`dispose` does, for
         permanent teardown).
         """
-        if self._native is not None and self._native.state is not HarnessState.TERMINATED:
-            await self._native.stop()
+        native = self._native
+        binding = (
+            self._approval_checkpoint
+            if self._active_agent_session is self._approval_child
+            and native is not None
+            and native.state is HarnessState.IDLE
+            and native.active_round is None
+            else None
+        )
+        if native is not None and native.state is not HarnessState.TERMINATED:
+            await native.stop()
         try:
             if self._active_agent_session is not None:
-                await self._active_agent_session.commit()
+                child = self._active_agent_session
+                before = binding.current_snapshot() if binding is not None else None
+                await child.commit()
+                if binding is not None:
+                    saved = binding.current_snapshot()
+                    if saved is not before:
+                        binding.saved_snapshot = saved
         except Exception:
             logger.debug(
                 "[TeamHarness] commit raised during teardown, ignoring",
@@ -202,6 +274,7 @@ class TeamHarness:
         finally:
             self._native_session_id = None
             self._active_agent_session = None
+            self._approval_child = None
 
     async def run_once(self, content: Any, *, team_session: Optional[Any] = None) -> dict[str, Any]:
         """Run one non-streaming execution; returns the ``Runner.run_agent`` dict.
@@ -303,6 +376,20 @@ class TeamHarness:
         persists) when available; otherwise creates a standalone session.
         """
         card = self._native.card if self._native is not None else None
+        binding = self._approval_checkpoint
+        if (
+            binding is not None
+            and isinstance(team_session, AgentTeamSession)
+            and team_session.get_session_id() == binding.session_id
+            and card is not None
+            and card.id == binding.agent_id
+        ):
+            return team_session.create_agent_session(
+                card=card,
+                share_stream_writer=False,
+                member_name=self._member_name,
+                _checkpointer=binding.checkpointer,
+            )
         if team_session is not None and hasattr(team_session, "create_agent_session"):
             return team_session.create_agent_session(
                 card=card,

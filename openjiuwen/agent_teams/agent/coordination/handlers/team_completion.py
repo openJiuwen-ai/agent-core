@@ -128,6 +128,9 @@ class TeamCompletionHandler(BaseCoordinationHandler):
         if snapshot is None:
             # Falling edge: re-arm so the next rising edge emits again.
             self._team_completed_emitted = False
+            recover = getattr(self._lifecycle, "recover_stopped_approval_members", None)
+            if self._blueprint.lifecycle == "persistent" and callable(recover):
+                await recover()
             return
         if self._team_completed_emitted:
             return
