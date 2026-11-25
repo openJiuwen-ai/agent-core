@@ -9,7 +9,10 @@ import asyncio
 import contextlib
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.harness.team_harness import _MemberApprovalCheckpoint
 
 
 @dataclass
@@ -36,6 +39,7 @@ class InProcessSpawnHandle:
     # here so cleanup_teammate can detach it deterministically. Subprocess
     # handles leave this None.
     chunk_forward: Any = field(default=None, repr=False)
+    approval_checkpoint: Optional["_MemberApprovalCheckpoint"] = field(default=None, repr=False)
 
     # ------------------------------------------------------------------
     # Properties compatible with SpawnedProcessHandle

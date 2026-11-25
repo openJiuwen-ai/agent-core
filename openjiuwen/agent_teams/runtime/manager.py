@@ -714,6 +714,15 @@ class TeamRuntimeManager:
                 if member is not None:
                     await member.update_status(target)
                 return
+            from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+
+            harness = getattr(getattr(agent, "resources", None), "harness", None)
+            if isinstance(harness, TeamHarness) and harness._approval_startup_pending():
+                # A targeted restart did not become live. The leader's recovery
+                # task owns the claim and will release it after this teardown.
+                await agent.stop_coordination()
+                return
+
             team_logger.info(
                 "finalize_member: pausing team member {}; marking READY for next assignment",
                 member_name,

@@ -2180,6 +2180,9 @@ class TeamAgent(BaseAgent):
         await self._stop_coordination()
         await self._session_manager.recover_for_existing_session(session)
 
+    async def recover_stopped_approval_members(self) -> None:
+        await self._recovery_manager.recover_stopped_approval_members()
+
     async def recover_team(self) -> list[str]:
         return await self._recovery_manager.recover_team()
 

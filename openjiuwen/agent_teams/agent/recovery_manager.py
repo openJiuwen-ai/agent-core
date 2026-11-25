@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from functools import partial
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -12,11 +14,14 @@ from typing import (
 
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.tools.message_manager import parse_approval_message, validate_approval_payload
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.agent_configurator import AgentConfigurator
     from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
+    from openjiuwen.agent_teams.harness.team_harness import _MemberApprovalCheckpoint
+    from openjiuwen.agent_teams.tools.team import TeamBackend
 
 
 class RecoveryManager:
@@ -118,6 +123,84 @@ class RecoveryManager:
                 restarted.append(member.member_name)
 
         return restarted
+
+    def clear_approval_checkpoints(self) -> None:
+        self._spawn_manager.clear_approval_checkpoints()
+
+    async def cancel_approval_recovery_tasks(self) -> None:
+        self.clear_approval_checkpoints()
+        await self._spawn_manager.cancel_approval_recovery_tasks()
+
+    async def recover_stopped_approval_members(self) -> None:
+        """Schedule native mailbox recovery only after the task and roster gates pass."""
+        backend = self._configurator.team_backend
+        candidates = self._spawn_manager.stopped_approval_checkpoints()
+        if backend is None or not candidates or await backend._settled_completion_snapshot() is None:
+            return
+        leader = await backend.resolve_leader_member_name()
+        if not leader or leader != self._configurator.member_name:
+            return
+
+        messages = backend.message_manager
+        for checkpoint in candidates:
+            member_name = checkpoint.member_name
+            member = await backend.get_member(member_name)
+            if (
+                member is None
+                or member.role != TeamRole.TEAMMATE.value
+                or member.status != MemberStatus.STOPPED.value
+            ):
+                continue
+            unread = await messages.get_messages(to_member_name=member_name, unread_only=True)
+            if not unread or await messages.get_broadcast_messages(member_name=member_name, unread_only=True):
+                continue
+            for message in unread:
+                payload = parse_approval_message(message)
+                if (
+                    message.from_member_name != leader
+                    or payload is None
+                    or validate_approval_payload(payload) is None
+                ):
+                    break
+            else:
+                self._spawn_manager.schedule_approval_recovery(
+                    checkpoint, partial(self._recover_approval_member, backend, checkpoint)
+                )
+
+    async def _recover_approval_member(
+        self, backend: TeamBackend, checkpoint: _MemberApprovalCheckpoint
+    ) -> None:
+        member = checkpoint.member_name
+        dao = backend.db.member
+        claim = asyncio.create_task(dao.claim_member_restart(member, backend.team_name, MemberStatus.STOPPED))
+        claimed = False
+        restarted = False
+        try:
+            try:
+                claimed = await asyncio.shield(claim)
+            except asyncio.CancelledError:
+                # SQLite may finish committing the claim after cancellation.
+                claimed = await claim
+                raise
+            if claimed:
+                restarted = await self._spawn_manager.restart_teammate(member, approval_checkpoint=checkpoint)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            team_logger.warning("Failed to recover approval mailbox for {}: {}", member, exc)
+        finally:
+            if claimed and not restarted:
+                handle = self._spawn_manager.spawned_handles.get(member)
+                binding = getattr(handle, "approval_checkpoint", None)
+                owns_handle = (
+                    binding is not None and binding.restore_snapshot is checkpoint.saved_snapshot
+                    and binding.startup is not None
+                )
+                if owns_handle and not binding.startup.done():
+                    await self._spawn_manager.cleanup_teammate(member)
+                if not owns_handle or not binding.startup.done():
+                    owned_status = MemberStatus.READY if owns_handle and binding.ready_written else MemberStatus.RESTARTING
+                    await dao.try_transition_member_status(member, backend.team_name, owned_status, MemberStatus.STOPPED)
 
     def persist_leader_config(self, session) -> None:
         from openjiuwen.agent_teams.runtime.metadata import (

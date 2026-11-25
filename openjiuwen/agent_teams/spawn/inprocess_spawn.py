@@ -19,6 +19,7 @@ from openjiuwen.core.common.logging import team_logger
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
     from openjiuwen.agent_teams.fork import ForkContext
+    from openjiuwen.agent_teams.harness.team_harness import _MemberApprovalCheckpoint
     from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
 
 
@@ -29,6 +30,8 @@ async def inprocess_spawn(
     initial_message: Optional[str] = None,
     session_id: Optional[str] = None,
     fork_from: "ForkContext | None" = None,
+    track_approval_checkpoint: bool = False,
+    approval_checkpoint: "_MemberApprovalCheckpoint | None" = None,
 ) -> InProcessSpawnHandle:
     """Spawn a teammate TeamAgent as a coroutine in the current process.
 
@@ -46,6 +49,10 @@ async def inprocess_spawn(
     """
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent as _TeamAgent
     from openjiuwen.agent_teams.context import set_session_id
+    from openjiuwen.agent_teams.harness.team_harness import TeamHarness, _MemberApprovalCheckpoint
+    from openjiuwen.agent_teams.schema.team import TeamRole
+    from openjiuwen.core.session.checkpointer import CheckpointerFactory
+    from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
     from openjiuwen.core.runner.runner import Runner
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -78,6 +85,38 @@ async def inprocess_spawn(
     # and it must precede configure for the same reason as above.
     team_agent.share_swarmflow_with(teammate)
     teammate.configure(spec, ctx)
+    harness = teammate.resources.harness
+    binding = None
+    if (
+        (track_approval_checkpoint or approval_checkpoint is not None)
+        and ctx.role == TeamRole.TEAMMATE
+        and session_id
+        and ctx.member_name
+        and type(harness) is TeamHarness
+        and agent_spec.card is None
+        and team_agent.card.id != card_id
+        and not any(agent.card is not None and agent.card.id == card_id for agent in spec.agents.values())
+    ):
+        checkpointer = (
+            approval_checkpoint.checkpointer if approval_checkpoint is not None else CheckpointerFactory.get_checkpointer()
+        )
+        if type(checkpointer) is InMemoryCheckpointer:
+            binding = _MemberApprovalCheckpoint(team_name, ctx.member_name, session_id, card_id, checkpointer)
+
+    if approval_checkpoint is not None:
+        if binding is None or (
+            binding.team_name, binding.member_name, binding.session_id, binding.agent_id
+        ) != (
+            approval_checkpoint.team_name, approval_checkpoint.member_name,
+            approval_checkpoint.session_id, approval_checkpoint.agent_id,
+        ):
+            raise RuntimeError("Cannot rebind the original member approval checkpoint")
+        binding.restore_snapshot = approval_checkpoint.saved_snapshot
+        binding.startup = asyncio.get_running_loop().create_future()
+        if binding.restore_snapshot is None or binding.current_snapshot() is not binding.restore_snapshot:
+            raise RuntimeError("Original member approval checkpoint is unavailable")
+    if binding is not None:
+        harness._approval_checkpoint = binding
     # Attach the leader's session-level background task controller AFTER
     # configure (before it the teammate has no harness, so the call would be
     # a no-op): the teammate's swarmflow tool then registers its runs in the
@@ -165,11 +204,14 @@ async def inprocess_spawn(
             raise
 
     task = run_ctx.run(asyncio.get_running_loop().create_task, _run())
+    if binding is not None:
+        task.add_done_callback(lambda _: setattr(binding, "exited", True))
 
     handle = InProcessSpawnHandle(
         process_id=f"inproc-{member_name}",
         _task=task,
         agent_ref=teammate,
+        approval_checkpoint=binding,
     )
     team_logger.info(
         "[inprocess] spawned teammate {} as task {}",
