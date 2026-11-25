@@ -405,21 +405,35 @@ class ContextProcessor(metaclass=MetaContextProcessor):
         """
         text_path = offload_text_path(offload_path)
         # Rendering a large tool result is CPU-bound; keep it off the event loop.
-        offload_text = await asyncio.to_thread(render_offload_text, messages, offload_handle=offload_handle)
-        if not await self._write_text_file(text_path, offload_text.text, sys_operation, prepend_newline=False):
+        # Any render/hint/write failure must degrade to the .json marker — same as a
+        # failed .txt write — and must not abort the already-successful .json offload.
+        try:
+            offload_text = await asyncio.to_thread(render_offload_text, messages, offload_handle=offload_handle)
+            read_hint = self._offload_read_hint(context, messages, offload_text)
+            written = await self._write_text_file(
+                text_path, offload_text.text, sys_operation, prepend_newline=False
+            )
+        except Exception as exc:
+            logger.error(
+                "[%s] offload text copy render failed: path=%s, reason=%s",
+                self.processor_type(),
+                text_path,
+                exc,
+            )
+            return content, offload_path
+        if not written:
             logger.warning(
                 "[%s] offload text copy unavailable, marker keeps json path: %s",
                 self.processor_type(),
                 offload_path,
             )
             return content, offload_path
-        read_hint = self._offload_read_hint(context, messages, offload_text)
         if read_hint:
             content = f"{content}\n{read_hint}"
         return content, text_path
 
+    @staticmethod
     def _offload_read_hint(
-            self,
             context: ModelContext,
             messages: List[BaseMessage],
             offload_text: OffloadText,
@@ -457,13 +471,15 @@ class ContextProcessor(metaclass=MetaContextProcessor):
         except Exception as exc:
             logger.error("[%s] offload file write failed: path=%s, reason=%s", self.processor_type(), file_path, exc)
             return False
-        if result.code != StatusCode.SUCCESS.code:
+        # Some sys_operation backends may return None or a non-WriteFileResult; treat as failure.
+        code = getattr(result, "code", None)
+        if code != StatusCode.SUCCESS.code:
             logger.error(
                 "[%s] offload file write failed: path=%s, code=%s, reason=%s",
                 self.processor_type(),
                 file_path,
-                result.code,
-                result.message,
+                code,
+                getattr(result, "message", result),
             )
             return False
         return True

@@ -956,9 +956,49 @@ class TestMessageOffloaderTextCopy:
         assert _offloaded_content(message) == content
 
     @pytest.mark.asyncio
+    async def test_marker_keeps_json_path_when_text_copy_render_raises(self, tmp_path, monkeypatch):
+        context = await create_context(
+            context_window_tokens=10_000,
+            workspace=SimpleNamespace(root_path=str(tmp_path)),
+            token_counter=_metadata_token_counter(),
+        )
+        content = _log_lines(300)
+
+        def boom(_messages, *, offload_handle):
+            raise TypeError(f"render failed for {offload_handle}")
+
+        monkeypatch.setattr(
+            "openjiuwen.core.context_engine.processor.forked.base.render_offload_text",
+            boom,
+        )
+
+        await context.add_messages(
+            ToolMessage(content=content, tool_call_id="tc-log", metadata={"test_token_count": 9_000})
+        )
+
+        message = context.get_messages()[0]
+        assert isinstance(message, OffloadMixin)
+        assert _marker_path(message).endswith(".json")
+        assert "[Offloaded text:" not in message.content
+        assert _offloaded_content(message) == content
+
+    @pytest.mark.asyncio
     async def test_keeps_original_message_when_sys_operation_write_returns_error(self):
         context = await create_context(context_window_tokens=100)
         sys_operation = _mock_sys_operation(StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code, "disk full")
+
+        await context.add_messages(ToolMessage(content="x" * 61, tool_call_id="tc-large"), sys_operation=sys_operation)
+
+        message = context.get_messages()[0]
+        assert not isinstance(message, OffloadMixin)
+        assert message.content == "x" * 61
+        sys_operation.fs.return_value.write_file.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_keeps_original_message_when_sys_operation_write_returns_none(self):
+        context = await create_context(context_window_tokens=100)
+        sys_operation = MagicMock()
+        sys_operation.fs.return_value.write_file = AsyncMock(return_value=None)
 
         await context.add_messages(ToolMessage(content="x" * 61, tool_call_id="tc-large"), sys_operation=sys_operation)
 
