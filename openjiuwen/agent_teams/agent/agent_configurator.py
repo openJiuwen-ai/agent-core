@@ -601,6 +601,13 @@ class AgentConfigurator:
         agent_spec = self.resolve_agent_spec(
             spec, ctx.role, ctx.member_name, agent_template_spec=ctx.agent_template_spec
         )
+        from openjiuwen.agent_teams.experts.template_connectors import attach_template_connectors
+
+        agent_spec = attach_template_connectors(
+            agent_spec,
+            team_name=(ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name,
+            member_name=ctx.member_name or "",
+        )
         resolved_language = self._blueprint.language if self._blueprint else _resolve_language(agent_spec.language)
         member_name = ctx.member_name
 
