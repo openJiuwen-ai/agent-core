@@ -31,7 +31,7 @@ flowchart LR
 
 DeepAgent 路径上，`ContextProcessorRail` 在 agent `init` 写入 processor 列表；`ContextAssembleRail` 在 `before_model_call` 刷新 prompt sections。溢出后的 force compact / retry 循环由 **jiuwenswarm** 的 recovery rail 驱动，core 只保证 `FullCompactProcessor` setter 语义（[[S_04]]）。
 
-`enable_reload=True` 时 `ContextProcessorRail` 在 `before_model_call` 注入 reload prompt 段，并提供 `ContextMessageBuffer.reload(offload_handle)`；`[[HANDLE]]` 的实际触发由调用方/模型按提示完成，False 时不注入（[[S_05]]）。
+`enable_reload=True` 时 `ContextProcessorRail` 在 `before_model_call` 注入 reload prompt 段，并提供 `OffloadMessageBuffer.reload(offload_handle, offload_type)`；模型按 `[[OFFLOAD: ...]]` 的 `path` 用 `read_file` 读回（filesystem 卸载的 `path` 指向 `.txt` 文本副本），False 时不注入（[[S_05]]）。
 
 ## 从哪里学用法（用户文档）
 

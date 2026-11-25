@@ -35,7 +35,7 @@
 |------|------|
 | `create_context(context_id, session, processors=..., history_messages=..., token_counter=...)` | 创建或返回池化 context；processors 为 `(name, config)` 列表，由 engine 解析为 `ContextProcessor` 实例 |
 | `get_context_window`（ModelContext 上） | 顺序执行已注册 processor → 应用 engine/window mutators → 返回 `ContextWindow` |
-| `enable_reload`（config） | 为真时注入 reload prompt 段并提供 `ContextMessageBuffer.reload(offload_handle)`；`[[HANDLE]]` 的实际触发由调用方/模型按提示完成（[[S_05]]）；为假时不注入 |
+| `enable_reload`（config） | 为真时注入 reload prompt 段并提供 `OffloadMessageBuffer.reload(offload_handle, offload_type)`；模型按 `[[OFFLOAD: ...]]` 的 `path` 用 `read_file` 读回（[[S_05]]）；为假时不注入 |
 
 ## 数据结构
 

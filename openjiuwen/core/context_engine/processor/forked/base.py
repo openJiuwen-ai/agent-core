@@ -3,14 +3,22 @@
 
 from abc import abstractmethod
 from typing import List, Dict, Any, Tuple, Optional
+import asyncio
 import os
 import uuid
 import json
 
 from pydantic import BaseModel, Field
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.logging import context_engine_logger as logger
 from openjiuwen.core.context_engine import ModelContext, ContextWindow
 from openjiuwen.core.context_engine.context.session_memory_manager import group_completed_api_rounds
+from openjiuwen.core.context_engine.processor.offload_text import (
+    OffloadText,
+    offload_text_path,
+    render_offload_text,
+)
 from openjiuwen.core.context_engine.schema.messages import create_offload_message
 from openjiuwen.core.foundation.llm import BaseMessage
 
@@ -267,7 +275,7 @@ class ContextProcessor(metaclass=MetaContextProcessor):
                 # 生成 offload_path
                 if not offload_path:
                     offload_path = self._generate_offload_path(workspace_dir, session_id, offload_handle)
-                # 写入原始内容到文件，失败时 fallback 到 in_memory
+                # 写入原始内容到文件；失败时返回 None，由调用方保留原消息
                 sys_operation = kwargs.get("sys_operation")
                 write_success = await self._write_offload_to_file(
                     session_id=session_id,
@@ -278,8 +286,16 @@ class ContextProcessor(metaclass=MetaContextProcessor):
                 )
                 if not write_success:
                     return None
+                content, marker_path = await self._write_offload_text_file(
+                    content,
+                    messages,
+                    context,
+                    offload_handle=offload_handle,
+                    offload_path=offload_path,
+                    sys_operation=sys_operation,
+                )
                 return await self._offload_messages_to_filesystem(
-                    role, content, offload_handle, offload_path, session_id=session_id, **kwargs
+                    role, content, offload_handle, marker_path, session_id=session_id, **kwargs
                 )
         return None
 
@@ -368,18 +384,89 @@ class ContextProcessor(metaclass=MetaContextProcessor):
             "messages": [msg.model_dump() if hasattr(msg, "model_dump") else str(msg) for msg in messages],
         }
         content_json = json.dumps(message_data, ensure_ascii=False, indent=2)
+        return await self._write_text_file(file_path, content_json, sys_operation)
+
+    async def _write_offload_text_file(
+            self,
+            content: str,
+            messages: List[BaseMessage],
+            context: ModelContext,
+            *,
+            offload_handle: str,
+            offload_path: str,
+            sys_operation=None,
+    ) -> Tuple[str, str]:
+        """
+        在 offload .json 旁写入供模型按行读回的同名 .txt 文本副本。
+
+        Returns:
+            Tuple[str, str]: 写入成功时为追加读取提示后的 content 与 .txt 路径；
+            写入失败时为原 content 与 .json 路径（marker 仍指向 .json）。
+        """
+        text_path = offload_text_path(offload_path)
+        # Rendering a large tool result is CPU-bound; keep it off the event loop.
+        offload_text = await asyncio.to_thread(render_offload_text, messages, offload_handle=offload_handle)
+        if not await self._write_text_file(text_path, offload_text.text, sys_operation, prepend_newline=False):
+            logger.warning(
+                "[%s] offload text copy unavailable, marker keeps json path: %s",
+                self.processor_type(),
+                offload_path,
+            )
+            return content, offload_path
+        read_hint = self._offload_read_hint(context, messages, offload_text)
+        if read_hint:
+            content = f"{content}\n{read_hint}"
+        return content, text_path
+
+    def _offload_read_hint(
+            self,
+            context: ModelContext,
+            messages: List[BaseMessage],
+            offload_text: OffloadText,
+    ) -> str:
+        """返回追加在 offload marker 之前的读取提示；默认不追加，由子类按自身预算覆盖。"""
+        _ = (context, messages, offload_text)
+        return ""
+
+    async def _write_text_file(
+            self,
+            file_path: str,
+            text: str,
+            sys_operation=None,
+            *,
+            prepend_newline: bool = True,
+    ) -> bool:
+        """
+        写入 offload 文件。
+
+        sys_operation 写入返回非成功状态码或抛出异常时视为失败，记录日志并返回 False。
+        prepend_newline 透传给 ``fs().write_file``（其默认在内容前追加换行）；本地直写不追加。
+
+        Returns:
+            bool: True if file was written successfully, False if failed.
+        """
         try:
             if sys_operation is None:
                 if not os.path.isabs(file_path):
                     return False
                 os.makedirs(os.path.dirname(file_path), exist_ok=True)
                 with open(file_path, "w", encoding="utf-8") as file:
-                    file.write(content_json)
+                    file.write(text)
                 return True
-            await sys_operation.fs().write_file(file_path, content_json)
-            return True
-        except Exception:
+            result = await sys_operation.fs().write_file(file_path, text, prepend_newline=prepend_newline)
+        except Exception as exc:
+            logger.error("[%s] offload file write failed: path=%s, reason=%s", self.processor_type(), file_path, exc)
             return False
+        if result.code != StatusCode.SUCCESS.code:
+            logger.error(
+                "[%s] offload file write failed: path=%s, code=%s, reason=%s",
+                self.processor_type(),
+                file_path,
+                result.code,
+                result.message,
+            )
+            return False
+        return True
 
     @staticmethod
     def _api_round(messages: List[BaseMessage]) -> bool:

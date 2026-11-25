@@ -16,6 +16,7 @@ import pytest
 import pytest_asyncio
 from PIL import Image
 
+from openjiuwen.core.context_engine.processor import offload_text
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.core.sys_operation import cwd as cwd_state
@@ -1882,3 +1883,10 @@ async def test_pdf_image_enumeration_is_scoped_to_the_read_range(sys_op, temp_di
     assert pages[1].images_accessed == 1 and pages[2].images_accessed == 1
     assert pages[3].images_accessed == 0 and pages[4].images_accessed == 0
 
+
+def test_offload_text_mirrors_read_tool_limits():
+    # core cannot import harness, so offload_text mirrors these limits; keep them in sync.
+    assert offload_text.GREP_MAX_COLUMNS == GrepTool.MAX_COLUMNS
+    assert offload_text.READ_FILE_MAX_LINES == ReadFileTool.MAX_LINES_TO_READ
+    assert offload_text.READ_FILE_MAX_TOKENS == ReadFileTool.MAX_TOKENS
+    assert offload_text.OFFLOAD_TEXT_WRAP_BYTES < GrepTool.MAX_COLUMNS

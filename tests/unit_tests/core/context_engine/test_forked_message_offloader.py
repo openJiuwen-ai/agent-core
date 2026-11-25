@@ -8,9 +8,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.processor.forked.offloader.message_offloader import (
     MessageSummaryOffloaderConfig,
+)
+from openjiuwen.core.context_engine.processor.offload_text import (
+    OFFLOAD_TEXT_HEADER_LINES,
+    OFFLOAD_TEXT_WRAP_BYTES,
 )
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage, UserMessage
@@ -83,10 +88,27 @@ def _large_diff() -> str:
     return "\n".join(chunks)
 
 
+def _marker_path(message: OffloadMixin) -> str:
+    return message.content.rsplit("path=", 1)[1].rsplit("]]", 1)[0]
+
+
 def _offloaded_content(message: OffloadMixin) -> str:
-    marker_path = message.content.rsplit("path=", 1)[1].rsplit("]]", 1)[0]
-    payload = json.loads(open(marker_path, encoding="utf-8").read())
+    json_path = os.path.splitext(_marker_path(message))[0] + ".json"
+    payload = json.loads(open(json_path, encoding="utf-8").read())
     return payload["messages"][0]["content"]
+
+
+def _log_lines(count: int) -> str:
+    return "\r\n".join(
+        f"2026-10-20 00:{index // 60:02d}:{index % 60:02d}.000 [INFO] [order] Order {index} created"
+        for index in range(count)
+    )
+
+
+def _mock_sys_operation(code: int, message: str) -> MagicMock:
+    sys_operation = MagicMock()
+    sys_operation.fs.return_value.write_file = AsyncMock(return_value=SimpleNamespace(code=code, message=message))
+    return sys_operation
 
 
 def _python_function_for_offload(name: str, *, line_count: int) -> list[str]:
@@ -840,3 +862,124 @@ class TestMessageOffloaderTtl:
         restored.load_state({"test_ctx": context.save_state()})
 
         assert restored.last_context_window_access_at() == 100.0
+
+
+class TestMessageOffloaderTextCopy:
+    @pytest.mark.asyncio
+    async def test_marker_points_to_line_oriented_text_copy(self, tmp_path):
+        context = await create_context(
+            context_window_tokens=10_000,
+            workspace=SimpleNamespace(root_path=str(tmp_path)),
+            token_counter=_metadata_token_counter(),
+        )
+        content = _log_lines(300)
+
+        await context.add_messages(
+            ToolMessage(content=content, tool_call_id="tc-log", metadata={"test_token_count": 9_000})
+        )
+
+        message = context.get_messages()[0]
+        assert isinstance(message, OffloadMixin)
+        text_path = _marker_path(message)
+        assert text_path.endswith(".txt")
+        assert os.path.isfile(os.path.splitext(text_path)[0] + ".json")
+        with open(text_path, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+        assert lines[0] == f"[OFFLOAD handle={message.offload_handle} tool_call_id=tc-log]"
+        assert lines[OFFLOAD_TEXT_HEADER_LINES:] == content.splitlines()
+        assert _offloaded_content(message) == content
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("context_window_tokens", "expected_limit"), [(10_000, 33), (100_000, 266)])
+    async def test_read_hint_limit_follows_offload_threshold(self, tmp_path, context_window_tokens, expected_limit):
+        context = await create_context(
+            context_window_tokens=context_window_tokens,
+            workspace=SimpleNamespace(root_path=str(tmp_path)),
+            token_counter=_metadata_token_counter(),
+        )
+
+        await context.add_messages(
+            ToolMessage(content=_log_lines(300), tool_call_id="tc-log", metadata={"test_token_count": 9_000})
+        )
+
+        message = context.get_messages()[0]
+        preview_body = message.content.split("[[OFFLOAD:", 1)[0]
+        assert "[Offloaded text: 300 lines, about 9000 tokens." in preview_body
+        assert f"use limit={expected_limit} " in preview_body
+        assert message.content.rstrip().endswith("]]")
+
+    @pytest.mark.asyncio
+    async def test_text_copy_wraps_long_line_at_character_boundaries(self, tmp_path):
+        context = await create_context(
+            context_window_tokens=10_000,
+            workspace=SimpleNamespace(root_path=str(tmp_path)),
+            token_counter=_metadata_token_counter(),
+        )
+        content = "中文😀a" * 2_000
+
+        await context.add_messages(
+            ToolMessage(content=content, tool_call_id="tc-cjk", metadata={"test_token_count": 9_000})
+        )
+
+        message = context.get_messages()[0]
+        with open(_marker_path(message), encoding="utf-8") as handle:
+            body = handle.read().splitlines()[OFFLOAD_TEXT_HEADER_LINES:]
+        assert all(len(line.encode("utf-8")) <= OFFLOAD_TEXT_WRAP_BYTES for line in body)
+        assert "".join(body) == content
+
+    @pytest.mark.asyncio
+    async def test_marker_keeps_json_path_when_text_copy_write_fails(self, tmp_path):
+        context = await create_context(
+            context_window_tokens=10_000,
+            workspace=SimpleNamespace(root_path=str(tmp_path)),
+            token_counter=_metadata_token_counter(),
+        )
+        processor = context._processors[0]
+        write_text_file = processor._write_text_file
+
+        async def fail_text_copy(file_path, text, sys_operation=None, *, prepend_newline=True):
+            if file_path.endswith(".txt"):
+                return False
+            return await write_text_file(file_path, text, sys_operation, prepend_newline=prepend_newline)
+
+        processor._write_text_file = fail_text_copy
+        content = _log_lines(300)
+
+        await context.add_messages(
+            ToolMessage(content=content, tool_call_id="tc-log", metadata={"test_token_count": 9_000})
+        )
+
+        message = context.get_messages()[0]
+        assert isinstance(message, OffloadMixin)
+        assert _marker_path(message).endswith(".json")
+        assert "[Offloaded text:" not in message.content
+        assert _offloaded_content(message) == content
+
+    @pytest.mark.asyncio
+    async def test_keeps_original_message_when_sys_operation_write_returns_error(self):
+        context = await create_context(context_window_tokens=100)
+        sys_operation = _mock_sys_operation(StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code, "disk full")
+
+        await context.add_messages(ToolMessage(content="x" * 61, tool_call_id="tc-large"), sys_operation=sys_operation)
+
+        message = context.get_messages()[0]
+        assert not isinstance(message, OffloadMixin)
+        assert message.content == "x" * 61
+        sys_operation.fs.return_value.write_file.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_sys_operation_writes_text_copy_without_leading_newline(self):
+        context = await create_context(context_window_tokens=100)
+        sys_operation = _mock_sys_operation(StatusCode.SUCCESS.code, StatusCode.SUCCESS.errmsg)
+
+        await context.add_messages(ToolMessage(content="x" * 61, tool_call_id="tc-large"), sys_operation=sys_operation)
+
+        message = context.get_messages()[0]
+        assert isinstance(message, OffloadMixin)
+        json_call, text_call = sys_operation.fs.return_value.write_file.await_args_list
+        assert json_call.args[0].endswith(".json")
+        assert json_call.kwargs["prepend_newline"] is True
+        assert text_call.args[0] == _marker_path(message)
+        assert text_call.args[0].endswith(".txt")
+        assert text_call.kwargs["prepend_newline"] is False
+        assert text_call.args[1].startswith(f"[OFFLOAD handle={message.offload_handle} ")
