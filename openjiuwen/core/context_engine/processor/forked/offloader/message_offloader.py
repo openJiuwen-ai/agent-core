@@ -282,7 +282,9 @@ class MessageSummaryOffloader(ContextProcessor):
             original_message=original_message,
             **kwargs,
         )
-        if not truncate_offloaded_preview:
+        # _offload_message returns original_message when writing the offload file failed;
+        # the original text is not saved anywhere, so it must not be truncated.
+        if offloaded is original_message or not truncate_offloaded_preview:
             return offloaded
         if self._should_keep_full_rule_compressed_preview(message):
             return offloaded

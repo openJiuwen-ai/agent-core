@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.processor.offloader.tool_result_budget_processor import (
     ToolResultBudgetProcessor,
@@ -26,6 +27,7 @@ from openjiuwen.core.foundation.llm import (
     UserMessage,
 )
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.sys_operation.result import WriteFileData, WriteFileResult
 from tests.unit_tests.core.context_engine._stream_state_helpers import (
     assert_context_state_pair,
     capture_context_compression_states,
@@ -36,7 +38,11 @@ def create_mock_sys_operation():
     """Create a mock SysOperation for testing."""
     mock_sys_op = MagicMock()
     mock_fs = MagicMock()
-    mock_fs.write_file = AsyncMock()
+    mock_fs.write_file = AsyncMock(return_value=WriteFileResult(
+        code=StatusCode.SUCCESS.code,
+        message=StatusCode.SUCCESS.errmsg,
+        data=WriteFileData(path="offload.json", size=0, mode="text"),
+    ))
     mock_sys_op.fs.return_value = mock_fs
     return mock_sys_op, mock_fs  # 返回两个对象，方便单独验证 mock_fs
 

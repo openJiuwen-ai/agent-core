@@ -9,6 +9,8 @@ import json
 
 from pydantic import BaseModel, Field
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.logging import context_engine_logger as logger
 from openjiuwen.core.context_engine import ModelContext, ContextWindow
 from openjiuwen.core.context_engine.context.session_memory_manager import group_completed_api_rounds
 from openjiuwen.core.context_engine.schema.messages import create_offload_message
@@ -380,10 +382,14 @@ class ContextProcessor(metaclass=MetaContextProcessor):
                 with open(file_path, "w", encoding="utf-8") as file:
                     file.write(content_json)
                 return True
-            await sys_operation.fs().write_file(file_path, content_json)
-            return True
-        except Exception:
+            result = await sys_operation.fs().write_file(file_path, content_json, prepend_newline=False)
+        except Exception as e:
+            logger.warning("offload write to %s failed: %s", file_path, e)
             return False
+        if result.code != StatusCode.SUCCESS.code:
+            logger.warning("offload write to %s failed: code=%s, message=%s", file_path, result.code, result.message)
+            return False
+        return True
 
     @staticmethod
     def _api_round(messages: List[BaseMessage]) -> bool:

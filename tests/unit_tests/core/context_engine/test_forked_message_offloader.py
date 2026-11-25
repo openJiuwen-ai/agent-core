@@ -210,6 +210,20 @@ class TestMessageOffloaderAddTrigger:
         assert "[[OFFLOAD:" not in message.content
 
     @pytest.mark.asyncio
+    async def test_rule_compression_keeps_untruncated_original_when_offload_write_fails(self):
+        context = await create_context(context_window_tokens=100)
+        processor = context._processors[0]
+        processor._write_offload_to_file = AsyncMock(return_value=False)
+        content = "\n".join(["same line"] * 100)
+
+        await context.add_messages(ToolMessage(content=content, tool_call_id="tc-repeat"))
+
+        processor._write_offload_to_file.assert_awaited_once()
+        message = context.get_messages()[0]
+        assert not isinstance(message, OffloadMixin)
+        assert message.content == content
+
+    @pytest.mark.asyncio
     async def test_rule_compression_offloads_original_message(self):
         context = await create_context(context_window_tokens=100)
         content = "\n".join(["same line"] * 20)

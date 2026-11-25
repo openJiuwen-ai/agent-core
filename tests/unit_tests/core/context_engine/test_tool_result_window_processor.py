@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import ValidationError
 
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.processor.offloader.tool_result_budget_processor import (
     PERSISTED_OUTPUT_TAG,
@@ -27,6 +28,7 @@ from openjiuwen.core.foundation.llm import (
     UserMessage,
 )
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.sys_operation.result import WriteFileData, WriteFileResult
 from tests.unit_tests.core.context_engine._stream_state_helpers import (
     assert_context_state_pair,
     capture_context_compression_states,
@@ -36,7 +38,11 @@ from tests.unit_tests.core.context_engine._stream_state_helpers import (
 def create_mock_sys_operation():
     mock_sys_op = MagicMock()
     mock_fs = MagicMock()
-    mock_fs.write_file = AsyncMock()
+    mock_fs.write_file = AsyncMock(return_value=WriteFileResult(
+        code=StatusCode.SUCCESS.code,
+        message=StatusCode.SUCCESS.errmsg,
+        data=WriteFileData(path="offload.json", size=0, mode="text"),
+    ))
     mock_sys_op.fs.return_value = mock_fs
     return mock_sys_op, mock_fs
 
@@ -92,6 +98,7 @@ class TestToolResultWindowProcessor:
         assert isinstance(grep_results[0], OffloadToolMessage)
         assert isinstance(grep_results[1], OffloadToolMessage)
         assert grep_results[0].content.startswith(PERSISTED_OUTPUT_TAG)
+        assert [m.offload_type for m in grep_results[:2]] == ["filesystem", "filesystem"]
         assert not isinstance(grep_results[2], OffloadToolMessage)
         assert not isinstance(grep_results[3], OffloadToolMessage)
         assert grep_results[2].content.startswith("result-2-")
@@ -186,6 +193,7 @@ class TestToolResultWindowProcessor:
         # Round 1 offloaded r0.
         offloaded_r0 = context.get_messages()[2]
         assert isinstance(offloaded_r0, OffloadToolMessage)
+        assert offloaded_r0.offload_type == "filesystem"
         r0_content = offloaded_r0.content
         assert mock_fs.write_file.call_count == 1
 
@@ -256,6 +264,7 @@ class TestToolResultWindowProcessor:
 
         results = [m for m in context.get_messages() if isinstance(m, ToolMessage)]
         assert isinstance(results[0], OffloadToolMessage)
+        assert results[0].offload_type == "filesystem"
         assert results[0].content.startswith(PERSISTED_OUTPUT_TAG)
         mock_fs.write_file.assert_called_once()
 

@@ -297,9 +297,15 @@ class ToolResultBudgetProcessor(MessageOffloader):
         if offload_message is not None:
             actual_handle = getattr(offload_message, "offload_handle", "unknown")
             actual_offload_type = getattr(offload_message, "offload_type", "unknown")
+            # 写入失败退回内存卸载时文件并不存在，占位里不能带 path
+            handle_marker = f"[[OFFLOAD: handle={actual_handle}, type={actual_offload_type}]]"
+            if actual_offload_type == "filesystem" and offload_path:
+                handle_marker = (
+                    f"[[OFFLOAD: handle={actual_handle}, type={actual_offload_type}, path={offload_path}]]"
+                )
             offload_message.content = self._build_persisted_output_message(
                 original_size=len(content),
-                offload_handle=f"[[OFFLOAD: handle={actual_handle}, type={actual_offload_type}, path={offload_path}]]",
+                offload_handle=handle_marker,
                 preview=preview,
                 has_more=has_more,
             )
