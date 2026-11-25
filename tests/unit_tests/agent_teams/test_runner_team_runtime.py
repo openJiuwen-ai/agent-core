@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import subprocess
 import uuid
 from types import SimpleNamespace
 from typing import (
@@ -1471,6 +1472,48 @@ class TestTeamRuntimeManagerReleaseSession:
         assert await manager.pool.teams_for_session(session_id) == []
 
         await isolated_checkpointer.release(session_id)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_release_session_removes_retained_member_worktree(self, tmp_path):
+        """Explicit session release removes a registered Git worktree."""
+        from openjiuwen.agent_teams.paths import (
+            reset_task_openjiuwen_home,
+            set_task_openjiuwen_home,
+            team_session_worktrees_dir,
+        )
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager, TeamSessionReleaseInfo
+        from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True, capture_output=True)
+        subprocess.run([
+            "git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+            "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Initial commit",
+        ], cwd=repo, check=True, capture_output=True)
+        manager = TeamRuntimeManager()
+        team_name, session_id = "release_team", "retained_worktree"
+        db_config = DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:")
+        release_info = TeamSessionReleaseInfo(team_names=[team_name], db_config=db_config)
+        token = set_task_openjiuwen_home(tmp_path / "openjiuwen-home")
+        try:
+            worktree = team_session_worktrees_dir(team_name, session_id) / "member"
+            worktree.parent.mkdir(parents=True)
+            subprocess.run(["git", "worktree", "add", "--detach", str(worktree)],
+                           cwd=repo, check=True, capture_output=True)
+            assert worktree.is_dir()
+            with (
+                patch.object(manager, "resolve_team_session_release_info", return_value=release_info),
+                patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=AsyncMock()),
+            ):
+                await manager.release_session(session_id)
+            assert not worktree.exists()
+            registered = subprocess.run(["git", "worktree", "list", "--porcelain"],
+                                        cwd=repo, check=True, capture_output=True, text=True).stdout
+            assert sum(line.startswith("worktree ") for line in registered.splitlines()) == 1
+        finally:
+            reset_task_openjiuwen_home(token)
 
     @pytest.mark.asyncio
     @pytest.mark.level0

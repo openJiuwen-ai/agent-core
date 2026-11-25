@@ -195,7 +195,10 @@ class TeamCompletionHandler(BaseCoordinationHandler):
                 team_logger.error("task list drained callback failed: {}", e, exc_info=True)
 
     async def _finalize_non_contributing_worktrees(self, reason: str) -> None:
-        """Best-effort cleanup of current-session worktrees with no branch commits."""
+        """Best-effort cleanup of temporary-team worktrees with no branch commits."""
+        if self._blueprint.lifecycle == "persistent":
+            # Persistent members can reuse their worktrees across runs.
+            return
         try:
             await self._lifecycle.finalize_non_contributing_worktrees()
         except Exception as e:
