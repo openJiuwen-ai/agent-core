@@ -317,7 +317,10 @@ class MessageHandler(BaseCoordinationHandler):
                             if result.reason == "unsupported_interactive_input":
                                 await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
                                 continue
-                            # Busy, or the interrupt is not readable yet: leave the mail.
+                            if result.reason == "interrupt_resume_unavailable":
+                                # Keep this reply unread and check later approvals in the batch.
+                                interrupted = True
+                                continue
                             return
                         await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
                         return
