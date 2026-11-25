@@ -22,7 +22,7 @@ dependencies = [
     # Content detection. The package is agent-security/agent_shield.
     # Pin to a fixed commit (not floating @develop) so core does not silently
     # pick up breaking agent-security API changes.
-    "agent-shield @ git+https://gitcode.com/openJiuwen/agent-security.git@552b5801c0698fac259ecb72c0f7d9a3e5f1894b#subdirectory=agent_shield",
+    "agent-shield @ git+https://gitcode.com/openJiuwen/agent-security.git@6d7535af77a1beae9a6a7333a8a664d423a05bef#subdirectory=agent_shield",
     # RSI engine dependency
     "agentdescent>=0.4.6",
     # HTTP clients
