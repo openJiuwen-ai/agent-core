@@ -114,7 +114,21 @@ async def _refresh_status_in_session(
     task_ids: Iterable[str],
     now: int,
 ) -> List[TeamTaskBase]:
-    """Recompute PENDING/BLOCKED status for tasks based on unresolved deps."""
+    """Recompute PENDING/BLOCKED status for tasks based on unresolved deps.
+
+    Uses ``SELECT ... FOR UPDATE`` on the candidate task rows so two
+    upstreams completing concurrently against the same downstream serialise
+    on the row lock. Without the lock, under ``READ COMMITTED`` each
+    upstream's read-modify-write sees only its own resolved dependency (the
+    other's is uncommitted), so each computes "1 unresolved" and both leave
+    the downstream ``BLOCKED``; the terminal CAS in
+    ``_terminate_task_in_session`` does not cover this dependent refresh.
+    With the lock, the second upstream's read happens after the first's
+    commit, so it sees all dependencies resolved and lifts ``BLOCKED``.
+    On SQLite the dialect strips ``FOR UPDATE`` (the process-level write
+    lock is the serialiser); on PostgreSQL / MySQL the row lock is the
+    serialiser.
+    """
     unique_ids = list({tid for tid in task_ids if tid})
     if not unique_ids:
         return []
@@ -122,7 +136,11 @@ async def _refresh_status_in_session(
     team_task_model = _get_task_model()
     task_dependency_model = _get_task_dependency_model()
 
-    tasks_result = await session.execute(select(team_task_model).where(team_task_model.task_id.in_(unique_ids)))
+    tasks_result = await session.execute(
+        select(team_task_model)
+        .where(team_task_model.task_id.in_(unique_ids))
+        .with_for_update()
+    )
     candidates = [
         t for t in tasks_result.scalars().all() if t.status in (TaskStatus.PENDING.value, TaskStatus.BLOCKED.value)
     ]

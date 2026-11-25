@@ -89,11 +89,17 @@ _ORG_SCHEMA_READY: weakref.WeakSet[DbSessions] = weakref.WeakSet()
 async def _ensure_org_schema(sessions: DbSessions) -> None:
     """Create / migrate the org static tables once per ``DbSessions``.
 
-    The DDL runs inside ``sessions.write()`` so it serialises with every DAO
-    write of the same ``TeamDatabase``. A bare ``engine.begin()`` bypassed that
-    lock: concurrent org lookups (``team.list`` polling, leader activation)
-    each held a write-pool connection while parked on the SQLite file lock and
-    exhausted the 2-connection pool (``QueuePool limit of size 2``).
+    The DDL runs inside ``sessions.write()`` **and** ``sessions.ddl_lock()``
+    so it serialises with the four DDL / cleanup helpers
+    (``create_cur_session_tables`` / ``drop_cur_session_tables`` /
+    ``cleanup_all_runtime_state`` / ``drop_session_tables_by_id``). On
+    PostgreSQL / MySQL ``sessions.write()`` skips the process-level write
+    lock (the DB itself is the write arbiter), so without ``ddl_lock()`` two
+    first-accessors could both pass the ``_ORG_SCHEMA_READY`` re-check, both
+    find a missing column, and both fire ``ALTER TABLE ... ADD COLUMN`` —
+    the second failing on "duplicate column". On SQLite the per-write lock
+    already serialises DDL with every DAO write; ``ddl_lock()`` adds
+    DDL-vs-DDL protection on the client/server backends.
 
     Must not be called from inside an open ``sessions.write()`` block: the
     write lock is non-reentrant, so the first call on a fresh database would
@@ -105,13 +111,15 @@ async def _ensure_org_schema(sessions: DbSessions) -> None:
         return
 
     async def _ddl_once() -> None:
-        async with sessions.write() as session:
-            # Re-check under the lock: a writer queued ahead may have done it.
-            if sessions in _ORG_SCHEMA_READY:
-                return
-            conn = await session.connection()
-            await conn.run_sync(ensure_org_static_tables)
-            await session.commit()
+        async with sessions.ddl_lock():
+            async with sessions.write() as session:
+                # Re-check under the DDL lock: a first-accessor queued ahead
+                # may have run the migration already.
+                if sessions in _ORG_SCHEMA_READY:
+                    return
+                conn = await session.connection()
+                await conn.run_sync(ensure_org_static_tables)
+                await session.commit()
         _ORG_SCHEMA_READY.add(sessions)
 
     await retry_on_transient(_ddl_once, label="ensure_org_static_tables")

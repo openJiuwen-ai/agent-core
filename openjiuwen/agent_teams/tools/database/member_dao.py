@@ -800,13 +800,23 @@ class MemberDao:
         team_name: str,
         builtin_model: MemberBuiltinModel | None,
     ) -> bool:
-        """Persist the built-in CLI model an external-CLI member runs on."""
+        """Persist the built-in CLI model an external-CLI member runs on.
+
+        Uses ``SELECT ... FOR UPDATE`` (``with_for_update()``) so two
+        concurrent updates to the same member's ``options`` JSON serialise
+        on the row lock, mirroring ``update_member_worktree``: without it, a
+        ``worktree`` update and a ``builtin_model`` update running in
+        parallel each read the old JSON, mutated their slice, and wrote
+        back the whole column — clobbering the other's slice (lost update).
+        """
         async with self._sessions.write() as session:
             result = await session.execute(
-                select(TeamMember).where(
+                select(TeamMember)
+                .where(
                     TeamMember.member_name == member_name,
                     TeamMember.team_name == team_name,
                 )
+                .with_for_update()
             )
             member = result.scalar_one_or_none()
             if member is None:
@@ -827,15 +837,22 @@ class MemberDao:
         Appends to the member's served-model history only when the model differs
         from the latest entry.
 
+        Uses ``SELECT ... FOR UPDATE`` (``with_for_update()``) so two
+        concurrent updates to the same member's ``options`` JSON serialise
+        on the row lock, mirroring ``update_member_worktree`` (see its
+        docstring for the rationale).
+
         Returns:
             Whether the member row exists (False lets the caller retry later).
         """
         async with self._sessions.write() as session:
             result = await session.execute(
-                select(TeamMember).where(
+                select(TeamMember)
+                .where(
                     TeamMember.member_name == member_name,
                     TeamMember.team_name == team_name,
                 )
+                .with_for_update()
             )
             member = result.scalar_one_or_none()
             if member is None:
@@ -858,13 +875,21 @@ class MemberDao:
         member_name: str,
         team_name: str,
     ) -> bool:
-        """Promote the persisted fallback model to the active model reference."""
+        """Promote the persisted fallback model to the active model reference.
+
+        Uses ``SELECT ... FOR UPDATE`` (``with_for_update()``) so two
+        concurrent updates to the same member's ``options`` JSON serialise
+        on the row lock, mirroring ``update_member_worktree`` (see its
+        docstring for the rationale).
+        """
         async with self._sessions.write() as session:
             result = await session.execute(
-                select(TeamMember).where(
+                select(TeamMember)
+                .where(
                     TeamMember.member_name == member_name,
                     TeamMember.team_name == team_name,
                 )
+                .with_for_update()
             )
             member = result.scalar_one_or_none()
             if member is None:
