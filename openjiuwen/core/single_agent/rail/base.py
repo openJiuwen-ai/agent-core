@@ -824,6 +824,10 @@ class AgentCallbackContext:
         """Async context manager for before/after event pairs.
 
         Fires ``before`` on entry, ``after`` in finally block.
+        Once ``before`` has started, ``after`` fires however the
+        block ends, including when a ``before`` callback aborts:
+        a rail that set something up in ``before`` always sees
+        the end of the pair. The abort then propagates as usual.
         Automatically saves and restores ``self.inputs`` so
         that inner steps (model_call, tool_call) can freely
         overwrite it without affecting the after event.
@@ -833,9 +837,9 @@ class AgentCallbackContext:
             after: Event to fire on exit (always)
         """
         saved_inputs = self.inputs
-        await self.fire(before)
         exc_to_raise = None
         try:
+            await self.fire(before)
             yield self
         except Exception as exc:
             exc_to_raise = exc
