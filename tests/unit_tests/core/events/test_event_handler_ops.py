@@ -1,19 +1,34 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Behavior of the concrete event handler operations builder and view."""
+"""Ops builder behavior, and member identity through the event boundary and ops verbs."""
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from unittest.mock import AsyncMock
 
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import ValidationError
+from openjiuwen.core.common.exception.errors import BaseError, ValidationError
+from openjiuwen.core.events.builtins.event_types.agent_spawn import AgentSpawnInput
+from openjiuwen.core.events.builtins.event_types.tool_check import TOOL_CHECK
+from openjiuwen.core.events.bus import ExtensionEventBus
 from openjiuwen.core.events.ops import EventHandlerOps, EventHandlerOpsBuilder
-from openjiuwen.core.events.types import PackageMetadata, SessionContext
+from openjiuwen.core.events.types import OPS_BUILD_EVENT_TYPE, Event, PackageMetadata, SessionContext
+from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.session import with_session
+from openjiuwen.core.session.agent import create_agent_session
+from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
+from openjiuwen.harness.schema.config import DeepAgentConfig
+from openjiuwen.harness.subagent_runtime.models import SpawnResult, SubagentStatus
+from openjiuwen.harness.tools.subagent._control_registry import get_subagent_control
 
 
 async def _return_context(
@@ -35,6 +50,25 @@ def _sync_method(ops: EventHandlerOps) -> None:
 
 class _BusinessFailure(Exception):
     """Representative extension business failure."""
+
+
+def _member(name: str) -> DeepAgent:
+    agent = DeepAgent(AgentCard(id=f"member-ops-{name}")).configure(DeepAgentConfig(enable_task_loop=False))
+
+    async def identify() -> str:
+        return name
+
+    tool = LocalFunction(
+        card=ToolCard(
+            id=f"member-ops-{name}-echo",
+            name="member_echo",
+            description="Identify this member",
+            input_params={"type": "object", "properties": {}},
+        ),
+        func=identify,
+    )
+    agent.ability_manager.add_ability(tool.card, tool)
+    return agent
 
 
 @pytest.mark.asyncio
@@ -160,3 +194,196 @@ async def test_ops_method_exceptions_propagate(exception: BaseException) -> None
     with pytest.raises(type(exception)) as raised:
         await ops.tool.fail(exception)
     assert raised.value is exception
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context_only", [False, True])
+async def test_shared_session_events_and_nested_ops_keep_member_identity(context_only: bool) -> None:
+    bus = ExtensionEventBus()
+    builder = await bus.trigger(Event(OPS_BUILD_EVENT_TYPE, None))
+
+    async def read_identity(event, ops, event_next):
+        del event, event_next
+        await asyncio.sleep(0)
+        return ops.session_context.agent_id
+
+    async def nested(event, ops, event_next):
+        del event, event_next
+        return await bus.trigger(Event("test.member_inner", None), ops.session_context)
+
+    bus.register_event_type("test.member_inner", lambda _event, pattern: not pattern, read_identity)
+    bus.register_event_type("test.member_outer", lambda _event, pattern: not pattern, nested)
+    contexts = []
+    for member in ("leader", "teammate"):
+        if context_only:
+            context = SessionContext("shared", "/workspace", {"key": "value"}, agent_id=member)
+        else:
+            context = create_agent_session(session_id="shared", card=AgentCard(id=member))
+        contexts.append(context)
+
+    assert await asyncio.gather(
+        *(bus.trigger(Event("test.member_outer", None), context) for context in contexts)
+    ) == ["leader", "teammate"]
+    assert builder.build(session_context=SessionContext("legacy")).session_context.agent_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_id", ["", 42])
+async def test_event_boundary_rejects_invalid_member_identity(agent_id) -> None:
+    bus = ExtensionEventBus()
+    await bus.trigger(Event(OPS_BUILD_EVENT_TYPE, None))
+
+    async def terminal(event, ops, event_next):
+        del event, ops, event_next
+
+    bus.register_event_type("test.invalid_member", lambda _event, pattern: not pattern, terminal)
+    with pytest.raises(BaseError):
+        await bus.trigger(Event("test.invalid_member", None), SessionContext("shared", agent_id=agent_id))
+
+
+@pytest.mark.asyncio
+async def test_cardless_session_keeps_the_legacy_session_only_context() -> None:
+    bus = ExtensionEventBus()
+    await bus.trigger(Event(OPS_BUILD_EVENT_TYPE, None))
+
+    async def read_context(event, ops, event_next):
+        del event, event_next
+        return ops.session_context
+
+    bus.register_event_type("test.cardless", lambda _event, pattern: not pattern, read_context)
+    result = await bus.trigger(Event("test.cardless", None), create_agent_session(session_id="legacy"))
+    assert result.session_id == "legacy"
+    assert result.agent_id is None
+
+
+@pytest.mark.parametrize("with_card", [False, True])
+def test_session_agent_metadata_getters_handle_optional_card(with_card: bool) -> None:
+    card = AgentCard(id="member", name="Member", description="Team member") if with_card else None
+    session = create_agent_session(session_id="metadata", card=card)
+
+    assert session.get_agent_id() == ("member" if with_card else None)
+    assert session.get_agent_name() == ("Member" if with_card else None)
+    assert session.get_agent_description() == ("Team member" if with_card else None)
+
+
+@pytest.mark.asyncio
+async def test_tool_ops_select_each_members_tool_and_permission_rail() -> None:
+    await Runner.start()
+    agents = [_member("leader"), _member("teammate")]
+    registry = get_agent_runtime()
+    bus = ExtensionEventBus()
+    builder = await bus.trigger(Event(OPS_BUILD_EVENT_TYPE, None))
+    seen = []
+
+    async def observe(event, ops, event_next):
+        seen.append((ops.session_context.agent_id, event.event_input.agent_id))
+        return await event_next(event)
+
+    bus.register_event_handler(TOOL_CHECK, observe, {})
+
+    async def execute(agent: DeepAgent, decision: str):
+        agent.add_rail(PermissionInterruptRail(config={"enabled": True, "tools": {"member_echo": decision}}))
+        session = create_agent_session(session_id="member-ops-shared", card=agent.card)
+        registry.bind(session.get_session_id(), agent)
+        ops = builder.build(session_context=SessionContext(session.get_session_id(), agent_id=agent.card.id))
+
+        @with_session(session)
+        async def invoke():
+            await asyncio.sleep(0)
+            check = await ops.tool.check("member_echo", {})
+            call = await ops.tool.call("member_echo", {})
+            return check.decision, call.result
+
+        return await invoke()
+
+    try:
+        outputs = await asyncio.gather(execute(agents[0], "deny"), execute(agents[1], "allow"))
+        assert outputs == [("deny", "leader"), ("allow", "teammate")]
+        assert sorted(seen) == [
+            ("member-ops-leader", "member-ops-leader"),
+            ("member-ops-teammate", "member-ops-teammate"),
+        ]
+    finally:
+        for agent in agents:
+            registry.unbind("member-ops-shared", agent)
+            await agent.aclose()
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["call", "spawn"])
+async def test_ops_reject_another_members_live_session_before_side_effect(method: str) -> None:
+    agent = _member(f"mismatch-{method}")
+    target_session = create_agent_session(session_id="member-ops-mismatch", card=agent.card)
+    other_session = create_agent_session(session_id="member-ops-mismatch", card=AgentCard(id="other-member"))
+    registry = get_agent_runtime()
+    registry.bind(target_session.get_session_id(), agent)
+    bus = ExtensionEventBus()
+    builder = await bus.trigger(Event(OPS_BUILD_EVENT_TYPE, None))
+    ops = builder.build(session_context=SessionContext(target_session.get_session_id(), agent_id=agent.card.id))
+    control = get_subagent_control(agent, other_session)
+    control.spawn = AsyncMock(return_value=SpawnResult(
+        subagent_id="should-not-exist", task_id="should-not-run", status=SubagentStatus.pending_init(),
+    ))
+    control.emit_status_update = AsyncMock()
+
+    @with_session(other_session)
+    async def invoke():
+        if method == "call":
+            return await ops.tool.call("member_echo", {})
+        return await ops.agent.spawn(AgentSpawnInput(
+            subagent_type="explore", task_description="inspect", display_name="Explorer", role="researcher",
+        ))
+
+    try:
+        with pytest.raises(BaseError, match="session does not match"):
+            await invoke()
+        control.spawn.assert_not_awaited()
+    finally:
+        registry.unbind(target_session.get_session_id(), agent)
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_spawn_uses_the_calling_members_control_and_preserves_nested_identity() -> None:
+    agents = [_member("spawn-leader"), _member("spawn-teammate")]
+    registry = get_agent_runtime()
+    bus = ExtensionEventBus()
+    builder = await bus.trigger(Event(OPS_BUILD_EVENT_TYPE, None))
+    seen = []
+
+    async def observe(event, ops, event_next):
+        seen.append(ops.session_context.agent_id)
+        return await event_next(event)
+
+    bus.register_event_handler("agent.spawn", observe, {})
+    sessions = [create_agent_session(session_id="member-spawn-shared", card=agent.card) for agent in agents]
+    for agent, session in zip(agents, sessions):
+        registry.bind(session.get_session_id(), agent)
+        control = get_subagent_control(agent, session)
+        control.spawn = AsyncMock(return_value=SpawnResult(
+            subagent_id=f"child-of-{agent.card.id}", task_id="task", status=SubagentStatus.pending_init(),
+        ))
+        control.emit_status_update = AsyncMock()
+
+    async def execute(agent: DeepAgent, session):
+        ops = builder.build(session_context=SessionContext(session.get_session_id(), agent_id=agent.card.id))
+
+        @with_session(session)
+        async def invoke():
+            return await ops.agent.spawn(AgentSpawnInput(
+                subagent_type="explore", task_description="inspect", display_name="Explorer", role="researcher",
+            ))
+
+        return await invoke()
+
+    try:
+        outputs = await asyncio.gather(*(execute(agent, session) for agent, session in zip(agents, sessions)))
+        assert [output.subagent_id for output in outputs] == [
+            "child-of-member-ops-spawn-leader", "child-of-member-ops-spawn-teammate",
+        ]
+        assert sorted(seen) == ["member-ops-spawn-leader", "member-ops-spawn-teammate"]
+    finally:
+        for agent in agents:
+            registry.unbind("member-spawn-shared", agent)
+            await agent.aclose()
