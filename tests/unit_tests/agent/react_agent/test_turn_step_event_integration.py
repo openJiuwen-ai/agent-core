@@ -140,6 +140,7 @@ async def test_turn_step_handler_can_invoke_ops_tool_call_before_model_step() ->
     tool = _echo_tool()
     agent.ability_manager.add_ability(tool.card, tool)
     deep = MagicMock(spec=DeepAgent)
+    deep.card = agent.card
     deep.react_agent = agent
     deep.find_rails_by_type.return_value = []
     get_agent_runtime().bind(session.get_session_id(), deep)
@@ -205,6 +206,7 @@ async def test_turn_step_core_receives_user_forwarded_input_after_ops_prefetch()
     tool = _echo_tool()
     agent.ability_manager.add_ability(tool.card, tool)
     deep = MagicMock(spec=DeepAgent)
+    deep.card = agent.card
     deep.react_agent = agent
     deep.find_rails_by_type.return_value = []
     get_agent_runtime().bind(session.get_session_id(), deep)

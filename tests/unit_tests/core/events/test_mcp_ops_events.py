@@ -47,6 +47,7 @@ from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.foundation.tool.mcp.base import MCPTool, McpToolCard, McpToolResult
 from openjiuwen.core.runner.resources_manager.base import Error, Ok
 from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 pytestmark = pytest.mark.asyncio
 
@@ -71,6 +72,7 @@ class _DeepConfig:
 
 class _Agent:
     def __init__(self, ability_manager: object | None, sys_operation: object | None) -> None:
+        self.card = AgentCard(id="mcp-ops-agent")
         self.ability_manager = ability_manager
         self.deep_config = _DeepConfig(sys_operation)
 
