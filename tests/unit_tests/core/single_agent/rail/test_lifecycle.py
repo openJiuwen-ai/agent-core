@@ -73,8 +73,7 @@ class TestLifecycleAfterAlwaysFires(unittest.IsolatedAsyncioTestCase):
         agent, _ = _make_agent()
         events = []
         keeper = RecordingRail("keeper", events, priority=90)
-        gate = RecordingRail("gate", events, priority=10,
-                             abort=AbortError("refused", cause=ValueError("bad input")))
+        gate = RecordingRail("gate", events, priority=10, abort=AbortError("refused", cause=ValueError("bad input")))
         await agent.register_rail(keeper)
         await agent.register_rail(gate)
 
@@ -171,7 +170,7 @@ class TestLifecycleAfterAlwaysFires(unittest.IsolatedAsyncioTestCase):
 
     @pytest.mark.level1
     async def test_before_abort_publishes_reason_and_closes_scope(self):
-        """When before aborts, after sees the published reason; the scope then closes and the caller's reason returns."""
+        """When before aborts, after sees the published reason; then the caller's reason returns."""
         agent, _ = _make_agent()
         seen = []
 
@@ -200,20 +199,80 @@ class TestLifecycleAfterAlwaysFires(unittest.IsolatedAsyncioTestCase):
 
     @pytest.mark.level1
     async def test_after_error_does_not_mask_before_abort(self):
-        """If after itself raises while a before abort is in flight, the abort reaches the caller."""
+        """If after itself aborts while a before abort is in flight, the before abort reaches the caller."""
         agent, _ = _make_agent()
+        before_abort = AbortError("refused")
+        after_calls = []
 
         async def on_before(ctx):
-            raise AbortError("refused")
+            raise before_abort
 
         async def on_after(ctx):
-            raise RuntimeError("after failed")
+            after_calls.append(ctx.exception)
+            # An AbortError is what trigger() lets out of a callback; other errors are only logged there.
+            raise AbortError("after refused")
 
         await agent.register_callback(AgentCallbackEvent.BEFORE_INVOKE, on_before)
         await agent.register_callback(AgentCallbackEvent.AFTER_INVOKE, on_after)
         ctx = AgentCallbackContext(agent=agent)
 
-        with pytest.raises(AbortError):
+        with pytest.raises(AbortError) as excinfo:
+            async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
+                pass
+        self.assertIs(excinfo.value, before_abort)
+        self.assertEqual(after_calls, [before_abort])
+        self.assertEqual(ctx._run_scope_depth, 0)
+
+    @pytest.mark.level1
+    async def test_after_abort_on_success_reaches_the_caller(self):
+        """With nothing in flight, an after callback's abort is raised to the caller, as before."""
+        agent, _ = _make_agent()
+
+        async def on_after(ctx):
+            raise AbortError("after refused")
+
+        await agent.register_callback(AgentCallbackEvent.AFTER_INVOKE, on_after)
+        ctx = AgentCallbackContext(agent=agent)
+
+        with pytest.raises(AbortError, match="after refused"):
             async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
                 pass
         self.assertEqual(ctx._run_scope_depth, 0)
+
+
+@pytest.mark.level1
+@pytest.mark.parametrize("cancelled_in", ["before", "body"])
+@pytest.mark.asyncio
+async def test_after_abort_does_not_mask_a_cancellation(cancelled_in):
+    """A cancellation reaches the caller even when an after callback aborts."""
+    agent, _ = _make_agent()
+    started = asyncio.Event()
+    after_reasons = []
+
+    async def on_before(ctx):
+        if cancelled_in == "before":
+            started.set()
+            await asyncio.sleep(10)
+
+    async def on_after(ctx):
+        after_reasons.append(ctx.termination_reason)
+        raise AbortError("after refused")
+
+    await agent.register_callback(AgentCallbackEvent.BEFORE_INVOKE, on_before)
+    await agent.register_callback(AgentCallbackEvent.AFTER_INVOKE, on_after)
+    ctx = AgentCallbackContext(agent=agent)
+
+    async def run():
+        async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
+            started.set()
+            await asyncio.sleep(10)
+
+    task = asyncio.create_task(run())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert task.cancelled()
+    assert after_reasons == [AgentTerminationReason.CANCELLED]
+    assert ctx._run_scope_depth == 0

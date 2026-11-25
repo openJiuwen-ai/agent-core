@@ -1045,7 +1045,6 @@ class AgentCallbackContext:
         if is_invoke_scope:
             self._run_scope_depth += 1
         saved_inputs = self.inputs
-        exc_to_raise = None
         crossing_exc: Optional[BaseException] = None
         try:
             # The BEFORE event fires inside this try: when it fails (a
@@ -1057,7 +1056,6 @@ class AgentCallbackContext:
             await self.fire(before)
             yield self
         except Exception as exc:
-            exc_to_raise = exc
             crossing_exc = exc
             self.exception = exc
             raise
@@ -1081,11 +1079,15 @@ class AgentCallbackContext:
             try:
                 await self.fire(after)
             except Exception as callback_exc:
-                if exc_to_raise is not None:
+                # While an exception crosses the boundary, that exception reaches
+                # the caller and an after callback's failure is only logged. This
+                # holds for a cancellation too: an after callback's AbortError
+                # must not turn a cancelled invoke into a failed one.
+                if crossing_exc is not None:
                     logger.error(
                         f"{after.value} callback error "
                         f"(masking original "
-                        f"{type(exc_to_raise).__name__}): {callback_exc}",
+                        f"{type(crossing_exc).__name__}): {callback_exc}",
                         exc_info=True
                     )
                 else:
