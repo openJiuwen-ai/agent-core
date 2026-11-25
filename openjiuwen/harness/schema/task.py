@@ -30,6 +30,15 @@ STATUS_ICONS = {
     TodoStatus.CANCELLED: "[×]",
 }
 
+# Saved todo lists are stably ordered by this rank: closed items, then in progress, then pending.
+# Shared with renderers that replay todo_modify locally so their order matches the saved file.
+PROGRESS_RANK = {
+    TodoStatus.COMPLETED: 0,
+    TodoStatus.CANCELLED: 0,
+    TodoStatus.IN_PROGRESS: 1,
+    TodoStatus.PENDING: 2,
+}
+
 
 class TodoItem(BaseModel):
     """Unified task data structure for DeepAgent task planning.
@@ -235,6 +244,7 @@ class ModelUsageRecord(BaseModel):
 
 __all__ = [
     "ModelUsageRecord",
+    "PROGRESS_RANK",
     "STATUS_ICONS",
     "TaskPlan",
     "TodoItem",

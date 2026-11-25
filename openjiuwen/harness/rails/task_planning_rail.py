@@ -5,11 +5,12 @@ from __future__ import annotations
 
 from typing import Dict, Optional, List
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.prompts.sections import SectionName
-from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ToolCallInputs,
@@ -47,6 +48,8 @@ class TaskPlanningRail(DeepAgentRail):
         list_tool_call_interval: int = 20,
         model_selection: Optional[Dict[Model, str]] = None,
         inject_prompt: bool = True,
+        *,
+        require_explicit_status: bool = False,
     ) -> None:
         """Initialize TaskPlanningRail.
 
@@ -59,12 +62,14 @@ class TaskPlanningRail(DeepAgentRail):
                 model before each LLM call based on the in-progress task's selected_model_id.
             inject_prompt: Whether to inject the task-planning system prompt.
                 Todo tool registration and model switching remain enabled when false.
+            require_explicit_status: Whether todo_create requires an explicit status for every item.
         """
         super().__init__()
         self.tools = None
         self.enable_progress_repeat = enable_progress_repeat
         self.list_tool_call_interval = list_tool_call_interval
         self.inject_prompt = inject_prompt
+        self.require_explicit_status = require_explicit_status
         self._tool_call_counts = {}
         self._todos_cache: Dict[str, List[TodoItem]] = {}
         self.system_prompt_builder = None
@@ -78,12 +83,15 @@ class TaskPlanningRail(DeepAgentRail):
         self._default_llm: Optional[Model] = None
 
     def clone_for_subagent(self) -> "TaskPlanningRail":
-        return type(self)(
+        clone = type(self)(
             enable_progress_repeat=self.enable_progress_repeat,
             list_tool_call_interval=self.list_tool_call_interval,
             model_selection=dict(self._model_selection),
             inject_prompt=self.inject_prompt,
         )
+        # Subclasses may keep the original constructor signature, so copy the setting after construction.
+        clone.require_explicit_status = self.require_explicit_status
+        return clone
 
     def init(self, agent) -> None:
         """Register todo tools on the agent."""
@@ -123,10 +131,16 @@ class TaskPlanningRail(DeepAgentRail):
         existing_tools = []
         for ability in agent.ability_manager.list():
             if isinstance(ability, ToolCard):
-                tool_instance = Runner.resource_mgr.get_tool(tool_id=ability.id)
+                tool_instance = agent.ability_manager.resolve_tool(ability)
                 if tool_instance:
                     for i, (tool_class, found) in enumerate(tool_configs):
                         if isinstance(tool_instance, tool_class):
+                            if (tool_class is TodoCreateTool
+                                    and tool_instance.require_explicit_status != self.require_explicit_status):
+                                raise build_error(
+                                    StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
+                                    error_msg="TaskPlanningRail: existing todo_create status configuration differs",
+                                )
                             tool_configs[i] = (tool_class, True)
                             existing_tools.append(tool_instance)
                             break
@@ -135,7 +149,9 @@ class TaskPlanningRail(DeepAgentRail):
         try:
             for tool_class, found in tool_configs:
                 if not found:
-                    new_tool = tool_class(self.sys_operation, workspace_dir, language, agent_id)
+                    options = ({"require_explicit_status": self.require_explicit_status}
+                               if tool_class is TodoCreateTool else {})
+                    new_tool = tool_class(self.sys_operation, workspace_dir, language, agent_id, **options)
                     agent.ability_manager.add_ability(new_tool.card, new_tool)
                     tools.append(new_tool)
             self.tools = tools

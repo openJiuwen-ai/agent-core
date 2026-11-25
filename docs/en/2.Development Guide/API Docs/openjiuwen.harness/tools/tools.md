@@ -51,9 +51,9 @@ Built-in tools available to `DeepAgent`. Tools are registered via `ToolCard` ent
 
 | Tool | Description |
 |---|---|
-| `TodoCreateTool` | Create a new to-do item. |
-| `TodoListTool` | List existing to-do items. |
-| `TodoModifyTool` | Modify or complete a to-do item. |
+| `TodoCreateTool` | Create or replace the current to-do list, validating and preserving task status according to the registered configuration. |
+| `TodoListTool` | List all current to-do items, including pending, in-progress, completed, and cancelled items, in persisted order. |
+| `TodoModifyTool` | Update the status or fields of to-do items, or append, insert, cancel, or delete items. |
 | `TaskTool` | Interact with the task plan (view, add, update tasks). |
 
 ### Progressive Tool Discovery

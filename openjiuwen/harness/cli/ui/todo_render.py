@@ -10,9 +10,12 @@ Renders todo items with visual checkboxes and progress summaries:
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from typing import Any, Dict, List, Optional
+
+from openjiuwen.harness.schema.task import PROGRESS_RANK, STATUS_ICONS
 
 # Status → (icon, Rich style)
 _STATUS_STYLE = {
@@ -22,12 +25,18 @@ _STATUS_STYLE = {
     "cancelled": ("☒", "dim strike"),
 }
 
-# SDK STATUS_ICONS → our status name
+# SDK STATUS_ICONS → our status name. Derived from the SDK so an icon
+# change there cannot silently break parsing here.
 _SDK_ICON_TO_STATUS = {
-    "[>]": "in_progress",
-    "[ ]": "pending",
-    "[√]": "completed",
-    "[×]": "cancelled",
+    icon: status.value for status, icon in STATUS_ICONS.items()
+}
+# Characters inside the brackets, for the parsing regexes below.
+_ICON_CHAR_CLASS = "".join(
+    re.escape(icon[1:-1]) for icon in _SDK_ICON_TO_STATUS
+)
+# Status name → saved-order rank, keyed by plain strings for cached dict items.
+_PROGRESS_RANK_BY_NAME = {
+    status.value: rank for status, rank in PROGRESS_RANK.items()
 }
 
 
@@ -109,25 +118,14 @@ def render_todo_summary(
 
 
 def _parse_todo_text(tool_result: str) -> Optional[List[Dict[str, Any]]]:
-    """Parse todo items from the SDK's human-readable text format.
+    """Parse todo items from ``todo_create``'s human-readable text.
 
-    The SDK todo tools return text like::
+    ``todo_create`` returns text like::
 
         Successfully created 3 task(s):
-          [>] task_id: abc , content: Write tests
+          [→] task_id: abc , content: Write tests
           [ ] task_id: def , content: Deploy
           [ ] task_id: ghi , content: Review
-
-    Or for ``todo_list``::
-
-        Todo List (Total: 3 items):
-
-        [>] In Progress Task
-         [uuid] Write tests
-
-        [ ] Pending Tasks
-         [uuid] Deploy
-         [uuid] Review
 
     Args:
         tool_result: Raw string from ``str(tool_result)``.
@@ -141,10 +139,9 @@ def _parse_todo_text(tool_result: str) -> Optional[List[Dict[str, Any]]]:
     # (str() on a dict produces Python repr with literal \\n)
     normalized = tool_result.replace("\\n", "\n")
 
-    # Pattern 1: TodoCreateTool format
-    #   [>] task_id: uuid , content: description
+    #   [→] task_id: uuid , content: description
     create_pattern = re.compile(
-        r"\[([>√× ])\]\s+task_id:\s*\S+\s*,\s*content:\s*(.+)"
+        rf"\[([{_ICON_CHAR_CLASS}])\]\s+task_id:\s*\S+\s*,\s*content:\s*(.+)"
     )
     for match in create_pattern.finditer(normalized):
         icon_char = match.group(1)
@@ -157,38 +154,6 @@ def _parse_todo_text(tool_result: str) -> Optional[List[Dict[str, Any]]]:
             {"content": content, "status": status}
         )
 
-    if items:
-        return items
-
-    # Pattern 2: TodoListTool format
-    #   Section headers: [>] In Progress Task  /  [ ] Pending Tasks
-    #   Items under them:  [uuid] description
-    current_status = "pending"
-    section_pattern = re.compile(
-        r"^\[([>√× ])\]\s+(?:In Progress|Pending|Completed|Cancelled)",
-    )
-    item_pattern = re.compile(
-        r"^\s+\[[\w-]+\]\s+(.+)",
-    )
-    for line in normalized.split("\n"):
-        section_match = section_pattern.match(line)
-        if section_match:
-            icon_char = section_match.group(1)
-            icon_key = f"[{icon_char}]"
-            current_status = _SDK_ICON_TO_STATUS.get(
-                icon_key, "pending"
-            )
-            continue
-        item_match = item_pattern.match(line)
-        if item_match:
-            content = item_match.group(1).strip()
-            items.append(
-                {
-                    "content": content,
-                    "status": current_status,
-                }
-            )
-
     return items if items else None
 
 
@@ -199,8 +164,10 @@ def parse_todo_result(
 
     Tries multiple strategies:
 
-    1. JSON (structured data)
-    2. SDK text format with ``[>]``/``[ ]`` icons
+    1. Structured data: JSON, or the Python dict repr the CLI tool
+       tracker produces with ``str()`` (e.g. ``todo_list``'s
+       ``{'tasks': [...]}``)
+    2. ``todo_create`` text format with ``STATUS_ICONS`` icons
 
     Args:
         tool_result: Raw string result from a todo tool.
@@ -211,11 +178,14 @@ def parse_todo_result(
     if not tool_result:
         return None
 
-    # Strategy 1: Try JSON
+    # Strategy 1: Try JSON, then Python literal repr
     try:
         data = json.loads(tool_result)
     except (json.JSONDecodeError, TypeError):
-        data = None
+        try:
+            data = ast.literal_eval(tool_result)
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            data = None
 
     if data is not None:
         if isinstance(data, list):
@@ -267,7 +237,21 @@ def apply_todo_modify_args(
 
     This lets the CLI refresh the visible todo checklist even when the
     tool result only contains a summary like ``Successfully updated``.
+    The result follows the saved order (closed, in progress, pending).
     """
+    updated = _replay_todo_modify(items, tool_args)
+    if updated is None:
+        return None
+    return sorted(
+        updated,
+        key=lambda item: _PROGRESS_RANK_BY_NAME.get(item.get("status"), 2),
+    )
+
+
+def _replay_todo_modify(
+    items: List[Dict[str, Any]],
+    tool_args: Any,
+) -> Optional[List[Dict[str, Any]]]:
     args = parse_todo_tool_args(tool_args)
     action = args.get("action")
     if not action:

@@ -139,6 +139,26 @@ class TestTodoTool(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Task 1", call_args[0][1])
         self.assertEqual(call_args[1].get("mode"), "text")
 
+    async def test_save_todos_orders_by_progress(self):
+        """save_todos writes finished items first, then in_progress, then pending, stable within each status."""
+        self.mock_fs.write_file.return_value = MagicMock(code=0)
+        tool = TodoTool(MagicMock(), self.mock_operation)
+        todos = [
+            TodoItem(id="outline", content="o", status=TodoStatus.COMPLETED),
+            TodoItem(id="review", content="r", status=TodoStatus.PENDING),
+            TodoItem(id="contact", content="c", status=TodoStatus.CANCELLED),
+            TodoItem(id="about", content="a", status=TodoStatus.COMPLETED),
+            TodoItem(id="deliver", content="d", status=TodoStatus.PENDING),
+            TodoItem(id="careers", content="j", status=TodoStatus.IN_PROGRESS),
+            TodoItem(id="terms", content="t", status=TodoStatus.PENDING),
+        ]
+        await tool.save_todos("test_session", todos)
+        written = json.loads(self.mock_fs.write_file.call_args[0][1])
+        self.assertEqual(
+            [t["id"] for t in written],
+            ["outline", "contact", "about", "careers", "review", "deliver", "terms"],
+        )
+
     async def test_save_todos_write_fail(self):
         """save_todos raises FrameworkError on write failure."""
         self.mock_fs.write_file.return_value = MagicMock(code=1)
@@ -237,6 +257,52 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Exception):
             await self.tool.invoke({"tasks": [{"content": "Task 1", "activeForm": "Doing"}]}, session=self.mock_session)
 
+    @staticmethod
+    def _task(task_id, status=None):
+        task = {"id": task_id, "content": task_id, "activeForm": task_id, "description": task_id}
+        if status is not None:
+            task["status"] = status
+        return task
+
+    async def test_invoke_create_keeps_explicit_statuses(self):
+        """Explicit statuses are saved as given; omitted ones default to pending without auto-start."""
+        tasks = [self._task("a", "completed"), self._task("b"), self._task("c", "in_progress")]
+        result = await self.tool.invoke({"tasks": tasks}, session=self.mock_session)
+        saved = self.tool.save_todos.call_args[0][1]
+        self.assertEqual([t.status for t in saved],
+                         [TodoStatus.COMPLETED, TodoStatus.PENDING, TodoStatus.IN_PROGRESS])
+        self.assertTrue(result["message"].endswith("Recorded in progress: 'c' (task_id: c). Next step: start this task now."))
+
+    async def test_invoke_create_all_closed(self):
+        """A fully closed list is accepted and the receipt asks to report actual results."""
+        tasks = [self._task("a", "completed"), self._task("b", "cancelled")]
+        result = await self.tool.invoke({"tasks": tasks}, session=self.mock_session)
+        self.assertTrue(result["message"].endswith("Report actual results."))
+
+    async def test_invoke_create_rejects_invalid_input_without_writing(self):
+        """Invalid status, multiple in_progress, or non-object items reject the whole call."""
+        cases = [
+            [self._task("a", "done")],
+            [self._task("a", None) | {"status": None}],
+            [self._task("a", "in_progress"), self._task("b", "in_progress")],
+            [self._task("a", "pending"), "b"],
+        ]
+        for tasks in cases:
+            with self.subTest(tasks=tasks):
+                with self.assertRaisesRegex(Exception, "No changes were written"):
+                    await self.tool.invoke({"tasks": tasks}, session=self.mock_session)
+        self.tool.save_todos.assert_not_called()
+
+    async def test_invoke_create_requires_status_when_configured(self):
+        """With require_explicit_status, any missing status rejects the call and names the items."""
+        tool = TodoCreateTool(operation=self.mock_operation, require_explicit_status=True)
+        tool.save_todos = AsyncMock()
+        with self.assertRaisesRegex(Exception, "Missing status for: b.*No changes were written"):
+            await tool.invoke({"tasks": [self._task("a", "pending"), self._task("b")]}, session=self.mock_session)
+        tool.save_todos.assert_not_called()
+        await tool.invoke({"tasks": [self._task("a", "pending")]}, session=self.mock_session)
+        tool.save_todos.assert_called_once()
+
 
 class TestTodoListTool(unittest.IsolatedAsyncioTestCase):
     """Test TodoListTool functionality."""
@@ -264,20 +330,17 @@ class TestTodoListTool(unittest.IsolatedAsyncioTestCase):
         patch.stopall()
 
     async def test_invoke_list_success(self):
-        """Returns only active (non-completed, non-cancelled) tasks in simplified format."""
+        """Returns items of every status in order, each with only id, content, status and depends_on."""
         result = await self.tool.invoke({}, session=self.mock_session)
         self.assertIn("tasks", result)
         tasks = result["tasks"]
-        # Only IN_PROGRESS and PENDING should be returned
-        self.assertEqual(len(tasks), 2)
+        self.assertEqual(len(tasks), 4)
         contents = [t["content"] for t in tasks]
         self.assertIn("In Progress Task", contents)
         self.assertIn("Pending Task", contents)
-        self.assertNotIn("Completed Task", contents)
-        self.assertNotIn("Cancelled Task", contents)
-        # Each item has id, content, status, depends_on
-        self.assertIn("id", tasks[0])
-        self.assertIn("depends_on", tasks[0])
+        self.assertIn("Completed Task", contents)
+        self.assertIn("Cancelled Task", contents)
+        self.assertEqual(set(tasks[0]), {"id", "content", "status", "depends_on"})
 
 
 class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
@@ -414,6 +477,44 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
         saved = self.tool.save_todos.call_args[0][1]
         self.assertEqual(len(saved), 4)
         self.assertEqual(saved[1].id, new_id)
+
+    async def test_insert_before_in_progress_accepts_only_completed_items(self):
+        """Completed items may go before the in_progress task; unfinished items may not."""
+        done = [{"id": f"done_{i}", "content": f"Done {i}", "activeForm": "Doing", "description": "d",
+                 "status": TodoStatus.COMPLETED.value} for i in range(2)]
+        result = await self.tool.invoke({
+            "action": "insert_before",
+            "todo_data": {"target_id": self.test_todo_ids[0], "items": done},
+        }, session=self.mock_session)
+        self.assertIn("Successfully inserted 2 task(s) before target task", result["message"])
+        saved = self.tool.save_todos.call_args[0][1]
+        self.assertEqual([t.id for t in saved], ["done_0", "done_1", *self.test_todo_ids])
+
+        self.tool.save_todos.reset_mock()
+        self.tool.load_todos = AsyncMock(return_value=self.test_todos.copy())
+        mixed = [done[0], {**done[1], "status": TodoStatus.PENDING.value}]
+        with self.assertRaises(FrameworkError) as cm:
+            await self.tool.invoke({
+                "action": "insert_before",
+                "todo_data": {"target_id": self.test_todo_ids[0], "items": mixed},
+            }, session=self.mock_session)
+        self.assertIn("doesn't allow insertion", str(cm.exception))
+        self.tool.save_todos.assert_not_called()
+
+    async def test_insert_after_completed_target(self):
+        """New steps may follow a completed task."""
+        todos = [TodoItem(id="done", content="Done", status=TodoStatus.COMPLETED), *self.test_todos]
+        self.tool.load_todos = AsyncMock(return_value=todos)
+        result = await self.tool.invoke({
+            "action": "insert_after",
+            "todo_data": {"target_id": "done", "items": [
+                {"id": "next_step", "content": "Next", "activeForm": "Doing next", "description": "d",
+                 "status": TodoStatus.PENDING.value}
+            ]},
+        }, session=self.mock_session)
+        self.assertIn("Successfully inserted 1 task(s) after target task", result["message"])
+        saved = self.tool.save_todos.call_args[0][1]
+        self.assertEqual([t.id for t in saved], ["done", "next_step", *self.test_todo_ids])
 
     async def test_invoke_cancel_success(self):
         """Cancels specified task."""

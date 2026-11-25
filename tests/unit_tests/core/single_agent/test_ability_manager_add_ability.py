@@ -309,3 +309,23 @@ def test_read_and_edit_equivalent_paths_share_one_execution_lane(tmp_path) -> No
         AbilityManager._tool_execution_resource_key(read_call)
         == AbilityManager._tool_execution_resource_key(edit_call)
     )
+
+
+def test_resolve_tool_prefers_own_instance_over_refreshed_global() -> None:
+    async def _run():
+        await Runner.start()
+        first, second = AbilityManager(owner_id="agent-same"), AbilityManager(owner_id="agent-same")
+        mine, other = _make_tool("probe", marker="mine"), _make_tool("probe", marker="other")
+        try:
+            first.add_ability(mine.card, mine)
+            second.add_ability(other.card, other)
+            # The second agent refreshed the shared global entry.
+            assert Runner.resource_mgr.get_tool(mine.card.id) is other
+            assert first.resolve_tool(first.get("probe")) is mine
+            assert second.resolve_tool(second.get("probe")) is other
+        finally:
+            first.remove_ability("probe")
+            second.remove_ability("probe")
+            await Runner.stop()
+
+    asyncio.run(_run())
