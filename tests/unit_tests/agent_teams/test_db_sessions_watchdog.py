@@ -15,6 +15,7 @@ import asyncio
 
 import pytest
 
+from openjiuwen.agent_teams.tools.database.config import DatabaseType
 from openjiuwen.agent_teams.tools.database.engine import DbSessions
 
 
@@ -103,3 +104,58 @@ async def test_fast_read_and_write_paths_unaffected() -> None:
         assert isinstance(read_session, _FakeSession)
     async with sessions.write() as write_session:
         assert isinstance(write_session, _FakeSession)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_sqlite_write_holds_process_lock() -> None:
+    """On SQLite write() holds the process-level lock during the block."""
+    sessions = DbSessions(_fake_session_factory, db_type=DatabaseType.SQLITE)
+    assert sessions._use_write_lock
+    async with sessions.write():
+        assert sessions._write_lock.locked()
+    assert not sessions._write_lock.locked()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_client_server_write_skips_process_lock() -> None:
+    """On PostgreSQL/MySQL write() does NOT hold the process-level lock."""
+    for db_type in (DatabaseType.POSTGRESQL, DatabaseType.MYSQL):
+        sessions = DbSessions(_fake_session_factory, db_type=db_type)
+        assert not sessions._use_write_lock
+        async with sessions.write():
+            assert not sessions._write_lock.locked()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_ddl_lock_serialises_concurrent_acquirers() -> None:
+    """ddl_lock() serialises concurrent acquirers on all backends."""
+    sessions = DbSessions(_fake_session_factory)
+    acquired = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def hold_ddl() -> None:
+        async with sessions.ddl_lock():
+            acquired.set()
+            await proceed.wait()
+
+    holder = asyncio.create_task(hold_ddl())
+    await acquired.wait()
+
+    # The waiter should block until the holder releases.
+    waiter_done = asyncio.Event()
+
+    async def wait_ddl() -> None:
+        async with sessions.ddl_lock():
+            waiter_done.set()
+
+    waiter = asyncio.create_task(wait_ddl())
+    await asyncio.sleep(0.01)
+    assert not waiter_done.is_set()
+
+    proceed.set()
+    await asyncio.wait_for(waiter, timeout=1.0)
+    assert waiter_done.is_set()
+    await holder

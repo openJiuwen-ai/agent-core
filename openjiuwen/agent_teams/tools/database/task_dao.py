@@ -45,6 +45,7 @@ from openjiuwen.agent_teams.tools.database.graph import (
     detect_cycle_in_adjacency,
 )
 from openjiuwen.agent_teams.tools.models import (
+    Team,
     TeamTaskBase,
     TeamTaskDependencyBase,
     TeamTaskReviewVoteBase,
@@ -415,9 +416,7 @@ async def _check_cycle_and_compute_new_edges(
             select(
                 task_dependency_model.task_id,
                 task_dependency_model.depends_on_task_id,
-            )
-            .where(task_dependency_model.team_name == team_name)
-            .with_for_update()
+            ).where(task_dependency_model.team_name == team_name)
         )
     ).all()
     existing_edge_set: set[tuple[str, str]] = {(row[0], row[1]) for row in existing_edges_rows}
@@ -1609,6 +1608,23 @@ class TaskDao:
         async with self._sessions.write() as session:
             try:
                 now = get_current_time()
+                # Serialise all graph mutations on the same team by locking the
+                # team_info row. This prevents two concurrent
+                # mutate_dependency_graph calls from each reading a stale edge
+                # set, each passing the cycle check, and together forming a
+                # cycle (the dep SELECT's FOR UPDATE is not enough: on an
+                # empty edge set it acquires zero locks). It also avoids the
+                # lock-ordering deadlock that a dep-row FOR UPDATE would
+                # create with _terminate_task_in_session (which locks task
+                # rows, then dep rows — the opposite order). The team row is
+                # a single short-lived lock and does not conflict with
+                # _terminate_task_in_session (which never locks team_info).
+                if add_edges:
+                    team_result = await session.execute(
+                        select(Team).where(Team.team_name == team_name).with_for_update()
+                    )
+                    if team_result.scalar_one_or_none() is None:
+                        raise _MutationFailure(f"Team {team_name} not found")
                 await _stage_new_tasks(session, team_name, new_tasks, now)
                 if suspend_parent is not None:
                     await _suspend_parent_in_session(session, *suspend_parent, now)

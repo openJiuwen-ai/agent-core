@@ -10,6 +10,7 @@ import weakref
 from typing import Any
 
 from sqlalchemy import inspect
+from sqlalchemy.exc import OperationalError
 from sqlmodel import SQLModel
 
 from openjiuwen.agent_teams.organization.schema import (
@@ -35,13 +36,31 @@ _ORG_TASK_NEW_COLUMNS = (
 )
 
 
+def _add_column_idempotent(sync_conn, table: str, column: str, col_type: str) -> None:
+    """Add a column, tolerating a concurrent add by another process.
+
+    The check-then-ALTER pattern is not atomic across processes: two
+    processes can both see the column missing and both issue
+    ``ALTER TABLE ... ADD COLUMN``. The DB's own DDL lock serialises the
+    two ALTERs, but the second fails with a "duplicate column" error.
+    Catch that error and treat it as success — the column exists, which
+    is the desired end state.
+    """
+    try:
+        sync_conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+    except OperationalError as exc:
+        msg = str(exc).lower()
+        if "duplicate column" not in msg and "already exists" not in msg:
+            raise
+
+
 def ensure_org_static_tables(sync_conn) -> None:
     SQLModel.metadata.create_all(sync_conn, tables=org_static_tables())
     _ensure_org_task_columns(sync_conn)
     _ensure_org_summary_execution_columns(sync_conn)
     inspector = inspect(sync_conn)
     if "unclaimed_task_policy_json" not in {col["name"] for col in inspector.get_columns("org_info")}:
-        sync_conn.exec_driver_sql("ALTER TABLE org_info ADD COLUMN unclaimed_task_policy_json TEXT")
+        _add_column_idempotent(sync_conn, "org_info", "unclaimed_task_policy_json", "TEXT")
     task_table = SQLModel.metadata.tables["org_task"]
     for index in task_table.indexes:
         if index.name in {"ix_org_task_unclaimed_due", "ix_org_task_recreation_request"}:
@@ -57,7 +76,7 @@ def _ensure_org_task_columns(sync_conn) -> None:
     columns = {col["name"] for col in inspector.get_columns("org_task")}
     for name, col_type in _ORG_TASK_NEW_COLUMNS:
         if name not in columns:
-            sync_conn.exec_driver_sql(f"ALTER TABLE org_task ADD COLUMN {name} {col_type}")
+            _add_column_idempotent(sync_conn, "org_task", name, col_type)
     failed_status = OrgTaskStatus.FAILED.value
     for legacy_status, failure_code in ORG_TASK_LEGACY_STATUS_FAILURE_CODES.items():
         sync_conn.exec_driver_sql(
@@ -76,7 +95,7 @@ def _ensure_org_summary_execution_columns(sync_conn) -> None:
         return
     columns = {col["name"] for col in inspector.get_columns("org_summary_execution")}
     if "updated_at" not in columns:
-        sync_conn.exec_driver_sql("ALTER TABLE org_summary_execution ADD COLUMN updated_at BIGINT NOT NULL DEFAULT 0")
+        _add_column_idempotent(sync_conn, "org_summary_execution", "updated_at", "BIGINT NOT NULL DEFAULT 0")
 
 
 # ``DbSessions`` providers whose database already has the org static schema.

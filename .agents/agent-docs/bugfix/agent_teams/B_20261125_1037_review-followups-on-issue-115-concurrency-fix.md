@@ -1,6 +1,6 @@
 ---
 id: B_20261125_1037_review-followups-on-issue-115-concurrency-fix
-title: issue #115 第二、三轮检视遗留并发洞的修复
+title: issue #115 第二至五轮检视遗留并发洞的修复
 type: B
 author: DaiYuxin511
 author_email: 455472400@qq.com
@@ -18,7 +18,7 @@ designs: []
 design_note: 91ad1d944 把锁的边界从「全写锁」收窄到「DDL 锁 + CAS + 行锁」时漏掉的入口；本修复把同一套并发模型补齐到所有剩余读改写路径，不引入新设计
 ---
 
-# issue #115 第二、三轮检视遗留并发洞的修复记录
+# issue #115 第二至五轮检视遗留并发洞的修复记录
 
 ## 现象与影响
 
@@ -178,15 +178,57 @@ DB's own table-level DDL lock ... `ddl_lock()` serialises ... with every other
 DDL helper on all backends」。与 `organization/db.py` 的 `_ensure_org_schema`
 docstring（53f1d5e38 已更新）措辞一致。
 
+### 第五轮检视：环校验锁修正、跨进程 ALTER 幂等、测试覆盖
+
+第五轮检视发现两个真实 bug 与一个测试覆盖缺失：
+
+1. **P2 #1 — `_check_cycle_and_compute_new_edges` 的 dep FOR UPDATE 在空边集上不生效**：
+   `SELECT ... FOR UPDATE` 只锁返回的行。若 team 没有任何现有边（空边集），SELECT 返回
+   零行、零锁。两个并发 `mutate_dependency_graph` 都不取锁，各自通过环校验，合在一起
+   可能成环。即使有现有边，两个加不相交端点新边的调用也可能各自通过但合并成环（经
+   现有边桥接）。
+
+   **修法**：移除 `_check_cycle_and_compute_new_edges` 的 dep FOR UPDATE，改为在
+   `mutate_dependency_graph` 开头锁 **team 行**（`SELECT Team WHERE team_name=? FOR UPDATE`）。
+   team 行锁串行化同 team 的所有图变更，不依赖边集大小。team 行是单行短锁，不与
+   `_terminate_task_in_session`（不锁 team_info）冲突。
+
+2. **P3 #4 — dep FOR UPDATE 与 `_terminate_task_in_session` 的锁序相反导致死锁**：
+   `mutate_dependency_graph`（dep→task）与 `_terminate_task_in_session`（task→dep）锁序
+   相反。A 持全部 dep 锁等 task T，B 持 task T 锁等 dep 锁 → PG/MySQL 检测死锁并 abort
+   一笔事务。移除 dep FOR UPDATE、改用 team 行锁后，`mutate_dependency_graph` 只锁
+   team 行 + task 行（refresh），不锁 dep 行，锁序与 `_terminate_task_in_session` 一致。
+
+3. **P2 #3 — `ddl_lock` 是 `asyncio.Lock`（进程级），多进程下 org 迁移仍可能报
+   duplicate column**：`_ddl_once` 的 `_ORG_SCHEMA_READY` 复查 + `ddl_lock` 都只在进程内
+   有效。两个进程同时首次访问同一 PG/MySQL 库时，各自通过复查、各自执行
+   `ALTER TABLE ADD COLUMN`，第二个进程命中「duplicate column」失败。
+
+   **修法**：新增 `_add_column_idempotent` 辅助函数，包裹 `ALTER TABLE ADD COLUMN` 并
+   捕获 `OperationalError`，对「duplicate column」/「already exists」类错误视为成功
+   （列已存在，正是所需状态）。三处 ALTER 调用（`_ensure_org_task_columns` 循环 /
+   `_ensure_org_summary_execution_columns` / `ensure_org_static_tables` 的
+   `unclaimed_task_policy_json`）全部改用此函数。
+
+4. **P3 #5 — client/server 写锁分支与 ddl_lock 无测试覆盖**：新增 3 个测试：
+   `test_sqlite_write_holds_process_lock`（SQLite 上 `write()` 持进程锁）、
+   `test_client_server_write_skips_process_lock`（PG/MySQL 上 `write()` 跳过进程锁）、
+   `test_ddl_lock_serialises_concurrent_acquirers`（`ddl_lock()` 串行化并发获取者）。
+
 ## 遗留与后续
 
-- 三条修复的并发正确性依赖 PG/MySQL 的 `READ COMMITTED` 行为：A 提交后 B 才能看
+- 修复的并发正确性依赖 PG/MySQL 的 `READ COMMITTED` 行为：A 提交后 B 才能看
   到 A 的写入。若后端配置成 `READ UNCOMMITTED`（脏读）或更弱的隔离级别，行为不
   保证——但项目 DB 配置默认 `READ COMMITTED`，不在本次范围。
 - 未在真实 PostgreSQL / MySQL 后端按屏障构造跑过端到端复现。需 swarm 侧用
   PG/MySQL 后端复测，确认下游不再卡 BLOCKED、options 不再丢更新、组织表迁移不再
   报 duplicate column、`update_task` revision 不再丢增、`add_graph` 不再漏检环、
   `reset_task` / `approve_plan_task` 不再被并发 `cancel_task` 复活、广播水位不再
-  回退。
+  回退、`mutate_dependency_graph` 与 `complete_task` 不再死锁。
 - 排查报告确认的「无风险」入口（纯 INSERT / 纯 CAS / 已加 FOR UPDATE / 只读）未
   在本记录逐一列出，详见排查报告。
+- **P2 #2**（PG/MySQL 跳过进程写锁的「未闭合」指控）：91ad1d944 的核心改动就是
+  跳过进程写锁以解决 issue #115 的吞吐问题。经四轮系统排查，所有 read-modify-write
+  入口已覆盖（FOR UPDATE / CAS / ddl_lock / team 行锁）。`ddl_lock` 的进程级局限
+  通过 `_add_column_idempotent` 跨进程兜底。方向不退——退回进程写锁会重新引入
+  issue #115 的 30s 看门狗堆积。
