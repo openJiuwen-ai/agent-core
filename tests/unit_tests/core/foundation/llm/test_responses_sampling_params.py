@@ -403,3 +403,27 @@ async def test_fallback_without_the_options_does_not_retry_outside_the_scope(fie
         await transport.create_response(body=body, access_token="access-token")
 
     assert len(sent_bodies) == 1
+
+
+@pytest.mark.asyncio
+async def test_refused_top_p_inside_extra_body_is_retried_without_it():
+    """Like temperature, a refused top_p is also removed from ``extra_body``, and other extra fields are kept."""
+    sent_bodies: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        sent_bodies.append(body)
+        if "top_p" in body.get("extra_body", {}):
+            return httpx.Response(400, json=_TOP_P_ERROR)
+        return httpx.Response(200, content=_RESPONSES_SSE, headers={"content-type": "text/event-stream"})
+
+    transport = OpenAIAccountResponsesTransport(
+        transport=httpx.MockTransport(handler),
+        request_fallback=RequestParameterFallback("OpenAI", "OpenAI Responses", retry_without_top_p=True),
+    )
+    body = {**build_request_body(model="gpt-6.1-sol", messages="hi"), "extra_body": {"top_p": 0.9, "routing": "keep"}}
+
+    message = await transport.create_response(body=body, access_token="access-token")
+
+    assert message.content == "ok"
+    assert [sent.get("extra_body") for sent in sent_bodies] == [{"top_p": 0.9, "routing": "keep"}, {"routing": "keep"}]

@@ -106,8 +106,12 @@ class RequestParameterFallback:
     def apply_cached(self, params: dict[str, Any]) -> dict[str, Any]:
         if self._retry_without_stop and "stop" in params and self._model_key(params) in self._models_rejecting_stop:
             params = self._without_stop(params)
-        if self._retry_without_top_p and "top_p" in params and self._top_p_cache_key(params) in self._rejected_top_p:
-            params = self._without_top_p(params)
+        if (
+            self._retry_without_top_p
+            and self._has_field(params, "top_p")
+            and self._top_p_cache_key(params) in self._rejected_top_p
+        ):
+            params = self._without_field(params, "top_p")
         scoped = is_disabled_thinking_fallback_allowed()
         if scoped:
             model_key = self._model_key(params)
@@ -115,7 +119,7 @@ class RequestParameterFallback:
                 params = self._without_disabled_thinking_params(params)
         retry_temperature = scoped or self._retry_without_temperature
         if retry_temperature and self._temperature_cache_key(params) in self._rejected_temperatures:
-            params = self._without_temperature(params)
+            params = self._without_field(params, "temperature")
         return params
 
     async def call(
@@ -145,14 +149,16 @@ class RequestParameterFallback:
                     rejected_stop = True
                     rejected_option = "stop"
                 elif retry_temperature and self._rejects_temperature(exc):
-                    if self._exception_status_code(exc) != 400 or not self._has_temperature(request_params):
+                    if self._exception_status_code(exc) != 400 or not self._has_field(request_params, "temperature"):
                         raise exc
                     rejected_temperature = self._temperature_cache_key(request_params)
-                    request_params = self._without_temperature(request_params)
+                    request_params = self._without_field(request_params, "temperature")
                     rejected_option = "temperature"
-                elif self._retry_without_top_p and "top_p" in request_params and self._rejects_top_p(exc):
+                elif (
+                    self._retry_without_top_p and self._has_field(request_params, "top_p") and self._rejects_top_p(exc)
+                ):
                     rejected_top_p = self._top_p_cache_key(request_params)
-                    request_params = self._without_top_p(request_params)
+                    request_params = self._without_field(request_params, "top_p")
                     rejected_option = "top_p"
                 elif not scoped:
                     raise exc
@@ -189,12 +195,6 @@ class RequestParameterFallback:
     def _without_stop(params: Mapping[str, Any]) -> dict[str, Any]:
         cleaned = dict(params)
         cleaned.pop("stop", None)
-        return cleaned
-
-    @staticmethod
-    def _without_top_p(params: Mapping[str, Any]) -> dict[str, Any]:
-        cleaned = dict(params)
-        cleaned.pop("top_p", None)
         return cleaned
 
     @classmethod
@@ -246,18 +246,19 @@ class RequestParameterFallback:
         return any(marker in text for marker in _UNSUPPORTED_PARAMETER_MARKERS) and bool(pattern.search(text))
 
     @staticmethod
-    def _has_temperature(params: Mapping[str, Any]) -> bool:
+    def _has_field(params: Mapping[str, Any], name: str) -> bool:
         extra_body = params.get("extra_body")
-        return "temperature" in params or (isinstance(extra_body, Mapping) and "temperature" in extra_body)
+        return name in params or (isinstance(extra_body, Mapping) and name in extra_body)
 
     @staticmethod
-    def _without_temperature(params: Mapping[str, Any]) -> dict[str, Any]:
+    def _without_field(params: Mapping[str, Any], name: str) -> dict[str, Any]:
+        """Remove ``name`` from the request and from ``extra_body``, which the SDK merges into the payload."""
         cleaned = dict(params)
-        cleaned.pop("temperature", None)
+        cleaned.pop(name, None)
         extra_body = cleaned.get("extra_body")
-        if isinstance(extra_body, Mapping) and "temperature" in extra_body:
+        if isinstance(extra_body, Mapping) and name in extra_body:
             cleaned_extra = dict(extra_body)
-            cleaned_extra.pop("temperature")
+            cleaned_extra.pop(name)
             if cleaned_extra:
                 cleaned["extra_body"] = cleaned_extra
             else:
@@ -266,7 +267,7 @@ class RequestParameterFallback:
 
     @classmethod
     def _temperature_cache_key(cls, params: Mapping[str, Any]) -> Optional[tuple[str, str]]:
-        if not cls._has_temperature(params):
+        if not cls._has_field(params, "temperature"):
             return None
         extra_body = params.get("extra_body")
         # SDK extra_body keys take precedence in the outgoing JSON payload.
