@@ -32,6 +32,7 @@ from typing import (
     Tuple,
     Union,
 )
+import weakref
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -53,6 +54,13 @@ from openjiuwen.core.foundation.llm.reasoning import (
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.utils.request_parameter_fallback import RequestParameterFallback
+from openjiuwen.core.foundation.llm.utils.shared_client_lifecycle import (
+    CacheEntryLoopMap,
+    LoopFinalizerMap,
+    aclose_all_shared_clients,
+    aclose_targeted_shared_clients,
+    get_or_build_shared_async_client,
+)
 from openjiuwen.core.foundation.llm.schema import (
     AudioGenerationResponse,
     ImageGenerationResponse,
@@ -628,6 +636,8 @@ class AnthropicModelClient(BaseModelClient):
     # connections. This cache is independent from OpenAIModelClient's (different
     # SDK client type).
     _client_cache: Dict[Tuple, "anthropic.AsyncAnthropic"] = {}
+    _client_cache_loops: CacheEntryLoopMap = {}
+    _loop_finalizers: LoopFinalizerMap = weakref.WeakKeyDictionary()
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
@@ -720,22 +730,24 @@ class AnthropicModelClient(BaseModelClient):
         if not self._use_shared_client():
             return self._build_async_anthropic_client(timeout=timeout)
 
-        # Shared path: build once per tenant/connection identity and reuse.
-        # Building is fully synchronous (no ``await``), so under a single-threaded
-        # asyncio event loop the get/build/set below is atomic and needs no lock.
-        key = self._client_cache_key()
-        client = self._client_cache.get(key)
-        if client is None:
-            client = self._build_async_anthropic_client()
-            self._client_cache[key] = client
-            llm_logger.info(
+        # Shared path: build once per tenant/connection identity on the active
+        # event loop and reuse. Building is synchronous (no ``await``), so under
+        # a single-threaded asyncio event loop the lookup/build/set is atomic.
+        return get_or_build_shared_async_client(
+            key=self._client_cache_key(),
+            client_cache=self._client_cache,
+            cache_loops=self._client_cache_loops,
+            loop_finalizers=self._loop_finalizers,
+            build_client=self._build_async_anthropic_client,
+            on_created=lambda: llm_logger.info(
                 "Created shared long-lived AsyncAnthropic client.",
                 event_type=LogEventType.LLM_CALL_START,
                 timeout=self.model_client_config.timeout,
                 max_retries=0,
                 metadata={"base_url": self._normalize_base_url(self.model_client_config.api_base)},
-            )
-        return client
+            ),
+            client_label="AsyncAnthropic client",
+        )
 
     def _build_async_anthropic_client(self, timeout: Optional[float] = None) -> "anthropic.AsyncAnthropic":
         """Build a fresh ``AsyncAnthropic`` client with its own httpx connection pool."""
@@ -786,14 +798,11 @@ class AnthropicModelClient(BaseModelClient):
         Intended for agent/process teardown only. NEVER call this on the request
         hot path: it tears down the shared client other in-flight calls rely on.
         """
-        clients = list(cls._client_cache.values())
-        cls._client_cache.clear()
-
-        for client in clients:
-            try:
-                await client.close()
-            except Exception as e:  # pragma: no cover - defensive cleanup
-                logger.warning(f"Error closing cached AsyncAnthropic client: {e}")
+        await aclose_all_shared_clients(
+            client_cache=cls._client_cache,
+            cache_loops=cls._client_cache_loops,
+            client_label="AsyncAnthropic client",
+        )
 
     @classmethod
     async def aclose_connections(cls, configs: Iterable[ModelClientConfig]) -> None:
@@ -811,18 +820,12 @@ class AnthropicModelClient(BaseModelClient):
         may retry it when no user-visible output has been written.
         """
         keys = {cls.connection_key(cfg) for cfg in configs}
-        closed = 0
-        for key in keys:
-            client = cls._client_cache.pop(key, None)
-            if client is None:
-                continue
-            try:
-                await client.close()
-                closed += 1
-            except Exception as e:
-                logger.warning(f"Error closing AsyncAnthropic client: {e}")
-        if closed:
-            logger.info(f"Closed {closed} AsyncAnthropic client(s) for removed/updated model config")
+        await aclose_targeted_shared_clients(
+            keys=keys,
+            client_cache=cls._client_cache,
+            cache_loops=cls._client_cache_loops,
+            client_label="AsyncAnthropic client",
+        )
 
     def _build_anthropic_params(
             self,
