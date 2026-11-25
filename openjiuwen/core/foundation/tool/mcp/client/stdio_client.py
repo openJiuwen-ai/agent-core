@@ -38,7 +38,10 @@ class StdioClient(McpClient):
         """Establish Stdio connection to the tool server"""
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
-        
+
+        # A previous failed attempt may have closed the stack. A retry must
+        # still clean up its newly opened transport if the handshake fails.
+        self._is_disconnected = False
         try:
             # server_path should be StdioServerParameters for stdio client
             valid_handlers = {"strict", "ignore", "replace"}
@@ -59,8 +62,7 @@ class StdioClient(McpClient):
             # An stdio wrapper may wait on an interactive flow (e.g. OAuth) and
             # never answer initialize(); bound it so the caller cannot hang.
             actual_timeout = self._resolve_timeout(timeout)
-            async with asyncio.timeout(actual_timeout):
-                await self._session.initialize()
+            await asyncio.wait_for(self._session.initialize(), timeout=actual_timeout)
             self._is_disconnected = False
             logger.info("Stdio client connected successfully")
             return True
@@ -112,8 +114,7 @@ class StdioClient(McpClient):
 
         try:
             actual_timeout = self._resolve_timeout(timeout)
-            async with asyncio.timeout(actual_timeout):
-                tools_response = await self._session.list_tools()
+            tools_response = await asyncio.wait_for(self._session.list_tools(), timeout=actual_timeout)
             tools_list = [
                 McpToolCard(
                     name=tool.name,

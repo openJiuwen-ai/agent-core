@@ -76,6 +76,18 @@ class TestStdioClientTimeouts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(disconnect.await_count, 1)
         self.assertIsInstance(client._last_connect_error, TimeoutError)
 
+    async def test_retry_timeout_closes_new_session(self):
+        client = StdioClient(_config())
+        with (
+            patch.dict(sys.modules, _fake_mcp_modules(_HangingSession)),
+            patch.object(client, "_resolve_timeout", lambda timeout: 0.01),
+        ):
+            self.assertFalse(await client.connect())
+            self.assertFalse(await client.connect())
+        self.assertTrue(client._is_disconnected)
+        self.assertIsNone(client._session)
+        self.assertIsNone(client._client)
+
     async def test_cancel_during_connect_disconnects_and_reraises(self):
         client = StdioClient(_config())
         disconnect = AsyncMock(wraps=client.disconnect)
