@@ -489,7 +489,7 @@ class SkillUseRail(DeepAgentRail):
         update_at_snapshot = dict(self._skill_update_at)
 
         ordered_keys: List[str] = []
-        # Newly loaded skills are staged and written to the cache only once
+        # The next skill cache is staged and published only once
         # the whole scan is known to be the live one: a switch mid-scan
         # leaves no partially mixed cache behind.
         staged_skills: Dict[str, Skill] = {}
@@ -499,10 +499,10 @@ class SkillUseRail(DeepAgentRail):
             key = str(item.resolve())
             ordered_keys.append(key)
 
-            cached_skill = cache_snapshot.get(key)
+            skill = cache_snapshot.get(key)
             cached_update_at = update_at_snapshot.get(key)
 
-            if cached_skill is None or cached_update_at != update_at:
+            if skill is None or cached_update_at != update_at:
                 lang_token = _SCAN_LANGUAGE.set(language)
                 try:
                     skill = await self._load_skill(item, update_at)
@@ -510,19 +510,16 @@ class SkillUseRail(DeepAgentRail):
                     _SCAN_LANGUAGE.reset(lang_token)
                 if not self._scan_still_current(scan, language):
                     return False
-                staged_skills[key] = skill
-                staged_update_at[key] = update_at
+            staged_skills[key] = skill
+            staged_update_at[key] = update_at
 
         if not self._scan_still_current(scan, language):
             return False
-        merged_skills = {**cache_snapshot, **staged_skills}
-        merged_update_at = {**update_at_snapshot, **staged_update_at}
-        committed_keys = [key for key in ordered_keys if key in merged_skills]
         self._skill_cache.clear()
-        self._skill_cache.update((key, merged_skills[key]) for key in committed_keys)
+        self._skill_cache.update(staged_skills)
         self._skill_update_at.clear()
-        self._skill_update_at.update((key, merged_update_at[key]) for key in committed_keys)
-        self._skill_order = committed_keys
+        self._skill_update_at.update(staged_update_at)
+        self._skill_order = ordered_keys
         self._committed_snapshot_signature = discovered_snapshot
         return True
 
