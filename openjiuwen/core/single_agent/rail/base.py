@@ -1025,6 +1025,9 @@ class AgentCallbackContext:
         """Async context manager for before/after event pairs.
 
         Fires ``before`` on entry, ``after`` in finally block.
+        Once ``before`` has started, ``after`` fires however the
+        block ends, including when a ``before`` callback aborts;
+        the abort then propagates as usual.
         Automatically saves and restores ``self.inputs`` so
         that inner steps (model_call, tool_call) can freely
         overwrite it without affecting the after event.
@@ -1042,20 +1045,16 @@ class AgentCallbackContext:
         if is_invoke_scope:
             self._run_scope_depth += 1
         saved_inputs = self.inputs
-        try:
-            await self.fire(before)
-        except BaseException as entry_exc:
-            # The scope opened above must close even when the BEFORE
-            # event itself fails (a guardrail can abort the invoke there); the
-            # after event is not fired in that case, matching the old shape.
-            if is_invoke_scope:
-                self._publish_invoke_reason(entry_exc)
-                self._run_scope_depth -= 1
-                restore_termination_scope(scope_previous)
-            raise
         exc_to_raise = None
         crossing_exc: Optional[BaseException] = None
         try:
+            # The BEFORE event fires inside this try: when it fails (a
+            # guardrail can abort the invoke there), the block body is skipped,
+            # and the handlers below treat its exception as one that crossed
+            # the boundary: ``self.exception`` is set, the reason is published,
+            # the after event fires, the scope closes and the exception is
+            # re-raised. A rail whose before callback ran sees the end of it.
+            await self.fire(before)
             yield self
         except Exception as exc:
             exc_to_raise = exc
