@@ -4,14 +4,18 @@ import asyncio
 from contextlib import AsyncExitStack
 from typing import Any, List, Optional
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.tool import McpToolCard
+from openjiuwen.core.foundation.tool import McpTimeoutError, McpToolCard
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT, preserve_mcp_tool_result_status
+from openjiuwen.core.foundation.tool.mcp.client.mcp_client import coerce_mcp_connect_error
 from openjiuwen.core.foundation.tool.mcp.client.stdio_client import StdioClient
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
     browser_agent_log_info,
     browser_agent_log_warning,
 )
+
 from ..utils.parsing import sanitize_json_schema
 from .logging_utils import summarize_tool_arguments_for_log
 
@@ -35,7 +39,7 @@ class BrowserMoveStdioClient(StdioClient):
         self._owner_ready: asyncio.Event = asyncio.Event()
         self._owner_close: asyncio.Event = asyncio.Event()
         self._connect_result: Optional[bool] = None
-        self._connect_exception: Optional[Exception] = None
+        self._connect_exception: Optional[BaseException] = None
         # Strong reference to an owner task that did not finish within
         # _force_close's cancel grace period, kept so the task object and
         # its exit stack are not GC'd while aclose() is still pending.
@@ -174,16 +178,26 @@ class BrowserMoveStdioClient(StdioClient):
                 await self._owner_ready.wait()
             else:
                 await asyncio.wait_for(self._owner_ready.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            logger.error(f"Stdio connection timeout")
-            await self._force_close()
+            if self._connect_exception is not None:
+                raise self._connect_exception
+            return self._connect_result is True
+        except BaseException as error:
+            original_error = error
+            error = coerce_mcp_connect_error(
+                error,
+                server_name=self._name,
+                timeout=self._resolve_timeout(timeout, default_s=30.0),
+            )
+            self._last_connect_error = error
+            try:
+                await self._force_close()
+            except BaseException as cleanup_error:
+                logger.debug("Stdio connect cleanup failed: %r", cleanup_error)
+            if isinstance(error, McpTimeoutError):
+                raise error from original_error
+            if not isinstance(error, Exception):
+                raise
             return False
-
-        if self._connect_exception is not None:
-            await self._force_close()
-            return False
-
-        return self._connect_result is True
 
     async def disconnect(self, *, timeout: float = NO_TIMEOUT) -> bool:
         """Close Stdio connection."""
@@ -202,11 +216,11 @@ class BrowserMoveStdioClient(StdioClient):
             else:
                 await asyncio.wait_for(self._owner_task, timeout=timeout)
         except asyncio.TimeoutError:
-            logger.error(f"Stdio disconnect timeout")
+            logger.error("Stdio disconnect timeout")
             await self._force_close()
             return False
         except asyncio.CancelledError:
-            logger.error(f"Stdio disconnect cancelled")
+            logger.error("Stdio disconnect cancelled")
             await self._force_close()
             raise
         except Exception as e:
@@ -217,48 +231,55 @@ class BrowserMoveStdioClient(StdioClient):
         return self._is_disconnected
 
     async def _force_close(self):
-        leaked_owner_task: Optional[asyncio.Task] = None
-        if self._owner_task and not self._owner_task.done():
-            self._owner_close.set()
-            try:
-                await asyncio.wait_for(self._owner_task, timeout=5.0)
-            except asyncio.TimeoutError:
-                self._owner_task.cancel()
+        owner_task = self._owner_task
+        caller_cancelled = False
+        try:
+            if owner_task and not owner_task.done():
+                self._owner_close.set()
                 try:
-                    await asyncio.wait_for(self._owner_task, timeout=2.0)
+                    await asyncio.wait_for(asyncio.shield(owner_task), timeout=5.0)
+                except asyncio.TimeoutError:
+                    owner_task.cancel()
+                    try:
+                        await asyncio.wait_for(owner_task, timeout=2.0)
+                    except asyncio.CancelledError:
+                        logger.warning(
+                            "Stdio client owner task was cancelled during graceful close"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Stdio client owner task close raised exception: %r", e
+                        )
                 except asyncio.CancelledError:
-                    logger.warning(
-                        "Stdio client owner task was cancelled during graceful close"
+                    current = asyncio.current_task()
+                    caller_cancelled = (
+                        current is None or current.cancelling() > 0
                     )
-                except Exception as e:
-                    logger.warning(
-                        "Stdio client owner task close raised exception: %r", e
-                    )
-                # Owner task did not finish within cancel grace period — it may
-                # still be stuck inside _exit_stack.aclose() (e.g., subprocess
-                # stdin closure blocked). Keep a strong reference so the task
-                # object is not GC'd while we clear our handle, and surface a
-                # warning so operators can detect subprocess pipe leaks.
-                if not self._owner_task.done():
-                    leaked_owner_task = self._owner_task
-                    logger.warning(
-                        "Stdio client owner task did not terminate after cancel; "
-                        "subprocess pipe may leak. task=%r",
-                        leaked_owner_task,
-                    )
-            except (asyncio.CancelledError, Exception):
-                pass
-        self._owner_task = None
-        self._session = None
-        self._client = None
-        self._read = None
-        self._write = None
-        # Reset the exit stack so a subsequent connect() starts fresh; the
-        # leaked owner task (if any) still holds the old stack and will run
-        # its own aclose() independently.
-        self._exit_stack = AsyncExitStack()
-        self._leaked_owner_task = leaked_owner_task
-        self._is_disconnected = True
+                    owner_task.cancel()
+                    logger.info("Stdio client owner task cancelled during graceful close")
+                except Exception:
+                    logger.debug("Stdio client owner task close failed", exc_info=True)
+        finally:
+            if owner_task is None or owner_task.done():
+                self._owner_task = None
+                self._session = None
+                self._client = None
+                self._read = None
+                self._write = None
+                self._exit_stack = AsyncExitStack()
+                self._leaked_owner_task = None
+                self._is_disconnected = True
+            else:
+                # A cancelled or stuck owner still owns the old transport and
+                # will reset these fields in _run_owner's finally block. Never
+                # let a replacement connection race that cleanup.
+                self._leaked_owner_task = owner_task
+                logger.warning(
+                    "Stdio client owner task is still closing; reconnect is blocked. task=%r",
+                    owner_task,
+                )
+        if caller_cancelled:
+            raise asyncio.CancelledError
 
     async def list_tools(self, *, timeout: float = NO_TIMEOUT) -> List[Any]:
         """List available tools via Stdio, with auto-reconnect and timeout."""
@@ -294,8 +315,13 @@ class BrowserMoveStdioClient(StdioClient):
                     if connected:
                         continue
                 logger.error(f"Stdio list_tools timed out after {effective_timeout:.1f}s")
-                raise RuntimeError(
-                    f"Stdio list_tools timed out after {effective_timeout:.1f}s"
+                raise build_error(
+                    StatusCode.TOOL_MCP_EXECUTION_TIMEOUT,
+                    cause=e,
+                    operation="list_tools",
+                    server_name=self._name,
+                    timeout=effective_timeout,
+                    reason=f"Stdio list_tools timed out after {effective_timeout:.1f}s",
                 ) from e
             except Exception as e:
                 if attempt == 0 and self._is_retryable_transport_error(e):
@@ -372,9 +398,16 @@ class BrowserMoveStdioClient(StdioClient):
                 logger.error(
                     f"Tool call timed out via Stdio: tool='{tool_name}', timeout={effective_timeout:.1f}s"
                 )
-                raise RuntimeError(
-                    f"Stdio tool call timed out for '{tool_name}' after {effective_timeout:.1f}s; "
-                    "execution may have occurred, reconcile state before repeating an action"
+                raise build_error(
+                    StatusCode.TOOL_MCP_EXECUTION_TIMEOUT,
+                    cause=e,
+                    operation="call_tool",
+                    server_name=self._name,
+                    timeout=effective_timeout,
+                    reason=(
+                        f"Stdio tool call timed out for '{tool_name}' after {effective_timeout:.1f}s; "
+                        "execution may have occurred, reconcile state before repeating an action"
+                    ),
                 ) from e
             except Exception as e:
                 if attempt == 0 and retry_safe and self._is_retryable_transport_error(e):

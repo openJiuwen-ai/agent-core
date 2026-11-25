@@ -906,6 +906,12 @@ class StatusCode(Enum):
     # 3. mcp tool 182300 - 182399
     TOOL_MCP_CLIENT_NOT_SUPPORTED = (182300, "mcp client is not supported, card={card}")
     TOOL_MCP_EXECUTION_ERROR = (182301, "execute {method} failed, error='{reason}', card={card}")
+    TOOL_MCP_EXECUTION_TIMEOUT = (
+        182302,
+        "mcp operation '{operation}' on server '{server_name}' timed out after {timeout}s, error='{reason}'")
+    TOOL_MCP_CONNECTION_ERROR = (
+        182303,
+        "mcp operation '{operation}' on server '{server_name}' failed, error='{reason}'")
 
     # 4. openapi tool 182400 - 182499
     TOOL_OPENAPI_CLIENT_EXECUTION_ERROR = (182400, "openapi client execute error, error='{reason}'")

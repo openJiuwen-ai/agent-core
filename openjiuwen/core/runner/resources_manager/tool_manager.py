@@ -8,7 +8,11 @@ from typing import Any, List, Optional
 
 from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import BaseError, build_error
+from openjiuwen.core.common.exception.errors import (
+    BaseError,
+    McpConnectionError,
+    build_error,
+)
 from openjiuwen.core.common.logging import runner_logger as logger
 from openjiuwen.core.foundation.tool import (
     McpClient,
@@ -148,10 +152,6 @@ class ToolMgr:
                 # reaches the frontend instead of a silent "task cancelled".
                 if isinstance(e, KeyboardInterrupt):
                     raise
-                # ``connect()`` False path already raised CONNECTION_ERROR above;
-                # let it through to keep its status/reason.
-                if isinstance(e, BaseError) and e.status is StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR:
-                    raise
                 if connected:
                     try:
                         await client.disconnect()
@@ -160,6 +160,17 @@ class ToolMgr:
                             "add_tool_server cleanup failed: %s, server_id=%s",
                             disconnect_exc, server_config.server_id,
                         )
+                if isinstance(e, McpConnectionError):
+                    raise build_error(
+                        StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR,
+                        cause=e,
+                        server_config=server_config,
+                        reason=f"{type(e).__name__}: {e}",
+                    ) from e
+                # ``connect()`` False path already raised CONNECTION_ERROR above;
+                # let it through to keep its status/reason.
+                if isinstance(e, BaseError) and e.status is StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR:
+                    raise
                 if isinstance(e, Exception) and not isinstance(e, asyncio.CancelledError):
                     cause = e
                 elif isinstance(e, asyncio.CancelledError):

@@ -28,6 +28,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT, McpServerConfig
+from openjiuwen.core.foundation.tool.mcp.errors import McpTimeoutError
 from openjiuwen.core.foundation.tool.mcp.client.sse_client import SseClient
 from openjiuwen.core.runner import Runner
 
@@ -161,16 +162,15 @@ class TestSseDoLifecycleIntegration:
             state["patcher"].stop()
 
     @pytest.mark.asyncio
-    async def test_do_connect_initialize_hung_is_bounded_and_returns_false(self) -> None:
-        """S5/R2: A hung session.initialize() must be bounded by the
-        defensive wait_for and surface as connect() == False after cleanup,
-        not hang forever."""
+    async def test_do_connect_initialize_hung_is_bounded_and_raises_timeout(self) -> None:
+        """S5/R2: A hung session.initialize() surfaces a typed timeout after
+        cleanup instead of hanging forever."""
         state = _install_fake_mcp(initialize_delay=10.0)
         try:
             client = _make_client()
             with patch.object(Runner.callback_framework, "trigger", AsyncMock(return_value=None)):
-                connected = await client.connect(timeout=0.05)
-            assert connected is False
+                with pytest.raises(McpTimeoutError):
+                    await client.connect(timeout=0.05)
             # Failed connect must not leave a live session behind.
             assert client._session is None
             await _stop(client)

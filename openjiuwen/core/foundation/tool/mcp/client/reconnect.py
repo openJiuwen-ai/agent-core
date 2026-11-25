@@ -17,8 +17,9 @@ import functools
 import os
 import random
 import time
-from typing import Any
+from typing import Any, Generator
 
+from openjiuwen.core.common.exception.errors import McpConnectionError
 from openjiuwen.core.common.logging import logger
 
 _SESSION_ERROR_MARKERS = (
@@ -57,8 +58,8 @@ _RETRYABLE_MARKERS: tuple[tuple[str, bool], ...] = tuple(
 # 可重试的异常类型集合（优先于 markers 判定，更稳健）。
 _RETRYABLE_TYPES: tuple[type, ...] = ()
 try:
-    from anyio import ClosedResourceError as _AnyioClosedResourceError  # type: ignore
     from anyio import BrokenResourceError as _AnyioBrokenResourceError  # type: ignore
+    from anyio import ClosedResourceError as _AnyioClosedResourceError  # type: ignore
 
     _RETRYABLE_TYPES += (_AnyioClosedResourceError, _AnyioBrokenResourceError)
 except Exception as _imp_exc:
@@ -92,7 +93,15 @@ def _is_retryable_mcp_error(error: Exception) -> bool:
     )
 
 
-def is_retryable_transport_error(error: Exception) -> bool:
+def _iter_exception_leaves(error: BaseException) -> Generator[BaseException, None, None]:
+    if isinstance(error, BaseExceptionGroup):
+        for child in error.exceptions:
+            yield from _iter_exception_leaves(child)
+    else:
+        yield error
+
+
+def is_retryable_transport_error(error: BaseException) -> bool:
     """Return True if ``error`` looks like a retryable transport-layer failure.
 
     优先按异常类型判断（更稳健），再退回到字符串 markers 匹配（跨版本兼容）。
@@ -100,6 +109,19 @@ def is_retryable_transport_error(error: Exception) -> bool:
     已小写化）做子串包含。每条 marker 自带"是否对 RuntimeError 不适用"标记，
     避免我们自己的未连接守卫被误判为可重试传输错误。
     """
+    if isinstance(error, McpConnectionError):
+        cause = error.cause
+        return (
+            not isinstance(error, TimeoutError)
+            and isinstance(cause, BaseException)
+            and is_retryable_transport_error(cause)
+        )
+    if isinstance(error, BaseExceptionGroup):
+        return any(
+            is_retryable_transport_error(item)
+            for item in _iter_exception_leaves(error)
+            if not isinstance(item, asyncio.CancelledError)
+        )
     if _McpError is not None and isinstance(error, _McpError):
         return _is_retryable_mcp_error(error)
     try:
@@ -117,6 +139,8 @@ def is_retryable_transport_error(error: Exception) -> bool:
 
 
 def _is_not_connected_guard(error: Exception) -> bool:
+    if isinstance(error, McpConnectionError) and not isinstance(error, TimeoutError):
+        return _is_not_connected_guard(error.cause) if isinstance(error.cause, Exception) else False
     return isinstance(error, RuntimeError) and "not connected" in str(error).lower()
 
 

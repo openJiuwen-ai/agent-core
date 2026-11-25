@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.foundation.tool import McpTimeoutError, ToolCard
 from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.rails.subagent.subagent_rail import SubagentRail
 from openjiuwen.harness.tools.browser_move.clients.stdio_client import BrowserMoveStdioClient
@@ -317,9 +317,141 @@ async def test_optional_stale_close_does_not_abort_following_read():
 
 
 @pytest.mark.asyncio
+async def test_browser_stdio_connect_timeout_is_typed_and_cleaned_up(monkeypatch):
+    client = BrowserMoveStdioClient.__new__(BrowserMoveStdioClient)
+    client._params = {}
+    client._name = "browser-test"
+    client._owner_task = None
+    client._owner_ready = asyncio.Event()
+    client._owner_close = asyncio.Event()
+    client._connect_result = None
+    client._connect_exception = None
+    client._last_connect_error = None
+    client._force_close = AsyncMock()
+
+    async def hanging_owner():
+        await asyncio.Event().wait()
+
+    client._run_owner = hanging_owner
+    with pytest.raises(McpTimeoutError) as exc_info:
+        await client.connect(timeout=0.05)
+    assert exc_info.value.params["operation"] == "connect"
+    assert client._last_connect_error is exc_info.value
+    client._force_close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_browser_stdio_connect_cleans_up_and_preserves_cancellation():
+    client = BrowserMoveStdioClient.__new__(BrowserMoveStdioClient)
+    client._params = {}
+    client._name = "browser-test"
+    client._owner_task = None
+    client._owner_ready = asyncio.Event()
+    client._owner_close = asyncio.Event()
+    client._connect_result = None
+    client._connect_exception = None
+    client._last_connect_error = None
+    client._force_close = AsyncMock()
+
+    async def hanging_owner():
+        await asyncio.Event().wait()
+
+    client._run_owner = hanging_owner
+    task = asyncio.create_task(client.connect(timeout=30.0))
+    await asyncio.sleep(0.02)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    client._force_close.assert_awaited_once()
+    assert not isinstance(client._last_connect_error, McpTimeoutError)
+
+
+@pytest.mark.asyncio
+async def test_browser_force_close_finishes_reset_after_owner_cancellation():
+    client = BrowserMoveStdioClient.__new__(BrowserMoveStdioClient)
+    client._owner_close = asyncio.Event()
+    client._session = object()
+    client._client = object()
+    client._read = object()
+    client._write = object()
+    client._exit_stack = object()
+    client._is_disconnected = False
+    client._leaked_owner_task = None
+
+    async def cancelled_owner():
+        raise asyncio.CancelledError()
+
+    client._owner_task = asyncio.create_task(cancelled_owner())
+    await asyncio.sleep(0)
+
+    await client._force_close()
+
+    assert client._owner_task is None
+    assert client._session is None
+    assert client._client is None
+    assert client._is_disconnected is True
+
+
+@pytest.mark.asyncio
+async def test_browser_force_close_preserves_caller_cancellation_and_blocks_reconnect():
+    client = BrowserMoveStdioClient.__new__(BrowserMoveStdioClient)
+    client._owner_close = asyncio.Event()
+    client._session = object()
+    client._client = object()
+    client._read = object()
+    client._write = object()
+    client._exit_stack = object()
+    client._is_disconnected = False
+    client._leaked_owner_task = None
+    owner_started = asyncio.Event()
+    owner_cleanup = asyncio.Event()
+
+    async def pending_owner():
+        owner_started.set()
+        await asyncio.Event().wait()
+
+    client._owner_task = asyncio.create_task(pending_owner())
+    task = asyncio.create_task(client._force_close())
+    await asyncio.wait_for(owner_started.wait(), timeout=1.0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert client._owner_task is not None
+    assert client._is_disconnected is False
+    assert await client.connect(timeout=0.1) is False
+    owner_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(client._owner_task, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_browser_force_close_resets_after_cancelled_owner_finishes():
+    client = BrowserMoveStdioClient.__new__(BrowserMoveStdioClient)
+    client._name = "browser-test"
+    client._params = {"timeout_s": 300}
+    started = asyncio.Event()
+
+    async def hanging_call(*args, **kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    client._session = SimpleNamespace(call_tool=hanging_call)
+    client._reconnect = AsyncMock(return_value=True)
+    task = asyncio.create_task(client.call_tool("browser_click", {}))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    client._reconnect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["browser_mouse_wheel", "browser_click", "browser_run_code_unsafe"])
 async def test_timed_out_actions_are_not_automatically_replayed(monkeypatch, action):
     client = BrowserMoveStdioClient.__new__(BrowserMoveStdioClient)
+    client._name = "browser-test"
     client._params = {"timeout_s": 300}
     client._session = SimpleNamespace(call_tool=AsyncMock(side_effect=asyncio.TimeoutError))
     client._reconnect = AsyncMock(return_value=True)
@@ -331,8 +463,10 @@ async def test_timed_out_actions_are_not_automatically_replayed(monkeypatch, act
         return await original(task, timeout)
 
     monkeypatch.setattr(asyncio, "wait_for", wait_for)
-    with pytest.raises(RuntimeError, match="execution may have occurred"):
+    with pytest.raises(McpTimeoutError) as exc_info:
         await client.call_tool(action, {})
+    assert "execution may have occurred" in str(exc_info.value)
+    assert isinstance(exc_info.value.cause, TimeoutError)
     client._session.call_tool.assert_awaited_once()
     client._reconnect.assert_not_awaited()
     assert timeouts == ([15.0] if action == "browser_mouse_wheel" else [300.0])

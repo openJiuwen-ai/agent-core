@@ -22,13 +22,17 @@ generated: true
 | [agent_teams/memory](#module-agent_teams-memory) |
 | [agent_teams/observability](#module-agent_teams-observability) |
 | [agent_teams/workflow](#module-agent_teams-workflow) |
+| [core](#module-core) |
 | [core.runner.resources_manager](#module-core-runner-resources_manager) |
 | [core.session.tracer](#module-core-session-tracer) |
+| [core/common/exception](#module-core-common-exception) |
 | [core/context_engine](#module-core-context_engine) |
 | [core/controller](#module-core-controller) |
 | [core/foundation/llm](#module-core-foundation-llm) |
 | [core/foundation/llm/model_clients](#module-core-foundation-llm-model_clients) |
+| [core/foundation/tool/mcp](#module-core-foundation-tool-mcp) |
 | [core/runner/drunner/dmessage_queue](#module-core-runner-drunner-dmessage_queue) |
+| [core/runner/resources_manager](#module-core-runner-resources_manager) |
 | [core/session](#module-core-session) |
 | [core/session/tracer](#module-core-session-tracer) |
 | [core/single_agent](#module-core-single_agent) |
@@ -356,6 +360,14 @@ generated: true
 | [SDD-0031](designs/proposals/SDD-0031-teammate-swarmflow-orchestration/design.md) | D | 集群模式teammate支持swarmflow工具 | @xiajing | — |
 | [B_20261102_1120_avatar-child-session-trace-root](bugfix/agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
 
+<a id="module-core"></a>
+
+## core
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [D-20261124-0140-mcp-timeout-errors](designs/active/D-20261124-0140-mcp-timeout-errors/design.md) | D | MCP 连接与调用超时异常标准化 | yingchen03 | — |
+
 <a id="module-core-runner-resources_manager"></a>
 
 ## core.runner.resources_manager
@@ -371,6 +383,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [F_20261105_1405_otel-decorator-llm-telemetry](features/F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
+
+<a id="module-core-common-exception"></a>
+
+## core/common/exception
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261124_1230_mcp-timeout-and-connection-errors](bugfix/openjiuwen/core/B_20261124_1230_mcp-timeout-and-connection-errors.md) | B | MCP 连接与调用超时异常标准化修复 | yingchen03 | [D-20261124-0140-mcp-timeout-errors](designs/active/D-20261124-0140-mcp-timeout-errors/design.md) |
 
 <a id="module-core-context_engine"></a>
 
@@ -414,6 +434,14 @@ generated: true
 |---|---|---|---|---|
 | [B_20261117_1727_anthropic-output-limit-errors](bugfix/openjiuwen/core/B_20261117_1727_anthropic-output-limit-errors.md) | B | 模型输出上限截断可见错误修复 | lizhiyuan | 无独立 D：用户在本轮会话确认的 Anthropic 输出上限错误处理范围，未形成独立设计文档。 |
 
+<a id="module-core-foundation-tool-mcp"></a>
+
+## core/foundation/tool/mcp
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261124_1230_mcp-timeout-and-connection-errors](bugfix/openjiuwen/core/B_20261124_1230_mcp-timeout-and-connection-errors.md) | B | MCP 连接与调用超时异常标准化修复 | yingchen03 | [D-20261124-0140-mcp-timeout-errors](designs/active/D-20261124-0140-mcp-timeout-errors/design.md) |
+
 <a id="module-core-runner-drunner-dmessage_queue"></a>
 
 ## core/runner/drunner/dmessage_queue
@@ -422,6 +450,14 @@ generated: true
 |---|---|---|---|---|
 | [B_20261103_1050_grandocean-review-feedback](bugfix/core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
 | [S_01_runtime-data-compatibility](specs/core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | — |
+
+<a id="module-core-runner-resources_manager"></a>
+
+## core/runner/resources_manager
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261124_1230_mcp-timeout-and-connection-errors](bugfix/openjiuwen/core/B_20261124_1230_mcp-timeout-and-connection-errors.md) | B | MCP 连接与调用超时异常标准化修复 | yingchen03 | [D-20261124-0140-mcp-timeout-errors](designs/active/D-20261124-0140-mcp-timeout-errors/design.md) |
 
 <a id="module-core-session"></a>
 
@@ -516,6 +552,7 @@ generated: true
 |---|---|---|---|---|
 | [D-20261110-1903-team-goal-mode](designs/active/D-20261110-1903-team-goal-mode/design.md) | D | Team Leader 与成员 Goal 模式设计方案 | alan_cheng | — |
 | [D-20261112-1120-goal-assessment-isolation](designs/active/D-20261112-1120-goal-assessment-isolation/design.md) | D | Goal 独立评估的轨迹与执行上下文隔离 | alan_cheng | — |
+| [D-20261124-0140-mcp-timeout-errors](designs/active/D-20261124-0140-mcp-timeout-errors/design.md) | D | MCP 连接与调用超时异常标准化 | yingchen03 | — |
 | [SDD-0006](designs/archive/SDD-0006-native-harness-async-tool-control-and-spill/design.md) | D | 原生 Harness 异步工具管控框架与磁盘溢写 | @alan_cheng | — |
 | [SDD-0022](designs/proposals/SDD-0022-trajectory-observability-framework/design.md) | D | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | @alan_cheng | — |
 | [SDD-0024](designs/proposals/SDD-0024-trajectory-projection-evolution-rl/design.md) | D | 轨迹投影：把 OTel 标准轨迹投影为自演进与在线 AgentRL 输入 | @alan_cheng | — |
@@ -643,6 +680,7 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [F_20261029_1852_optional-handoff-and-resume](features/F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
+| [B_20261124_1230_mcp-timeout-and-connection-errors](bugfix/openjiuwen/core/B_20261124_1230_mcp-timeout-and-connection-errors.md) | B | MCP 连接与调用超时异常标准化修复 | yingchen03 | [D-20261124-0140-mcp-timeout-errors](designs/active/D-20261124-0140-mcp-timeout-errors/design.md) |
 
 <a id="module-harness-tools-browser_move-decision"></a>
 

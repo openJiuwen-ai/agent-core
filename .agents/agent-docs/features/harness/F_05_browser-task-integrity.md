@@ -25,7 +25,7 @@ the complete tool and lifecycle reference.
 | Item | Value |
 | --- | --- |
 | Date | 2026-09-16 |
-| Last revised | 2026-09-22 |
+| Last revised | 2026-11-24 |
 | Scope | Browser evidence, targets, cancellation and shared-browser task ownership |
 | Specs | S_05 tools contract, S_18 subagents and lifecycle |
 | Refs | openJiuwen-ai/jiuwenswarm#6006; local September 16 browser traces |
@@ -159,3 +159,39 @@ storage or coordinate separately launched host processes. Hosts pointing several
 keys at the same external CDP endpoint must supply a shared browser identity.
 Cancellation stops and joins the local producer; it cannot undo a browser action
 that has already reached the remote page. Ambiguous actions are not replayed.
+
+## November 24 MCP Timeout Error Alignment
+
+The two browser_move client overrides now use the core `McpTimeoutError` and
+`McpConnectionError` contract instead of translating deadlines into unrelated
+`RuntimeError` instances or returning `False` for an expired internal connect
+deadline. The original transport exception remains available as `cause`.
+Caller cancellation still propagates as `CancelledError`; the Browser Stdio
+force-close path no longer consumes it silently.
+
+This continues the existing no-blind-replay decision rather than adding a new
+retry protocol. Scroll/wheel, click and unsafe code execution are attempted at
+most once when their outcome is unknown. Streamable HTTP now applies its
+configured or caller-supplied deadline to `list_tools()` and `call_tool()`, and
+only the existing retry-safe read actions may use the bounded reconnect path.
+The Stdio timeout retains the explicit warning: "execution may have occurred,
+reconcile state before repeating an action". Owner-task architecture and
+transport result schemas are unchanged.
+
+On Windows 11 with Python 3.11.15, the two targeted files
+`test_config.py` and `test_browser_task_integrity.py` passed 59 tests together.
+After adding explicit Browser Stdio cancellation coverage, the latter file
+passed 29 tests alone. The complete combined core MCP, ResourceManager and
+browser_move regression then passed 160 tests in 18.15 seconds on the earlier
+base. After rebasing onto official `develop` at `83b859c87`, the same command
+passed 163 tests in 27.19 seconds, including three official SSE reconnect
+tests added by the new base. Focused review then found that HTTP disconnects
+could still replay unsafe actions. Disconnect regressions for click, mouse
+wheel and unsafe code, plus a retry-safe snapshot control, reproduced that
+problem before the retry condition was restricted to read-only actions. The
+final combined suite passed 173 tests in 10.89 seconds after also fixing
+ResourceManager cleanup and nested exception-group classification. These
+results cover mocked MCP sessions, not a live browser or an external MCP
+service. The real local Stdio probe remains blocked and unexecuted. A focused
+independent re-review confirmed the three reported P1 issues resolved; this
+is not an official committer approval or merged status.

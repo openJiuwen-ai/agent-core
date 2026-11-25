@@ -252,6 +252,14 @@ class ToolchainError(ExecutionError):
     pass
 
 
+class McpConnectionError(ExecutionError):
+    """An MCP transport connection failed or an active session was lost."""
+
+
+class McpTimeoutError(McpConnectionError, TimeoutError):
+    """An MCP operation exceeded its caller-supplied or configured deadline."""
+
+
 class SessionError(ExecutionError):
     pass
 
