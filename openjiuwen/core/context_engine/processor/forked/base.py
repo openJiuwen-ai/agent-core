@@ -383,13 +383,15 @@ class ContextProcessor(metaclass=MetaContextProcessor):
                     file.write(content_json)
                 return True
             result = await sys_operation.fs().write_file(file_path, content_json, prepend_newline=False)
+            if result.code != StatusCode.SUCCESS.code:
+                logger.warning(
+                    "offload write to %s failed: code=%s, message=%s", file_path, result.code, result.message
+                )
+                return False
+            return True
         except Exception as e:
             logger.warning("offload write to %s failed: %s", file_path, e)
             return False
-        if result.code != StatusCode.SUCCESS.code:
-            logger.warning("offload write to %s failed: code=%s, message=%s", file_path, result.code, result.message)
-            return False
-        return True
 
     @staticmethod
     def _api_round(messages: List[BaseMessage]) -> bool:
