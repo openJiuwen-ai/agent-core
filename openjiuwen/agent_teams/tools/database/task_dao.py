@@ -129,6 +129,17 @@ async def _refresh_status_in_session(
     On SQLite the dialect strips ``FOR UPDATE`` (the process-level write
     lock is the serialiser); on PostgreSQL / MySQL the row lock is the
     serialiser.
+
+    The deps count query below is a plain (consistent) SELECT. The row
+    lock on the candidate tasks is a current read, but under MySQL's
+    default ``REPEATABLE READ`` the count query would reuse the read view
+    established at the first consistent read earlier in the transaction
+    (e.g. ``_terminate_task_in_session``'s plain SELECT), hiding the other
+    upstream's committed dep resolutions and leaving the downstream
+    ``BLOCKED``. ``engine.py`` therefore pins the PG/MySQL engines to
+    ``READ COMMITTED`` so each statement — including the count query —
+    sees a fresh snapshot and the FOR UPDATE lock's serialisation actually
+    takes effect.
     """
     unique_ids = list({tid for tid in task_ids if tid})
     if not unique_ids:

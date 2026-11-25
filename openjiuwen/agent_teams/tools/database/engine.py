@@ -966,6 +966,15 @@ async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
             max_overflow=20,
             pool_pre_ping=True,
             pool_recycle=1800,
+            # READ COMMITTED is the isolation level the DAO layer assumes:
+            # read-modify-write sequences (SELECT ... FOR UPDATE + plain
+            # SELECT count) must see the latest committed data after acquiring
+            # a row lock, otherwise a stale read view (MySQL default RR
+            # establishes it at the first consistent read) hides concurrent
+            # upstream commits and leaves downstream tasks stuck BLOCKED
+            # (issue #115). PostgreSQL defaults to READ COMMITTED; setting it
+            # explicitly documents the assumption for both backends.
+            isolation_level="READ COMMITTED",
         )
         read_engine = write_engine
 
@@ -986,6 +995,15 @@ async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
             max_overflow=20,
             pool_pre_ping=True,
             pool_recycle=1800,
+            # MySQL defaults to REPEATABLE READ, which establishes a read view
+            # at the first consistent read in a transaction. That view hides
+            # concurrent upstream commits from the plain SELECT count in
+            # _refresh_status_in_session, so two upstreams completing
+            # concurrently each see "1 unresolved" and both leave the
+            # downstream BLOCKED (issue #115). READ COMMITTED gives each
+            # statement a fresh snapshot, so the count after the FOR UPDATE
+            # lock sees the other upstream's committed dep resolutions.
+            isolation_level="READ COMMITTED",
         )
         read_engine = write_engine
     else:

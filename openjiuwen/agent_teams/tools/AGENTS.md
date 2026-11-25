@@ -50,6 +50,11 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
   5 路 advocate 负载下 30s 看门狗堆积）。写锁是**不可重入**的：当一个公开
   写委托给另一个（`verify_and_fix_task_consistency` →
   `_verify_and_fix_blocked_tasks`）时，只有最内层的 session opener 取锁。
+  **PG/MySQL 引擎显式设 `isolation_level="READ COMMITTED"`**：MySQL 默认
+  `REPEATABLE READ` 会在事务首个一致性读建立 read view，使 `_refresh_status_in_session`
+  的 deps count（普通 SELECT）在 FOR UPDATE 行锁拿到后仍读旧 view，看不到并发上游已
+  提交的 dep 解析 → 下游卡 BLOCKED。READ COMMITTED 让每条语句取新快照，FOR UPDATE
+  串行化才真正生效。`create_async_engine` 在 `initialize_engine` 里统一设。
   **跳过进程级写锁后，并发正确性由「DDL 锁 + CAS + 行锁」三件套保证**：
   (1) DDL / cleanup helper（`create_cur_session_tables` / `drop_cur_session_tables` /
   `cleanup_all_runtime_state` / `drop_session_tables_by_id`）及组织表迁移

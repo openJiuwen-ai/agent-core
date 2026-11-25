@@ -231,9 +231,12 @@ docstring（53f1d5e38 已更新）措辞一致。
 
    修法：用 `with sync_conn.begin_nested():`（SAVEPOINT）包住 ALTER，捕获
    `DBAPIError`（覆盖 `OperationalError` + `ProgrammingError`）。失败时回滚到 savepoint，
-   外层事务保持 clean、可提交。MySQL DDL 隐式提交使 savepoint 对 rollback 无效，但
-   错误仍被吞掉——MySQL 的 ALTER 要么成功（列已加）要么失败（Duplicate column name），
-   两种情况列都存在，正是所需状态。
+   外层事务保持 clean、可提交。**MySQL 路径单独处理**：MySQL 的 DDL 隐式提交会销毁
+   savepoint，`begin_nested` 退出时的 `ROLLBACK TO SAVEPOINT` 会抛二次 `DBAPIError`
+   （ERROR 1305 "SAVEPOINT does not exist"），掩盖原 "Duplicate column name" 错误——
+   因此 MySQL 跳过 `begin_nested`、直接执行 ALTER，吞掉 duplicate-column 错误后用
+   `inspect.get_columns` 兜底验证列确实存在（隐式提交使 post-ALTER 状态成为 ground truth）；
+   若列仍缺失则 re-raise（不一致状态）。
 
    补 2 个迁移幂等单测：
    - `test_ensure_org_static_tables_is_idempotent_when_columns_already_exist`：先完整迁移，
@@ -244,8 +247,11 @@ docstring（53f1d5e38 已更新）措辞一致。
 ## 遗留与后续
 
 - 修复的并发正确性依赖 PG/MySQL 的 `READ COMMITTED` 行为：A 提交后 B 才能看
-  到 A 的写入。若后端配置成 `READ UNCOMMITTED`（脏读）或更弱的隔离级别，行为不
-  保证——但项目 DB 配置默认 `READ COMMITTED`，不在本次范围。
+  到 A 的写入。`engine.py` 的 `create_async_engine` 已为 PG/MySQL 显式设
+  `isolation_level="READ COMMITTED"`——MySQL 默认 `REPEATABLE READ` 会在事务首个
+  一致性读建立 read view，使 `_refresh_status_in_session` 的 deps count 查询看不到
+  并发上游已提交的 dep 解析（FOR UPDATE 行锁拿到后 count 仍用旧 view → 下游卡
+  BLOCKED）。显式设 RC 后每条语句取新快照，FOR UPDATE 串行化才真正生效。
 - 未在真实 PostgreSQL / MySQL 后端按屏障构造跑过端到端复现。需 swarm 侧用
   PG/MySQL 后端复测，确认下游不再卡 BLOCKED、options 不再丢更新、组织表迁移不再
   报 duplicate column、`update_task` revision 不再丢增、`add_graph` 不再漏检环、
@@ -257,5 +263,6 @@ docstring（53f1d5e38 已更新）措辞一致。
 - **P2 #2**（PG/MySQL 跳过进程写锁的「未闭合」指控）：91ad1d944 的核心改动就是
   跳过进程写锁以解决 issue #115 的吞吐问题。经五轮系统排查，所有 read-modify-write
   入口已覆盖（FOR UPDATE / CAS / ddl_lock / team 行锁）。`ddl_lock` 的进程级局限
-  通过 `_add_column_idempotent`（SAVEPOINT + DBAPIError）跨进程兜底。方向不退——退回进程写锁会重新引入
-  issue #115 的 30s 看门狗堆积。
+  通过 `_add_column_idempotent` 跨进程兜底：SQLite/PG 走 SAVEPOINT + DBAPIError，
+  MySQL 跳过 savepoint（DDL 隐式提交销毁之）改为 ALTER + `inspect` 兜底验证。
+  方向不退——退回进程写锁会重新引入 issue #115 的 30s 看门狗堆积。
