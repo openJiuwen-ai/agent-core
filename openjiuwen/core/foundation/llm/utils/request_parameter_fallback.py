@@ -109,7 +109,7 @@ class RequestParameterFallback:
         if (
             self._retry_without_top_p
             and self._has_field(params, "top_p")
-            and self._top_p_cache_key(params) in self._rejected_top_p
+            and self._sampling_cache_key(params, "top_p") in self._rejected_top_p
         ):
             params = self._without_field(params, "top_p")
         scoped = is_disabled_thinking_fallback_allowed()
@@ -118,7 +118,7 @@ class RequestParameterFallback:
             if model_key in self._models_rejecting_disabled_thinking and self._has_disabled_thinking_params(params):
                 params = self._without_disabled_thinking_params(params)
         retry_temperature = scoped or self._retry_without_temperature
-        if retry_temperature and self._temperature_cache_key(params) in self._rejected_temperatures:
+        if retry_temperature and self._sampling_cache_key(params, "temperature") in self._rejected_temperatures:
             params = self._without_field(params, "temperature")
         return params
 
@@ -151,13 +151,13 @@ class RequestParameterFallback:
                 elif retry_temperature and self._rejects_temperature(exc):
                     if self._exception_status_code(exc) != 400 or not self._has_field(request_params, "temperature"):
                         raise exc
-                    rejected_temperature = self._temperature_cache_key(request_params)
+                    rejected_temperature = self._sampling_cache_key(request_params, "temperature")
                     request_params = self._without_field(request_params, "temperature")
                     rejected_option = "temperature"
                 elif (
                     self._retry_without_top_p and self._has_field(request_params, "top_p") and self._rejects_top_p(exc)
                 ):
-                    rejected_top_p = self._top_p_cache_key(request_params)
+                    rejected_top_p = self._sampling_cache_key(request_params, "top_p")
                     request_params = self._without_field(request_params, "top_p")
                     rejected_option = "top_p"
                 elif not scoped:
@@ -196,14 +196,6 @@ class RequestParameterFallback:
         cleaned = dict(params)
         cleaned.pop("stop", None)
         return cleaned
-
-    @classmethod
-    def _top_p_cache_key(cls, params: Mapping[str, Any]) -> Optional[tuple[str, str]]:
-        # OpenAI accepts top_p only at reasoning effort "none", so a refusal is remembered per reasoning setting.
-        model = cls._model_key(params)
-        if model is None:
-            return None
-        return model, json.dumps(reasoning_request_controls(params), sort_keys=True, default=str)
 
     @classmethod
     def _rejects_stop(cls, exc: BaseException) -> bool:
@@ -266,8 +258,13 @@ class RequestParameterFallback:
         return cleaned
 
     @classmethod
-    def _temperature_cache_key(cls, params: Mapping[str, Any]) -> Optional[tuple[str, str]]:
-        if not cls._has_field(params, "temperature"):
+    def _sampling_cache_key(cls, params: Mapping[str, Any], name: str) -> Optional[tuple[str, str]]:
+        """Key a refused ``temperature`` or ``top_p`` by model, value and reasoning settings.
+
+        Some models refuse only some values (e.g. "Only the default (1) value is supported"), and OpenAI accepts
+        both only at reasoning effort ``none``, so a refusal is not reused for another value or reasoning setting.
+        """
+        if not cls._has_field(params, name):
             return None
         extra_body = params.get("extra_body")
         # SDK extra_body keys take precedence in the outgoing JSON payload.
@@ -283,7 +280,7 @@ class RequestParameterFallback:
         if isinstance(template_kwargs, Mapping) and "enable_thinking" in template_kwargs:
             controls["chat_template_kwargs.enable_thinking"] = template_kwargs["enable_thinking"]
         try:
-            return model, json.dumps([wire["temperature"], controls], sort_keys=True)
+            return model, json.dumps([wire[name], controls], sort_keys=True)
         except (TypeError, ValueError):
             return None
 

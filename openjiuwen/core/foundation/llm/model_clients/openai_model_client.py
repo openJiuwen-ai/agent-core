@@ -435,7 +435,8 @@ class OpenAIModelClient(BaseModelClient):
             model_client_config.client_provider, "OpenAI-compatible",
         )
         # Unlike Chat mode, a refused temperature or top_p is retried even outside disabled_thinking_fallback_scope:
-        # Responses mode used to drop both, so callers that set one must keep working.
+        # Responses mode used to drop both, so callers that set one must keep working. max_output_tokens is not
+        # retried, as max_tokens isn't in Chat mode: dropping it would send the request with no output limit.
         self._responses_request_fallback = RequestParameterFallback(
             model_client_config.client_provider,
             "OpenAI Responses",

@@ -214,6 +214,17 @@ _TOP_P_VALUE_ERROR = {
         "code": "decimal_above_max_value",
     }
 }
+# OpenAI's refusal of one value on reasoning models: about the value, so it is remembered per value.
+_TOP_P_UNSUPPORTED_VALUE_ERROR = {
+    "error": {
+        "message": (
+            "Unsupported value: 'top_p' does not support 0.5 with this model. Only the default (1) value is supported."
+        ),
+        "type": "invalid_request_error",
+        "param": "top_p",
+        "code": "unsupported_value",
+    }
+}
 _MAX_OUTPUT_TOKENS_ERROR = {
     "error": {
         "message": "Unsupported parameter: 'max_output_tokens' is not supported with this model.",
@@ -366,16 +377,39 @@ async def test_top_p_memory_is_per_reasoning_setting():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "field, refusal",
-    [("max_output_tokens", _MAX_OUTPUT_TOKENS_ERROR), ("top_p", _TOP_P_VALUE_ERROR)],
-    ids=["other_field", "top_p_value_error"],
-)
-async def test_other_errors_are_not_retried(field, refusal):
+async def test_top_p_memory_is_per_value():
+    """A refusal of one top_p value is not reused for another value, as with temperature."""
     sent_bodies: list[dict] = []
-    model = _refusing_model(sent_bodies, {field: refusal})
+    model = _refusing_model(sent_bodies, {"top_p": _TOP_P_UNSUPPORTED_VALUE_ERROR})
 
-    with pytest.raises(BaseError, match=field):
+    await model.invoke("hello", top_p=0.5)
+    await model.invoke("hello", top_p=0.5)
+    await model.invoke("hello", top_p=0.3)
+
+    assert [body.get("top_p") for body in sent_bodies] == [0.5, None, None, 0.3, None]
+
+
+@pytest.mark.asyncio
+async def test_refused_max_output_tokens_is_not_dropped():
+    """Unlike temperature and top_p, a refused output limit fails the call, as ``max_tokens`` does in Chat mode.
+
+    The limit caps cost and output length; retrying without it would send the request with no limit at all.
+    """
+    sent_bodies: list[dict] = []
+    model = _refusing_model(sent_bodies, {"max_output_tokens": _MAX_OUTPUT_TOKENS_ERROR})
+
+    with pytest.raises(BaseError, match="max_output_tokens"):
+        await model.invoke("hello")
+
+    assert len(sent_bodies) == 1
+
+
+@pytest.mark.asyncio
+async def test_top_p_value_errors_are_not_retried():
+    sent_bodies: list[dict] = []
+    model = _refusing_model(sent_bodies, {"top_p": _TOP_P_VALUE_ERROR})
+
+    with pytest.raises(BaseError, match="top_p"):
         await model.invoke("hello")
 
     assert len(sent_bodies) == 1
