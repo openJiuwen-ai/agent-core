@@ -3134,26 +3134,32 @@ async def test_completion_waits_for_each_member_then_commits_once_without_task_c
     bus = _wire_completion_handler(agent, TeamCompletionSnapshot(member_count=3, task_count=1))
     handler = agent._coordination.dispatcher.team_completion
     event = InnerEventMessage(event_type=InnerEventType.POLL_TASK)
+    drained = EventMessage.from_event(TaskListDrainedEvent(team_name="test-team", task_count=1))
+    callback = AsyncMock()
+    handler.register_completion_callback(callback)
     pending["member-a"](True)
     pending["member-b"](True)
+    await handler.on_task_list_drained(drained)
+    callback.assert_awaited_once_with()
     await handler.on_poll_task(event)
     pending["member-a"](False)
     await handler.on_poll_task(event)
     assert not handler._team_completed_emitted
     assert agent.stream_controller.stream_queue.empty()
     bus.publish.assert_not_awaited()
+    agent.finalize_non_contributing_worktrees.assert_not_awaited()
     pending["member-b"](False)
     await handler.on_poll_task(event)
     await handler.on_poll_task(event)
     assert handler._team_completed_emitted
     assert agent.stream_controller.stream_queue.qsize() == 2
     bus.publish.assert_awaited_once()
+    agent.finalize_non_contributing_worktrees.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("owner", ["leader", "member-a"])
-@pytest.mark.parametrize("stage", ["backend", "worktree"])
-async def test_completion_rechecks_interrupt_created_during_await(owner, stage):
+async def test_completion_rechecks_interrupt_created_during_backend_read(owner):
     agent, pending = _completion_subjects()
     snapshot = TeamCompletionSnapshot(member_count=3, task_count=1)
     bus = _wire_completion_handler(agent, snapshot)
@@ -3165,17 +3171,14 @@ async def test_completion_rechecks_interrupt_created_during_await(owner, stage):
         pending[owner](True)
         return snapshot
 
-    if stage == "backend":
-        handler._infra.team_backend.is_team_completed.side_effect = interrupt_during_await
-    else:
-        agent.finalize_non_contributing_worktrees.side_effect = interrupt_during_await
+    handler._infra.team_backend.is_team_completed.side_effect = interrupt_during_await
     await handler.on_poll_task(event)
     assert not handler._team_completed_emitted
     assert agent.stream_controller.stream_queue.empty()
     bus.publish.assert_not_awaited()
+    agent.finalize_non_contributing_worktrees.assert_not_awaited()
     pending[owner](False)
     handler._infra.team_backend.is_team_completed.side_effect = None
-    agent.finalize_non_contributing_worktrees.side_effect = None
     await handler.on_poll_task(event)
     assert agent.stream_controller.stream_queue.qsize() == 2
     bus.publish.assert_awaited_once()
@@ -3406,6 +3409,7 @@ async def test_team_completion_consumers_accept_their_events():
 async def test_drained_fires_registered_completion_callbacks():
     """on_task_list_drained fires every registered completion callback."""
     agent = _make_leader()
+    agent.finalize_non_contributing_worktrees = AsyncMock()
     handler = agent._coordination.dispatcher.team_completion
     callback = AsyncMock()
     handler.register_completion_callback(callback)
@@ -3414,6 +3418,7 @@ async def test_drained_fires_registered_completion_callbacks():
     await handler.on_task_list_drained(drained)
 
     callback.assert_awaited_once_with()
+    agent.finalize_non_contributing_worktrees.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
