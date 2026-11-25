@@ -14,6 +14,7 @@ files:
 - openjiuwen/agent_teams/organization/db.py
 - openjiuwen/agent_teams/tools/AGENTS.md
 - tests/unit_tests/agent_teams/test_db_sessions_watchdog.py
+- tests/unit_tests/agent_teams/organization/test_org_db.py
 designs: []
 design_note: 91ad1d944 把锁的边界从「全写锁」收窄到「DDL 锁 + CAS + 行锁」时漏掉的入口；本修复把同一套并发模型补齐到所有剩余读改写路径，不引入新设计
 ---
@@ -215,6 +216,31 @@ docstring（53f1d5e38 已更新）措辞一致。
    `test_client_server_write_skips_process_lock`（PG/MySQL 上 `write()` 跳过进程锁）、
    `test_ddl_lock_serialises_concurrent_acquirers`（`ddl_lock()` 串行化并发获取者）。
 
+### 第六轮检视：`_add_column_idempotent` 异常类错误 + 事务状态污染
+
+第六轮检视发现第五轮新增的 `_add_column_idempotent` 有两个真实 bug：
+
+1. **异常类错误**：`except OperationalError` 只捕获 SQLite 的重复列错误。PG 的重复列
+   （SQLSTATE 42701）在 SQLAlchemy 层是 `ProgrammingError`（与 `OperationalError` 平行，
+   都继承自 `DBAPIError`），旧代码根本捕获不到，异常照旧抛出——跨进程 duplicate column
+   在 PG/MySQL 上仍然失败。
+
+2. **事务状态污染**：即使改对异常类，PG 在语句失败后会把整个事务置为 aborted 状态，
+   `db.py:141` 的 `await session.commit()` 随后抛 `InFailedSQLTransaction`（非 transient，
+   `retry_on_transient` 不重试），`_ensure_org_schema` 依旧失败。
+
+   修法：用 `with sync_conn.begin_nested():`（SAVEPOINT）包住 ALTER，捕获
+   `DBAPIError`（覆盖 `OperationalError` + `ProgrammingError`）。失败时回滚到 savepoint，
+   外层事务保持 clean、可提交。MySQL DDL 隐式提交使 savepoint 对 rollback 无效，但
+   错误仍被吞掉——MySQL 的 ALTER 要么成功（列已加）要么失败（Duplicate column name），
+   两种情况列都存在，正是所需状态。
+
+   补 2 个迁移幂等单测：
+   - `test_ensure_org_static_tables_is_idempotent_when_columns_already_exist`：先完整迁移，
+     再在显式事务里调 `ensure_org_static_tables`，断言 commit 成功。
+   - `test_add_column_idempotent_swallows_duplicate_column`：直接测 helper——预加列后调
+     `_add_column_idempotent`，断言不抛异常且事务可继续写入。
+
 ## 遗留与后续
 
 - 修复的并发正确性依赖 PG/MySQL 的 `READ COMMITTED` 行为：A 提交后 B 才能看
@@ -224,11 +250,12 @@ docstring（53f1d5e38 已更新）措辞一致。
   PG/MySQL 后端复测，确认下游不再卡 BLOCKED、options 不再丢更新、组织表迁移不再
   报 duplicate column、`update_task` revision 不再丢增、`add_graph` 不再漏检环、
   `reset_task` / `approve_plan_task` 不再被并发 `cancel_task` 复活、广播水位不再
-  回退、`mutate_dependency_graph` 与 `complete_task` 不再死锁。
+  回退、`mutate_dependency_graph` 与 `complete_task` 不再死锁、跨进程 org 迁移
+  不再报 duplicate column。
 - 排查报告确认的「无风险」入口（纯 INSERT / 纯 CAS / 已加 FOR UPDATE / 只读）未
   在本记录逐一列出，详见排查报告。
 - **P2 #2**（PG/MySQL 跳过进程写锁的「未闭合」指控）：91ad1d944 的核心改动就是
-  跳过进程写锁以解决 issue #115 的吞吐问题。经四轮系统排查，所有 read-modify-write
+  跳过进程写锁以解决 issue #115 的吞吐问题。经五轮系统排查，所有 read-modify-write
   入口已覆盖（FOR UPDATE / CAS / ddl_lock / team 行锁）。`ddl_lock` 的进程级局限
-  通过 `_add_column_idempotent` 跨进程兜底。方向不退——退回进程写锁会重新引入
+  通过 `_add_column_idempotent`（SAVEPOINT + DBAPIError）跨进程兜底。方向不退——退回进程写锁会重新引入
   issue #115 的 30s 看门狗堆积。

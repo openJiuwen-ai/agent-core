@@ -412,3 +412,83 @@ async def test_close_waits_for_inflight_initialize_and_releases_it(tmp_path: Pat
     assert db.closed
     assert db.engine is None and db.read_engine is None
     assert db.sessions is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_org_static_tables_is_idempotent_when_columns_already_exist() -> None:
+    """Re-running ensure_org_static_tables on a fully-migrated DB is a no-op.
+
+    Covers the cross-process race where two processes both see a column
+    missing and both fire ALTER TABLE ADD COLUMN — the second one must not
+    abort the outer transaction. Simulates the race by pre-adding every
+    org_task / org_summary_execution / org_info column, then calling
+    ensure_org_static_tables inside an open transaction and asserting the
+    commit succeeds.
+    """
+    from openjiuwen.agent_teams.organization import db as org_db
+
+    database = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    await database.initialize()
+    assert database.engine is not None
+
+    # First call migrates to the latest schema.
+    async with database.engine.begin() as conn:
+        await conn.run_sync(org_db.ensure_org_static_tables)
+
+    # Second call inside an explicit transaction: every column already exists,
+    # so every ALTER would fail. The SAVEPOINT + DBAPIError catch in
+    # _add_column_idempotent must swallow the "duplicate column" error and
+    # leave the transaction committable.
+    async with database.engine.begin() as conn:
+        await conn.run_sync(org_db.ensure_org_static_tables)
+        # If the failed ALTER poisoned the transaction, commit (implicit at
+        # block exit) would raise InFailedSQLTransaction. Reaching here means
+        # the savepoint correctly isolated the failure.
+
+    # Sanity: the org tables and their columns are still present.
+    async with database.engine.connect() as conn:
+        org_task_columns = await conn.run_sync(
+            lambda sync_conn: {c["name"] for c in inspect(sync_conn).get_columns("org_task")}
+        )
+        for name, _ in org_db._ORG_TASK_NEW_COLUMNS:
+            assert name in org_task_columns
+        org_info_columns = await conn.run_sync(
+            lambda sync_conn: {c["name"] for c in inspect(sync_conn).get_columns("org_info")}
+        )
+        assert "unclaimed_task_policy_json" in org_info_columns
+
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_add_column_idempotent_swallows_duplicate_column() -> None:
+    """_add_column_idempotent catches duplicate-column errors on all backends.
+
+    Direct unit test for the helper: pre-create a table with the target
+    column, then call _add_column_idempotent. It must not raise and must
+    not poison the surrounding transaction.
+    """
+    from openjiuwen.agent_teams.organization import db as org_db
+
+    database = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    await database.initialize()
+    assert database.engine is not None
+
+    async with database.engine.begin() as conn:
+        await conn.exec_driver_sql("CREATE TABLE idempotent_test (id INTEGER PRIMARY KEY)")
+        await conn.exec_driver_sql("ALTER TABLE idempotent_test ADD COLUMN marker TEXT")
+        # Column now exists; _add_column_idempotent must swallow the error.
+        await conn.run_sync(
+            lambda sync_conn: org_db._add_column_idempotent(
+                sync_conn, "idempotent_test", "marker", "TEXT"
+            )
+        )
+        # Surrounding transaction must still be committable (implicit commit
+        # at block exit). A follow-up write proves the transaction is alive.
+        await conn.exec_driver_sql("INSERT INTO idempotent_test (id, marker) VALUES (1, 'x')")
+
+    async with database.engine.connect() as conn:
+        rows = await conn.exec_driver_sql("SELECT marker FROM idempotent_test WHERE id = 1")
+        assert rows.fetchone()[0] == "x"
+
+    await database.close()

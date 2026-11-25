@@ -10,7 +10,7 @@ import weakref
 from typing import Any
 
 from sqlalchemy import inspect
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DBAPIError
 from sqlmodel import SQLModel
 
 from openjiuwen.agent_teams.organization.schema import (
@@ -42,13 +42,28 @@ def _add_column_idempotent(sync_conn, table: str, column: str, col_type: str) ->
     The check-then-ALTER pattern is not atomic across processes: two
     processes can both see the column missing and both issue
     ``ALTER TABLE ... ADD COLUMN``. The DB's own DDL lock serialises the
-    two ALTERs, but the second fails with a "duplicate column" error.
-    Catch that error and treat it as success — the column exists, which
-    is the desired end state.
+    two ALTERs, but the second one fails:
+    - SQLite: ``OperationalError`` "duplicate column name".
+    - PostgreSQL: ``ProgrammingError`` (SQLSTATE 42701) "column ... already exists".
+      PG also puts the transaction into an aborted state after the failed
+      statement, so the outer ``session.commit()`` would later raise
+      ``InFailedSQLTransaction``.
+    - MySQL: ``OperationalError`` (1060) "Duplicate column name".
+
+    Wrap the ALTER in a SAVEPOINT (``begin_nested``) and catch
+    ``DBAPIError`` (the common base of ``OperationalError`` and
+    ``ProgrammingError``): on a "duplicate column" / "already exists"
+    message the savepoint rolls back to the pre-ALTER state, leaving the
+    outer transaction clean and committable. Non-duplicate errors re-raise.
+    On MySQL DDL implicitly commits, so the savepoint is a no-op for
+    rollback, but the error is still swallowed — MySQL's ALTER either
+    succeeded (column added) or failed with "Duplicate column name", both
+    of which leave the column present, the desired end state.
     """
     try:
-        sync_conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-    except OperationalError as exc:
+        with sync_conn.begin_nested():
+            sync_conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+    except DBAPIError as exc:
         msg = str(exc).lower()
         if "duplicate column" not in msg and "already exists" not in msg:
             raise
