@@ -322,3 +322,10 @@ def test_iteration_checkpoint_is_on_by_default():
     from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 
     assert ContextEngineConfig().enable_iteration_checkpoint is True
+
+
+def test_mock_session_has_no_step_sink():
+    """Sentinel: doubles without a real step method must not trigger per-iteration saves."""
+    from unittest.mock import MagicMock
+
+    assert ReActAgent._session_has_step_sink(MagicMock()) is False
