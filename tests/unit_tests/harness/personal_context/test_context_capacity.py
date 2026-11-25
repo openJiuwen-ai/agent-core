@@ -465,7 +465,7 @@ def test_navigation_above_reclaim_target_does_not_clear_bodies(tmp_path):
 def test_oversized_singleton_does_not_evict_fitting_older_knowledge(tmp_path):
     old = _page(tmp_path, "old/old.md", "# Old\n" + "a" * 4000, 100)
     huge = _page(tmp_path, "huge/page.md", "# Huge\n" + "x" * 12000, 200)
-    result = maintain_capacity(tmp_path, limit_bytes=10_000)
+    result = maintain_capacity(tmp_path, limit_bytes=10_000, commit_candidate=_commit_without_process_scheduling)
     assert old.exists() and not huge.exists()
     assert result["removed_count"] == result["oversized_count"] == 1
     assert result["after_bytes"] <= 10_000
