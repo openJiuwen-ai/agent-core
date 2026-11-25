@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.prompts.tools import get_tool_input_params
 from openjiuwen.harness.prompts.tools.audio import (
     get_audio_metadata_input_params,
@@ -35,9 +36,11 @@ from openjiuwen.harness.prompts.tools.list_skill import (
     get_list_skill_input_params,
 )
 from openjiuwen.harness.prompts.tools.todo import (
+    get_todo_create_description,
     get_todo_create_input_params,
     get_todo_list_input_params,
     get_todo_modify_input_params,
+    require_todo_create_status,
 )
 from openjiuwen.harness.prompts.tools.vision import (
     get_image_ocr_input_params,
@@ -239,3 +242,49 @@ class TestToolClassInputParams:
         for tool_cls, builder_fn in builders:
             tool = tool_cls(language="en")
             assert tool.card.input_params == builder_fn("en")
+
+
+_STATUS_RULE_TEXT = {
+    "cn": ("每项必须显式传入真实 status", "全部省略 status 时"),
+    "en": ("Every task must explicitly include its actual status", "If every status is omitted"),
+}
+# Status entries in the tasks parameter's field lists, and the header that starts the optional fields.
+_PARAM_RULE_TEXT = {
+    "cn": ("- status：任务的真实状态，每项必填", "- status：任务状态，缺省规则见工具说明", "可选字段："),
+    "en": ("- status: actual task status; required for every item",
+           "- status: task status; see the tool's default rules when omitted", "Optional field:"),
+}
+
+
+class TestTodoCreateStatusParam:
+    @staticmethod
+    @pytest.mark.parametrize("language", ["cn", "en"])
+    def test_status_is_optional_by_default(language):
+        tasks = get_todo_create_input_params(language)["properties"]["tasks"]
+        item = tasks["items"]
+        assert item["properties"]["status"]["enum"] == ["pending", "in_progress", "completed", "cancelled"]
+        assert "status" not in item["required"]
+        # The optional status entry closes the optional-fields list.
+        _, optional_entry, _ = _PARAM_RULE_TEXT[language]
+        assert tasks["description"].split("\n")[-1] == optional_entry
+
+    @staticmethod
+    @pytest.mark.parametrize("language", ["cn", "en"])
+    def test_require_status_marks_it_required_and_updates_rule(language):
+        card = ToolCard(
+            name="todo_create",
+            description=get_todo_create_description(language),
+            input_params=get_todo_create_input_params(language),
+        )
+        require_todo_create_status(card, language)
+        tasks = card.input_params["properties"]["tasks"]
+        assert tasks["items"]["required"] == ["id", "content", "activeForm", "description", "status"]
+        required_rule, optional_rule = _STATUS_RULE_TEXT[language]
+        assert required_rule in card.description and optional_rule not in card.description
+        required_entry, optional_entry, optional_header = _PARAM_RULE_TEXT[language]
+        lines = tasks["description"].split("\n")
+        assert optional_entry not in lines
+        # Status is listed with the required fields, before the optional-fields header.
+        assert lines.index(required_entry) < lines.index(optional_header)
+        # The shared default schema is not mutated.
+        assert "status" not in get_todo_create_input_params(language)["properties"]["tasks"]["items"]["required"]

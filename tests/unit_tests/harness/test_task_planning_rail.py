@@ -871,3 +871,51 @@ def test_build_todo_section_without_model_selection_no_model_prompt() -> None:
     content = section.content.get("en", "")
     assert "Model Selection Note" in content
     assert "do NOT use the selected_model_id field" in content
+
+
+def test_require_explicit_status_reaches_registered_tool_and_clone() -> None:
+    """require_explicit_status is passed to the registered todo_create tool and kept by clones."""
+    from openjiuwen.harness.tools.todo import TodoCreateTool
+
+    rail = TaskPlanningRail(require_explicit_status=True)
+    rail.set_sys_operation(_make_operation())
+    agent = _make_agent(workspace="/tmp/test_ws")
+    rail.init(agent)
+    try:
+        create = next(tool for tool in rail.tools if isinstance(tool, TodoCreateTool))
+        assert create.require_explicit_status
+        assert "status" in create.card.input_params["properties"]["tasks"]["items"]["required"]
+        assert rail.clone_for_subagent().require_explicit_status
+    finally:
+        rail.uninit(agent)
+
+
+def test_clone_preserves_status_for_legacy_subclass_signature() -> None:
+    """Subclasses whose __init__ predates require_explicit_status still clone with the parent's setting."""
+    class LegacyTaskPlanningRail(TaskPlanningRail):
+        def __init__(self, enable_progress_repeat=False, list_tool_call_interval=20,
+                     model_selection=None, inject_prompt=True):
+            super().__init__(enable_progress_repeat, list_tool_call_interval, model_selection, inject_prompt)
+
+    rail = LegacyTaskPlanningRail()
+    assert not rail.clone_for_subagent().require_explicit_status
+    rail.require_explicit_status = True
+    clone = rail.clone_for_subagent()
+    assert isinstance(clone, LegacyTaskPlanningRail)
+    assert clone.require_explicit_status
+
+
+def test_init_rejects_existing_todo_create_with_other_status_setting() -> None:
+    """Reusing an agent's todo_create with a different status setting raises instead of silently mixing."""
+    from openjiuwen.core.common.exception.errors import BaseError
+
+    agent = _make_agent(workspace="/tmp/test_ws")
+    loose = _make_rail()
+    loose.init(agent)
+    try:
+        strict = TaskPlanningRail(require_explicit_status=True)
+        strict.set_sys_operation(_make_operation())
+        with pytest.raises(BaseError, match="configuration differs"):
+            strict.init(agent)
+    finally:
+        loose.uninit(agent)

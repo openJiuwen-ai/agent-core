@@ -3,8 +3,11 @@
 """Bilingual descriptions and input params for Todo tools."""
 from __future__ import annotations
 
+from copy import deepcopy
+from string import Template
 from typing import Any, Dict
 
+from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.prompts.tools.base import (
     ToolMetadataProvider,
 )
@@ -12,41 +15,88 @@ from openjiuwen.harness.prompts.tools.base import (
 # ---------------------------------------------------------------------------
 # Todo-create description
 # ---------------------------------------------------------------------------
-TODO_CREATE_DESCRIPTION_CN = """
+_TODO_CREATE_TEMPLATE_CN = Template("""
 创建当前会话的待办事项列表，用于跟踪进度、组织复杂任务，帮助用户了解整体执行情况。
 
 ## 使用方式
 
 入参为 JSON 数组（每个任务必须包含 id 字段）：
-    {"tasks": [{"id": "translate_doc", "content": "翻译文档", "activeForm": "正在翻译文档", "description": "将文档翻译为目标语言", "selected_model_id": "fast"}, {"id": "analyze_arch", "content": "分析代码架构", "activeForm": "正在分析代码架构", "description": "梳理代码模块结构与依赖关系", "selected_model_id": "smart"}]}
+    {"tasks": [{"id": "translate_doc", "content": "翻译文档", "activeForm": "正在翻译文档", "description": "将文档翻译为目标语言", "selected_model_id": "fast", "status": "in_progress"}, {"id": "analyze_arch", "content": "分析代码架构", "activeForm": "正在分析代码架构", "description": "梳理代码模块结构与依赖关系", "selected_model_id": "smart", "status": "pending"}]}
 
 ## 规则
 
 - **id 字段为必填**：必须为每个任务指定简短、语义清晰的唯一字符串 ID（如 "translate_doc"、"analyze_code"），禁止使用随机字符或 UUID。同一会话内 ID 不得重复。此 ID 在后续 todo_modify 中用于精准定位任务，是跨轮次更新状态的唯一依据
-- 第一个任务自动设为 in_progress，其余为 pending
-- 同一时间只能有一个 in_progress 任务
+$status_rules
+- status 仅允许 pending、in_progress、completed、cancelled；最多一个 in_progress，也允许没有进行中项或全部已结束
 - 任务描述必须具体、可执行、清晰明确
 - 调用本工具会覆盖当前会话的任务列表；若需追加任务，请使用 todo_modify
+- 已有清单时，增加、拆分或取消个别步骤使用 todo_modify；只有大部分条目都要替换时，才用本工具整体重建。重建时提交要保留的完整清单，携带已有任务的 id 和真实状态；缺少完整清单时先调用 todo_list
 - 当没有获取到当前可用模型信息时，不要添加 selected_model_id 字段；否则必须添加 selected_model_id 指定执行任务的模型 ID
-"""
+""")
 
-TODO_CREATE_DESCRIPTION_EN = """
+_TODO_CREATE_TEMPLATE_EN = Template("""
 Create a todo list for the current session to track progress, organize complex tasks, and help the user understand overall execution status.
 
 ## Usage
 
 Input is a JSON array (each task must include an id field):
-    {"tasks": [{"id": "translate_doc", "content": "Translate document", "activeForm": "Translating document", "description": "Translate the document into the target language", "selected_model_id": "fast"}, {"id": "analyze_arch", "content": "Analyze code architecture", "activeForm": "Analyzing code architecture", "description": "Map out module structure and dependencies", "selected_model_id": "smart"}]}
+    {"tasks": [{"id": "translate_doc", "content": "Translate document", "activeForm": "Translating document", "description": "Translate the document into the target language", "selected_model_id": "fast", "status": "in_progress"}, {"id": "analyze_arch", "content": "Analyze code architecture", "activeForm": "Analyzing code architecture", "description": "Map out module structure and dependencies", "selected_model_id": "smart", "status": "pending"}]}
 
 ## Rules
 
 - **id is required**: You must provide a short, semantically meaningful unique string ID for each task (e.g. "translate_doc", "analyze_code"). Do NOT use random characters or UUIDs. IDs must be unique within a session. This ID is used by todo_modify to precisely locate tasks and is the sole key for cross-turn status updates
-- First task is automatically set to in_progress, others to pending
-- Only one task can be in_progress at a time
+$status_rules
+- status must be pending, in_progress, completed, or cancelled; at most one in_progress is allowed, including no active task or an entirely closed list
 - Task descriptions must be specific, actionable, and clear
 - Calling this tool replaces the current session's task list; use todo_modify to append tasks
+- When a list already exists, use todo_modify to add, split, or cancel individual steps; rebuild with this tool only when most items are being replaced. When rebuilding, include the complete list to retain, preserving existing ids and actual statuses; read todo_list first if the complete list is unavailable
 - When the currently available model information is not obtained, the selected_model_id field should not be added; otherwise, selected_model_id must be added to specify the model ID for executing the task.
-"""
+""")
+
+_TODO_CREATE_TEMPLATES = {"cn": _TODO_CREATE_TEMPLATE_CN, "en": _TODO_CREATE_TEMPLATE_EN}
+_TODO_CREATE_OPTIONAL_STATUS_RULES = {
+    "cn": (
+        "- 全部省略 status 时，第一个任务自动设为 in_progress，其余为 pending；重建时全部省略也会重新初始化状态\n"
+        "- 至少一项提供 status 时，保留显式状态，省略的记为 pending，不自动启动第一项"
+    ),
+    "en": (
+        "- If every status is omitted, the first task becomes in_progress and the rest pending; "
+        "rebuilding with all statuses omitted also resets the list\n"
+        "- If any status is supplied, preserve explicit statuses and default omitted ones to pending, "
+        "without automatically starting the first task"
+    ),
+}
+_TODO_CREATE_REQUIRED_STATUS_RULES = {
+    "cn": "- 每项必须显式传入真实 status；缺少状态时整批拒绝，本次不写入",
+    "en": (
+        "- Every task must explicitly include its actual status; "
+        "missing statuses reject the entire call without writing"
+    ),
+}
+# Status is one entry of the field lists in the tasks parameter description: by default it ends the
+# optional fields; when required it moves above the optional-fields header.
+_STATUS_PARAMETER_RULES = {
+    "cn": {True: "- status：任务的真实状态，每项必填",
+           False: "- status：任务状态，缺省规则见工具说明"},
+    "en": {True: "- status: actual task status; required for every item",
+           False: "- status: task status; see the tool's default rules when omitted"},
+}
+_OPTIONAL_FIELDS_HEADER = {"cn": "可选字段：", "en": "Optional field:"}
+
+
+def _status_lang(language: str) -> str:
+    """Language key for the status texts above; anything other than "en" uses Chinese."""
+    return "en" if language == "en" else "cn"
+
+
+def get_todo_create_description(language: str = "cn") -> str:
+    """Return the todo_create description with the default (optional) status rules."""
+    lang = _status_lang(language)
+    return _TODO_CREATE_TEMPLATES[lang].substitute(status_rules=_TODO_CREATE_OPTIONAL_STATUS_RULES[lang])
+
+
+TODO_CREATE_DESCRIPTION_CN = get_todo_create_description("cn")
+TODO_CREATE_DESCRIPTION_EN = get_todo_create_description("en")
 
 TODO_CREATE_DESCRIPTION: Dict[str, str] = {
     "cn": TODO_CREATE_DESCRIPTION_CN,
@@ -57,7 +107,7 @@ TODO_CREATE_DESCRIPTION: Dict[str, str] = {
 # Todo-list description
 # ---------------------------------------------------------------------------
 TODO_LIST_DESCRIPTION_CN = """
-检索并显示当前会话的所有待办事项。
+检索并显示当前会话的完整清单，包含 pending、in_progress、completed、cancelled，保留原顺序；每项包含 id、content、status、depends_on。
 
 ## 何时使用 todo_list（而非 todo_modify）
 
@@ -71,7 +121,7 @@ TODO_LIST_DESCRIPTION_CN = """
 """
 
 TODO_LIST_DESCRIPTION_EN = """
-Retrieve and display all todo items for the current session
+Retrieve the complete current session list, including pending, in_progress, completed, and cancelled, preserving order; each item includes id, content, status, and depends_on.
 
 ## When to Use todo_list (vs. todo_modify)
 
@@ -96,8 +146,9 @@ TODO_MODIFY_DESCRIPTION_CN = """
 修改当前会话的待办事项，包括：更新（update）、删除（delete）、取消（cancel）、追加（append）、在其后插入（insert_after）、在其前插入（insert_before）
 
 重要说明：
-- 若需重新规划整个任务列表，请调用 todo_create
-- 支持批量处理同一时点发生的结构变更，避免连续多次调用。状态流转应随执行进度即时更新：单次 update 的状态变更通常只涉及当前任务和下一任务，不要将多个 pending 任务批量改为 completed
+- 在原清单上增加、拆分、取消个别步骤使用本工具（append、insert_after、insert_before、cancel），已完成项保持不动；只有大部分条目都需要替换时，才调用 todo_create 整体重建
+- 清单保持执行顺序：新步骤要在某个已有 pending 步骤（如校对、交付）之前执行的，用 insert_before 插到该步骤前面；append 只用于排在所有已有步骤之后执行的步骤
+- 同时发生的结构变更可批量处理。状态变化时及时更新；发现多项已完成但漏记时，核实后可以一次 update 补记。尚未完成或仍等待必要验证的工作不得提前标记 completed
 - **id 使用你在 todo_create 时自定义的语义 ID**（如 "translate_doc"），不要使用 UUID
 - **只传入发生变化的字段**：update 每次调用只需给出 id 加上实际改变的字段（通常只是 status），不要把 content、description、activeForm 等未变化的字段重新完整传一遍
 
@@ -140,13 +191,13 @@ append：在列表末尾追加新任务（id 由你指定，须简短语义且�
         ]
     }
 
-insert_after：在指定任务之后插入新任务（目标任务状态须为 in_progress 或 pending）：
+insert_after：在指定任务之后插入新任务（目标任务状态须为 completed、in_progress 或 pending）：
     {
         "action": "insert_after",
         "todo_data": {"target_id": "translate_doc", "items": [{"id": "review_translation", "content": "插入的任务", "activeForm": "执行插入的任务", "description": "任务的详细描述", "status": "pending", "selected_model_id": "fast"}]}
     }
 
-insert_before：在指定任务之前插入新任务（目标任务状态须为 pending）：
+insert_before：在指定任务之前插入新任务（目标任务状态须为 pending；插入的条目全部为 completed 时也可为 in_progress）：
     {
         "action": "insert_before",
         "todo_data": {"target_id": "analyze_code", "items": [{"id": "setup_env", "content": "插入的任务", "activeForm": "执行插入的任务", "description": "任务的详细描述", "status": "pending"}]}
@@ -155,8 +206,9 @@ insert_before：在指定任务之前插入新任务（目标任务状态须为 
 核心规则：
 - update 操作：id 字段不可修改，其他字段支持部分更新
 - 同一时间只能有一个任务处于 in_progress
-- insert_after：目标任务状态必须为 in_progress 或 pending
-- insert_before：目标任务状态必须为 pending
+- insert_after：目标任务状态必须为 completed、in_progress 或 pending
+- insert_before：目标任务状态必须为 pending；插入的条目全部为 completed 时，目标也可以是 in_progress
+- 保存时清单按 completed/cancelled、in_progress、pending 的顺序排列，同一状态内保持原有顺序
 - 如果任务的 selected_model_id 为空时，任何操作都不要更改 selected_model_id 字段
 """
 
@@ -164,8 +216,9 @@ TODO_MODIFY_DESCRIPTION_EN = """
 Modify todo items for the current session, including: update, delete, cancel, append, insert_after, and insert_before.
 
 Important notes:
-- To re-plan the entire task list, call todo_create instead
-- Batch structural changes that occur at the same time to avoid repeated calls. Status transitions should be updated immediately as execution progresses: a single update should normally change only the current task and the next task; do not change multiple pending tasks to completed in one call
+- Use this tool (append, insert_after, insert_before, cancel) to add, split, or cancel individual steps in the existing list, leaving completed items untouched; call todo_create to rebuild only when most items are being replaced
+- Keep the list in execution order: insert a new step before the existing pending step it should precede (for example before review or delivery) with insert_before; use append only for steps that run after all existing ones
+- Batch structural changes that occur together. Update statuses promptly; if multiple completed items were left unrecorded, verify them and record them in one update. Never mark unfinished work or work awaiting required verification completed
 - **Use the semantic id you assigned in todo_create** (e.g. "translate_doc"); never use UUIDs
 - **Only send the fields that changed**: for update, each call only needs the id plus the fields that actually changed (usually just status) — do not resend unchanged fields like content, description, or activeForm
 
@@ -208,13 +261,13 @@ append: Add new tasks at the end of the list (id must be a short semantic string
         ]
     }
 
-insert_after: Insert new tasks after the specified task (target must be in_progress or pending):
+insert_after: Insert new tasks after the specified task (target must be completed, in_progress, or pending):
     {
         "action": "insert_after",
         "todo_data": {"target_id": "translate_doc", "items": [{"id": "review_translation", "content": "Inserted task", "activeForm": "Executing inserted task", "description": "Detailed description of the task", "status": "pending", "selected_model_id": "fast"}]}
     }
 
-insert_before: Insert new tasks before the specified task (target must be pending):
+insert_before: Insert new tasks before the specified task (target must be pending, or in_progress when every inserted item is completed):
     {
         "action": "insert_before",
         "todo_data": {"target_id": "analyze_code", "items": [{"id": "setup_env", "content": "Inserted task", "activeForm": "Executing inserted task", "description": "Detailed description of the task", "status": "pending"}]}
@@ -223,8 +276,9 @@ insert_before: Insert new tasks before the specified task (target must be pendin
 Core rules:
 - update: the id field cannot be modified; all other fields support partial updates
 - Only one task can be in_progress at a time
-- insert_after: target task status must be in_progress or pending
-- insert_before: target task status must be pending
+- insert_after: target task status must be completed, in_progress, or pending
+- insert_before: target task status must be pending; when every inserted item is completed, the target may also be in_progress
+- On save the list is ordered completed/cancelled, then in_progress, then pending, keeping the existing order within each status
 - If the task's selected_model_id is empty, do not modify the selected_model_id field in any operation.
 """
 
@@ -371,6 +425,7 @@ def get_todo_create_input_params(language: str = "cn") -> Dict[str, Any]:
     """Return the full JSON Schema for todo_create tool input_params."""
     p = TODO_CREATE_PARAMS
     tasks_desc = p["tasks"].get(language, p["tasks"]["cn"])
+    tasks_desc += "\n" + _status_parameter_rule(language, False)
     item_props = _todo_item_properties(language)
     return {
         "type": "object",
@@ -385,6 +440,7 @@ def get_todo_create_input_params(language: str = "cn") -> Dict[str, Any]:
                         "content": item_props["content"],
                         "activeForm": item_props["activeForm"],
                         "description": item_props["description"],
+                        "status": item_props["status"],
                         "selected_model_id": item_props["selected_model_id"],
                     },
                     "required": ["id", "content", "activeForm", "description"],
@@ -393,6 +449,51 @@ def get_todo_create_input_params(language: str = "cn") -> Dict[str, Any]:
         },
         "required": ["tasks"],
     }
+
+
+def _status_parameter_rule(language: str, required: bool) -> str:
+    return _STATUS_PARAMETER_RULES[_status_lang(language)][required]
+
+
+def _move_status_to_required_fields(description: str, lang: str) -> str:
+    """Drop the optional status entry and list status among the required fields."""
+    lines = [line for line in description.split("\n") if line != _status_parameter_rule(lang, False)]
+    required = _status_parameter_rule(lang, True)
+    if required not in lines:
+        header = _OPTIONAL_FIELDS_HEADER[lang]
+        if header in lines:
+            lines.insert(lines.index(header), required)
+        else:
+            lines.append(required)
+    return "\n".join(lines).strip()
+
+
+def require_todo_create_status(card: ToolCard, language: str) -> None:
+    """Make status required on a built todo_create card.
+
+    The card may come from a registered provider, so only the built-in status rules are
+    replaced; other provider text and schema constraints are kept.
+    """
+    lang = _status_lang(language)
+    optional = _TODO_CREATE_OPTIONAL_STATUS_RULES[lang]
+    required = _TODO_CREATE_REQUIRED_STATUS_RULES[lang]
+    if optional in card.description:
+        card.description = card.description.replace(optional, required)
+    else:
+        card.description += "\n" + required
+    schema = deepcopy(card.input_params)
+    tasks = schema["properties"]["tasks"]
+    tasks["description"] = _move_status_to_required_fields(tasks.get("description", ""), lang)
+    item = tasks["items"]
+    status = item["properties"].setdefault("status", {})
+    standard = _todo_item_properties(lang)["status"]
+    status.setdefault("type", standard["type"])
+    status.setdefault("description", standard["description"])
+    status["enum"] = [value for value in status.get("enum", standard["enum"]) if value in standard["enum"]]
+    required_fields = item.setdefault("required", [])
+    if "status" not in required_fields:
+        required_fields.append("status")
+    card.input_params = schema
 
 
 def get_todo_list_input_params(language: str = "cn") -> Dict[str, Any]:
@@ -478,9 +579,7 @@ class TodoCreateMetadataProvider(ToolMetadataProvider):
         return "todo_create"
 
     def get_description(self, language: str = "cn") -> str:
-        return TODO_CREATE_DESCRIPTION.get(
-            language, TODO_CREATE_DESCRIPTION["cn"]
-        )
+        return get_todo_create_description(language)
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_todo_create_input_params(language)

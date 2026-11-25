@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import uuid
+
+from openjiuwen.core.session.agent import Session
+from openjiuwen.core.sys_operation import LocalWorkConfig, SysOperation, SysOperationCard
 from openjiuwen.harness.cli.ui.todo_render import (
     apply_todo_modify_args,
     parse_todo_result,
@@ -10,6 +15,11 @@ from openjiuwen.harness.cli.ui.todo_render import (
     render_todo_list,
     render_todo_summary,
 )
+from openjiuwen.harness.schema.task import STATUS_ICONS, TodoStatus
+from openjiuwen.harness.tools.todo import TodoCreateTool, TodoListTool
+
+_IN_PROGRESS_ICON = STATUS_ICONS[TodoStatus.IN_PROGRESS]
+_PENDING_ICON = STATUS_ICONS[TodoStatus.PENDING]
 
 
 class TestRenderTodoItem:
@@ -130,9 +140,9 @@ class TestParseTodoResult:
         raw_dict = {
             "message": (
                 "Successfully created 3 task(s):\n"
-                "  [>] task_id: abc-123 , content: 设计UI\n"
-                "  [ ] task_id: def-456 , content: 实现表单\n"
-                "  [ ] task_id: ghi-789 , content: 添加验证\n"
+                f"  {_IN_PROGRESS_ICON} task_id: abc-123 , content: 设计UI\n"
+                f"  {_PENDING_ICON} task_id: def-456 , content: 实现表单\n"
+                f"  {_PENDING_ICON} task_id: ghi-789 , content: 添加验证\n"
                 "\nNext step: execute"
             )
         }
@@ -146,46 +156,60 @@ class TestParseTodoResult:
         assert items[2]["status"] == "pending"
 
     def test_parse_list_tool_repr(self) -> None:
-        """Parse TodoListTool's str(dict) repr format."""
-        raw_dict = {
-            "message": (
-                "Todo List (Total: 3 items):\n"
-                "\n"
-                "[>] In Progress Task\n"
-                " [abc-123] 设计UI\n"
-                "\n"
-                "[ ] Pending Tasks\n"
-                " [def-456] 实现表单\n"
-                " [ghi-789] 添加验证"
-            )
-        }
-        result = str(raw_dict)
-        items = parse_todo_result(result)
-        assert items is not None
-        assert len(items) == 3
-        assert items[0]["status"] == "in_progress"
-        assert items[1]["status"] == "pending"
-        assert items[2]["status"] == "pending"
+        """Parse TodoListTool's str(dict) repr of ``{'tasks': [...]}``."""
+        tasks = [
+            {"id": "abc-123", "content": "已完成", "status": "completed", "depends_on": []},
+            {"id": "def-456", "content": "进行中", "status": "in_progress", "depends_on": []},
+            {"id": "ghi-789", "content": "待处理", "status": "pending", "depends_on": ["def-456"]},
+        ]
+        items = parse_todo_result(str({"tasks": tasks}))
+        assert items == tasks
 
-    def test_parse_list_tool_with_completed(self) -> None:
-        """Parse TodoListTool with completed items."""
-        raw_dict = {
-            "message": (
-                "Todo List (Total: 2 items):\n"
-                "\n"
-                "[√] Completed Tasks\n"
-                " [abc-123] 已完成\n"
-                "\n"
-                "[>] In Progress Task\n"
-                " [def-456] 进行中"
-            )
-        }
-        result = str(raw_dict)
+    def test_parse_list_repr(self) -> None:
+        """Parse a bare str(list) repr, as sent by todo.updated chunks."""
+        todos = [{"id": "a", "content": "任务A", "status": "in_progress"}]
+        assert parse_todo_result(str(todos)) == todos
+
+    def test_parse_non_literal_repr_returns_none(self) -> None:
+        """A repr that is not a Python literal falls back to text parsing."""
+        assert parse_todo_result("{'tasks': [<object at 0x1>]}") is None
+
+    def test_parse_every_sdk_status_icon(self) -> None:
+        """Every icon in the SDK STATUS_ICONS maps back to its status."""
+        lines = [
+            f"  {icon} task_id: t{i} , content: task {status.value}"
+            for i, (status, icon) in enumerate(STATUS_ICONS.items())
+        ]
+        result = str({"message": "Successfully created:\n" + "\n".join(lines)})
         items = parse_todo_result(result)
-        assert items is not None
-        assert len(items) == 2
-        assert items[0]["status"] == "completed"
-        assert items[1]["status"] == "in_progress"
+        assert items == [
+            {"content": f"task {status.value}", "status": status.value}
+            for status in STATUS_ICONS
+        ]
+
+    def test_parse_real_create_and_list_results(self, tmp_path) -> None:
+        """Real todo_create and todo_list results parse to the saved order and statuses."""
+        operation = SysOperation(SysOperationCard(
+            id=f"todo-render-{uuid.uuid4().hex}",
+            work_config=LocalWorkConfig(sandbox_root=[str(tmp_path)]),
+        ))
+        session = Session(session_id="todo-render")
+        tasks = [
+            {"id": "a", "content": "Task A", "activeForm": "Doing A", "description": "A", "status": "pending"},
+            {"id": "b", "content": "Task B", "activeForm": "Doing B", "description": "B", "status": "completed"},
+            {"id": "c", "content": "Task C", "activeForm": "Doing C", "description": "C", "status": "in_progress"},
+        ]
+
+        async def run():
+            created = await TodoCreateTool(operation, str(tmp_path)).invoke({"tasks": tasks}, session=session)
+            listed = await TodoListTool(operation, str(tmp_path)).invoke({}, session=session)
+            return created, listed
+
+        created, listed = asyncio.run(run())
+        assert [(item["content"], item["status"]) for item in parse_todo_result(str(created))] == [
+            ("Task B", "completed"), ("Task C", "in_progress"), ("Task A", "pending"),
+        ]
+        assert parse_todo_result(str(listed)) == listed["tasks"]
 
     def test_parse_empty_string(self) -> None:
         """Empty string returns None."""
@@ -231,6 +255,26 @@ class TestApplyTodoModifyArgs:
         assert updated[0]["status"] == "completed"
         assert updated[1]["status"] == "in_progress"
         assert updated[1]["content"] == "Doing Task B"
+
+    def test_update_follows_saved_order(self) -> None:
+        """Completing a later item moves it ahead of unfinished ones, as in the saved file."""
+        items = [
+            {"id": "a", "content": "Task A", "status": "completed"},
+            {"id": "b", "content": "Task B", "status": "in_progress"},
+            {"id": "c", "content": "Task C", "status": "pending"},
+            {"id": "d", "content": "Task D", "status": "pending"},
+        ]
+        args = {
+            "action": "update",
+            "todos": [
+                {"id": "b", "status": "completed"},
+                {"id": "d", "status": "completed"},
+                {"id": "c", "status": "in_progress"},
+            ],
+        }
+        updated = apply_todo_modify_args(items, args)
+        assert updated is not None
+        assert [item["id"] for item in updated] == ["a", "b", "d", "c"]
 
     def test_delete_removes_cached_items(self) -> None:
         """delete removes matching items."""

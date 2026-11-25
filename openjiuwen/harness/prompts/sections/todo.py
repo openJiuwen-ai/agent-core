@@ -45,7 +45,7 @@ Use the todo tools (todo_create, todo_modify, todo_list, todo_get) to break down
 
 **Task management rules:**
 - Once a planning need is identified, call todo_create immediately before starting execution.
-- Update status via todo_modify as soon as it changes; do not accumulate multiple status changes that have already occurred and update them all later. A single update should normally change only the current task and the next task: set the current task to completed and the next task to in_progress; do not change multiple pending tasks to completed in one call
+- Update statuses promptly via todo_modify. If multiple completed items were left unrecorded, verify them and record them in one update.
 - When calling todo_modify to update a task, only include the fields that changed (usually just id and status); do not resend unchanged fields
 - Only one task can be in_progress at a time; complete it before starting the next
   - Exception: if an in_progress task needs to process multiple independent sub-items in parallel
@@ -53,14 +53,16 @@ Use the todo tools (todo_create, todo_modify, todo_list, todo_get) to break down
     you may advance those sub-items in parallel and process results as they become available.
     Mark the task completed only after all required sub-items are finished. This is intra-task parallelism
     and does not violate the "one in_progress at a time" rule.
-- Mark unnecessary tasks as cancelled via todo_modify.
-- Use todo_list to understand the overall progress of the current task plan
+- Cancel a user-requested item only if the user withdraws it or it duplicates another item; internal steps that are no longer needed may be cancelled. If an item fails or is blocked, do not cancel or delete it: keep its status and explain what is blocking it when you deliver.
+- When adjusting an existing list (adding, splitting, or cancelling steps), change it in place with todo_modify (append, insert_after, insert_before, cancel) and leave completed items untouched. Keep the list in execution order: insert a new step before the existing pending step it should precede (for example before review or delivery) with insert_before, and use append only for steps that run after all existing ones. Rebuild with todo_create only when most existing items are being replaced.
+- Use todo_list to read the complete list, including closed items. Before rebuilding with todo_create, obtain the full list and keep completed items that still belong to the current task with their existing ids and actual statuses.
 - Use todo_get to view the details of a specific task
 
 **Before marking a task completed:**
 - Verify the work is fully done (e.g., run tests to confirm)
 - Never mark completed if: partially implemented, tests failing, unresolved errors
-- After completing, check if new follow-up tasks were discovered and append them via todo_modify
+- After completing, check if new follow-up tasks were discovered and add them via todo_modify in execution order
+- Before delivering the current task, reconcile its list with actual verified results and record completed work. Keep genuinely unfinished requirements open and explain the missing deliverables and reasons. Unchecked items alone do not establish that work is unfinished. Do not repeat reads or writes when the list is accurate or start extra work because of unrelated old items.
 """
 
 TODO_SYSTEM_PROMPT_CN = """
@@ -88,20 +90,22 @@ TODO_SYSTEM_PROMPT_CN = """
 
 **任务管理规则：**
 - **识别到规划需求后，在开始执行前立即调用 todo_create。**
-- 实时更新状态：任务状态变化时立即调用 todo_modify，不要积攒多个已发生的状态变化后统一更新。单次 update 的状态变更通常只涉及当前任务和下一任务：将当前任务设为 completed，并将下一任务设为 in_progress；不要在一次调用中将多个 pending 任务批量改为 completed
+- 状态变化时及时调用 todo_modify；发现多项已完成但漏记时，核实后可以一次 update 补记
 - 调用 todo_modify 更新时，每次只传入发生变化的字段（通常只有 id 和 status），不要把未变化的字段重新传一遍
 - 同一时间只能有一个任务处于 in_progress，完成后再开始下一个
   - 例外：若某个 in_progress 任务内部需要并行处理多个独立子项（如同时阅读多篇文档、并发搜索多个来源），
     可在该任务内并行推进独立子项，按结果就绪情况逐步处理；所有必需子项完成后，再将任务标记为 completed。
     这属于任务内部的并行执行，不违反"同一时间只有一个 in_progress"原则。
-- 不再需要的任务用 todo_modify 标记为 cancelled
-- 可通过调用 todo_list 了解当前任务整体规划进展
+- 用户提出的事项，只有用户撤销或与其他条目重复时才取消；不再需要的内部步骤可以取消。条目执行失败或缺少前提条件时，不要取消或删除，保持原状态，交付时说明卡在哪里
+- 调整已有清单（增加、拆分、取消步骤）时，用 todo_modify 的 append、insert_after、insert_before、cancel 在原清单上修改，已完成项保持不动。清单保持执行顺序：新步骤要在某个已有 pending 步骤（如校对、交付）之前执行的，用 insert_before 插到该步骤前面；append 只用于排在所有已有步骤之后执行的步骤。只有原清单大部分条目都要替换时，才用 todo_create 整体重建
+- todo_list 返回包含已结束项的完整清单；整体重建前取得完整清单，仍属于当前任务的已完成项保留原有 id 和真实状态
 - 可通过调用 todo_get 了解某项任务的详细信息
 
 **将任务标记为已完成前：**
 - 必须仔细验证工作已全部完成（如运行测试用例）
 - 以下情况绝对不能标记为已完成：部分实现、测试失败、存在未解决的错误等
-- 标记完成后，检查实现过程中是否发现新的后续任务，及时通过 todo_modify 追加
+- 标记完成后，检查实现过程中是否发现新的后续任务，按执行顺序通过 todo_modify 加入清单
+- 交付当前任务前按实际核实结果核对清单，补记已完成工作。确实未交付且仍有效的要求保留未完成状态，并说明实际缺项及原因；不根据未勾选数量断言工作未完成。清单准确时不重复读写，也不因无关旧清单残留启动额外工作
 """
 
 TODO_SYSTEM_PROMPT: Dict[str, str] = {

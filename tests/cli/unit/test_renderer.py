@@ -11,6 +11,10 @@ import pytest
 from rich.console import Console
 
 from openjiuwen.harness.cli.ui.renderer import render_stream
+from openjiuwen.harness.schema.task import STATUS_ICONS, TodoStatus
+
+_IN_PROGRESS_ICON = STATUS_ICONS[TodoStatus.IN_PROGRESS]
+_PENDING_ICON = STATUS_ICONS[TodoStatus.PENDING]
 
 
 # ---------------------------------------------------------------------------
@@ -353,8 +357,8 @@ class TestRenderStream:
         raw_dict = {
             "message": (
                 "Successfully created 2 task(s):\n"
-                "  [>] task_id: abc , content: Task A\n"
-                "  [ ] task_id: def , content: Task B"
+                f"  {_IN_PROGRESS_ICON} task_id: abc , content: Task A\n"
+                f"  {_PENDING_ICON} task_id: def , content: Task B"
             )
         }
         chunks = [
@@ -372,7 +376,8 @@ class TestRenderStream:
         console = Console(file=buf)
         await render_stream(_async_iter(chunks), console)
         output = buf.getvalue()
-        assert "◐" in output or "Task A" in output
+        assert "◐ Task A" in output
+        assert "☐ Task B" in output
 
     @pytest.mark.asyncio
     async def test_todo_modify_rerenders_cached_todos(self) -> None:
@@ -380,8 +385,8 @@ class TestRenderStream:
         create_raw_dict = {
             "message": (
                 "Successfully created 2 task(s):\n"
-                "  [>] task_id: a , content: Task A\n"
-                "  [ ] task_id: b , content: Task B"
+                f"  {_IN_PROGRESS_ICON} task_id: a , content: Task A\n"
+                f"  {_PENDING_ICON} task_id: b , content: Task B"
             )
         }
         modify_raw_dict = {

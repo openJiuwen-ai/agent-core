@@ -11,14 +11,26 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import tool_logger, LogEventType
 from openjiuwen.core.foundation.tool import Tool, ToolCard, Input, Output
-from openjiuwen.core.session.agent import Session
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.prompts.tools import build_tool_card
+from openjiuwen.harness.prompts.tools.todo import require_todo_create_status
 from openjiuwen.harness.schema.task import (
+    PROGRESS_RANK,
     STATUS_ICONS,
     TodoItem,
     TodoStatus,
 )
+
+_STATUS_VALUES = tuple(status.value for status in TodoStatus)
+_ALLOWED_STATUSES = f"Allowed: {', '.join(_STATUS_VALUES)}."
+_NOT_WRITTEN = "No changes were written."
+
+
+def _order_by_progress(todos: List[TodoItem]) -> None:
+    # Steps added after pending ones (e.g. appended behind review/delivery) and finished first would
+    # otherwise show finished work after unfinished work. A stable sort keeps each status group in order;
+    # sorting in place keeps receipts built from the same list in the saved order.
+    todos.sort(key=lambda todo: PROGRESS_RANK.get(todo.status, 2))
 
 
 class TodoLockManager:
@@ -146,7 +158,8 @@ class TodoTool(Tool):
 
         Args:
             session_id: The session ID to save todos for.
-            todos: List of TodoItem instances to persist.
+            todos: List of TodoItem instances to persist; reordered in place by progress
+                (completed/cancelled, in_progress, pending), stable within each status.
 
         Raises:
             ToolError: If file writing fails.
@@ -154,6 +167,7 @@ class TodoTool(Tool):
         async with self._lock_manager.operation(session_id):
             file_path = self._get_file_path(session_id)
             abs_path = os.path.abspath(file_path)
+            _order_by_progress(todos)
             data = [todo.to_dict() for todo in todos]
             json_content = json.dumps(data, ensure_ascii=False, indent=2)
             write_res = await self.fs.write_file(abs_path, json_content, mode="text")
@@ -191,9 +205,15 @@ class TodoCreateTool(TodoTool):
         language: str = "cn",
         agent_id: Optional[str] = None,
         lock_manager: Optional[TodoLockManager] = None,
+        *,
+        require_explicit_status: bool = False,
     ):
+        self.require_explicit_status = require_explicit_status
+        card = build_tool_card("todo_create", "TodoCreateTool", language, agent_id=agent_id)
+        if require_explicit_status:
+            require_todo_create_status(card, language)
         super().__init__(
-            build_tool_card("todo_create", "TodoCreateTool", language, agent_id=agent_id),
+            card,
             operation,
             workspace,
             lock_manager,
@@ -261,8 +281,16 @@ class TodoCreateTool(TodoTool):
             status_icon = STATUS_ICONS.get(todo.status, "[ ]")
             model_info = f" (model: {todo.selected_model_id})" if todo.selected_model_id else ""
             result += f"  {status_icon} task_id: {todo.id} , content: {todo.content}{model_info}\n"
-        first_task = todos[0].content if todos else ""
-        result += f"\nNext step: Immediately execute task '{first_task}'"
+        current = next((todo for todo in todos if todo.status == TodoStatus.IN_PROGRESS), None)
+        if current is not None:
+            result += (
+                f"\nRecorded in progress: '{current.content}' (task_id: {current.id}). "
+                "Next step: start this task now."
+            )
+        elif any(todo.status == TodoStatus.PENDING for todo in todos):
+            result += "\nNext step: Choose a pending task and set it to in_progress before starting."
+        else:
+            result += "\nAll items are closed (completed or cancelled). Report actual results."
         return result.strip()
 
     async def _create_from_list(self, session_id: str, tasks_data: List[Dict[str, Any]]) -> str:
@@ -272,8 +300,27 @@ class TodoCreateTool(TodoTool):
                 StatusCode.TOOL_TODOS_VALIDATION_INVALID,
                 reason="Task list cannot be empty"
             )
+        for i, task in enumerate(tasks_data):
+            if not isinstance(task, dict):
+                raise build_error(
+                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                    reason=f"Task at index {i} must be an object. {_NOT_WRITTEN}"
+                )
         new_todos = []
         seen_ids: set = set()
+        explicit_status = any("status" in task for task in tasks_data)
+        missing = [str(task.get("id") or f"index {i}") for i, task in enumerate(tasks_data)
+                   if "status" not in task]
+        if self.require_explicit_status and missing:
+            omitted = f" (+{len(missing) - 10} omitted)" if len(missing) > 10 else ""
+            raise build_error(
+                StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                reason=(
+                    f"Missing status for: {', '.join(missing[:10])}{omitted}. {_ALLOWED_STATUSES} "
+                    'Example task: {"id":"verify","content":"Verify","activeForm":"Verifying",'
+                    f'"description":"Verify the result","status":"in_progress"}}. {_NOT_WRITTEN}'
+                ),
+            )
         for i, task_data in enumerate(tasks_data):
             content = task_data.get("content", "")
             if not content:
@@ -303,7 +350,17 @@ class TodoCreateTool(TodoTool):
                     reason=f"Duplicate task id '{task_id}' at index {i}"
                 )
             seen_ids.add(task_id)
-            status = TodoStatus.IN_PROGRESS if i == 0 else TodoStatus.PENDING
+            if "status" in task_data:
+                value = task_data["status"]
+                if not isinstance(value, str) or value not in _STATUS_VALUES:
+                    raise build_error(
+                        StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                        reason=(f"Invalid status for task '{task_id}'. {_ALLOWED_STATUSES} "
+                                f'Example: {{"id":"verify","status":"in_progress"}}. {_NOT_WRITTEN}'),
+                    )
+                status = TodoStatus(value)
+            else:
+                status = TodoStatus.IN_PROGRESS if i == 0 and not explicit_status else TodoStatus.PENDING
             new_todos.append(
                 TodoItem(
                     id=task_id,
@@ -315,13 +372,18 @@ class TodoCreateTool(TodoTool):
                 )
             )
 
+        if sum(todo.status == TodoStatus.IN_PROGRESS for todo in new_todos) > 1:
+            raise build_error(
+                StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                reason=f"At most one task may be in_progress. {_NOT_WRITTEN}",
+            )
         await self.save_todos(session_id, new_todos)
         tool_logger.info("Created todo items from JSON array", event_type=LogEventType.TOOL_CALL_END)
         return self._format_create_result(new_todos)
 
 
 class TodoListTool(TodoTool):
-    """Todo List Tool - Returns active (non-completed, non-cancelled) todo items."""
+    """Todo List Tool - Returns all todo items in their persisted order."""
 
     def __init__(
         self,
@@ -361,10 +423,6 @@ class TodoListTool(TodoTool):
 
         try:
             tasks = await self.load_todos(session_id)
-            active_tasks = [
-                t for t in tasks
-                if t.status not in (TodoStatus.CANCELLED, TodoStatus.COMPLETED)
-            ]
             simplified = [
                 {
                     "id": t.id,
@@ -372,7 +430,7 @@ class TodoListTool(TodoTool):
                     "status": t.status.value,
                     "depends_on": t.depends_on,
                 }
-                for t in active_tasks
+                for t in tasks
             ]
             return {"tasks": simplified}
         except Exception as e:
@@ -709,7 +767,7 @@ class TodoModifyTool(TodoTool):
     async def _insert_after_todos(self, session_id: str, target_id: str, insert_todos_data: List[Dict],
                                    current_todos: List[TodoItem]) -> str:
         target_index = self._validate_target_task_status(
-            target_id, current_todos, [TodoStatus.IN_PROGRESS, TodoStatus.PENDING]
+            target_id, current_todos, [TodoStatus.IN_PROGRESS, TodoStatus.PENDING, TodoStatus.COMPLETED]
         )
         existing_ids = {todo.id for todo in current_todos}
         insert_todos = []
@@ -731,9 +789,11 @@ class TodoModifyTool(TodoTool):
 
     async def _insert_before_todos(self, session_id: str, target_id: str, insert_todos_data: List[Dict],
                                     current_todos: List[TodoItem]) -> str:
-        target_index = self._validate_target_task_status(
-            target_id, current_todos, [TodoStatus.PENDING]
-        )
+        # Completed items may also go before the in_progress task, so restored finished work stays
+        # ahead of the current task instead of after unfinished ones.
+        all_completed = all(item.get("status") == TodoStatus.COMPLETED.value for item in insert_todos_data)
+        allowed = [TodoStatus.PENDING, TodoStatus.IN_PROGRESS] if all_completed else [TodoStatus.PENDING]
+        target_index = self._validate_target_task_status(target_id, current_todos, allowed)
         existing_ids = {todo.id for todo in current_todos}
         insert_todos = []
         for todo_data in insert_todos_data:
@@ -758,6 +818,8 @@ def create_todos_tool(
     workspace: Optional[str] = None,
     language: str = "cn",
     agent_id: Optional[str] = None,
+    *,
+    require_explicit_status: bool = False,
 ) -> List[TodoTool]:
     """Create a set of todo tools that share the same lock manager.
 
@@ -767,13 +829,15 @@ def create_todos_tool(
         workspace: Path for file system operations.
         language: Language for tool descriptions.
         agent_id: Optional agent identifier.
+        require_explicit_status: Whether todo_create requires an explicit status for every item.
 
     Returns:
         List of TodoTool instances sharing the same lock manager.
     """
     shared_lock_manager = TodoLockManager()
     return [
-        TodoCreateTool(operation, workspace, language, agent_id, shared_lock_manager),
+        TodoCreateTool(operation, workspace, language, agent_id, shared_lock_manager,
+                       require_explicit_status=require_explicit_status),
         TodoListTool(operation, workspace, language, agent_id, shared_lock_manager),
         TodoGetTool(operation, workspace, language, agent_id, shared_lock_manager),
         TodoModifyTool(operation, workspace, language, agent_id, shared_lock_manager),

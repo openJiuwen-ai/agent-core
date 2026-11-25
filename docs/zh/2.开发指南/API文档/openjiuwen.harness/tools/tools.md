@@ -58,9 +58,9 @@ DeepAgent 内置工具实现。所有工具通过 Rails 或 `create_deep_agent()
 | 工具 | 说明 |
 |---|---|
 | `TodoTool` | 统一待办事项工具（创建、列出、修改） |
-| `TodoCreateTool` | 创建待办事项 |
-| `TodoListTool` | 列出待办事项 |
-| `TodoModifyTool` | 修改待办事项状态 |
+| `TodoCreateTool` | 创建或整体替换当前待办清单，按注册配置校验并保留任务状态 |
+| `TodoListTool` | 按持久化顺序列出完整待办清单，包含待处理、进行中、已完成和已取消项 |
+| `TodoModifyTool` | 更新待办项的状态或字段，或追加、插入、取消、删除待办项 |
 
 ### 技能工具
 

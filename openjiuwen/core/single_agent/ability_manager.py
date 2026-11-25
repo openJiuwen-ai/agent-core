@@ -748,6 +748,21 @@ class AbilityManager:
                 reordered[name] = card
         self._tools = reordered
 
+    def resolve_tool(
+            self, card: ToolCard, *, tag: Optional[str | list[str]] = None, session: Optional[Session] = None
+    ) -> Optional[Tool]:
+        """Return the tool instance this agent executes for ``card``.
+
+        Prefers the instance registered on this manager, then the global resource manager.
+        Another agent with the same id may refresh the global entry, so reuse checks must
+        call this method to see the same instance that execution uses.
+        """
+        tool = self._tool_instances.get(card.name)
+        if tool is not None:
+            return tool
+        from openjiuwen.core.runner import Runner
+        return Runner.resource_mgr.get_tool(tool_id=card.id or card.name, tag=tag, session=session)
+
     def get(self, name: str) -> Optional[Ability]:
         """Get an ability Card by name
 
@@ -1256,10 +1271,7 @@ class AbilityManager:
             # this agent's stateful tools (e.g. task_tool).
             tool_card = self._tools[tool_name]
             tool_id = tool_card.id or tool_card.name
-            tool = self._tool_instances.get(tool_name)
-            if tool is None:
-                from openjiuwen.core.runner import Runner
-                tool = Runner.resource_mgr.get_tool(tool_id=tool_id, tag=tag, session=session)
+            tool = self.resolve_tool(tool_card, tag=tag, session=session)
             if not tool:
                 raise self._build_execution_error(
                     tool_call,
