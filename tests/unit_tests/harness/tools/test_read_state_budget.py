@@ -166,13 +166,14 @@ async def test_read_past_eof_recovers_when_pages_end_on_limit(
     monkeypatch.setattr(ReadFileTool, "EAGER_COUNT_MAX_BYTES", 1)
 
     # Two full pages: neither is short, so EOF is not observable yet.
-    await read_tool.invoke({"file_path": path, "offset": 0, "limit": 3})
-    await read_tool.invoke({"file_path": path, "offset": 3, "limit": 3})
+    # offset 为 1 基行号：1-3 行、4-6 行。
+    await read_tool.invoke({"file_path": path, "offset": 1, "limit": 3})
+    await read_tool.invoke({"file_path": path, "offset": 4, "limit": 3})
     assert _FILE_READ_REGISTRY[path].total_lines_known is False
 
-    # An empty page at offset 6 proves every earlier line exists; 6 is a safe
+    # An empty page at offset 7 proves every earlier line exists; 6 is a safe
     # upper bound and the coverage union already reaches it.
-    await read_tool.invoke({"file_path": path, "offset": 6, "limit": 3})
+    await read_tool.invoke({"file_path": path, "offset": 7, "limit": 3})
     state = _FILE_READ_REGISTRY[path]
     assert state.total_lines_known is True
     assert state.total_lines == 6

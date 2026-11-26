@@ -79,7 +79,8 @@ async def test_file_read_write(sys_op, temp_dir):
     assert "第三行" in read_res.data["content"]
     assert read_res.data["line_count"] == 3
 
-    read_partial = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 1})
+    # offset 为 1 基行号：offset=2 读第 2 行（旧 skip 语义下 offset=1 才读第 2 行）。
+    read_partial = await read_tool.invoke({"file_path": file_path, "offset": 2, "limit": 1})
     assert read_partial.success is True
     assert "第二行" in read_partial.data["content"]
 
@@ -558,7 +559,7 @@ async def test_edit_file_tool_editable_after_offset_paginated_reads_only(sys_op,
     # Paginate through the file in chunks, mirroring how an agent would read a
     # file too large to fit in one call. Never issue a full (no offset/limit) read.
     page_size = 1000
-    for offset in range(0, total_lines, page_size):
+    for offset in range(1, total_lines + 1, page_size):  # 1 基行号分页起点
         page_res = await read_tool.invoke({"file_path": file_path, "offset": offset, "limit": page_size})
         assert page_res.success is True
     assert _FILE_READ_REGISTRY[file_path].is_partial is True
@@ -579,7 +580,7 @@ async def test_edit_file_tool_partial_read_still_rejects_external_modification(s
     edit_tool = EditFileTool(sys_op)
     file_path = os.path.join(temp_dir, "partial_edit_stale.txt")
     await write_tool.invoke({"file_path": file_path, "content": "line1\nline2\nline3"})
-    await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 1})
+    await read_tool.invoke({"file_path": file_path, "offset": 2, "limit": 1})
 
     # External modification after the partial read must still be detected.
     with open(file_path, "w", encoding="utf-8") as fh:
@@ -841,13 +842,13 @@ async def test_read_file_tool_text(sys_op, temp_dir):
     content = "alpha\nbeta\ngamma\ndelta\n"
     await write_tool.invoke({"file_path": file_path, "content": content})
 
-    first = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 2})
+    first = await read_tool.invoke({"file_path": file_path, "offset": 2, "limit": 2})
     assert first.success is True
     assert first.data["content"].startswith("     1\tbeta")
     assert "     2\tgamma" in first.data["content"]
 
     # Second read of the same range always returns full content (no dedup).
-    second = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 2})
+    second = await read_tool.invoke({"file_path": file_path, "offset": 2, "limit": 2})
     assert second.success is True
     assert second.data["content"].startswith("     1\tbeta")
     assert "     2\tgamma" in second.data["content"]
@@ -1242,7 +1243,9 @@ async def test_write_file_rejects_partial_read_with_resumable_hint(sys_op, temp_
     res = await write_tool.invoke({"file_path": file_path, "content": "overwrite"})
     assert res.success is False
     assert "fully read" in res.error
-    assert "offset=1000" in res.error
+    # 1-based resume hint (upstream contract): internal gap starts at 0-based
+    # line 1000, so the hint advertises offset=1001.
+    assert "offset=1001" in res.error
     state = _FILE_READ_REGISTRY[file_path]
     assert state.total_lines == total_lines
     assert _first_unread_offset(state.read_ranges) == 1000
@@ -1262,7 +1265,7 @@ async def test_write_file_allows_after_paginated_read_covers_whole_file(sys_op, 
 
     _FILE_READ_REGISTRY.pop(file_path, None)
     page_size = 1000
-    for offset in range(0, total_lines, page_size):
+    for offset in range(1, total_lines + 1, page_size):  # 1 基行号分页起点
         await read_tool.invoke({"file_path": file_path, "offset": offset, "limit": page_size})
 
     state = _FILE_READ_REGISTRY[file_path]
@@ -1285,14 +1288,14 @@ async def test_write_file_allows_after_head_tail_then_middle_fill(sys_op, temp_d
     await write_tool.invoke({"file_path": file_path, "content": "\n".join(lines)})
 
     _FILE_READ_REGISTRY.pop(file_path, None)
-    await read_tool.invoke({"file_path": file_path, "offset": 0, "limit": 100})    # 1-100
-    await read_tool.invoke({"file_path": file_path, "offset": 2000})              # 2001-3824, gap 101-2000
+    await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 100})    # 1-100
+    await read_tool.invoke({"file_path": file_path, "offset": 2001})              # 2001-3824, gap 101-2000
 
     res_gap = await write_tool.invoke({"file_path": file_path, "content": "blocked"})
     assert res_gap.success is False
-    assert "offset=100" in res_gap.error
+    assert "offset=101" in res_gap.error
 
-    await read_tool.invoke({"file_path": file_path, "offset": 100, "limit": 1900})  # fill 101-2000
+    await read_tool.invoke({"file_path": file_path, "offset": 101, "limit": 1900})  # fill 101-2000
     res_ok = await write_tool.invoke({"file_path": file_path, "content": "merged"})
     assert res_ok.success is True
 
@@ -1342,3 +1345,75 @@ async def test_write_file_small_file_single_full_read_allows_overwrite(sys_op, t
 
     res = await write_tool.invoke({"file_path": file_path, "content": "x\ny\nz"})
     assert res.success is True
+
+
+@pytest.mark.asyncio
+async def test_read_file_offset_is_1_based_line_number(sys_op, temp_dir):
+    """契约回归：offset 为 1 基行号（与工具卡一致），不是 0 基 skip。
+
+    背景（20261118_0848/TC-CHAT_SEND-TOOL-002）：卡说「开始读取的行号」而实现
+    按「跳过 N 行」执行，主代理按卡编排子代理 offset 导致系统性错位一行。
+    """
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "one_based.txt")
+    await write_tool.invoke({"file_path": file_path, "content": "line1\nline2\nline3"})
+
+    first = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 1})
+    assert first.success is True
+    assert "line1" in first.data["content"]
+    assert "line2" not in first.data["content"]
+
+    third = await read_tool.invoke({"file_path": file_path, "offset": 3, "limit": 1})
+    assert third.success is True
+    assert "line3" in third.data["content"]
+
+    default = await read_tool.invoke({"file_path": file_path, "limit": 1})
+    assert default.success is True
+    assert "line1" in default.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_offset_zero_is_compatible_with_one(sys_op, temp_dir):
+    """兼容钳位：offset=0 与 offset=1 均从首行读（旧 skip 习惯调用方不炸）。"""
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "zero_compat.txt")
+    await write_tool.invoke({"file_path": file_path, "content": "line1\nline2\nline3"})
+
+    zero = await read_tool.invoke({"file_path": file_path, "offset": 0, "limit": 1})
+    one = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 1})
+    assert zero.success is True and one.success is True
+    assert "line1" in zero.data["content"]
+    assert zero.data["content"] == one.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_offset_past_eof_reports_line_and_total(sys_op, temp_dir):
+    """越界文案带行号与总行数上界，降低自纠成本。"""
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "eof_hint.txt")
+    await write_tool.invoke({"file_path": file_path, "content": "line1\nline2\nline3"})
+
+    res = await read_tool.invoke({"file_path": file_path, "offset": 4, "limit": 1})
+    assert res.success is True
+    assert "line 4 is past its end" in res.data["content"]
+    assert "at most 3 lines" in res.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_blank_line_page_does_not_claim_eof(sys_op, temp_dir):
+    """空白页 ≠ 越界：读空行不得断言 past-EOF 或低报总行数（AI 检视 P2）。"""
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "blank_mid.txt")
+    await write_tool.invoke({"file_path": file_path, "content": "line1\n\nline3"})
+
+    blank = await read_tool.invoke({"file_path": file_path, "offset": 2, "limit": 1})
+    assert blank.success is True
+    assert "past its end" not in blank.data["content"]
+    assert "line 2 is blank" in blank.data["content"]
+
+    after = await read_tool.invoke({"file_path": file_path, "offset": 3, "limit": 1})
+    assert "line3" in after.data["content"]
