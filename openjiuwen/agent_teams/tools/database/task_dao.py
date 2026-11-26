@@ -140,6 +140,22 @@ async def _refresh_status_in_session(
     ``READ COMMITTED`` so each statement — including the count query —
     sees a fresh snapshot and the FOR UPDATE lock's serialisation actually
     takes effect.
+
+    The candidate rows are read as a scalar projection
+    (``task_id, status``), not as an ORM entity, mirroring
+    ``_apply_new_edges``'s upstream-endpoint read: the rows may already be
+    loaded into this session's identity map (e.g. by
+    ``_terminate_task_in_session``'s plain SELECT after its CAS), and an
+    entity SELECT ``with_for_update()`` would return those cached objects
+    with their stale attributes instead of the current DB value under the
+    row lock. A scalar projection bypasses the identity map and reads the
+    live committed value, so the FOR UPDATE lock's serialisation actually
+    takes effect on the current state (not a cached snapshot). The status
+    flip is then a scalar UPDATE — ``WHERE task_id = ? AND status = ?`` —
+    so the lock's read-modify-write never goes through the identity map
+    and never clobbers a concurrent terminal state (the ``status = ?``
+    guard rejects a row that has since become ``IN_PROGRESS`` / terminal,
+    so a stale IN_PROGRESS read can never be flipped back to BLOCKED).
     """
     unique_ids = list({tid for tid in task_ids if tid})
     if not unique_ids:
@@ -148,18 +164,22 @@ async def _refresh_status_in_session(
     team_task_model = _get_task_model()
     task_dependency_model = _get_task_dependency_model()
 
+    # Scalar projection: bypass the identity map so the FOR UPDATE lock
+    # sees the live committed status, not a cached object's stale attribute.
     tasks_result = await session.execute(
-        select(team_task_model)
+        select(team_task_model.task_id, team_task_model.status)
         .where(team_task_model.task_id.in_(unique_ids))
         .with_for_update()
     )
-    candidates = [
-        t for t in tasks_result.scalars().all() if t.status in (TaskStatus.PENDING.value, TaskStatus.BLOCKED.value)
-    ]
-    if not candidates:
+    candidate_ids: List[str] = []
+    current_status: Dict[str, str] = {}
+    for tid, status in tasks_result.all():
+        if status in (TaskStatus.PENDING.value, TaskStatus.BLOCKED.value):
+            candidate_ids.append(tid)
+            current_status[tid] = status
+    if not candidate_ids:
         return []
 
-    candidate_ids = [t.task_id for t in candidates]
     unresolved_result = await session.execute(
         select(
             task_dependency_model.task_id,
@@ -174,18 +194,33 @@ async def _refresh_status_in_session(
     unresolved_by_task: Dict[str, int] = {row[0]: row[1] for row in unresolved_result.all()}
 
     refreshed: List[TeamTaskBase] = []
-    for task in candidates:
-        unresolved = unresolved_by_task.get(task.task_id, 0)
-        if task.status == TaskStatus.PENDING.value and unresolved > 0:
-            task.status = TaskStatus.BLOCKED.value
-            task.updated_at = now
-            refreshed.append(task)
-            team_logger.info("Task %s blocked (%d unresolved deps)", task.task_id, unresolved)
-        elif task.status == TaskStatus.BLOCKED.value and unresolved == 0:
-            task.status = TaskStatus.PENDING.value
-            task.updated_at = now
-            refreshed.append(task)
-            team_logger.info("Task %s unblocked (all deps resolved)", task.task_id)
+    for tid in candidate_ids:
+        unresolved = unresolved_by_task.get(tid, 0)
+        old_status = current_status[tid]
+        if old_status == TaskStatus.PENDING.value and unresolved > 0:
+            new_status = TaskStatus.BLOCKED.value
+            team_logger.info("Task %s blocked (%d unresolved deps)", tid, unresolved)
+        elif old_status == TaskStatus.BLOCKED.value and unresolved == 0:
+            new_status = TaskStatus.PENDING.value
+            team_logger.info("Task %s unblocked (all deps resolved)", tid)
+        else:
+            continue
+        # Scalar UPDATE guarded on the status we just read under the lock,
+        # so a stale read can never flip a terminal / IN_PROGRESS row back.
+        update_result = await session.execute(
+            update(team_task_model)
+            .where(
+                team_task_model.task_id == tid,
+                team_task_model.status == old_status,
+            )
+            .values(status=new_status, updated_at=now)
+        )
+        if update_result.rowcount == 1:
+            refreshed.append(
+                team_task_model(
+                    task_id=tid, status=new_status, updated_at=now,
+                )
+            )
     return refreshed
 
 

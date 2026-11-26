@@ -484,3 +484,70 @@ COLUMN`），同款 TOCTOU 命中后第二个进程会撞 `duplicate column`。�
 检视只点名了 `_create_static_tables`），可作下一轮 follow-up：把它们的 ALTER 全部换成
 `_add_column_idempotent` 包装即可（与 `organization/db.py` 的 `_ensure_org_task_columns`
 同款）。
+
+### 第十二轮检视：DDL verify 语义 + ALTER 幂等 + FOR UPDATE 读回 identity map stale 实体
+
+第十二轮检视点出 5 个遗留 + 新问题：
+
+1. **`_create_static_tables` 的 verify 语义错**（`engine.py:506-512`）：上一轮把 `create_all`
+   包进 `_run_ddl_idempotent`，但 verify 是 `all(t.name in has_table_names for t in
+   static_tables())`——「全部静态表都在」——而 `_run_ddl_idempotent` 是「吞 `already exists`
+   后才走 verify」。MySQL 并发首建场景下：第一个进程建表1，第二个进程建表1失败 → 吞
+   `already exists` → verify「全部表都在」时只有表1建好，表2-N 还没建 → verify=False →
+   re-raise 吞掉的错误。审查正确指出此 verify 语义不能闭合「第二个进程需要继续建表2-N」的
+   竞态。
+2. **`ensure_org_static_tables` 同款 verify 语义错**（`organization/db.py:58-65`）。
+3. **`_ensure_message_protocol_column` / `_ensure_message_meta_column` 缺跨进程幂等**
+   （`engine.py:624` / `engine.py:658`）：两个 migration helper 都是裸 `inspect.get_columns`
+   探针 + `ALTER TABLE ADD COLUMN`，没走 `_add_column_idempotent`，跨进程并发会撞
+   `duplicate column`（PG `ProgrammingError` 42701 / MySQL 1060）。`retry_on_transient` 不
+   覆盖，第二个 bind 崩 `create_cur_session_tables()`。
+4. **`_refresh_status_in_session` 的 FOR UPDATE 读回 identity map stale 实体**
+   （`task_dao.py:151-155`）：`select(team_task_model).with_for_update()` 返回 ORM 实体，落
+   进 identity map。如果同 session 此前已 load 过此实体（`_terminate_task_in_session` 的
+   CAS 路径 line 258 已经 `select(...).where(task_id=...)` load 过一次），会拿回那个被改写
+   过的对象（terminator 已把它改成 `COMPLETED`/`CANCELLED`）。`candidates` filter
+   `t.status in (PENDING, BLOCKED)` 会跳过它——对 terminator 自己的 task 是 OK 的，但对
+   **downstream task**（refresh 操作的对象）如果已被本 session 在别处 load 过，会拿回缓存
+   实体的 stale status，可能把 IN_PROGRESS 覆写为 BLOCKED。审查正确指出此风险。
+5. **`_mark_read_in_session` 广播水位的 FOR UPDATE 同款读回 identity map**
+   （`message_dao.py:655`）：`select(read_status_model).with_for_update()` 返回 ORM 实体，
+   如果同 session 已 load 过此实体（同 batch 内前一条广播消息 mark_read 后），会拿回缓存
+   实体的 stale `read_at`，水位可能被回退（lost update）。
+
+**修法**：
+
+- **#1 / #2（verify 语义）**：把 `create_all(tables=[])` 单调用拆为按表逐个
+  `_run_ddl_idempotent(create_all(tables=[table]), verify=has_table(table.name))`。每张表的
+  `already exists` 单独吞 + 单独 verify「这张表在不在」，闭合竞态到表级粒度。`create_all`
+  仍用于每张表（不用手写 `CREATE TABLE` DDL 字符串），`tables=[one_table]` 参数把每次调用
+  限定到一张表，FK 排序与方言特定 DDL 编译仍是 SQLAlchemy 的事。
+- **#3（ALTER 幂等）**：`_ensure_message_protocol_column` / `_ensure_message_meta_column`
+  的裸 `ALTER TABLE ADD COLUMN` 改用 `_add_column_idempotent(sync_conn, table, column,
+  col_type)` 包装，与 `organization/db.py` 的 `_ensure_org_task_columns` 同款——SAVEPOINT
+  包 ALTER + 吞 `duplicate column`/`already exists` + `inspect.get_columns` 复查列确实
+  在，若仍缺失则 re-raise。
+- **#4 / #5（FOR UPDATE + identity map）**：把 `select(model).with_for_update()` 返回 ORM
+  实体改为标量投影 `select(model.pk, model.field).with_for_update()`，绕过 identity map
+  读 live 提交值（与 `_apply_new_edges` 的上游端点读同款）。状态/水位翻转改为标量
+  `UPDATE ... WHERE pk=? AND status/read_at=?` 的 forward-only CAS——guard 在我们刚在锁下
+  读到的值上，stale 读永远不会翻转终态/IN_PROGRESS 行（status guard 拒绝），水位永远不会
+  回退（read_at guard 拒绝）。
+
+**契约同步**：
+- `engine.py` 的 `_create_static_tables` / `_ensure_message_protocol_column` /
+  `_ensure_message_meta_column` docstring 扩展说明各自修复的根因。
+- `_refresh_status_in_session` docstring 扩展说明 identity map 风险与标量投影修复。
+- `_mark_read_in_session` 的 broadcast 水位 docstring 扩展同款说明。
+- `organization/db.py` 的 `ensure_org_static_tables` 加注释说明按表逐个 verify 的根因。
+- `tools/AGENTS.md` 第 (1) 条 DDL 锁契约已在前几轮追加；本轮 verify 语义修复不改变该契约
+  的措辞，但 `_run_ddl_idempotent` 的 verify 不变式应改为「verify 单个 DDL 目标是否在」，
+  多目标的 `create_all` 由调用方拆为按目标逐个调用。
+
+**验证**：
+- `tests/unit_tests/agent_teams/organization/test_org_db.py`、`test_database.py`、
+  `test_database_concurrency.py`、`test_message_manager.py`、`test_task_manager.py`：
+  536 passed。
+- 「静态表已存在 → 再 `initialize()`」「同 session_id 并发 bind」「单条消息 mark_read 后
+  同 session 再 mark_read 同广播」等场景的语义复现脚本均与修复前行为等价（标量投影 +
+  CAS 在无竞态时与 ORM 实体 setattr 行为相同；竞态下才显现保护效果）。

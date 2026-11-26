@@ -488,28 +488,45 @@ def _create_static_tables(sync_conn) -> None:
     database. Creating them here would also make schema setup cost grow with
     the process's session history instead of with the schema itself.
 
-    The ``create_all`` is wrapped in :func:`_run_ddl_idempotent` rather than
-    relying on SQLAlchemy's checkfirst=True alone: ``checkfirst`` is an
-    in-process ``has_table`` probe → ``CREATE`` pair, not atomic across
-    processes. ``initialize_engine`` runs directly on the writer engine
-    (no ``DbSessions`` is published yet, so no ``ddl_lock()`` is available
-    here), and two processes concurrently initialising the same PG/MySQL
-    database both read "missing" and both issue ``CREATE TABLE``; the DB's
-    own DDL lock serialises the two ``CREATE``s but the second one fails
-    with ``already exists`` (PG ``ProgrammingError`` SQLSTATE 42P07; MySQL
-    1050). ``retry_on_transient`` does not cover ``already exists`` (it is
-    not in ``_TRANSIENT_OPERATIONAL_MARKERS`` and PG raises
-    ``ProgrammingError``, not ``OperationalError``), so without this wrapper
-    the second ``initialize()`` crashes — the same issue-115 symptom-5 shape
-    closed for ``_ensure_session_tables`` / ``ensure_org_static_tables``.
+    Each ``Table.create(checkfirst=False)`` is wrapped individually in
+    :func:`_run_ddl_idempotent` rather than one ``create_all(checkfirst=True)``
+    covering the set:
+
+    - ``checkfirst=True`` on ``create_all`` is an in-process ``has_table`` probe
+      → ``CREATE`` pair, not atomic across processes. ``initialize_engine``
+      runs directly on the writer engine (no ``DbSessions`` is published yet,
+      so no ``ddl_lock()`` is available here), and two processes concurrently
+      initialising the same PG/MySQL database both read "missing" and both
+      issue ``CREATE TABLE``; the DB's own DDL lock serialises the two
+      ``CREATE``s but the second one fails with ``already exists``
+      (PG ``ProgrammingError`` SQLSTATE 42P07; MySQL 1050).
+      ``retry_on_transient`` does not cover ``already exists`` (it is not in
+      ``_TRANSIENT_OPERATIONAL_MARKERS`` and PG raises ``ProgrammingError``,
+      not ``OperationalError``), so without this wrapper the second
+      ``initialize()`` crashes — the same issue-115 symptom-5 shape closed
+      for ``_ensure_session_tables`` / ``ensure_org_static_tables``.
+
+    - Per-table wrapping keeps the verify step honest: the previous
+      ``create_all`` + ``verify == all(t.name in has_table_names for t in
+      static_tables())`` form would re-raise on the first ``already exists``
+      swallow when fewer than all static tables were present — the loser of
+      the concurrent first-create race sees its own ``CREATE`` for table 1
+      swallowed (the winner committed it) but its ``CREATE`` for tables 2..N
+      never ran, so verify reports a partial set and the helper re-raises
+      the swallowed error instead of letting it race forward to create the
+      rest. Per-table verify = "is *this* table present" closes the race
+      table-by-table instead of "are *all* tables present" which fails on
+      the very first loser. ``create_all`` is still used per-table (not a
+      hand-rolled ``CREATE TABLE`` DDL string) so the FK constraint ordering
+      and the dialect-specific DDL compilation stay SQLAlchemy's job; the
+      ``tables=[one_table]`` argument scopes each call to exactly one table.
     """
-    _run_ddl_idempotent(
-        sync_conn,
-        lambda: SQLModel.metadata.create_all(sync_conn, tables=static_tables()),
-        lambda: all(
-            t.name in set(inspect(sync_conn).get_table_names()) for t in static_tables()
-        ),
-    )
+    for table in static_tables():
+        _run_ddl_idempotent(
+            sync_conn,
+            lambda t=table: SQLModel.metadata.create_all(sync_conn, tables=[t]),
+            lambda t=table: inspect(sync_conn).has_table(t.name),
+        )
 
 
 def _ensure_team_member_role_column(sync_conn) -> None:
@@ -631,6 +648,20 @@ def _ensure_message_protocol_column(sync_conn) -> None:
     ``ALTER TABLE ... ADD COLUMN`` with a default of ``"plain"`` so legacy
     rows retain their original semantics. Other sessions may be dropped
     concurrently and are migrated when they are bound themselves.
+
+    The ALTER is wrapped in :func:`_add_column_idempotent` (mirroring
+    ``_create_static_tables``): the inspect-then-ALTER pattern is not atomic
+    across processes. Two processes concurrently binding the same
+    ``session_id`` (e.g. on a PG/MySQL backend) can both see the column
+    missing and both issue ``ALTER TABLE ADD COLUMN``; the DB's own DDL lock
+    serialises the two ALTERs but the second one fails with ``duplicate
+    column name`` (PG ``ProgrammingError`` SQLSTATE 42701; MySQL 1060). That
+    error is not in ``_TRANSIENT_DB_ERRORS`` (PG raises ``ProgrammingError``,
+    not ``OperationalError``) nor does it match
+    ``_TRANSIENT_OPERATIONAL_MARKERS``, so without this wrapper the second
+    bind crashes ``create_cur_session_tables()`` — the same issue-115
+    symptom-5 shape closed for ``_create_static_tables`` /
+    ``_ensure_session_tables``.
     """
     table_name = next(
         (name for name in _current_session_migration_tables() if name.startswith("team_message_")),
@@ -648,7 +679,9 @@ def _ensure_message_protocol_column(sync_conn) -> None:
         return
     if "protocol" in columns:
         return
-    sync_conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN protocol TEXT NOT NULL DEFAULT 'plain'")
+    _add_column_idempotent(
+        sync_conn, table_name, "protocol", "TEXT NOT NULL DEFAULT 'plain'"
+    )
     team_logger.info(
         "Migrated legacy message table %s: added protocol column",
         table_name,
@@ -662,6 +695,9 @@ def _ensure_message_meta_column(sync_conn) -> None:
     alters a live table. Only the current session's message table is probed;
     legacy rows get NULL meta, which the delivery path reads as "plain message,
     render content verbatim" — the pre-F_63 behavior.
+
+    The ALTER is wrapped in :func:`_add_column_idempotent` for the same
+    cross-process TOCTOU reason (see ``_ensure_message_protocol_column``).
     """
     table_name = next(
         (name for name in _current_session_migration_tables() if name.startswith("team_message_")),
@@ -679,7 +715,7 @@ def _ensure_message_meta_column(sync_conn) -> None:
         return
     if "meta" in columns:
         return
-    sync_conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN meta TEXT")
+    _add_column_idempotent(sync_conn, table_name, "meta", "TEXT")
     team_logger.info("Migrated legacy message table %s: added meta column", table_name)
 
 

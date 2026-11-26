@@ -55,14 +55,22 @@ _ORG_TASK_NEW_COLUMNS = (
 
 
 def ensure_org_static_tables(sync_conn) -> None:
-    org_tables = org_static_tables()
-    _run_ddl_idempotent(
-        sync_conn,
-        lambda: SQLModel.metadata.create_all(sync_conn, tables=org_tables),
-        lambda: all(
-            t.name in set(inspect(sync_conn).get_table_names()) for t in org_tables
-        ),
-    )
+    # Per-table wrapping (not one create_all + verify == all()): a single
+    # ``create_all`` for all org tables + a single verify "are all tables
+    # present?" re-raises on the first ``already exists`` swallow when fewer
+    # than all tables have been committed — the loser of the concurrent
+    # first-create race sees its CREATE for table 1 swallowed (winner
+    # committed it) but its CREATE for tables 2..N never ran, so verify
+    # reports a partial set and the helper re-raises the swallowed error
+    # instead of letting it race forward to create the rest. Per-table
+    # verify = "is *this* table present" closes the race table-by-table
+    # (mirroring ``engine._create_static_tables``).
+    for table in org_static_tables():
+        _run_ddl_idempotent(
+            sync_conn,
+            lambda t=table: SQLModel.metadata.create_all(sync_conn, tables=[t]),
+            lambda t=table: inspect(sync_conn).has_table(t.name),
+        )
     _ensure_org_task_columns(sync_conn)
     _ensure_org_summary_execution_columns(sync_conn)
     inspector = inspect(sync_conn)

@@ -639,6 +639,19 @@ class MessageDao:
             # acquires the lock (READ COMMITTED — pinned in engine.py —
             # gives each statement a fresh snapshot).
             #
+            # The read is a scalar projection (``member_name, read_at``), not
+            # an ORM entity: a row that was already loaded into this
+            # session's identity map (e.g. by a concurrent
+            # ``_mark_read_in_session`` call earlier in the same mailbox
+            # drain that ran into a retry, or by a previous batch iteration)
+            # would be returned from the cache with its stale ``read_at``
+            # attribute instead of the live committed value under the row
+            # lock, defeating the lock entirely. A scalar projection
+            # bypasses the identity map and reads the live committed value.
+            # The watermark advance is then a scalar UPDATE guarded on the
+            # read_at value we just read under the lock — a forward-only
+            # CAS so a stale read can never rewind the watermark.
+            #
             # The row-does-not-exist branch cannot be protected by this lock:
             # under READ COMMITTED a zero-row FOR UPDATE acquires no gap lock,
             # so two concurrent transactions both see None and both INSERT.
@@ -653,19 +666,19 @@ class MessageDao:
             # concurrent upserts on the same PK, and the subsequent UPDATE
             # is a CAS-style forward-only advance).
             read_result = await session.execute(
-                select(read_status_model)
+                select(read_status_model.member_name, read_status_model.read_at)
                 .where(
                     read_status_model.member_name == member_name,
                     read_status_model.team_name == message.team_name,
                 )
                 .with_for_update()
             )
-            read_status = read_result.scalar_one_or_none()
-            if read_status is None:
+            read_row = read_result.first()
+            if read_row is None:
                 await self._upsert_broadcast_read_status(
                     session, read_status_model, member_name, message.team_name, message.timestamp,
                 )
-                # Re-load the row the upsert materialised (ours or the
+                # Re-read the row the upsert materialised (ours or the
                 # concurrent winner's) and advance the watermark if the
                 # incoming broadcast is newer. The re-SELECT takes FOR UPDATE
                 # so two concurrent upserters serialise on the now-existing
@@ -675,18 +688,29 @@ class MessageDao:
                 # Without the lock both would re-SELECT the same read_at,
                 # both compute the same new value, and last-writer-wins could
                 # lose an update.
-                read_status = (
-                    await session.execute(
-                        select(read_status_model)
-                        .where(
-                            read_status_model.member_name == member_name,
-                            read_status_model.team_name == message.team_name,
-                        )
-                        .with_for_update()
+                read_result = await session.execute(
+                    select(read_status_model.member_name, read_status_model.read_at)
+                    .where(
+                        read_status_model.member_name == member_name,
+                        read_status_model.team_name == message.team_name,
                     )
-                ).scalar_one()
-            if read_status.read_at is None or message.timestamp > read_status.read_at:
-                read_status.read_at = message.timestamp
+                    .with_for_update()
+                )
+                read_row = read_result.first()
+            current_read_at = read_row[1] if read_row is not None else None
+            if current_read_at is None or message.timestamp > current_read_at:
+                # Scalar UPDATE guarded on the read_at we just read under the
+                # lock — a forward-only CAS so a stale read can never rewind
+                # the watermark.
+                await session.execute(
+                    update(read_status_model)
+                    .where(
+                        read_status_model.member_name == member_name,
+                        read_status_model.team_name == message.team_name,
+                        read_status_model.read_at == current_read_at,
+                    )
+                    .values(read_at=message.timestamp)
+                )
         else:
             message.is_read = True
 
