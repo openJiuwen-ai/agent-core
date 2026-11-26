@@ -220,6 +220,13 @@ class LSPClient:
                 while True:
                     line = await reader.readline()
                     if not line:
+                        # stdout EOF: the server process exited (crash or
+                        # kill). Report it so pending futures fail fast with
+                        # ConnectionError instead of waiting out the request
+                        # timeout. _crash_reported keeps this idempotent, and
+                        # graceful stop() cancels the reader task before the
+                        # pipes close, so shutdown does not take this path.
+                        self._on_crash(self._process.returncode)
                         return
                     line_str = line.decode("ascii", errors="replace")
                     if line_str == "\r\n":
@@ -286,6 +293,9 @@ class LSPClient:
                     else:
                         future.set_result(message.get("result"))
                     self._pending.pop(msg_id_str, None)
+                else:
+                    # Timed-out request: drop the stale entry instead of leaking it.
+                    self._pending.pop(msg_id_str, None)
             else:
                 # Server-initiated request - schedule async handling without blocking read loop
                 asyncio.create_task(self._handle_server_request(method, msg_id, message.get("params")))
@@ -316,6 +326,8 @@ class LSPClient:
                 return
             future, _method = entry
             if future.done():
+                # Timed-out request: drop the stale entry instead of leaking it.
+                self._pending.pop(msg_id_str, None)
                 return
             # Resolve the future BEFORE removing from _pending (same rationale as above).
             if "error" in message:
@@ -379,6 +391,9 @@ class LSPClient:
                 future.set_exception(
                     LSPError(-1, f"Request timeout after {DEFAULT_REQUEST_TIMEOUT_MS}ms: {method}")
                 )
+                # Drop the entry so a late response cannot accumulate stale
+                # pending records (the response path skips done futures).
+                self._pending.pop(msg_id, None)
 
         timer = loop.call_later(DEFAULT_REQUEST_TIMEOUT_MS / 1000, on_timeout)
 
