@@ -45,6 +45,7 @@ class GroupMessageHandler(MessageHandler):
     def __init__(self, host, blueprint, infra, poll_ctrl) -> None:
         super().__init__(host, blueprint, infra, poll_ctrl)
         self._host_notifications: dict[tuple[str, str], asyncio.Task[None]] = {}
+        self._host_message_reads: set[asyncio.Task] = set()
 
     async def handles(self, event) -> bool:
         if getattr(event, "event_type", None) == TeamEvent.MEMBER_SHUTDOWN:
@@ -89,6 +90,8 @@ class GroupMessageHandler(MessageHandler):
                 # Cancelling a SQLite read can invalidate the shared memory
                 # connection. Finish the DAO scope, including session cleanup.
                 lookup = asyncio.create_task(backend.db.message.get_message(message_id))
+                self._host_message_reads.add(lookup)
+                lookup.add_done_callback(self._host_message_reads.discard)
                 row = await _finish_notification_task(lookup)
                 if row is not None and group_metadata(row):
                     await backend.notify_host_managed_inbound(conversation_message(row, get_session_id()))
@@ -96,13 +99,15 @@ class GroupMessageHandler(MessageHandler):
             team_logger.error("Host-managed notification failed; host must retry {}", message_id, exc_info=True)
 
     async def cancel_host_notifications(self) -> None:
-        """Cancel and drain notifications before the session is released."""
+        """Cancel notifications and finish framework reads before releasing the session."""
         tasks = tuple(self._host_notifications.values())
+        current = asyncio.current_task()
         for task in tasks:
-            if not task.done() and not task.cancelling():
+            if task is not current and not task.done() and not task.cancelling():
                 task.cancel()
-        if tasks:
-            await _finish_notification_task(asyncio.gather(*tasks, return_exceptions=True))
+        reads = tuple(self._host_message_reads)
+        if reads:
+            await _finish_notification_task(asyncio.gather(*reads, return_exceptions=True))
 
     async def start_mentioned_members(self) -> None:
         """Start pending group recipients through the existing member lifecycle."""
