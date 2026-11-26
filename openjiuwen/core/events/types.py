@@ -44,6 +44,7 @@ class SessionContext:
     """Read-only session facts supplied at a call boundary."""
 
     session_id: str
+    agent_id: str | None = field(default=None, kw_only=True)
     cwd: str | None = None
     metadata: Mapping[str, object] = field(default_factory=_empty_metadata)
 

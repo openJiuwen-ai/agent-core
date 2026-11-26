@@ -80,6 +80,7 @@ class Event:
 @dataclass(frozen=True, slots=True)
 class SessionContext:
     session_id: str
+    agent_id: str | None = field(default=None, kw_only=True)
     cwd: str | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)
 
@@ -144,6 +145,9 @@ EventType 使用字符串，不使用枚举。业务平台可以在自己的仓�
 - EventType 必须匹配 `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`。`ops.` 前缀由 Core 保留，调用方不得登记、覆盖或注销该前缀下的事件。
 - HandlerId 是所属 Bus 实例内唯一的不透明字符串，用于注销和宿主追踪注册记录，不构成授权。
 - `PackageMetadata.package_id` 和 `SessionContext.session_id` 必须非空；缺失字段不得从 EventInput 推断。
+- `SessionContext.agent_id` 是可选成员身份，提供时必须为非空字符串。Bus 从真实 AgentSession 的
+  `get_agent_id()` 读取，并在上下文规范化、只读复制和嵌套调用中保留；无 Agent Card 的 Session 保持 `None`。
+  原有三个位置参数的含义不变，不从 EventInput 或 Runtime 猜测缺失身份。
 - `SessionContext.metadata` 和 MatchPattern 只允许 `None`、`bool`、`int`、`float`、`str`，以及由这些值递归组成的映射和序列。Bus 在边界复制并转成只读形态。
 - MatchPatternFunc 与 EventType 可选 Validator 必须同步、无阻塞、无业务副作用，并且返回严格的 `bool`。
 
@@ -400,6 +404,21 @@ Core 预置 `prompt.section` 和 `prompt.compose` 两个提示词事件，详细
 - `prompt.compose CORE` 必须从 `ops.session_context.session_id` 查找已绑定的 DeepAgent，并在其内部 composition 入口中按 native effective section 顺序串行触发 `prompt.section`；CORE 不调用同名 Ops，不把 Agent、builder、rail 或 section 列表放入 EventInput。
 - `ops.prompt.compose(input)` 是显式触发一条新的 `prompt.compose` 事件链的方法，使用当前 Ops 的 `SessionContext`，不推进调用方当前 EventNext；`prompt.section` 不提供同名方法。
 - Agent Loop 在所有 `BEFORE_MODEL_CALL` rail 完成后、最终 system message 渲染前触发 compose；无 Bus 时保留 native builder fallback。最终 SystemMessage、ContextWindow 和 usage report 复用同一 request-local section snapshot，不建立跨请求 prompt cache。
+
+### 4.6.5 Agent Runtime 与成员 Ops
+
+- `AgentRuntime` 使用 `(session_id, agent.card.id)` 保存弱引用。`bind(session_id, agent)` 和
+  `unbind(session_id, agent)` 保持原签名；相同复合键替换，解绑只移除仍指向该对象的绑定。
+- `get(session_id, *, agent_id=None)` 在指定身份时只查精确键；未命中返回 `None`，不回退其他成员。
+  旧单参数查询返回该会话最后绑定且仍存活的 Agent，无候选时返回 `None`，不因多绑定报错。
+  仅保留复合键弱引用表；重复绑定同一复合键先删除再插入，以更新绑定顺序。
+- `ops.tool.check`、`ops.tool.call`、`ops.agent.spawn` 使用当前 `SessionContext` 的复合身份解析 Agent。
+  工具执行和 spawn 在使用真实 Session 前，同时检查会话 ID 与已提供的成员 ID，归属不一致时拒绝执行。
+- `turn.start/step/complete`、`tool.check/call` 沿用当前真实 Session 与私有 TriggerContext；Bus 为其
+  Handler 保留成员身份。执行闭包不再通过 Runtime 重建；已有 `tool.check` 输入同步暴露当前 Agent ID。
+- 调用方负责注册和释放 Agent。本次身份契约不新增 Team 成员生命周期绑定，也不恢复 Team 的
+  `prompt.compose/section` 或 `prompt.attachment` 旁路；未迁移的 session-only 消费方保留最后绑定语义，
+  不保证成员隔离。
 
 ### 4.7 错误码与取消
 
