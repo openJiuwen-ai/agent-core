@@ -61,6 +61,7 @@ from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
+from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
 from openjiuwen.core.single_agent.interrupt.response import InterruptKind
 from openjiuwen.core.single_agent.interrupt.state import (
     INTERRUPTION_KEY,
@@ -190,7 +191,6 @@ class NativeHarness(DeepAgent):
         agent_spec: "DeepAgentSpec",
         build_context: "BuildContext | None" = None,
         extra_rails: "list[AgentRail] | None" = None,
-        is_team_agent: bool = False,
     ) -> None:
         """Initialize a NativeHarness that configures itself from a spec.
 
@@ -207,9 +207,6 @@ class NativeHarness(DeepAgent):
             extra_rails: Additional rails not declared in ``agent_spec.rails``
                 (transitional team-side rails; folded into the spec later).
                 Mounted after the spec rails.
-            is_team_agent: Whether this harness is owned by ``TeamHarness``.
-                Standalone NativeHarness consumers keep the normal prompt event
-                path; team-owned harnesses render their member-local builder.
         """
         from openjiuwen.harness.factory import apply_deep_agent_parts
 
@@ -221,7 +218,6 @@ class NativeHarness(DeepAgent):
 
         self._agent_spec = agent_spec
         self._build_context = build_context
-        self._is_team_agent = is_team_agent
         self._extra_rails: list[AgentRail] = list(extra_rails) if extra_rails else []
         self._session: Session | None = None
         self.track_completed_turn_fork = False
@@ -277,15 +273,14 @@ class NativeHarness(DeepAgent):
         self.add_rail(self._snapshot_rail)
 
     def _wire_inner_react_agent(self, react_agent: Any) -> None:
-        """Apply harness-local prompt and usage identity to an inner agent."""
+        """Apply harness-local usage attribution to an inner agent."""
         react_agent.set_runtime_context(
-            is_team_agent=self._is_team_agent,
             usage_build_context=self._build_context,
             usage_agent_id=self.card.id,
         )
 
     def _create_react_agent(self) -> Any:
-        """Create an inner agent while preserving the harness mode contract."""
+        """Create an inner agent with harness-owned usage attribution."""
         react_agent = super()._create_react_agent()
         self._wire_inner_react_agent(react_agent)
         return react_agent
@@ -466,7 +461,7 @@ class NativeHarness(DeepAgent):
                 await self._setup_goal(self._session, self._goal_stop_config)
 
             self._st.supervisor_task = asyncio.create_task(
-                self._supervisor(),
+                self._supervisor(self._session),
                 name=f"native_harness_supervisor[{self.session_id}]",
             )
             self._forwarder_task = asyncio.create_task(
@@ -942,8 +937,11 @@ class NativeHarness(DeepAgent):
     # Supervisor main loop
     # ------------------------------------------------------------------
 
-    async def _supervisor(self) -> None:
+    async def _supervisor(self, session: Session) -> None:
         """Main supervisor coroutine; sole writer of HarnessInternalState."""
+        # This loop drives the inner ReActAgent directly, bypassing the
+        # AgentRuntime registration in DeepAgent.invoke().
+        self._bind_session_runtime(session)
         self._started_event.set()
         crashed_cmd: Any = None
         crash_exc: BaseException | None = None
@@ -963,6 +961,7 @@ class NativeHarness(DeepAgent):
             logger.exception("[NativeHarness] supervisor crashed; terminating")
             self._st.phase = HarnessState.TERMINATED
         finally:
+            get_agent_runtime().unbind(session.get_session_id(), self)
             # Resolve every ack that will otherwise never be answered, so no
             # external caller hangs forever. Covers the crashed command and
             # anything queued behind it (including commands queued after Stop).

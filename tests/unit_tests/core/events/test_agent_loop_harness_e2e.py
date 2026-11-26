@@ -257,7 +257,6 @@ async def test_tool_round_traces_full_agent_loop_event_order(
                 **default_agent_options(tmp_path),
             )
             get_agent_runtime().bind(session_id, sibling)
-            agent.react_agent.set_runtime_context(is_team_agent=True)
         try:
             with patch_mock_llm(mock_llm):
                 result = await Runner.run_agent(

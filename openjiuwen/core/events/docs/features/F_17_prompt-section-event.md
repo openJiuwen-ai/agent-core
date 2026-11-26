@@ -115,7 +115,7 @@ Handler 也可以直接短路返回合法的 `PromptSectionOutput`，此时下�
 4. 只把输出文本映射为 `PromptSectionSpec.text`，`None`/空白文本直接省略；
 5. 返回给外层 compose CORE，不修改共享 builder。
 
-不会使用 `ContextVar` 保存当前 Agent、builder 或 compose 状态，也不会把这些运行时对象放入事件 DTO。`prompt.compose CORE` 通过显式 `ops.session_context.session_id` 查找已绑定的 DeepAgent；section CORE 自身不做 Runtime 查找。
+不会使用 `ContextVar` 保存当前 Agent、builder 或 compose 状态，也不会把这些运行时对象放入事件 DTO。`prompt.compose CORE` 按 `SessionContext` 的 `(session_id, agent_id)` 查找已绑定的 DeepAgent，并将同一上下文传给 section 事件。section CORE 自身不做 Runtime 查找。
 
 ### 4.2 ReActAgent 最终请求
 

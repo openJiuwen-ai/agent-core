@@ -236,25 +236,19 @@ async def test_attachment_event_cancellation_propagates_before_history_write() -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("team_mode", "expected_event_calls"),
-    ((True, []), (False, ["runtime"])),
-)
-async def test_react_agent_attachment_sync_uses_legacy_path_for_team_mode(
-    team_mode: bool,
-    expected_event_calls: list[str],
-) -> None:
-    event_calls: list[str] = []
+@pytest.mark.parametrize("agent_id", ["agent-1", None, ""])
+async def test_react_agent_attachment_sync_preserves_optional_session_identity(agent_id: str | None) -> None:
+    event_calls: list[tuple[str, str | None, str | None]] = []
 
     async def observe(
         event: Event,
         ops: EventHandlerOps | None,
         event_next: EventNext,
     ) -> PromptAttachmentOutput:
-        del ops
+        assert ops is not None and ops.session_context is not None
         event_input = event.event_input
         assert isinstance(event_input, PromptAttachmentInput)
-        event_calls.append(str(event_input.detail["section"]))
+        event_calls.append((ops.session_context.session_id, ops.session_context.agent_id, event_input.agent_id))
         return await event_next(event)
 
     bus = ExtensionEventBus()
@@ -269,13 +263,12 @@ async def test_react_agent_attachment_sync_uses_legacy_path_for_team_mode(
         kind=PromptAttachmentKind.TEXT,
         source="test",
     )
-    agent = ReActAgent(AgentCard(id="agent-1", name="agent-1"))
-    agent.set_runtime_context(is_team_agent=team_mode)
+    agent = ReActAgent(AgentCard(id=agent_id if agent_id is not None else "agent-1", name="agent-1"))
     agent.prompt_attachment_manager = manager
     context = _context()
     callback_context = AgentCallbackContext(
         agent=agent,
-        session=Session(session_id="session-1"),
+        session=Session(session_id="session-1", card=agent.card if agent_id is not None else None),
         context=context,
     )
 
@@ -284,7 +277,7 @@ async def test_react_agent_attachment_sync_uses_legacy_path_for_team_mode(
     messages = context.get_messages()
     assert len(messages) == 2
     assert "team attachment" in messages[-1].content
-    assert event_calls == expected_event_calls
+    assert event_calls == [("session-1", agent_id or None, agent_id or None)]
 
 
 def test_deep_agent_receives_prompt_attachment_bus_explicitly() -> None:

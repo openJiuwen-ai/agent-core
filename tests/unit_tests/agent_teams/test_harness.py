@@ -56,12 +56,10 @@ class _FakeNative:
         agent_spec: Any,
         build_context: Any = None,
         extra_rails: Any = None,
-        is_team_agent: bool = False,
     ) -> None:
         self.agent_spec = agent_spec
         self.build_context = build_context
         self.extra_rails = list(extra_rails) if extra_rails else []
-        self.is_team_agent = is_team_agent
         self.deep_config: Any = None
         self._prepare_config()
 

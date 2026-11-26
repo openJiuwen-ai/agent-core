@@ -26,6 +26,7 @@ generated: true
 | [core.session.tracer](#module-core-session-tracer) |
 | [core/context_engine](#module-core-context_engine) |
 | [core/controller](#module-core-controller) |
+| [core/events](#module-core-events) |
 | [core/foundation/llm](#module-core-foundation-llm) |
 | [core/foundation/llm/model_clients](#module-core-foundation-llm-model_clients) |
 | [core/runner/drunner/dmessage_queue](#module-core-runner-drunner-dmessage_queue) |
@@ -89,6 +90,7 @@ generated: true
 | [D-20261110-1839-leader-external-harness](designs/active/D-20261110-1839-leader-external-harness/design.md) | D | Leader 三方 Harness 插拔设计方案 | alan_cheng | — |
 | [D-20261110-1903-team-goal-mode](designs/active/D-20261110-1903-team-goal-mode/design.md) | D | Team Leader 与成员 Goal 模式设计方案 | alan_cheng | — |
 | [D-20261121-0832-group-member-notification](designs/proposals/D-20261121-0832-group-member-notification/design.md) | D | 群聊成员通知入口设计方案 | weichenhao | — |
+| [D-20261125-1725-team-prompt-event-identity](designs/active/D-20261125-1725-team-prompt-event-identity/design.md) | D | Team 子 Agent Prompt 事件与复合身份恢复设计方案 | yangzequ | — |
 | [SDD-0011](designs/archive/SDD-0011-evolvable-team-workspace/design.md) | D | 可演进 Team 工作区 | @xiajing | — |
 | [SDD-0015](designs/proposals/SDD-0015-agent-team-scheduled-dispatch/design.md) | D | AgentTeam 调度模式：任务图驱动的低通信协同与验证闭环 | @alan_cheng | — |
 | [SDD-0016](designs/archive/SDD-0016-third-party-agent-reliability/design.md) | D | 三方 Agent 可靠性设计 | @zhanglongmin | — |
@@ -163,6 +165,7 @@ generated: true
 | [F_20261117_1752_host-managed-group-member](features/F_20261117_1752_host-managed-group-member.md) | F | 宿主管理群成员角色 | weichenhao | jiuwenclaw/D-20261116-1201-colleague-swarmchat-membership（非本仓或待定位） |
 | [F_20261121_0906_group-member-notification](features/F_20261121_0906_group-member-notification.md) | F | 群聊成员通知入口实施记录 | weichenhao | [D-20261121-0832-group-member-notification](designs/proposals/D-20261121-0832-group-member-notification/design.md) |
 | [F_20261123_1059_external-member-execution-environment](features/F_20261123_1059_external-member-execution-environment.md) | F | 三方 harness 成员的执行环境注入 | alan_cheng | 无独立 D：无独立 D；把 F_20261104_1720 的成员执行环境扩展到三方 harness 成员，沿用既有 BuildContext 扩展点与 HarnessContext.env 协议字段。 |
+| [F_20261125_1828_team-prompt-event-identity](features/F_20261125_1828_team-prompt-event-identity.md) | F | Team 成员 Prompt 事件的身份隔离 | yangzequ | [D-20261125-1725-team-prompt-event-identity](designs/active/D-20261125-1725-team-prompt-event-identity/design.md) |
 | [F_20_human-agent-mailbox-unread-flip](features/agent_teams/F_20_human-agent-mailbox-unread-flip.md) | F | Human-Agent Mailbox: Flip Auto-Read Off | alan_cheng | 待核实 |
 | [F_21_external-agent-access](features/agent_teams/F_21_external-agent-access.md) | F | External Agent Access: skill+cli / mcp Wrappers | alan_cheng | 待核实 |
 | [F_21_team-completion-auto-pause](features/agent_teams/F_21_team-completion-auto-pause.md) | F | Team Completion Auto-Pause | alan_cheng | 待核实 |
@@ -393,6 +396,15 @@ generated: true
 | [B_20261103_1050_grandocean-review-feedback](bugfix/core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
 | [S_01_runtime-data-compatibility](specs/core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | — |
 
+<a id="module-core-events"></a>
+
+## core/events
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [D-20261125-1725-team-prompt-event-identity](designs/active/D-20261125-1725-team-prompt-event-identity/design.md) | D | Team 子 Agent Prompt 事件与复合身份恢复设计方案 | yangzequ | — |
+| [F_20261125_1828_team-prompt-event-identity](features/F_20261125_1828_team-prompt-event-identity.md) | F | Team 成员 Prompt 事件的身份隔离 | yangzequ | [D-20261125-1725-team-prompt-event-identity](designs/active/D-20261125-1725-team-prompt-event-identity/design.md) |
+
 <a id="module-core-foundation-llm"></a>
 
 ## core/foundation/llm
@@ -430,6 +442,7 @@ generated: true
 
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
+| [D-20261125-1725-team-prompt-event-identity](designs/active/D-20261125-1725-team-prompt-event-identity/design.md) | D | Team 子 Agent Prompt 事件与复合身份恢复设计方案 | yangzequ | — |
 | [B_20261103_1050_grandocean-review-feedback](bugfix/core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
 | [S_01_runtime-data-compatibility](specs/core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | — |
 
@@ -447,6 +460,8 @@ generated: true
 
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
+| [D-20261125-1725-team-prompt-event-identity](designs/active/D-20261125-1725-team-prompt-event-identity/design.md) | D | Team 子 Agent Prompt 事件与复合身份恢复设计方案 | yangzequ | — |
+| [F_20261125_1828_team-prompt-event-identity](features/F_20261125_1828_team-prompt-event-identity.md) | F | Team 成员 Prompt 事件的身份隔离 | yangzequ | [D-20261125-1725-team-prompt-event-identity](designs/active/D-20261125-1725-team-prompt-event-identity/design.md) |
 | [B_20261117_1727_anthropic-output-limit-errors](bugfix/openjiuwen/core/B_20261117_1727_anthropic-output-limit-errors.md) | B | 模型输出上限截断可见错误修复 | lizhiyuan | 无独立 D：用户在本轮会话确认的 Anthropic 输出上限错误处理范围，未形成独立设计文档。 |
 
 <a id="module-core-sys_operation"></a>
@@ -517,6 +532,7 @@ generated: true
 |---|---|---|---|---|
 | [D-20261110-1903-team-goal-mode](designs/active/D-20261110-1903-team-goal-mode/design.md) | D | Team Leader 与成员 Goal 模式设计方案 | alan_cheng | — |
 | [D-20261112-1120-goal-assessment-isolation](designs/active/D-20261112-1120-goal-assessment-isolation/design.md) | D | Goal 独立评估的轨迹与执行上下文隔离 | alan_cheng | — |
+| [D-20261125-1725-team-prompt-event-identity](designs/active/D-20261125-1725-team-prompt-event-identity/design.md) | D | Team 子 Agent Prompt 事件与复合身份恢复设计方案 | yangzequ | — |
 | [SDD-0006](designs/archive/SDD-0006-native-harness-async-tool-control-and-spill/design.md) | D | 原生 Harness 异步工具管控框架与磁盘溢写 | @alan_cheng | — |
 | [SDD-0022](designs/proposals/SDD-0022-trajectory-observability-framework/design.md) | D | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | @alan_cheng | — |
 | [SDD-0024](designs/proposals/SDD-0024-trajectory-projection-evolution-rl/design.md) | D | 轨迹投影：把 OTel 标准轨迹投影为自演进与在线 AgentRL 输入 | @alan_cheng | — |
@@ -554,6 +570,7 @@ generated: true
 | [F_20261104_1720_tool-execution-environment](features/F_20261104_1720_tool-execution-environment.md) | F | 工具执行环境作用域 | alan_cheng | 无独立 D：无独立 D；在现有 harness 工具调用与 team 会话存储契约上的小范围扩展。 |
 | [F_20261110_1922_team-goal-mode](features/F_20261110_1922_team-goal-mode.md) | F | Team Leader 与成员 Goal 模式实施与决策归档 | alan_cheng | [D-20261110-1903-team-goal-mode](designs/active/D-20261110-1903-team-goal-mode/design.md) |
 | [F_20261112_1120_goal-assessment-isolation](features/F_20261112_1120_goal-assessment-isolation.md) | F | Goal 评估调用的观测隔离实施 | alan_cheng | [D-20261112-1120-goal-assessment-isolation](designs/active/D-20261112-1120-goal-assessment-isolation/design.md) |
+| [F_20261125_1828_team-prompt-event-identity](features/F_20261125_1828_team-prompt-event-identity.md) | F | Team 成员 Prompt 事件的身份隔离 | yangzequ | [D-20261125-1725-team-prompt-event-identity](designs/active/D-20261125-1725-team-prompt-event-identity/design.md) |
 | [F_20_react-iteration-limit](features/harness/F_20_react-iteration-limit.md) | F | F_20 ReAct 迭代耗尽后的结构化结果 | openJiuwen-bot | 待核实 |
 | [F_21_browser-decision-observation-handoff](features/harness/F_21_browser-decision-observation-handoff.md) | F | Browser decision observation and local handoff | 待确认 | 待核实 |
 | [F_21_cua-desktop-subagent](features/harness/F_21_cua-desktop-subagent.md) | F | cua_agent desktop subagent | kwangyyinc | 待核实 |

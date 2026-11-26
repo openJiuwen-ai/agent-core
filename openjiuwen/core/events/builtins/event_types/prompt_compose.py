@@ -155,7 +155,7 @@ async def _core_handler(
     from openjiuwen.harness.deep_agent import DeepAgent
 
     session_context = ops.session_context
-    agent = get_agent_runtime().get(session_context.session_id)
+    agent = get_agent_runtime().get(session_context.session_id, agent_id=session_context.agent_id)
     if not isinstance(agent, DeepAgent):
         raise_error(StatusCode.EVENTS_STATE_INVALID, reason="prompt.compose requires a bound DeepAgent")
 

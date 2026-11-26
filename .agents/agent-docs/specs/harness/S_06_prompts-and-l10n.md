@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/prompts/`（67 文件） |
-| 最近一次修订日期 | 2026-11-07 |
+| 最近一次修订日期 | 2026-11-25 |
 | 关联 feature | [F_26 Prompt Attachment Agent Loop 事件接入](../features/F_26_prompt-attachment-event-agent-loop.md) |
 
 ## 范围 / 边界
@@ -147,6 +147,9 @@ class PromptAttachmentContextWriter:
 `context.add_messages()` 之前，为每个候选异步触发一次 `prompt.attachment`。有 bus 时批内
 并发、收集结果保持原候选顺序；没有 bus 时直接走旧路径，不创建事件任务。事件输入是
 独立只读 DTO，handler 可改写 `text`，返回 `text=None` 时省略本次渲染片段。
+
+Agent Loop（含进程内 Team 成员）调用 `sync_to_context(context, session_id, agent_id=...)` 时
+传入当前 Agent Session 的身份。事件输入和上下文使用同一 `agent_id`，直接调用管理器可省略该参数。
 
 事件改写后的文本写入本次 history `UserMessage`，但 history metadata 中的 state 仍按原始
 attachment 内容计算，因此改写不会制造新的 delta。异常 attachment 回退原文，取消继续向

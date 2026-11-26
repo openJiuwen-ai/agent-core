@@ -54,6 +54,10 @@ snapshot/delta hash、history metadata、ContextEngine 选窗及 provider role p
 事件结果只影响本次待渲染的 attachment 副本：改写文本写入本次 history，状态仍按原始
 attachment 内容计算；返回 `None` 只省略该片段。
 
+进程内 Team 成员沿用上述接入路径。Agent Loop 将当前 Session 的 `agent_id` 传到管理器，
+使 `prompt.attachment` 的输入和事件上下文都指向触发事件的成员。当前契约见
+[Harness S_06](../../specs/harness/S_06_prompts-and-l10n.md)。
+
 ## 无扩展兼容性
 
 `DeepAgent(card)`、未带 bus 的 `create_deep_agent()`、以及没有 live BuildContext 的冷恢复

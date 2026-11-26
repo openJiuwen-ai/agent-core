@@ -181,7 +181,7 @@ PromptComposeInput
 
 ### 5.1 CORE 的显式 AgentRuntime 链
 
-`openjiuwen/core/events/builtins/event_types/prompt_compose.py` 的 CORE 先从 `ops.session_context.session_id` 读取会话，再使用已有 `get_agent_runtime().get(session_id)` 查找绑定的 `DeepAgent`。未绑定、已释放或类型不是 `DeepAgent` 时失败。找到后调用 `DeepAgent.compose_prompt_sections(compose_input, bus, session_context)`；CORE 不直接操作 builder。
+`openjiuwen/core/events/builtins/event_types/prompt_compose.py` 的 CORE 从 `ops.session_context` 读取会话和 Agent 身份，调用 `get_agent_runtime().get(session_id, agent_id=agent_id)`。同一会话的 Team 成员因此各用自己的 builder。只有缺少 `agent_id` 的旧调用才使用 session-only 查找。未绑定、已释放或类型不是 `DeepAgent` 时失败。找到后调用 `DeepAgent.compose_prompt_sections(compose_input, bus, session_context)`，由该 Agent 读取 builder。
 
 DeepAgent 内部 composition 入口：
 
