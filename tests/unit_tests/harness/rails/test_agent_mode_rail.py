@@ -108,7 +108,7 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
         self.assertIsNone(ctx.inputs.tool_result)
 
     async def test_before_tool_call_rejects_hidden_todo_or_session_tools_in_plan_mode(self) -> None:
-        rail, ctx, _ = _make_ctx("todo_create", mode="plan")
+        rail, ctx, _ = _make_ctx("todo_write", mode="plan")
 
         await rail.before_tool_call(ctx)
 
@@ -193,7 +193,7 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
         self.assertIn("exit_plan_mode can only be called in plan mode", exit_ctx.inputs.tool_result["error"])
 
     async def test_before_model_call_filters_hidden_tools_and_injects_mode_section(self) -> None:
-        tools = [_ToolInfo("todo_create"), _ToolInfo("sessions_spawn"), _ToolInfo("read_file")]
+        tools = [_ToolInfo("todo_write"), _ToolInfo("sessions_spawn"), _ToolInfo("read_file")]
         rail, ctx, _ = _make_ctx("noop", mode="plan", tools=tools)
 
         mode_section = PromptSection(name="mode_instructions", content={"en": "MODE_SECTION"}, priority=85)
@@ -201,7 +201,7 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
             await rail.before_model_call(ctx)
 
         visible_tool_names = [t.name for t in ctx.inputs.tools]
-        self.assertNotIn("todo_create", visible_tool_names)
+        self.assertNotIn("todo_write", visible_tool_names)
         self.assertNotIn("sessions_spawn", visible_tool_names)
         self.assertIn("read_file", visible_tool_names)
 
@@ -337,7 +337,7 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
     async def test_legacy_static_plan_note_uses_attachment_and_whitelist(self) -> None:
         tools = [
             _ToolInfo("switch_mode"),
-            _ToolInfo("todo_create"),
+            _ToolInfo("todo_write"),
             _ToolInfo("read_file"),
             _ToolInfo("non_whitelist_tool"),
         ]
@@ -355,7 +355,7 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
 
         visible_tool_names = [t.name for t in ctx.inputs.tools]
         self.assertNotIn("switch_mode", visible_tool_names)
-        self.assertNotIn("todo_create", visible_tool_names)
+        self.assertNotIn("todo_write", visible_tool_names)
         self.assertNotIn("non_whitelist_tool", visible_tool_names)
         self.assertIn("read_file", visible_tool_names)
         self.assertEqual(rail.system_prompt_builder.added_sections, [])
@@ -366,7 +366,7 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
     async def test_static_plan_attachment_note_uses_whitelist_without_changing_system_prompt(self) -> None:
         tools = [
             _ToolInfo("switch_mode"),
-            _ToolInfo("todo_create"),
+            _ToolInfo("todo_write"),
             _ToolInfo("read_file"),
             _ToolInfo("non_whitelist_tool"),
         ]
@@ -384,7 +384,7 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
 
         visible_tool_names = [t.name for t in ctx.inputs.tools]
         self.assertNotIn("switch_mode", visible_tool_names)
-        self.assertNotIn("todo_create", visible_tool_names)
+        self.assertNotIn("todo_write", visible_tool_names)
         self.assertNotIn("non_whitelist_tool", visible_tool_names)
         self.assertIn("read_file", visible_tool_names)
         self.assertEqual(rail.system_prompt_builder.added_sections, [])

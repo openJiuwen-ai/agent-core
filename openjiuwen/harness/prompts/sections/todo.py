@@ -18,9 +18,9 @@ from openjiuwen.harness.prompts.sections import SectionName
 # TodoTool system prompt - for system message injection
 # ---------------------------------------------------------------------------
 TODO_SYSTEM_PROMPT_EN = """
-Use the todo tools (todo_create, todo_modify, todo_list, todo_get) to break down and manage your work. These tools help track progress, organize complex tasks, and ensure all requirements are completed.
+Use todo_write to break down and manage your work. These tools help track progress, organize complex tasks, and ensure all requirements are completed.
 
-**When to create a task list — call todo_create when any of the following applies:**
+**When to create a task list — call todo_write when any of the following applies:**
 - The user explicitly requests planning or provides multiple items to complete
 - The task has several stages with a real sequence or dependency between them, spans multiple rounds of tool calls, and visibility into overall progress is genuinely useful
 
@@ -43,29 +43,28 @@ Use the todo tools (todo_create, todo_modify, todo_list, todo_get) to break down
   This makes it unambiguous that one task_tool call should be dispatched per sub-item at execution time.
 
 **Task management rules:**
-- Once a planning need is identified, call todo_create immediately before starting execution.
-- Update status via todo_modify as soon as it changes; do not accumulate multiple status changes that have already occurred and update them all later. A single update should normally change only the current task and the next task: set the current task to completed and the next task to in_progress; do not change multiple pending tasks to completed in one call
-- When calling todo_modify to update a task, only include the fields that changed (usually just id and status); do not resend unchanged fields
+- Once a planning need is identified, call todo_write immediately before starting execution.
+- Update status via todo_write as soon as it changes; do not accumulate multiple status changes that have already occurred and update them all later. A single update should normally change only the current task and the next task: set the current task to completed and the next task to in_progress; do not change multiple pending tasks to completed in one call
+- Each write replaces the full list. Keep existing task IDs and include the latest revision from the todo_snapshot or tool result when updating.
 - Only one task can be in_progress at a time; complete it before starting the next
   - Exception: if an in_progress task needs to process multiple independent sub-items in parallel
     (e.g., reading several documents simultaneously, concurrently searching multiple sources),
     you may issue multiple task_tool calls at once within that task and wait for all to return
     before marking the task completed. This is intra-task parallelism and does not violate the
     "one in_progress at a time" rule.
-- Mark unnecessary tasks as cancelled via todo_modify.
-- Use todo_list to understand the overall progress of the current task plan
-- Use todo_get to view the details of a specific task
+- Mark unnecessary tasks as cancelled via todo_write.
+- Read the current task state from the todo_snapshot supplied by the framework.
 
 **Before marking a task completed:**
 - Verify the work is fully done (e.g., run tests to confirm)
 - Never mark completed if: partially implemented, tests failing, unresolved errors
-- After completing, check if new follow-up tasks were discovered and append them via todo_modify
+- After completing, check if new follow-up tasks were discovered and append them via todo_write
 """
 
 TODO_SYSTEM_PROMPT_CN = """
-使用 todo 工具（todo_create、todo_modify、todo_list、todo_get）拆解和管理工作。这些工具用于跟踪进度、组织复杂任务，确保所有需求都被完成。
+使用 todo_write 拆解和管理工作。这些工具用于跟踪进度、组织复杂任务，确保所有需求都被完成。
 
-**何时创建任务列表 — 满足以下任一情况时调用 todo_create：**
+**何时创建任务列表 — 满足以下任一情况时调用 todo_write：**
 - 用户明确要求进行规划或提供了多个待完成事项
 - 任务包含多个存在先后顺序或依赖关系的阶段，需要跨多轮工具调用逐步推进，且让用户看到整体进展确有必要
 
@@ -86,21 +85,20 @@ TODO_SYSTEM_PROMPT_CN = """
   这样执行时才能清楚地为每个子项发出一个 task_tool 调用。
 
 **任务管理规则：**
-- **识别到规划需求后，在开始执行前立即调用 todo_create。**
-- 实时更新状态：任务状态变化时立即调用 todo_modify，不要积攒多个已发生的状态变化后统一更新。单次 update 的状态变更通常只涉及当前任务和下一任务：将当前任务设为 completed，并将下一任务设为 in_progress；不要在一次调用中将多个 pending 任务批量改为 completed
-- 调用 todo_modify 更新时，每次只传入发生变化的字段（通常只有 id 和 status），不要把未变化的字段重新传一遍
+- **识别到规划需求后，在开始执行前立即调用 todo_write。**
+- 实时更新状态：任务状态变化时立即调用 todo_write，不要积攒多个已发生的状态变化后统一更新。单次 update 的状态变更通常只涉及当前任务和下一任务：将当前任务设为 completed，并将下一任务设为 in_progress；不要在一次调用中将多个 pending 任务批量改为 completed
+- 每次写入替换整个列表。沿用已有任务 ID，更新时传入 todo_snapshot 或工具结果提供的最新 revision。
 - 同一时间只能有一个任务处于 in_progress，完成后再开始下一个
   - 例外：若某个 in_progress 任务内部需要并行处理多个独立子项（如同时阅读多篇文档、并发搜索多个来源），
     可在该任务内一次性发出多个 task_tool 调用，等全部返回后再将任务标记为 completed。
     这属于任务内部的并行执行，不违反"同一时间只有一个 in_progress"原则。
-- 不再需要的任务用 todo_modify 标记为 cancelled
-- 可通过调用 todo_list 了解当前任务整体规划进展
-- 可通过调用 todo_get 了解某项任务的详细信息
+- 不再需要的任务用 todo_write 标记为 cancelled
+- 从框架提供的 todo_snapshot 读取当前待办状态。
 
 **将任务标记为已完成前：**
 - 必须仔细验证工作已全部完成（如运行测试用例）
 - 以下情况绝对不能标记为已完成：部分实现、测试失败、存在未解决的错误等
-- 标记完成后，检查实现过程中是否发现新的后续任务，及时通过 todo_modify 追加
+- 标记完成后，检查实现过程中是否发现新的后续任务，及时通过 todo_write 追加
 """
 
 TODO_SYSTEM_PROMPT: Dict[str, str] = {
@@ -161,7 +159,7 @@ MODEL_SELECTION_PROMPT_CN = """
 
 ### 执行质量保障
 若某个子任务执行结果质量不佳（输出不准确、逻辑错误、未达到预期目标），
-应通过 todo_modify 工具将该任务的 selected_model_id 修改为描述更强的模型 ID，然后重新执行该任务。
+应通过 todo_write 工具将该任务的 selected_model_id 修改为描述更强的模型 ID，然后重新执行该任务。
 不要在低质量结果上继续推进后续依赖任务。
 """
 
@@ -186,7 +184,7 @@ When creating subtasks, read each model's description and assign an appropriate 
 
 ### Quality Assurance
 If a subtask produces poor results (inaccurate output, logical errors, unmet objectives),
-use todo_modify to update that task's selected_model_id to a model with a stronger description,
+use todo_write to update that task's selected_model_id to a model with a stronger description,
 then re-execute the task. Do not proceed with downstream tasks that depend on low-quality results.
 """
 

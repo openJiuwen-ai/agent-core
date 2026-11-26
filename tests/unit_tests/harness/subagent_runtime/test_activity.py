@@ -192,3 +192,27 @@ def test_tool_result_summary_prefers_rendered_result_over_compat_result() -> Non
     )
 
     assert activities[0].summary == "/a.py"
+
+
+def test_todo_write_projects_full_snapshot_even_when_preview_is_truncated() -> None:
+    import json
+
+    todos = [{"id": "verify", "content": "Verify result " * 10, "status": "completed"}]
+    result = {"revision": "v2", "todos": todos, "conflict": True}
+    activities = _projector(activity_text_max_len=32).project(
+        {
+            "type": "tool_result",
+            "payload": {
+                "tool_result": {
+                    "tool_name": "todo_write",
+                    "rendered_result": json.dumps(result),
+                }
+            },
+        },
+        task_id="task-1",
+    )
+
+    activity = activities[0]
+    assert len(activity.summary) <= 32
+    assert activity.to_dict()["todo_snapshot"] == todos
+    assert type(activity).from_dict(activity.to_dict()).todo_snapshot == todos

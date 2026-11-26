@@ -406,18 +406,10 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
         mock_llm = MockLLMModel()
         mock_llm.set_responses([
             create_tool_call_response(
-                "todo_create",
-                '{"todos": "设计打卡系统数据库表结构;实现用户打卡功能接口;开发前端打卡页面;添加打卡统计功能"}'
+                "todo_write",
+                '{"todos":[{"id":"plan","content":"设计打卡系统","status":"in_progress"}]}',
             ),
-            create_tool_call_response(
-                "todo_list",
-                '{}'
-            ),
-            create_tool_call_response(
-                "todo_modify",
-                '{"action": "update", "todos": [{"id": "mock_task_id_1", "status": "completed"}]}'
-            ),
-            create_text_response("我已经帮你完成了打卡系统的任务规划，并完成了第一个任务的设计工作。")
+            create_text_response("已建立计划。"),
         ])
 
         agent = create_deep_agent(
@@ -440,29 +432,15 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
     async def test_deep_agent_task_planning_with_progress_reminder(self):
         """测试任务规划中的工具调用计数和进度提醒功能"""
         sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
-        task_planning = TaskPlanningRail(list_tool_call_interval=3)
+        task_planning = TaskPlanningRail(enable_progress_repeat=True, list_tool_call_interval=1)
         mock_llm = MockLLMModel()
         
-        # 模拟工具调用序列：前3次不触发提醒，第3次触发提醒
         mock_llm.set_responses([
             create_tool_call_response(
-                "todo_create",
-                '{"todos": "任务1;任务2;任务3;任务4;任务5"}'
+                "todo_write",
+                '{"todos":[{"id":"plan","content":"设计打卡系统","status":"in_progress"}]}',
             ),
-            create_tool_call_response(
-                "todo_modify",
-                '{"action": "update", "todos": [{"id": "task_1", "status": "completed"}]}'
-            ),
-            create_tool_call_response(
-                "todo_modify",
-                '{"action": "update", "todos": [{"id": "task_2", "status": "completed"}]}'
-            ),
-            # 第3次工具调用后应该触发进度提醒，模型调用 todo_list
-            create_tool_call_response(
-                "todo_list",
-                '{}'
-            ),
-            create_text_response("任务1和任务2已完成，正在执行任务3。")
+            create_text_response("已建立计划。"),
         ])
 
         agent = create_deep_agent(
@@ -479,6 +457,11 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsInstance(result, dict)
         self.assertEqual(result.get("result_type"), "answer")
+        self.assertGreaterEqual(len(mock_llm.call_history), 2)
+        final_messages = mock_llm.call_history[-1]
+        contents = [str(getattr(message, "content", message)) for message in final_messages]
+        self.assertTrue(any("todo_snapshot" in content and "revision" in content for content in contents))
+
 
     @pytest.mark.asyncio
     async def test_deep_agent_heartbeat(self):

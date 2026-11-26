@@ -1,831 +1,178 @@
-# coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Session todo storage and whole-list replacement tool."""
+from __future__ import annotations
+
 import asyncio
+import hashlib
 import json
-import os.path
-import uuid as _uuid
-from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, List, Optional, Dict
+import os
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Any, AsyncIterator
+from uuid import NAMESPACE_URL, uuid5
+
+from filelock import FileLock
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import tool_logger, LogEventType
-from openjiuwen.core.foundation.tool import Tool, ToolCard, Input, Output
-from openjiuwen.core.session.agent import Session
-from openjiuwen.core.sys_operation import SysOperation
+from openjiuwen.core.foundation.tool import Input, Output, Tool
 from openjiuwen.harness.prompts.tools import build_tool_card
-from openjiuwen.harness.tools.base_tool import render_fields
-from openjiuwen.harness.schema.task import (
-    STATUS_ICONS,
-    TodoItem,
-    TodoStatus,
-)
+from openjiuwen.harness.schema.task import TodoItem, TodoStatus
+
+_WRITABLE_FIELDS = frozenset({"id", "content", "status", "description", "selected_model_id"})
+_ACTIVE_STATUSES = frozenset({TodoStatus.PENDING, TodoStatus.IN_PROGRESS})
 
 
-class TodoLockManager:
-    """Manages operation locks for todo tools, keyed by session_id.
+class TodoWriteTool(Tool):
+    """Replace a session's full ordered todo list using its latest revision."""
 
-    Ensures mutual exclusion for file I/O operations within the same session.
-    Different sessions use different locks and do not block each other.
+    def __init__(self, workspace: str | Path, language: str = "cn", agent_id: str | None = None) -> None:
+        super().__init__(build_tool_card("todo_write", "TodoWriteTool", language, agent_id=agent_id))
+        self.workspace = Path(workspace).resolve()
+        self.language = language
 
-    All tools sharing the same lock manager will coordinate their operations
-    for the same session, preventing race conditions when multiple tools
-    try to access or modify the file simultaneously.
-    """
+    def _path(self, session_id: str) -> Path:
+        path = (self.workspace / session_id / "todo.json").resolve()
+        if not session_id or not path.is_relative_to(self.workspace):
+            raise ValueError("Invalid todo session ID")
+        return path
 
-    def __init__(self):
-        self._session_locks: Dict[str, asyncio.Lock] = {}
-        self._global_lock = asyncio.Lock()
-
-    async def _get_session_lock(self, session_id: str) -> asyncio.Lock:
-        """Get or create lock for a specific session."""
-        async with self._global_lock:
-            if session_id not in self._session_locks:
-                self._session_locks[session_id] = asyncio.Lock()
-            return self._session_locks[session_id]
-
-    @asynccontextmanager
-    async def operation(self, session_id: str):
-        """Acquire the operation lock for a specific session.
-
-        Args:
-            session_id: The session ID to lock operations for.
-        """
-        lock = await self._get_session_lock(session_id)
-        await lock.acquire()
+    @staticmethod
+    def _read(path: Path) -> tuple[list[TodoItem], str | None]:
         try:
-            yield
-        finally:
-            lock.release()
+            data = path.read_bytes()
+        except FileNotFoundError:
+            return [], None
+        records = json.loads(data)
+        if not isinstance(records, list):
+            raise ValueError("Invalid persisted todo list")
+        todos = []
+        for index, record in enumerate(records):
+            if not isinstance(record, dict):
+                raise ValueError("Invalid persisted todo item")
+            if not record.get("id"):
+                record = {**record, "id": str(uuid5(NAMESPACE_URL, f"{path.parent.name}/todo/{index}"))}
+            todos.append(TodoItem.from_dict(record))
+        return todos, hashlib.sha256(data).hexdigest()
 
-    def cleanup_session(self, session_id: str) -> None:
-        """Remove lock for a session (cleanup when session ends)."""
-        if session_id in self._session_locks:
-            del self._session_locks[session_id]
+    @staticmethod
+    def _save(path: Path, todos: list[TodoItem]) -> str:
+        data = json.dumps([todo.to_dict() for todo in todos], ensure_ascii=False, indent=2).encode("utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(dir=path.parent, delete=False) as file:
+            temporary = Path(file.name)
+            try:
+                file.write(data)
+                file.close()
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
+        return hashlib.sha256(data).hexdigest()
 
+    @staticmethod
+    def _snapshot(todos: list[TodoItem], revision: str | None) -> dict[str, Any]:
+        return {
+            "revision": revision,
+            "todos": [{"id": todo.id, "content": todo.content, "status": todo.status.value} for todo in todos],
+        }
 
-class TodoTool(Tool):
-    """Base class for Todo tools with common persistence operations"""
+    async def load_todos(self, session_id: str) -> list[TodoItem]:
+        """Read persisted items, including metadata used by the task loop."""
+        todos, _ = await asyncio.to_thread(self._read, self._path(session_id))
+        return todos
 
-    async def invoke(self, inputs: Input, **kwargs) -> Output:
-        pass
+    async def load_snapshot(self, session_id: str) -> dict[str, Any] | None:
+        """Read the complete model-visible list and the version of that exact list."""
+        todos, revision = await asyncio.to_thread(self._read, self._path(session_id))
+        return self._snapshot(todos, revision) if revision is not None else None
 
-    def render_for_llm(self, output: Dict[str, Any]) -> str:
-        """Render the ``message`` a create or modify call returns.
+    @staticmethod
+    def _build_todos(items: list[dict[str, Any]], current: list[TodoItem]) -> list[TodoItem]:
+        existing = {todo.id: todo for todo in current}
+        todos = []
+        seen = set()
+        in_progress = 0
+        for item in items:
+            if not isinstance(item, dict) or item.keys() - _WRITABLE_FIELDS:
+                raise ValueError("Invalid todo fields")
+            todo_id = item.get("id")
+            content = item.get("content")
+            if not isinstance(todo_id, str) or not todo_id.strip() or todo_id in seen:
+                raise ValueError("Each todo needs a unique nonempty id")
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError(f"Todo {todo_id} needs nonempty content")
+            status = TodoStatus(item.get("status"))
+            in_progress += status == TodoStatus.IN_PROGRESS
+            if in_progress > 1:
+                raise ValueError("At most one todo can be in_progress")
+            previous = existing.get(todo_id)
+            data = previous.to_dict() if previous else {"activeForm": content}
+            todos.append(TodoItem.model_validate({**data, **item}))
+            seen.add(todo_id)
+        for todo in todos:
+            if set(todo.depends_on) - seen:
+                raise ValueError(f"Todo {todo.id} references a missing dependency")
+        return todos
 
-        Todo tools return plain dicts rather than ``ToolOutput``; the CLI todo
-        view parses their ``str()`` form, so the dict shape stays unchanged.
-        """
-        return output["message"]
-
-    async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
-        pass
-
-    def __init__(
-        self,
-        card: ToolCard,
-        operation: SysOperation,
-        workspace: Optional[str] = None,
-        lock_manager: Optional[TodoLockManager] = None,
-    ):
-        """Initialize TodoTool with persistence layer.
-
-        Args:
-            card: Tool metadata card with description and parameter schema.
-            operation: System operation for file system access.
-            workspace: Path for file system operations.
-            lock_manager: Shared lock manager for coordinating operations across
-                all todo tools. If not provided, a new one is created.
-                Tools should share the same lock manager instance.
-        """
-        super().__init__(card)
-        self.workspace = workspace if workspace else "./"
-        self.fs = operation.fs()
-        self._lock_manager = lock_manager if lock_manager else TodoLockManager()
-
-    def _get_file_path(self, session_id: str) -> str:
-        """Get the file path for a given session_id.
-
-        Args:
-            session_id: The session ID to get file path for.
-
-        Returns:
-            Full file path for the session's todo.json file.
-        """
-        return os.path.join(self.workspace, f"./{session_id}/todo.json")
-
-    async def load_todos(self, session_id: str) -> List[TodoItem]:
-        """Load todo items from session-specific JSON file.
-
-        Args:
-            session_id: The session ID to load todos for.
-
-        Returns:
-            List of TodoItem instances loaded from file.
-
-        Raises:
-            ToolError: If file loading/parsing fails.
-        """
-        async with self._lock_manager.operation(session_id):
-            file_path = self._get_file_path(session_id)
-            abs_path = os.path.abspath(file_path)
-            if not os.path.isfile(abs_path):
-                raise build_error(
-                    StatusCode.TOOL_TODOS_LOAD_FAILED,
-                    reason=f"Todo file not found: {abs_path}"
+    def _replace(self, path: Path, items: list[dict[str, Any]], revision: str | None) -> dict[str, Any]:
+        with FileLock(path.with_suffix(".lock"), timeout=30):
+            current, latest = self._read(path)
+            if revision != latest:
+                message = (
+                    "待办版本已变化。请在此最新列表上合并修改后重试。"
+                    if self.language != "en"
+                    else "The todo list changed. Merge your changes into this latest list and retry."
                 )
+                return {"conflict": True, "message": message, **self._snapshot(current, latest)}
+            todos = self._build_todos(items, current)
+            return self._snapshot(todos, self._save(path, todos))
 
-            read_res = await self.fs.read_file(abs_path, mode="text")
-            if read_res.code != 0:
-                raise build_error(
-                    StatusCode.TOOL_TODOS_LOAD_FAILED,
-                    reason="Failed to load todo list, because read_file fail"
-                )
-
-            data = json.loads(read_res.data.content)
-            todos = [TodoItem.from_dict(item) for item in data]
-            tool_logger.info(
-                "Successfully loaded todo items",
-                event_type=LogEventType.TOOL_CALL_END
-            )
+    def _update_statuses(
+        self, path: Path, statuses: dict[str, TodoStatus] | None,
+    ) -> list[TodoItem]:
+        with FileLock(path.with_suffix(".lock"), timeout=30):
+            todos, _ = self._read(path)
+            changed = False
+            for todo in todos:
+                if statuses is None:
+                    target = TodoStatus.CANCELLED if todo.status in _ACTIVE_STATUSES else todo.status
+                else:
+                    target = statuses.get(todo.id, todo.status)
+                if target != todo.status:
+                    todo.status = target
+                    changed = True
+            if changed:
+                self._save(path, todos)
             return todos
 
-    async def save_todos(self, session_id: str, todos: List[TodoItem]):
-        """Save todo items to session-specific JSON file.
+    async def sync_statuses(self, session_id: str, statuses: dict[str, TodoStatus]) -> list[TodoItem]:
+        """Apply task-loop statuses to the latest stored list by ID."""
+        return await asyncio.to_thread(self._update_statuses, self._path(session_id), statuses)
 
-        Args:
-            session_id: The session ID to save todos for.
-            todos: List of TodoItem instances to persist.
-
-        Raises:
-            ToolError: If file writing fails.
-        """
-        async with self._lock_manager.operation(session_id):
-            file_path = self._get_file_path(session_id)
-            abs_path = os.path.abspath(file_path)
-            data = [todo.to_dict() for todo in todos]
-            json_content = json.dumps(data, ensure_ascii=False, indent=2)
-            write_res = await self.fs.write_file(abs_path, json_content, mode="text")
-            if write_res.code == 0:
-                tool_logger.info(
-                    "Successfully saved todo items",
-                    event_type=LogEventType.TOOL_CALL_END
-                )
-            else:
-                tool_logger.error(
-                    "Failed to save todo list, because write_file fail",
-                    event_type=LogEventType.TOOL_CALL_ERROR
-                )
-                raise build_error(
-                    StatusCode.TOOL_TODOS_SAVE_FAILED,
-                    reason="Failed to save todo list, because write_file fail"
-                )
-
-    def cleanup_session(self, session_id: str) -> None:
-        """Clean up resources for a session (call when session ends).
-
-        Args:
-            session_id: The session ID to clean up.
-        """
-        self._lock_manager.cleanup_session(session_id)
-
-
-class TodoCreateTool(TodoTool):
-    """Todo Create Tool - Create new todo items with session."""
-
-    def __init__(
-        self,
-        operation: SysOperation,
-        workspace: Optional[str] = None,
-        language: str = "cn",
-        agent_id: Optional[str] = None,
-        lock_manager: Optional[TodoLockManager] = None,
-    ):
-        super().__init__(
-            build_tool_card("todo_create", "TodoCreateTool", language, agent_id=agent_id),
-            operation,
-            workspace,
-            lock_manager,
-        )
+    async def cancel_pending(self, session_id: str) -> list[TodoItem]:
+        """Cancel active todos without changing completed or already cancelled items."""
+        return await asyncio.to_thread(self._update_statuses, self._path(session_id), None)
 
     async def invoke(self, inputs: Input, **kwargs) -> Output:
-        """Asynchronous invocation handler for TodoCreate tool operations
+        session = kwargs.get("session")
+        if session is None or not session.get_session_id():
+            raise build_error(StatusCode.TOOL_TODOS_INVOKE_FAILED, reason="Session ID is required")
 
-        Args:
-            inputs: Input parameters dictionary containing task creation data
-            **kwargs: Additional operation parameters (supports session_id override)
-
-        Returns:
-            Execution result with human-readable creation message
-
-        Raises:
-            ToolError: If invalid parameters or operation fails
-        """
-        session = kwargs.get("session", None)
-        session_id = session.get_session_id() if session and hasattr(session, "get_session_id") else None
-        if session_id is None:
-            raise build_error(
-                StatusCode.TOOL_TODOS_INVOKE_FAILED,
-                reason="Session ID is required"
-            )
-
-        results = dict()
+        items = inputs.get("todos")
+        revision = inputs.get("revision")
+        if inputs.keys() - {"todos", "revision"} or not isinstance(items, list):
+            raise build_error(StatusCode.TOOL_TODOS_VALIDATION_INVALID, reason="Provide the complete todos list")
+        if revision is not None and not isinstance(revision, str):
+            raise build_error(StatusCode.TOOL_TODOS_VALIDATION_INVALID, reason="Provide a valid revision")
         try:
-            todos_input = inputs.get("todos")
-            if todos_input and isinstance(todos_input, list):
-                results["message"] = await self._create_from_list(session_id, todos_input)
-                return results
+            return await asyncio.to_thread(self._replace, self._path(session.get_session_id()), items, revision)
+        except ValueError as exc:
+            raise build_error(StatusCode.TOOL_TODOS_VALIDATION_INVALID, reason=str(exc)) from exc
+        except OSError as exc:
+            raise build_error(StatusCode.TOOL_TODOS_SAVE_FAILED, reason=str(exc)) from exc
 
-            raise build_error(
-                StatusCode.TOOL_TODOS_INVOKE_FAILED,
-                reason="'todos' parameter is required and must be a JSON array"
-            )
-
-        except Exception as e:
-            tool_logger.error(
-                "Todo create tool invocation failed",
-                event_type=LogEventType.TOOL_CALL_ERROR,
-                exception=str(e)
-            )
-            raise build_error(
-                StatusCode.TOOL_TODOS_INVOKE_FAILED,
-                reason=str(e)
-            ) from e
-
-    async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
-        """Stream response handler (not supported for TodoCreate tool)"""
-        raise build_error(StatusCode.TOOL_STREAM_NOT_SUPPORTED, card=self._card)
-
-    def _format_create_result(self, todos: List[TodoItem]) -> str:
-        """Format task creation result into human-readable string
-
-        Args:
-            todos: List of created TodoItem instances
-
-        Returns:
-            Formatted success message with task details
-        """
-        result = f"Successfully created {len(todos)} task(s):\n"
-        for todo in todos:
-            status_icon = STATUS_ICONS.get(todo.status, "[ ]")
-            model_info = f" (model: {todo.selected_model_id})" if todo.selected_model_id else ""
-            result += f"  {status_icon} task_id: {todo.id} , content: {todo.content}{model_info}\n"
-        first_task = todos[0].content if todos else ""
-        result += f"\nNext step: Immediately execute task '{first_task}'"
-        return result.strip()
-
-    async def _create_from_list(self, session_id: str, tasks_data: List[Dict[str, Any]]) -> str:
-        """Create todo items from a JSON array of task objects."""
-        if not tasks_data:
-            raise build_error(
-                StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                reason="Task list cannot be empty"
-            )
-        new_todos = []
-        seen_ids: set = set()
-        for i, task_data in enumerate(tasks_data):
-            content = task_data.get("content", "")
-            if not content:
-                raise build_error(
-                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason=f"Task at index {i} is missing a 'content' field"
-                )
-            active_form = task_data.get("activeForm", "")
-            if not active_form:
-                raise build_error(
-                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason=f"Task at index {i} is missing a 'activeForm' field"
-                )
-            description = task_data.get("description", "")
-            if not description:
-                raise build_error(
-                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason=f"Task at index {i} is missing a 'description' field"
-                )
-            # Prefer model-provided id; fall back to uuid only when absent
-            task_id = str(task_data.get("id") or "").strip()
-            if not task_id:
-                task_id = str(_uuid.uuid4())
-            if task_id in seen_ids:
-                raise build_error(
-                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason=f"Duplicate task id '{task_id}' at index {i}"
-                )
-            seen_ids.add(task_id)
-            status = TodoStatus.IN_PROGRESS if i == 0 else TodoStatus.PENDING
-            new_todos.append(
-                TodoItem(
-                    id=task_id,
-                    content=content,
-                    activeForm=active_form,
-                    description=description,
-                    status=status,
-                    selected_model_id=task_data.get("selected_model_id"),
-                )
-            )
-
-        await self.save_todos(session_id, new_todos)
-        tool_logger.info("Created todo items from JSON array", event_type=LogEventType.TOOL_CALL_END)
-        return self._format_create_result(new_todos)
-
-
-class TodoListTool(TodoTool):
-    """Todo List Tool - Returns active (non-completed, non-cancelled) todo items."""
-
-    def __init__(
-        self,
-        operation: SysOperation,
-        workspace: Optional[str] = None,
-        language: str = "cn",
-        agent_id: Optional[str] = None,
-        lock_manager: Optional[TodoLockManager] = None,
-    ):
-        super().__init__(
-            build_tool_card("todo_list", "TodoListTool", language, agent_id=agent_id),
-            operation,
-            workspace,
-            lock_manager,
-        )
-
-    async def invoke(self, inputs: Input, **kwargs) -> Output:
-        """Asynchronous invocation handler for TodoCreate tool operations
-
-        Args:
-            inputs: Input parameters dictionary (no additional params required)
-            **kwargs: Additional operation parameters (supports session_id override)
-
-        Returns:
-            Execution result with formatted todo list
-
-        Raises:
-            ToolError: If no todos exist or operation fails
-        """
-        session = kwargs.get("session", None)
-        session_id = session.get_session_id() if session and hasattr(session, "get_session_id") else None
-        if session_id is None:
-            raise build_error(
-                StatusCode.TOOL_TODOS_INVOKE_FAILED,
-                reason="Session ID is required"
-            )
-
-        try:
-            tasks = await self.load_todos(session_id)
-            active_tasks = [
-                t for t in tasks
-                if t.status not in (TodoStatus.CANCELLED, TodoStatus.COMPLETED)
-            ]
-            simplified = [
-                {
-                    "id": t.id,
-                    "content": t.content,
-                    "status": t.status.value,
-                    "depends_on": t.depends_on,
-                }
-                for t in active_tasks
-            ]
-            return {"todos": simplified}
-        except Exception as e:
-            tool_logger.error(
-                "Todo list tool invocation failed",
-                event_type=LogEventType.TOOL_CALL_ERROR,
-                exception=str(e)
-            )
-            raise build_error(
-                StatusCode.TOOL_TODOS_INVOKE_FAILED,
-                reason=str(e)
-            ) from e
-
-    def render_for_llm(self, output: Dict[str, Any]) -> str:
-        """Render one active task per line with its status and dependencies."""
-        lines = []
-        for task in output["todos"]:
-            depends = f" (depends on: {', '.join(task['depends_on'])})" if task["depends_on"] else ""
-            lines.append(f"- [{task['status']}] {task['id']}: {task['content']}{depends}")
-        return "\n".join(lines) or "No active tasks."
-
-    async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
-        """Stream response handler (not supported for TodoList tool)"""
-        raise build_error(StatusCode.TOOL_STREAM_NOT_SUPPORTED, card=self._card)
-
-
-class TodoGetTool(TodoTool):
-    """Todo Get Tool - Returns full details of a single task by ID."""
-
-    def __init__(
-        self,
-        operation: SysOperation,
-        workspace: Optional[str] = None,
-        language: str = "cn",
-        agent_id: Optional[str] = None,
-        lock_manager: Optional[TodoLockManager] = None,
-    ):
-        super().__init__(
-            build_tool_card("todo_get", "TodoGetTool", language, agent_id=agent_id),
-            operation,
-            workspace,
-            lock_manager,
-        )
-
-    async def invoke(self, inputs: Input, **kwargs) -> Output:
-        session = kwargs.get("session", None)
-        session_id = session.get_session_id() if session and hasattr(session, "get_session_id") else None
-        if session_id is None:
-            raise build_error(
-                StatusCode.TOOL_TODOS_INVOKE_FAILED,
-                reason="Session ID is required"
-            )
-
-        task_id = inputs.get("id")
-        if not task_id:
-            raise build_error(
-                StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                reason="Task ID is required"
-            )
-
-        try:
-            tasks = await self.load_todos(session_id)
-            for task in tasks:
-                if task.id == task_id:
-                    return {"todo": task.to_dict()}
-            raise build_error(
-                StatusCode.TOOL_TODOS_INVOKE_FAILED,
-                reason=f"Task with id '{task_id}' not found"
-            )
-        except Exception as e:
-            tool_logger.error(
-                "Todo get tool invocation failed",
-                event_type=LogEventType.TOOL_CALL_ERROR,
-                exception=str(e)
-            )
-            raise build_error(
-                StatusCode.TOOL_TODOS_INVOKE_FAILED,
-                reason=str(e)
-            ) from e
-
-    def render_for_llm(self, output: Dict[str, Any]) -> str:
-        """Render the task's fields as ``key: value`` lines."""
-        return render_fields(output["todo"])
+    def render_for_llm(self, output: dict[str, Any]) -> str:
+        return json.dumps(output, ensure_ascii=False, separators=(",", ":"))
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         raise build_error(StatusCode.TOOL_STREAM_NOT_SUPPORTED, card=self._card)
-
-
-class TodoModifyTool(TodoTool):
-    """
-    Todo Modify Tool
-
-    update/delete/cancel/append/insert_after/insert_before action operations todo items with session
-    """
-
-    def __init__(
-        self,
-        operation: SysOperation,
-        workspace: Optional[str] = None,
-        language: str = "cn",
-        agent_id: Optional[str] = None,
-        lock_manager: Optional[TodoLockManager] = None,
-    ):
-        super().__init__(
-            build_tool_card("todo_modify", "TodoModifyTool", language, agent_id=agent_id),
-            operation,
-            workspace,
-            lock_manager,
-        )
-
-    async def invoke(self, inputs: Input, **kwargs) -> Output:
-        session = kwargs.get("session", None)
-        session_id = session.get_session_id() if session and hasattr(session, "get_session_id") else None
-        if session_id is None:
-            raise build_error(
-                StatusCode.TOOL_TODOS_INVOKE_FAILED,
-                reason="Session ID is required"
-            )
-
-        results = dict()
-        try:
-            action = inputs.get("action")
-            if not action:
-                raise build_error(
-                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason="Invalid input: 'action' field is required"
-                )
-
-            current_todos = await self.load_todos(session_id)
-
-            if action == "delete":
-                ids = inputs.get("ids")
-                if not ids or not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
-                    raise build_error(
-                        StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                        reason="Invalid input for delete action: 'ids' must be a non-empty list of task IDs"
-                    )
-                results["message"] = await self._delete_todos(session_id, ids, current_todos)
-            elif action == "cancel":
-                ids = inputs.get("ids")
-                if not ids or not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
-                    raise build_error(
-                        StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                        reason="Invalid input for cancel action: 'ids' must be a non-empty list of task IDs"
-                    )
-                results["message"] = await self._cancel_todos(session_id, ids, current_todos)
-            elif action == "update":
-                todos_data = self._require_todo_array(
-                    inputs.get("todos"),
-                    "update",
-                    '{"action":"update","todos":[{"id":"task_id","status":"completed"}]}',
-                )
-                results["message"] = await self._update_todos(session_id, todos_data, current_todos)
-            elif action == "append":
-                todos_data = self._require_todo_array(
-                    inputs.get("todos"),
-                    "append",
-                    '{"action":"append","todos":[{"id":"task_id","content":"...","activeForm":"...",'
-                    '"description":"...","status":"pending"}]}',
-                )
-                results["message"] = await self._append_todos(session_id, todos_data, current_todos)
-            elif action == "insert_after":
-                todo_data = inputs.get("todo_data")
-                self._validate_todo_data_structure(todo_data)
-                target_id = todo_data["target_id"]
-                insert_todos = todo_data["items"]
-                results["message"] = await self._insert_after_todos(session_id, target_id, insert_todos, current_todos)
-            elif action == "insert_before":
-                todo_data = inputs.get("todo_data")
-                self._validate_todo_data_structure(todo_data)
-                target_id = todo_data["target_id"]
-                insert_todos = todo_data["items"]
-                results["message"] = await self._insert_before_todos(session_id, target_id, insert_todos, current_todos)
-            else:
-                raise build_error(
-                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason=f"Invalid action: {action}"
-                )
-            return results
-        except Exception as e:
-            tool_logger.error(
-                "Todo modify tool invocation failed",
-                event_type=LogEventType.TOOL_CALL_ERROR,
-                exception=str(e)
-            )
-            raise build_error(
-                StatusCode.TOOL_TODOS_INVOKE_FAILED,
-                reason=str(e)
-            ) from e
-
-    async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
-        raise build_error(StatusCode.TOOL_STREAM_NOT_SUPPORTED, card=self._card)
-
-    def _validate_todo_data_structure(self, todo_data: Dict):
-        """Validate structure of todo_data object for insert_after/insert_before actions
-
-        Args:
-            todo_data: {"target_id": str, "items": [todo_list]} object to validate
-
-        Raises:
-            ToolError: If todo_data is invalid (missing fields or wrong type)
-        """
-        if not todo_data or not isinstance(todo_data, dict):
-            raise build_error(
-                StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                reason="Invalid input for insert action: 'todo_data' must be an object with 'target_id' and 'items'"
-            )
-
-        target_id = todo_data.get("target_id")
-        insert_todos = todo_data.get("items")
-
-        if not target_id or not isinstance(target_id, str):
-            raise build_error(
-                StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                reason="Invalid input: todo_data 'target_id' must be a non-empty string"
-            )
-        if not insert_todos or not isinstance(insert_todos, list):
-            raise build_error(
-                StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                reason="Invalid input: todo_data 'items' must be a non-empty list of todo objects"
-            )
-        for todo_item in insert_todos:
-            self._validate_single_todo_item(todo_item)
-
-    def _validate_target_task_status(self, target_id: str, current_todos: List[TodoItem],
-                                     allowed_statuses: List[str]):
-        target_index = -1
-        target_todo = None
-        for idx, todo in enumerate(current_todos):
-            if todo.id == target_id:
-                target_index = idx
-                target_todo = todo
-                break
-        if not target_todo:
-            raise build_error(
-                StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                reason=f"Target task with ID '{target_id}' not found in current todo list"
-            )
-        if target_todo.status not in allowed_statuses:
-            raise build_error(
-                StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                reason=f"Target task status '{target_todo.status}' doesn't allow insertion."
-            )
-        return target_index
-
-    def _validate_single_in_progress(self, todos_data: List[TodoItem]):
-        in_progress_count = sum(1 for todo in todos_data if todo.status == TodoStatus.IN_PROGRESS)
-        if in_progress_count > 1:
-            raise build_error(
-                StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                reason="More than one task is marked as 'in_progress' (only one allowed)"
-            )
-
-    def _require_todo_array(self, todos_data: Any, action: str, example: str) -> List[Dict]:
-        """Reject a missing or wrongly shaped ``todos`` before it is iterated."""
-        if not isinstance(todos_data, list) or not todos_data:
-            raise build_error(
-                StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                reason=(
-                    f"Invalid input for {action}: 'todos' must be a non-empty array of task objects. "
-                    f"Example: {example}"
-                ),
-            )
-        for index, item in enumerate(todos_data):
-            if not isinstance(item, dict) or not str(item.get("id") or "").strip():
-                raise build_error(
-                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason=(
-                        f"Invalid input for {action}: item {index} must be an object with 'id'. "
-                        f"Example: {example}"
-                    ),
-                )
-        return todos_data
-
-    def _validate_single_todo_item(self, todo_data: Dict):
-        validation_errors = []
-        required_fields = ["content", "activeForm", "description", "status", "id"]
-        for field in required_fields:
-            if field not in todo_data:
-                validation_errors.append(f"Missing required field: '{field}'")
-        try:
-            TodoStatus(todo_data.get("status", ""))
-        except ValueError:
-            validation_errors.append(
-                f"Invalid status '{todo_data.get('status')}'. Valid values: {[v.value for v in TodoStatus]}")
-        if validation_errors:
-            raise build_error(
-                StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                reason=f"Todo data validation error: {'; '.join(validation_errors)}"
-            )
-
-    def _convert_to_todo_item(self, todo_data: Dict) -> TodoItem:
-        return TodoItem(
-            id=str(todo_data.get("id") or "").strip() or str(_uuid.uuid4()),
-            content=todo_data["content"],
-            activeForm=todo_data.get("activeForm", ""),
-            description=todo_data.get("description", ""),
-            status=TodoStatus(todo_data["status"]),
-            selected_model_id=todo_data.get("selected_model_id"),
-        )
-
-    async def _delete_todos(self, session_id: str, ids: List[str], current_todos: List[TodoItem]) -> str:
-        deleted_count = 0
-        remaining_todos = []
-        delete_ids = set(ids)
-        for todo in current_todos:
-            if todo.id in delete_ids:
-                deleted_count += 1
-            else:
-                remaining_todos.append(todo)
-        if deleted_count == 0:
-            return f"No tasks deleted: None of the provided IDs ({', '.join(ids)}) were found"
-        await self.save_todos(session_id, remaining_todos)
-        return f"Successfully deleted {deleted_count} task(s) (IDs: {', '.join(delete_ids)})"
-
-    async def _cancel_todos(self, session_id: str, ids: List[str], current_todos: List[TodoItem]) -> str:
-        cancelled_count = 0
-        cancelled_ids = []
-        for todo in current_todos:
-            if todo.id in ids:
-                todo.status = TodoStatus.CANCELLED
-                cancelled_count += 1
-                cancelled_ids.append(todo.id)
-        if cancelled_count == 0:
-            return f"No tasks cancelled: None of the provided IDs ({', '.join(ids)}) were found"
-        await self.save_todos(session_id, current_todos)
-        return f"Successfully cancelled {cancelled_count} task(s) (IDs: {', '.join(cancelled_ids)})"
-
-    async def _update_todos(self, session_id: str, todos_data: List[Dict], current_todos: List[TodoItem]) -> str:
-        todo_map = {todo.id: todo for todo in current_todos}
-        updated_count = 0
-        for todo_data in todos_data:
-            todo_id = todo_data.get("id")
-            if not todo_id:
-                raise build_error(
-                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason="Batch update failed: Missing required field: 'id'"
-                )
-            if todo_id not in todo_map:
-                raise build_error(
-                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason=f"Batch update failed: Task with ID '{todo_id}' not found"
-                )
-            current_todo = todo_map[todo_id]
-            if "content" in todo_data:
-                current_todo.content = todo_data["content"]
-            if "activeForm" in todo_data:
-                current_todo.activeForm = todo_data["activeForm"]
-            if "description" in todo_data:
-                current_todo.description = todo_data["description"]
-            if "status" in todo_data:
-                current_todo.status = TodoStatus(todo_data["status"])
-            if "selected_model_id" in todo_data:
-                current_todo.selected_model_id = todo_data["selected_model_id"]
-            updated_count += 1
-        self._validate_single_in_progress(current_todos)
-        await self.save_todos(session_id, current_todos)
-        return f"Successfully updated {updated_count} task(s)"
-
-    async def _append_todos(self, session_id: str, todos_data: List[Dict], current_todos: List[TodoItem]) -> str:
-        todo_ids = {todo.id for todo in current_todos}
-        for todo_data in todos_data:
-            self._validate_single_todo_item(todo_data)
-            todo_id = todo_data.get("id")
-            if todo_id in todo_ids:
-                raise build_error(
-                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason=f"Batch append failed: Task with ID '{todo_id}' is duplicated"
-                )
-            current_todos.append(self._convert_to_todo_item(todo_data))
-            todo_ids.add(todo_id)
-        self._validate_single_in_progress(current_todos)
-        await self.save_todos(session_id, current_todos)
-        return f"Successfully appended {len(todos_data)} task(s)"
-
-    async def _insert_after_todos(self, session_id: str, target_id: str, insert_todos_data: List[Dict],
-                                   current_todos: List[TodoItem]) -> str:
-        target_index = self._validate_target_task_status(
-            target_id, current_todos, [TodoStatus.IN_PROGRESS, TodoStatus.PENDING]
-        )
-        existing_ids = {todo.id for todo in current_todos}
-        insert_todos = []
-        for todo_data in insert_todos_data:
-            todo_id = todo_data["id"]
-            if todo_id in existing_ids:
-                raise build_error(
-                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason=f"Insert failed: Task with ID '{todo_id}' already exists"
-                )
-            insert_todos.append(self._convert_to_todo_item(todo_data))
-            existing_ids.add(todo_id)
-        updated_todos = (
-            current_todos[:target_index + 1] + insert_todos + current_todos[target_index + 1:]
-        )
-        self._validate_single_in_progress(updated_todos)
-        await self.save_todos(session_id, updated_todos)
-        return f"Successfully inserted {len(insert_todos)} task(s) after target task, id: '{target_id}'"
-
-    async def _insert_before_todos(self, session_id: str, target_id: str, insert_todos_data: List[Dict],
-                                    current_todos: List[TodoItem]) -> str:
-        target_index = self._validate_target_task_status(
-            target_id, current_todos, [TodoStatus.PENDING]
-        )
-        existing_ids = {todo.id for todo in current_todos}
-        insert_todos = []
-        for todo_data in insert_todos_data:
-            todo_id = todo_data["id"]
-            if todo_id in existing_ids:
-                raise build_error(
-                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason=f"Insert failed: Task with ID '{todo_id}' already exists"
-                )
-            insert_todos.append(self._convert_to_todo_item(todo_data))
-            existing_ids.add(todo_id)
-        updated_todos = (
-            current_todos[:target_index] + insert_todos + current_todos[target_index:]
-        )
-        self._validate_single_in_progress(updated_todos)
-        await self.save_todos(session_id, updated_todos)
-        return f"Successfully inserted {len(insert_todos)} task(s) before target task, id: '{target_id}'"
-
-
-def create_todos_tool(
-    operation: SysOperation,
-    workspace: Optional[str] = None,
-    language: str = "cn",
-    agent_id: Optional[str] = None,
-) -> List[TodoTool]:
-    """Create a set of todo tools that share the same lock manager.
-
-
-    Args:
-        operation: System operation for file system access.
-        workspace: Path for file system operations.
-        language: Language for tool descriptions.
-        agent_id: Optional agent identifier.
-
-    Returns:
-        List of TodoTool instances sharing the same lock manager.
-    """
-    shared_lock_manager = TodoLockManager()
-    return [
-        TodoCreateTool(operation, workspace, language, agent_id, shared_lock_manager),
-        TodoListTool(operation, workspace, language, agent_id, shared_lock_manager),
-        TodoGetTool(operation, workspace, language, agent_id, shared_lock_manager),
-        TodoModifyTool(operation, workspace, language, agent_id, shared_lock_manager),
-    ]

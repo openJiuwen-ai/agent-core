@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 # Tool name sets
 # ---------------------------------------------------------------------------
 
-_TODO_TOOL_NAMES = frozenset({"todo_create", "todo_list", "todo_modify"})
+_TODO_TOOL_NAMES = frozenset({"todo_write"})
 _SESSION_TOOL_NAMES = frozenset({"sessions_list", "sessions_cancel", "sessions_spawn"})
 _HIDDEN_IN_PLAN = _TODO_TOOL_NAMES | _SESSION_TOOL_NAMES
 _HIDDEN_IN_NORMAL = frozenset({"enter_plan_mode", "exit_plan_mode"})
