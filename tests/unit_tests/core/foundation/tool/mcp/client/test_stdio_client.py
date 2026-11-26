@@ -43,6 +43,14 @@ class _ConnectedSession(_HangingSession):
         return None
 
 
+class _TransportTimeoutSession(_ConnectedSession):
+    async def initialize(self):
+        raise TimeoutError("transport handshake timed out")
+
+    async def list_tools(self):
+        raise TimeoutError("transport list timed out")
+
+
 def _config() -> McpServerConfig:
     return McpServerConfig(
         server_name="mubu",
@@ -88,6 +96,13 @@ class TestStdioClientTimeouts(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(client._session)
         self.assertIsNone(client._client)
 
+    async def test_transport_handshake_timeout_keeps_original_error(self):
+        client = StdioClient(_config())
+        with patch.dict(sys.modules, _fake_mcp_modules(_TransportTimeoutSession)):
+            self.assertFalse(await client.connect())
+        self.assertEqual(str(client._last_connect_error), "transport handshake timed out")
+        self.assertIsNone(client._session)
+
     async def test_cancel_during_connect_disconnects_and_reraises(self):
         client = StdioClient(_config())
         disconnect = AsyncMock(wraps=client.disconnect)
@@ -124,6 +139,15 @@ class TestStdioClientTimeouts(unittest.IsolatedAsyncioTestCase):
         with patch.object(client, "_resolve_timeout", lambda timeout: 0.05):
             with self.assertRaises(TimeoutError):
                 await client.list_tools()
+        await client.disconnect()
+
+    async def test_transport_list_timeout_keeps_original_error(self):
+        client = StdioClient(_config())
+        with patch.dict(sys.modules, _fake_mcp_modules(_ConnectedSession)):
+            self.assertTrue(await client.connect())
+        client._session = _TransportTimeoutSession()
+        with self.assertRaisesRegex(TimeoutError, "transport list timed out"):
+            await client.list_tools()
         await client.disconnect()
 
     def test_resolve_timeout_prefers_config_then_60s(self):

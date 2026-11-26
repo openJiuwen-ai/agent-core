@@ -2,12 +2,26 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import asyncio
 from contextlib import AsyncExitStack
-from typing import Any, List, Optional
+from typing import Any, Awaitable, List, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT, extract_mcp_tool_result_content
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
+
+
+class _TransportTimeout(Exception):
+    """Distinguish a transport timeout from the local wait_for deadline."""
+
+    def __init__(self, error: TimeoutError):
+        self.error = error
+
+
+async def _preserve_transport_timeout(operation: Awaitable[Any]) -> Any:
+    try:
+        return await operation
+    except TimeoutError as error:
+        raise _TransportTimeout(error) from error
 
 
 class StdioClient(McpClient):
@@ -62,13 +76,17 @@ class StdioClient(McpClient):
             # An stdio wrapper may wait on an interactive flow (e.g. OAuth) and
             # never answer initialize(); bound it so the caller cannot hang.
             actual_timeout = self._resolve_timeout(timeout)
-            await asyncio.wait_for(self._session.initialize(), timeout=actual_timeout)
+            await asyncio.wait_for(
+                _preserve_transport_timeout(self._session.initialize()), timeout=actual_timeout
+            )
             self._is_disconnected = False
             logger.info("Stdio client connected successfully")
             return True
         except BaseException as e:
             error = e
-            if isinstance(e, TimeoutError):
+            if isinstance(e, _TransportTimeout):
+                error = e.error
+            elif isinstance(e, TimeoutError):
                 error = TimeoutError(
                     f"stdio handshake did not complete within {self._resolve_timeout(timeout):g}s"
                 )
@@ -114,7 +132,9 @@ class StdioClient(McpClient):
 
         try:
             actual_timeout = self._resolve_timeout(timeout)
-            tools_response = await asyncio.wait_for(self._session.list_tools(), timeout=actual_timeout)
+            tools_response = await asyncio.wait_for(
+                _preserve_transport_timeout(self._session.list_tools()), timeout=actual_timeout
+            )
             tools_list = [
                 McpToolCard(
                     name=tool.name,
@@ -126,6 +146,8 @@ class StdioClient(McpClient):
             ]
             logger.info(f"Retrieved {len(tools_list)} tools from Stdio server")
             return tools_list
+        except _TransportTimeout as exc:
+            raise exc.error from exc
         except TimeoutError as exc:
             raise TimeoutError(
                 f"stdio list_tools did not complete within {actual_timeout:g}s"
