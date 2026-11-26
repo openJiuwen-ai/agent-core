@@ -179,6 +179,33 @@ async def test_graceful_stop_does_not_report_crash():
     assert exits == [], "graceful stop must not fire the crash callback"
 
 
+@pytest.mark.asyncio
+async def test_eof_during_stop_not_counted_as_crash():
+    """EOF observed while stop() is running must not fire the crash callback.
+
+    During a graceful stop the reader can see stdout EOF before it is
+    cancelled (the exit notification is awaited first). That EOF must not
+    bump crash counts or overwrite real errors - e.g. a failed start()
+    (state ERROR, not STOPPING) calling client.stop() would otherwise
+    replace its real _last_error with a spurious 'exited with code None'.
+    """
+    process = _make_process()
+    exits: list[int | None] = []
+    client = LSPClient(
+        config=_make_config(),
+        process=process,
+        on_exit=lambda code: exits.append(code),
+    )
+    client._is_stopping = True  # stop() has begun; EOF races the cancel
+
+    # Direct EOF path: _on_crash must observe the stopping flag and return.
+    client._on_crash(process.returncode)
+
+    assert exits == [], "EOF during graceful stop must not fire the crash callback"
+    assert client._crash_reported is False, "stopping exits are not crashes"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows path semantics required")
 class TestPathToFileUri:
     def test_windows_encodes_special_characters(self, monkeypatch):
         monkeypatch.setattr(sys, "platform", "win32")
