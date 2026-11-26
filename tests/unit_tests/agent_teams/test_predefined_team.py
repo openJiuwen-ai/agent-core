@@ -9,6 +9,7 @@ import pytest_asyncio
 
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
+from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
@@ -112,6 +113,178 @@ class TestBuildTeamWithPredefinedMembers:
         assert "backend-dev" in member_ids
         assert "frontend-dev" in member_ids
         assert len(members) == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_build_team_skips_redundant_team_exists_probe(
+            self, team_with_predefined, db, monkeypatch):
+        """build_team 内所有成员注册走 skip_team_exists——团队行刚由同一
+        调用栈创建，逐成员复查是纯冗余读池 checkout（装配突发里每次
+        checkout 都在共享读池排队）。探针打桩成必抛：一旦被调用即失败。"""
+
+        async def _must_not_be_called(*args, **kwargs):  # pragma: no cover
+            raise AssertionError("team_exists probe must be skipped during build_team")
+
+        monkeypatch.setattr(db.team, "team_exists", _must_not_be_called)
+
+        await team_with_predefined.build_team(
+            display_name="Test Team",
+            desc="A predefined team",
+            leader_display_name="Leader",
+            leader_desc="PM",
+        )
+
+        members = await db.member.get_team_members("predefined_team")
+        assert {m.member_name for m in members} == {"leader1", "backend-dev", "frontend-dev"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_build_team_raises_when_member_registration_fails(
+            self, team_with_predefined, monkeypatch):
+        """成员注册返回失败必须上抛。"""
+        from openjiuwen.agent_teams.schema.team import MemberOpResult
+
+        async def _fail(**kwargs):
+            return MemberOpResult.fail("member boom")
+
+        monkeypatch.setattr(team_with_predefined, "spawn_member", _fail)
+
+        with pytest.raises(RuntimeError, match="member boom"):
+            await team_with_predefined.build_team(
+                display_name="Test Team",
+                desc="desc",
+                leader_display_name="Leader",
+                leader_desc="PM",
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_build_team_keeps_registering_after_mid_loop_failure(
+            self, db, message_bus, monkeypatch):
+        """单个预定义成员注册失败不得中断剩余成员注册，也不得跳过收尾
+        （on_team_built / TeamCreatedEvent）：尾段照跑后统一上抛，缺失
+        成员名称随异常文案透出（五轮检视：立即 raise 会把团队行留在
+        "已可用但收尾未执行"的矛盾态）。"""
+        from openjiuwen.agent_teams.schema.team import MemberOpResult
+
+        specs = [
+            TeamMemberSpec(member_name="backend-dev", display_name="Backend Developer"),
+            TeamMemberSpec(member_name="frontend-dev", display_name="Frontend Developer"),
+            TeamMemberSpec(member_name="qa-dev", display_name="QA Engineer"),
+        ]
+        built: list[str] = []
+
+        async def _on_built() -> None:
+            built.append("built")
+
+        backend = TeamBackend(
+            team_name="predefined_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            predefined_members=specs,
+            on_team_built=_on_built,
+        )
+
+        original_spawn = backend.spawn_member
+        attempted: list[str] = []
+
+        async def _flaky_spawn(**kwargs):
+            attempted.append(kwargs["member_name"])
+            if kwargs["member_name"] == "frontend-dev":
+                return MemberOpResult.fail("insert rejected")
+            return await original_spawn(**kwargs)
+
+        monkeypatch.setattr(backend, "spawn_member", _flaky_spawn)
+
+        with pytest.raises(RuntimeError, match="frontend-dev"):
+            await backend.build_team(
+                display_name="Test Team",
+                desc="desc",
+                leader_display_name="Leader",
+                leader_desc="PM",
+            )
+
+        # 失败成员之后的成员照常注册（保留旧 best-effort 语义）
+        assert attempted == ["leader1", "backend-dev", "frontend-dev", "qa-dev"]
+        members = await db.member.get_team_members("predefined_team")
+        assert {m.member_name for m in members} == {
+            "leader1", "backend-dev", "qa-dev",
+        }
+
+        # 尾段必须执行：on_team_built（调度器装载钩子）与 TeamCreatedEvent
+        assert built == ["built"]
+        created_events = [
+            call.kwargs["message"]
+            for call in message_bus.publish.await_args_list
+            if getattr(call.kwargs.get("message"), "event_type", None)
+               == TeamEvent.CREATED
+        ]
+        assert len(created_events) == 1
+        assert created_events[0].payload["team_name"] == "predefined_team"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_build_team_keeps_registering_after_mid_loop_exception(
+            self, db, message_bus, monkeypatch):
+        """spawn_member 内部裸读/写抛出的异常同样不得逃出循环：转成失败
+        汇总，其余成员照常注册、尾段照跑。"""
+        specs = [
+            TeamMemberSpec(member_name="backend-dev", display_name="Backend Developer"),
+            TeamMemberSpec(member_name="frontend-dev", display_name="Frontend Developer"),
+            TeamMemberSpec(member_name="qa-dev", display_name="QA Engineer"),
+        ]
+        built: list[str] = []
+
+        async def _on_built() -> None:
+            built.append("built")
+
+        backend = TeamBackend(
+            team_name="predefined_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            predefined_members=specs,
+            on_team_built=_on_built,
+        )
+
+        original_spawn = backend.spawn_member
+        attempted: list[str] = []
+
+        async def _flaky_spawn(**kwargs):
+            attempted.append(kwargs["member_name"])
+            if kwargs["member_name"] == "frontend-dev":
+                raise TimeoutError("read pool timeout")
+            return await original_spawn(**kwargs)
+
+        monkeypatch.setattr(backend, "spawn_member", _flaky_spawn)
+
+        with pytest.raises(RuntimeError, match="read pool timeout"):
+            await backend.build_team(
+                display_name="Test Team",
+                desc="desc",
+                leader_display_name="Leader",
+                leader_desc="PM",
+            )
+
+        # 异常成员之后的成员照常注册
+        assert attempted == ["leader1", "backend-dev", "frontend-dev", "qa-dev"]
+        members = await db.member.get_team_members("predefined_team")
+        assert {m.member_name for m in members} == {
+            "leader1", "backend-dev", "qa-dev",
+        }
+
+        # 尾段必须执行（异常路径不得跳过调度器装载/created 事件）
+        assert built == ["built"]
+        created_events = [
+            call.kwargs["message"]
+            for call in message_bus.publish.await_args_list
+            if getattr(call.kwargs.get("message"), "event_type", None)
+               == TeamEvent.CREATED
+        ]
+        assert len(created_events) == 1
 
     @pytest.mark.asyncio
     @pytest.mark.level0

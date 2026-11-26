@@ -279,14 +279,222 @@ class TestBuildTeamTool:
 
     @pytest.mark.asyncio
     @pytest.mark.level0
-    async def test_circuit_opens_after_threshold_and_refuses_fast(self, db, message_bus, t, monkeypatch):
-        """Second consecutive failure opens the circuit; later calls never reach build_team."""
+    async def test_unreadable_failure_state_brakes_without_circuit(
+            self, db, message_bus, t, monkeypatch):
+        """判定读本身失败（超时/锁）≠ 未建成：不计数失败熔断（避免假熔断），
+        但也不许无限重试——独立的未知态streak连续 2 次后快速拒绝（零 DB
+        访问），并把降级文案换成"已停止尝试"；首次中性失败明确"本轮不要
+        重试 build_team"。"""
+        failures: list[str] = []
+
+        async def _on_failed(error: str) -> None:
+            failures.append(error)
+
         backend = TeamBackend(
             team_name="test_team",
             member_name="leader1",
             is_leader=True,
             db=db,
             messager=message_bus,
+            on_team_build_failed=_on_failed,
+        )
+        tool = BuildTeamTool(backend, t)
+        _patch_create_team_boom(backend, monkeypatch)
+
+        async def _probe_read_boom(*args, **kwargs):
+            raise TimeoutError("DbSessions.read() exceeded the 30s watchdog")
+
+        monkeypatch.setattr(backend.db.team, "get_team", _probe_read_boom)
+
+        bad_args = {
+            "display_name": "X",
+            "team_desc": "d",
+            "leader_display_name": "L",
+            "leader_desc": "d",
+        }
+
+        first = await tool.invoke(bad_args)
+        assert first.success is False
+        assert first.error and "db gone" in first.error  # 携带原始失败原因
+        assert "本轮不要重试 build_team" in first.error
+        assert backend.consecutive_build_unknown == 1
+        assert backend.build_state_unknown_exhausted is False
+        # 首次未知态也必须置 round-end latch：本轮确实没有可用团队，
+        # 若模型遵守"本轮不要重试"直接单人收尾，静默会伪装成正常完成
+        # （单轮会话下永远无信号）。
+        assert len(failures) == 1 and "db gone" in failures[0]
+
+        second = await tool.invoke(bad_args)
+        assert second.success is False
+        assert "已暂停尝试 build_team" in second.error
+        assert "冷却后允许再试一次" in second.error
+        assert backend.build_state_unknown_exhausted is True
+        # 每次未知态尝试都置 latch（幂等；收尾读取即清）
+        assert len(failures) == 2 and "db gone" in failures[1]
+
+        # 第三次（冷却未到）：快速拒绝——不得再打 DB（build_team / 判定读
+        # 都不许被调），但同样要置 latch（拒绝轮不得被当成干净轮次）。
+        async def _explode(**kwargs):  # pragma: no cover - must never run
+            raise AssertionError("build_team called after unknown-state exhaust")
+
+        backend.build_team = _explode  # type: ignore[method-assign]
+
+        async def _probe_forbidden(*args, **kwargs):  # pragma: no cover
+            raise AssertionError("probe called during fast-refuse")
+
+        monkeypatch.setattr(backend.db.team, "get_team", _probe_forbidden)
+
+        third = await tool.invoke(bad_args)
+        assert third.success is False
+        assert "已暂停尝试 build_team" in third.error
+        assert len(failures) == 3  # 快速拒绝同样置 latch（每轮一次）
+
+        # 未知态不是失败：失败熔断计数保持干净
+        assert backend.consecutive_build_failures == 0
+        assert backend.build_circuit_open is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_unknown_state_streak_resets_on_determinate_outcome(
+            self, db, message_bus, t, monkeypatch):
+        """未知态streak在任一确定结果（确定未建成/半建成/成功）后清零：
+        一次读失败 + 一次确定未建成，再把判定读打回失败——不得直接达阈值。"""
+        backend = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+        )
+        tool = BuildTeamTool(backend, t)
+        _patch_create_team_boom(backend, monkeypatch)
+
+        bad_args = {
+            "display_name": "X",
+            "team_desc": "d",
+            "leader_display_name": "L",
+            "leader_desc": "d",
+        }
+
+        async def _probe_read_boom(*args, **kwargs):
+            raise TimeoutError("watchdog")
+
+        monkeypatch.setattr(backend.db.team, "get_team", _probe_read_boom)
+        first = await tool.invoke(bad_args)
+        assert first.success is False
+        assert backend.consecutive_build_unknown == 1
+
+        # 确定未建成（判定读恢复、行不存在）→ 失败计数 +1，未知态清零
+        monkeypatch.setattr(
+            backend.db.team, "get_team",
+            AsyncMock(return_value=None),
+        )
+        second = await tool.invoke(bad_args)
+        assert second.success is False
+        assert backend.consecutive_build_unknown == 0
+        assert backend.consecutive_build_failures == 1
+        assert backend.build_state_unknown_exhausted is False
+
+        # 再遇判定读失败：streak 从 1 重新计，不达阈值
+        monkeypatch.setattr(backend.db.team, "get_team", _probe_read_boom)
+        third = await tool.invoke(bad_args)
+        assert third.success is False
+        assert backend.consecutive_build_unknown == 1
+        assert backend.build_state_unknown_exhausted is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_unknown_state_brake_recovers_after_cooldown(
+            self, db, message_bus, t, monkeypatch):
+        """冷却到点允许半开探测：确定结果清零恢复；再失败重新计冷却——
+        两次瞬时读失败不得把 build_team 锁死到会话结束（此前快速拒绝
+        封死全部清零入口，形成会话级永久禁用）。"""
+        failures: list[str] = []
+
+        async def _on_failed(error: str) -> None:
+            failures.append(error)
+
+        backend = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            on_team_build_failed=_on_failed,
+        )
+        tool = BuildTeamTool(backend, t)
+        _patch_create_team_boom(backend, monkeypatch)
+
+        probe_calls = 0
+
+        async def _probe_read_boom(*args, **kwargs):
+            nonlocal probe_calls
+            probe_calls += 1
+            raise TimeoutError("watchdog")
+
+        monkeypatch.setattr(backend.db.team, "get_team", _probe_read_boom)
+        bad_args = {
+            "display_name": "X",
+            "team_desc": "d",
+            "leader_display_name": "L",
+            "leader_desc": "d",
+        }
+
+        await tool.invoke(bad_args)  # unknown 1
+        await tool.invoke(bad_args)  # unknown 2 → exhausted
+        assert backend.build_state_unknown_exhausted is True
+
+        # 冷却未到：快速拒绝，判定读不再执行
+        before = probe_calls
+        refused = await tool.invoke(bad_args)
+        assert refused.success is False
+        assert probe_calls == before
+
+        # 冷却到点：放行一次半开探测（build_team 与判定读重新执行）
+        original_cooldown = backend._build_unknown_cooldown_s  # type: ignore[attr-defined]
+        backend._build_unknown_cooldown_s = 0.0  # type: ignore[attr-defined]
+        half_open = await tool.invoke(bad_args)
+        assert half_open.success is False
+        assert probe_calls == before + 1
+        assert backend.consecutive_build_unknown == 3
+        assert backend.build_state_unknown_exhausted is True
+
+        # 半开失败必须**重新武装**冷却：恢复正数冷却后，紧随的下一次
+        # invoke 必须被快速拒绝且判定读不再执行（否则"只在首次耗尽写
+        # 一次冷却起点"的实现会漏过——本用例是唯一的回归钉）。
+        backend._build_unknown_cooldown_s = original_cooldown  # type: ignore[attr-defined]
+        rearms = await tool.invoke(bad_args)
+        assert rearms.success is False
+        assert "已暂停尝试 build_team" in rearms.error
+        assert probe_calls == before + 1  # 快速拒绝，判定读零调用
+
+        # 判定读恢复且确定未建成：streak 清零、可重新尝试
+        backend._build_unknown_cooldown_s = 0.0  # type: ignore[attr-defined]
+        monkeypatch.setattr(backend.db.team, "get_team", AsyncMock(return_value=None))
+        recovered = await tool.invoke(bad_args)
+        assert recovered.success is False
+        assert backend.consecutive_build_unknown == 0
+        assert backend.build_state_unknown_exhausted is False
+        assert backend.consecutive_build_failures == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_circuit_opens_after_threshold_and_refuses_fast(self, db, message_bus, t, monkeypatch):
+        """Second consecutive failure opens the circuit; later calls never reach
+        build_team — and the fast refusal still latches a round-end failure
+        signal (熔断后的轮次不得静默按"正常完成"收尾)."""
+        failures: list[str] = []
+
+        async def _on_failed(error: str) -> None:
+            failures.append(error)
+
+        backend = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            on_team_build_failed=_on_failed,
         )
         tool = BuildTeamTool(backend, t)
         _patch_create_team_boom(backend, monkeypatch)
@@ -314,6 +522,8 @@ class TestBuildTeamTool:
         third = await tool.invoke(bad_args)
         assert third.success is False
         assert third.error and "db gone" in third.error  # carries the last failure reason
+        # 第三次是熔断后的快速拒绝：同样置 latch（三轮检视对偶缺陷）
+        assert len(failures) == 3
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -391,7 +601,9 @@ class TestBuildTeamTool:
     @pytest.mark.asyncio
     @pytest.mark.level0
     async def test_partial_built_failure_does_not_count_circuit(self, db, message_bus, t):
-        """create_team 落行后的失败（成员注册等）= 半建成，不按"未建成"熔断/告警。
+        """create_team 落行后的失败（成员注册等）= 半建成，不计熔断，但仍要
+        置 round-end latch（以当轮半建成原因）：文案已改为"初始化不完整、
+        必要时单人兜底"，静默按正常完成收尾会与文案口径分叉。
 
         否则行已在 → 重试必撞「已存在」→ 两次即熔断，
         leader 被永久禁用团队能力，而团队实际可用（spawn_member 可补齐）。
@@ -421,26 +633,38 @@ class TestBuildTeamTool:
             "leader_display_name": "L",
             "leader_desc": "d",
         }
-        # 两次失败（第二次 create_team 撞行已存在）都不应计熔断/触发 latch
+        # 两次失败（第二次 create_team 撞行已存在）都不应计熔断，但都要 latch
         for _ in range(2):
             result = await tool.invoke(args)
             assert result.success is False
-            assert result.error and "spawn_member" in result.error
+            # 两轮的 reason 不同（首轮 spawn 爆炸、次轮 create_team 撞
+            # 「已存在」），以半建成文案标记断言
+            assert result.error and "禁止再调用 build_team" in result.error
+            # 文案不得再指引不存在的工具（预定义模式下无任何 spawn 工具，
+            # list_members 也未注册给 leader）
+            assert "spawn_member" not in result.error
+            assert "list_members" not in result.error
 
         assert backend.consecutive_build_failures == 0
         assert backend.build_circuit_open is False
-        assert failures == []
+        # 半建成同样要收尾可见：两轮各置一次 latch，原因分别是首轮
+        # 成员注册失败与次轮 create_team 撞「已存在」
+        assert len(failures) == 2
+        assert "spawn exploded" in failures[0]
+        assert "Failed to create team" in failures[1]
         # 团队行确实已落库（半建成前提成立）
         assert await db.team.get_team("test_team") is not None
 
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_partial_built_clears_stale_latch(self, db, message_bus, t):
-        """半建成分支必须清掉前轮"未建成"遗留的 latch：
+        """半建成分支必须先清前轮"未建成"遗留的 latch，再以本轮半建成
+        原因重新置位：
 
-        先有一次未建成失败（latch 置位）→ 同一轮内重试时 create_team 已把
-        行写入但后续失败 → 半建成 → on_team_build_recovered 触发清 latch，
-        否则收尾会推出与"团队已存在"提示自相矛盾的 degraded 告警。
+        先有一次未建成失败（latch 置位）→ 重试时 create_team 已把行写入
+        但后续失败 → 半建成 → on_team_build_recovered 清掉前轮原因，随后
+        notify_build_failed 换上本轮原因——收尾告警与"初始化未完整"文案
+        一致，不会复用前轮"未建成"的旧原因。
         """
         events: list[str] = []
 
@@ -486,8 +710,13 @@ class TestBuildTeamTool:
         backend.spawn_member = _spawn_boom  # type: ignore[method-assign]
         second = await tool.invoke(args)
         assert second.success is False
-        assert second.error and "spawn_member" in second.error
-        assert events[-1] == "recovered"
+        assert second.error and "禁止再调用 build_team" in second.error
+        assert "spawn_member" not in second.error
+        assert "list_members" not in second.error
+        # 先 recovered（清前轮原因）再 failed（置本轮半建成原因）
+        assert events[1] == "recovered"
+        assert events[2].startswith("failed:")
+        assert "spawn exploded" in events[2]
 
     @pytest.mark.asyncio
     @pytest.mark.level1
