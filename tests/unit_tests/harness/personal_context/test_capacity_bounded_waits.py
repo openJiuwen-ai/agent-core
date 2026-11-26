@@ -19,6 +19,7 @@ from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context import _capacity_commit as commit_worker
 from openjiuwen.harness.personal_context import context_capacity as capacity
 from openjiuwen.harness.personal_context import context_pipeline as pipeline
+from openjiuwen.harness.personal_context import context_retirement as retirement
 from openjiuwen.harness.personal_context import context_usage as usage
 from openjiuwen.harness.personal_context.config import PersonalContextConfig
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
@@ -129,9 +130,24 @@ def test_successful_capacity_removal_preserves_description_coverage(tmp_path):
     (root / "old.md").rename(topic / "old.md")
     (root / "description.md").write_text("# Context\n[Topic](topic/description.md)\n", encoding="utf-8")
     (topic / "description.md").write_text("# Topic\n[Old](old.md)\n", encoding="utf-8")
-    result = capacity.maintain_capacity(tmp_path, limit_bytes=1000)
-    assert result["removed_count"] == 1
-    pipeline._validate_description_coverage(root)
+    leases = [retirement.register_sandbox(tmp_path) for _ in range(2)]
+    try:
+        result = capacity.maintain_capacity(tmp_path, limit_bytes=1000)
+        assert result["removed_count"] == 1
+        pipeline._validate_description_coverage(root)
+        records = [json.loads(path.read_text(encoding="utf-8"))
+                   for path in (tmp_path / "state/context-retired").glob("*.json")]
+        assert {record["kind"] for record in records} == {"page", "topic"}
+        assert all(set(record["sandbox_ids"]) == {lease[0] for lease in leases} for record in records)
+    finally:
+        for lease in leases:
+            retirement.release_sandbox(lease)
+    # Each optional cleanup is budgeted; later rounds finish leftover records.
+    for _ in range(8):
+        capacity.maintain_capacity(tmp_path, limit_bytes=1000)
+        if not list((tmp_path / "state/context-retired").iterdir()):
+            break
+    assert not list((tmp_path / "state/context-retired").iterdir())
 
 
 # Whole-job start failure, preparation timeout/cancellation, and subsequent
@@ -191,6 +207,49 @@ async def test_stuck_commit_child_is_killed_and_releases_its_real_lock(tmp_path,
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_kind", ["task", "callback"])
+async def test_cancelled_update_wait_releases_priority_lock(tmp_path, cancel_kind):
+    (tmp_path / "state").mkdir()
+    cancelled = False
+
+    async def publish():
+        async with usage.context_update_lock(tmp_path, cancelled=lambda: cancelled):
+            pytest.fail("the occupied update lock must not be acquired")
+
+    with FileLock(tmp_path / "state/context_update.lock", timeout=0):
+        task = asyncio.create_task(publish())
+        await _until(lambda: commit_worker._publication_waiting(tmp_path / "state"))
+        if cancel_kind == "task":
+            task.cancel()
+        else:
+            cancelled = True
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        with FileLock(tmp_path / "state/context_priority.lock", timeout=0):
+            pass
+    async with usage.context_update_lock(tmp_path):
+        pass
+
+
+def test_commit_child_uses_manifest_lock_instead_of_manifest_parent(tmp_path, monkeypatch):
+    root, plan_path, plan = _plan(tmp_path)
+    unrelated = tmp_path / "elsewhere/deep"
+    unrelated.mkdir(parents=True)
+    moved_plan = unrelated / plan_path.name
+    plan_path.replace(moved_plan)
+
+    def unexpected_launch(*_args, **_kwargs):
+        pytest.fail("publication intent must prevent launching an optional writer")
+
+    monkeypatch.setattr(capacity.subprocess, "Popen", unexpected_launch)
+    with FileLock(tmp_path / "state/context_priority.lock", timeout=0):
+        result = capacity._commit_candidate(moved_plan, deadline=time.monotonic() + 2, cancelled=lambda: False)
+    assert result["status"] != "succeeded"
+    assert (root / "old.md").exists()
+    assert "[Old]" in (root / "description.md").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
