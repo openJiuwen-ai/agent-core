@@ -223,9 +223,11 @@ class LSPClient:
                         # stdout EOF: the server process exited (crash or
                         # kill). Report it so pending futures fail fast with
                         # ConnectionError instead of waiting out the request
-                        # timeout. _crash_reported keeps this idempotent, and
-                        # graceful stop() cancels the reader task before the
-                        # pipes close, so shutdown does not take this path.
+                        # timeout. During a graceful stop() the reader can
+                        # observe EOF before it is cancelled (the exit
+                        # notification is awaited first); _on_crash checks
+                        # _is_stopping so that exit is not counted as a
+                        # crash.
                         self._on_crash(self._process.returncode)
                         return
                     line_str = line.decode("ascii", errors="replace")
@@ -425,6 +427,13 @@ class LSPClient:
     def _on_crash(self, code: int | None) -> None:
         """Called when the subprocess exits unexpectedly (once per crash)."""
         if self._crash_reported:
+            return
+        # A graceful stop() observes EOF before the reader task is cancelled
+        # (the exit notification is awaited before the cancel), and stop()
+        # callers may not be in a STOPPING state (e.g. a failed start() is
+        # already ERROR). Do not count that exit as a crash: it would bump
+        # _crash_count and overwrite the real _last_error.
+        if self._is_stopping:
             return
         self._crash_reported = True
         self._is_initialized = False
