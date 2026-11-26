@@ -20,6 +20,7 @@ import pytest
 
 from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
 from openjiuwen.agent_teams.agent.state import TeamAgentState
+from openjiuwen.agent_teams.schema.status import MemberStatus
 
 
 def _make_spawn_manager() -> SpawnManager:
@@ -59,3 +60,39 @@ async def test_restart_teammate_passes_no_initial_message():
     sm.spawn_teammate.assert_awaited_once()
     assert sm.spawn_teammate.await_args.kwargs["initial_message"] is None
     sm._configurator.team_backend.get_member.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_restart_exhaustion_archives_error_via_conditional_write():
+    """重试耗尽归档 ERROR 也是条件写：并发 PAUSED/STOPPED 不被覆盖。
+
+    本路径跑在 recovery 任务上（on_teammate_unhealthy 经 ensure_future 派发），
+    与 leader 的 pause/stop 标记并发；条件写落空时只记 INFO，不改权威状态。
+    """
+    backend = SimpleNamespace(
+        get_member=AsyncMock(),
+        set_member_status=AsyncMock(return_value=False),
+    )
+    configurator = SimpleNamespace(
+        member_name="leader",
+        team_backend=backend,
+        team_name="t",
+    )
+    sm = SpawnManager(
+        state=TeamAgentState(),
+        configurator=configurator,
+        team_agent_getter=lambda: None,
+    )
+    sm.cleanup_teammate = AsyncMock()
+    sm.build_context_from_db = AsyncMock(return_value=SimpleNamespace(member_name="m"))
+    sm.spawn_teammate = AsyncMock(side_effect=RuntimeError("boom"))
+
+    ok = await sm.restart_teammate("m", max_retries=1)
+
+    assert ok is False
+    backend.set_member_status.assert_awaited_once_with(
+        "m",
+        MemberStatus.ERROR,
+        allowed_from=SpawnManager._RESTART_ABORT_OVERWRITABLE,
+    )
