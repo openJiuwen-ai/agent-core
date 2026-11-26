@@ -133,7 +133,7 @@ async def test_post_after_end_keeps_records_when_blob_serialization_fails(monkey
 
 
 @pytest.mark.asyncio
-async def test_post_on_interrupted_appends_interrupt_without_blob():
+async def test_post_on_interrupted_saves_blob_then_clears_records():
     kv = MockKVStore()
     cp = PersistenceCheckpointer(kv)
     session = make_session()
@@ -143,10 +143,83 @@ async def test_post_on_interrupted_appends_interrupt_without_blob():
     await cp.end_agent_steps(session, interrupted=True)
     set_msgs(session, ["q", "a1"])
 
+    # The HITL hook itself only records the interrupt; the round-end commit is
+    # what merges the pending state into the blob.
+    assert await cp._agent_storage.exists(session) is False
+    assert [load(kv, k).kind for k in keys(kv)] == ["step", "interrupt"]
+
     await cp.post_agent_execute(session)
 
-    assert [load(kv, k).kind for k in keys(kv)][-2:] == ["interrupt", "interrupt"]
-    assert await cp._agent_storage.exists(session) is False
+    assert keys(kv) == []
+    assert await cp._agent_storage.exists(session) is True
+
+    reader = make_session()
+    restarted = PersistenceCheckpointer(kv)
+    await restarted.pre_agent_execute(reader, None)
+    assert contents(reader) == ["q", "a1"]
+    assert restarted.peek_agent_step_resume(reader) is None
+
+
+@pytest.mark.asyncio
+async def test_interrupt_post_replaces_stale_blob_with_pending_state():
+    kv = MockKVStore()
+    cp = PersistenceCheckpointer(kv)
+    session = make_session()
+
+    # A previous request left its completed state in the blob.
+    set_msgs(session, ["old-q", "old-a1"])
+    await cp.post_agent_execute(session)
+    assert await cp._agent_storage.exists(session) is True
+
+    # The current request completes one step, then stops for confirmation.
+    assert cp.begin_agent_steps(session) is None
+    set_msgs(session, ["new-q", "new-a1"])
+    session.state().update_global({"pending_tool": "call_0"})
+    await cp.save_agent_step(session, 0, query="new-q")
+    await cp.end_agent_steps(session, interrupted=True)
+
+    await cp.post_agent_execute(session)
+
+    assert keys(kv) == []
+    reader = make_session()
+    restarted = PersistenceCheckpointer(kv)
+    await restarted.pre_agent_execute(reader, None)
+    assert contents(reader) == ["new-q", "new-a1"]
+    assert reader.state().get_global("pending_tool") == "call_0"
+    assert restarted.peek_agent_step_resume(reader) is None
+
+
+@pytest.mark.asyncio
+async def test_request_two_steps_replay_over_request_one_blob():
+    kv = MockKVStore()
+    cp = PersistenceCheckpointer(kv)
+    session = make_session()
+
+    # Request 1 stops for confirmation and is merged into the blob.
+    cp.begin_agent_steps(session)
+    set_msgs(session, ["q1", "a1"])
+    await cp.save_agent_step(session, 0, query="q1")
+    await cp.end_agent_steps(session, interrupted=True)
+    await cp.post_agent_execute(session)
+    assert keys(kv) == []
+    assert await cp._agent_storage.exists(session) is True
+
+    # Request 2 starts from an empty step track and appends from seq 0.
+    assert cp.begin_agent_steps(session) is None
+    set_msgs(session, ["q2", "a2-0"])
+    await cp.save_agent_step(session, 0, query="q2")
+    set_msgs(session, ["q2", "a2-0", "a2-1"])
+    await cp.save_agent_step(session, 1, query="q2")
+
+    assert [load(kv, k).seq for k in keys(kv)] == [0, 1]
+
+    reader = make_session()
+    restarted = PersistenceCheckpointer(kv)
+    await restarted.pre_agent_execute(reader, None)
+
+    # Request 1's blob restores first; request 2's steps replay over it.
+    assert contents(reader) == ["q2", "a2-0", "a2-1"]
+    assert restarted.peek_agent_step_resume(reader) == StepResume(iteration=1, query="q2")
 
 
 @pytest.mark.asyncio
