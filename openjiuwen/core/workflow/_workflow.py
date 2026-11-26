@@ -65,7 +65,13 @@ async def execute_single_component(
     context: ModelContext = None,  # Context, optional parameter
 ):
     # 1. Create WorkflowSession
-    workflow_session = WorkflowSession(workflow_id=component_id, parent=None, session_id=session.get_session_id())
+    _env_scope = session.get_env_scope() if hasattr(session, "get_env_scope") else {}
+    workflow_session = WorkflowSession(
+        workflow_id=component_id, parent=None, session_id=session.get_session_id(),
+        workspace_id=_env_scope.get("workspace_id"),
+        environment_id=_env_scope.get("environment_id"),
+        project_id=_env_scope.get("project_id"),
+    )
     await workflow_session.checkpointer().pre_workflow_execute(workflow_session, inputs)
     # 2. Create NodeSession
     node_session = NodeSession(workflow_session, component_id, type(executor).__name__)

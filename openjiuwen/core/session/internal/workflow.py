@@ -15,9 +15,42 @@ if TYPE_CHECKING:
     from openjiuwen.core.graph.stream_actor.manager import ActorManager
 
 
+def _parent_execution_id(parent):
+    """统一读取父会话的执行 ID（issue 1753 检视意见①）。
+
+    只在此处兼容 get_execution_id / execution_id 两种历史命名，避免调用方
+    各自探测造成遗漏；无该能力或旧会话异常时返回 None（视为未提供）。
+    """
+    getter = getattr(parent, "get_execution_id", None) or getattr(parent, "execution_id", None)
+    if not callable(getter):
+        return None
+    try:
+        return getter()
+    except Exception:  # noqa: BLE001 - 旧会话无该能力时视为未提供
+        return None
+
+
 class WorkflowSession(BaseSession):
-    def __init__(self, workflow_id: str = '', parent: BaseSession = None, session_id: str = None, state: State = None):
+    def __init__(self, workflow_id: str = '', parent: BaseSession = None, session_id: str = None,
+                 state: State = None, execution_id: str = None, workspace_id: str = None,
+                 environment_id: str = None, project_id: str = None):
         self._session_id = session_id
+        if execution_id is None and parent is not None:
+            execution_id = _parent_execution_id(parent)
+        self._execution_id = execution_id
+        # issue #1755：请求级环境作用域随会话链继承（与 execution_id 同模式）
+        parent_scope = {}
+        if parent is not None and hasattr(parent, "get_env_scope"):
+            parent_scope = parent.get_env_scope()
+        self._env_scope = {}
+        for _key, _value in (
+            ("workspace_id", workspace_id),
+            ("environment_id", environment_id),
+            ("project_id", project_id),
+        ):
+            _resolved = _value or parent_scope.get(_key)
+            if _resolved:
+                self._env_scope[_key] = _resolved
         self._parent = parent
         if parent is not None:
             if self._session_id is None:
@@ -68,6 +101,18 @@ class WorkflowSession(BaseSession):
 
     def session_id(self) -> str:
         return self._session_id
+
+    def get_env_scope(self) -> dict:
+        """请求级环境作用域（workspace/environment/project），供 Span 属性写入。"""
+        return dict(self._env_scope or {})
+
+    def get_execution_id(self) -> str | None:
+        """执行级 ID（与 execution_id() 同值，供统一探测使用）。"""
+        return self._execution_id
+
+    def execution_id(self) -> str | None:
+        """兼容别名（保留给旧调用方），语义同 get_execution_id。"""
+        return self.get_execution_id()
 
     def checkpointer(self):
         if self._parent is not None:
@@ -138,6 +183,21 @@ class NodeSession(BaseSession):
 
     def workflow_id(self):
         return self._workflow_id
+
+    def get_execution_id(self):
+        """执行级 ID（委托外层会话；旧会话仅实现 execution_id 时兼容）。"""
+        return _parent_execution_id(self._session)
+
+    def execution_id(self):
+        """兼容别名（保留给旧调用方），语义同 get_execution_id。"""
+        return self.get_execution_id()
+
+    def get_env_scope(self) -> dict:
+        """委托外层会话的环境作用域（issue #1755）。"""
+        try:
+            return self._session.get_env_scope()
+        except Exception:  # noqa: BLE001 - 旧会话无该能力时视为空
+            return {}
 
     def main_workflow_id(self):
         return self._main_workflow_id

@@ -10,6 +10,22 @@ from openjiuwen.core.session.utils import NESTED_PATH_SPLIT
 from openjiuwen.core.session.tracer.handler import TracerHandlerName
 
 
+def _env_scope_metadata(session) -> dict:
+    """请求级环境作用域（issue #1755）：随每个 span 的 metadata 下发。
+
+    走 metadata 而不是 handler 单例字段，避免并发执行互相覆盖；缺失值不写键。
+    """
+    getter = getattr(session, "get_env_scope", None)
+    if not callable(getter):
+        return {}
+    try:
+        scope = getter() or {}
+    except Exception:
+        return {}
+    return {key: scope[key] for key in ("workspace_id", "environment_id", "project_id")
+            if scope.get(key)}
+
+
 class TracerWorkflowUtils:
     @staticmethod
     def _get_workflow_metadata(session) -> dict:
@@ -20,6 +36,7 @@ class TracerWorkflowUtils:
             "workflow_id": executable_id,
             "workflow_version": workflow_metadata.version if workflow_metadata else '',
             "workflow_name": workflow_metadata.name if workflow_metadata else '',
+            **_env_scope_metadata(session),
         }
 
     @staticmethod
@@ -31,7 +48,8 @@ class TracerWorkflowUtils:
             "component_id": session.node_id(),
             "component_name": _node_name or session.node_id(),
             "component_type": session.node_type(),
-            "workflow_id": session.workflow_id()
+            "workflow_id": session.workflow_id(),
+            **_env_scope_metadata(session),
         }
         loop_id = state.get_global(LOOP_ID)
         if loop_id is None:
@@ -49,10 +67,17 @@ class TracerWorkflowUtils:
         tracer = session.tracer()
         if tracer is None or not tracer.workflow_handler_valid():
             return
+        metadata = TracerWorkflowUtils._get_workflow_metadata(session)
+        # 执行级 execution_id（宿主传入，子工作流继承同值）：写入根 Span 属性，
+        # 每次执行唯一且与 SSE executionId / X-Execution-Id 对齐（issue #1753）
+        _exec_getter = getattr(session, "get_execution_id", None) or getattr(session, "execution_id", None)
+        execution_id = _exec_getter() if callable(_exec_getter) else None
+        if execution_id:
+            metadata["execution_id"] = str(execution_id)
         await tracer.trigger(TracerHandlerName.TRACER_WORKFLOW.value, event_name="on_call_start",
                              invoke_id=session.workflow_id(),
                              parent_node_id='',
-                             metadata=TracerWorkflowUtils._get_workflow_metadata(session),
+                             metadata=metadata,
                              inputs=inputs,
                              session_id=session.session_id(),
                              need_send=True)
