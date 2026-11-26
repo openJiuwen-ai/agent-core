@@ -77,7 +77,7 @@ kernel 继续先停事件分发，再调用同一取消入口：
 ### 4.1 原子资格与抢占
 
 保留原预检及 checkpoint 校验，用合法审批邮件 ID 集合作为本次候选。
-新增 TeamDatabase 的私有跨表接管操作，由 RecoveryManager 调用：
+新增 TeamDatabase 的跨表接管协作方法，由 RecoveryManager 调用：
 
 1. 只打开一次 DbSessions.write，复用同一个 session。
 2. 在事务中先按团队、成员、角色及 STOPPED 条件占用成员行，写入尚未提交的 RESTARTING。

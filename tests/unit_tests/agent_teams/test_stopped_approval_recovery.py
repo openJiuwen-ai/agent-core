@@ -284,7 +284,7 @@ async def test_failed_child_restore_keeps_approval_and_releases_restart(tmp_path
 async def test_teardown_releases_a_claim_committed_during_cancellation(tmp_path, monkeypatch, teardown):
     async with stopped_worker(tmp_path, monkeypatch) as (leader, backend, manager, _, _, tool):
         dao = backend.db.member
-        claim = backend.db._claim_approval_restart
+        claim = backend.db.claim_approval_restart
         committed = asyncio.Event()
         finish_claim = asyncio.Event()
 
@@ -295,7 +295,7 @@ async def test_teardown_releases_a_claim_committed_during_cancellation(tmp_path,
             await finish_claim.wait()
             return result
 
-        monkeypatch.setattr(backend.db, "_claim_approval_restart", delayed_result)
+        monkeypatch.setattr(backend.db, "claim_approval_restart", delayed_result)
         assert await backend.approve_tool("worker", "call-a", True)
         await poll_completion(leader)
         task, = manager.recovery_tasks
@@ -408,7 +408,7 @@ async def test_approval_claim_rechecks_mail_and_releases_only_ineligible_attempt
     async with stopped_worker(tmp_path, monkeypatch, memory_db=memory_db) as (
         leader, backend, manager, _, original, tool
     ):
-        claim = backend.db._claim_approval_restart
+        claim = backend.db.claim_approval_restart
         entered, release = asyncio.Event(), asyncio.Event()
 
         async def gated_claim(*args):
@@ -416,7 +416,7 @@ async def test_approval_claim_rechecks_mail_and_releases_only_ineligible_attempt
             await release.wait()
             return await claim(*args)
 
-        monkeypatch.setattr(backend.db, "_claim_approval_restart", gated_claim)
+        monkeypatch.setattr(backend.db, "claim_approval_restart", gated_claim)
         assert await backend.approve_tool("worker", "call-a", True)
         await poll_completion(leader)
         recovery, = manager.recovery_tasks
@@ -502,7 +502,7 @@ async def test_unexpected_claim_failure_keeps_this_runs_attempt(tmp_path, monkey
         async def failed_claim(*args):
             raise RuntimeError("unknown transaction result")
 
-        monkeypatch.setattr(backend.db, "_claim_approval_restart", failed_claim)
+        monkeypatch.setattr(backend.db, "claim_approval_restart", failed_claim)
         assert await backend.approve_tool("worker", "call-a", True)
         await poll_completion(leader)
         recovery, = manager.recovery_tasks
@@ -527,7 +527,7 @@ async def test_approval_claim_reuses_group_addressing_and_watermark(tmp_path, mo
         )
         if covered:
             assert await backend.message_manager.mark_message_read("old-group", "worker")
-        assert await backend.db._claim_approval_restart(
+        assert await backend.db.claim_approval_restart(
             backend.team_name, "worker", "leader", frozenset(row.message_id for row in unread),
         )
         assert (await backend.get_member("worker")).status == MemberStatus.RESTARTING.value

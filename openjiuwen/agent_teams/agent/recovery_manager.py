@@ -175,7 +175,7 @@ class RecoveryManager:
     ) -> bool:
         member = checkpoint.member_name
         dao = backend.db.member
-        claim = asyncio.create_task(backend.db._claim_approval_restart(
+        claim = asyncio.create_task(backend.db.claim_approval_restart(
             backend.team_name, member, leader, expected_ids,
         ))
         claimed = False
