@@ -1358,6 +1358,47 @@ async def test_plan_mode_submit_plan_starts_preassigned_pending_task(db, message
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_plan_mode_submit_plan_scheduled_waits_for_scheduler(db, message_bus, tmp_path):
+    """Scheduled dispatch leaves a pre-assigned PENDING task to the scheduler."""
+    await db.team.create_team(team_name="plan_team", display_name="Plan Team", leader_member_name="leader")
+    await db.member.create_member(
+        member_name="member1",
+        team_name="plan_team",
+        display_name="member1",
+        agent_card=AgentCard().model_dump_json(),
+        status="BUSY",
+        mode=MemberMode.PLAN_MODE.value,
+    )
+    manager = TeamTaskManager(
+        team_name="plan_team",
+        member_name="member1",
+        db=db,
+        messager=message_bus,
+        plans_dir=tmp_path / "plans",
+        team_plan_id="plan_1",
+        dispatch_mode="scheduled",
+    )
+    created = await manager.add_graph(
+        [TaskGraphSpec(title="Plan task", content="Do work", task_id="preassigned", assignee="member1")]
+    )
+    assert created.ok
+    plan_path = tmp_path / "member_plan.md"
+    plan_path.write_text("1. inspect\n2. implement\n", encoding="utf-8")
+
+    result = await manager.submit_plan("preassigned", plan_path=str(plan_path))
+
+    assert result["success"] is True
+    assert result["status"] == TaskStatus.PENDING.value
+    assert result["pending_dispatch"] is True
+    updated = await manager.get("preassigned")
+    assert updated.status == TaskStatus.PENDING.value
+    assert updated.assignee == "member1"
+    assert _published_events(message_bus, TeamEvent.TASK_PLAN_REQUEST) == []
+    assert _published_events(message_bus, TeamEvent.TASK_STARTED) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_plan_mode_submit_plan_claims_unassigned_pending_task(db, message_bus, tmp_path):
     """An unassigned PENDING task is still claimed by the first plan submission."""
     await db.team.create_team(team_name="plan_team", display_name="Plan Team", leader_member_name="leader")

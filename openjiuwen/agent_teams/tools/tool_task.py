@@ -2019,6 +2019,10 @@ class SubmitPlanTool(TeamTool):
         if not output.success:
             return output.error or "Failed to submit member plan"
         d = output.data
+        if d.get("pending_dispatch"):
+            return d.get("message") or (
+                f"Task {d.get('task_id')} is waiting for the scheduler to start it"
+            )
         return (
             f"Member plan submitted: task_id={d.get('task_id')} plan_id={d.get('plan_id')} "
             f"status={d.get('status')} "

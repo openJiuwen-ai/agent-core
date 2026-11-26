@@ -26,7 +26,8 @@ from openjiuwen.agent_teams.tools.database import (
 )
 from openjiuwen.agent_teams.tools.locales import make_translator
 from openjiuwen.agent_teams.tools.team import TeamBackend
-from openjiuwen.agent_teams.tools.tool_task import ScheduledTaskCreateTool, TaskCreateTool
+from openjiuwen.agent_teams.tools.tool_task import ScheduledTaskCreateTool, SubmitPlanTool, TaskCreateTool
+from openjiuwen.core.foundation.tool.schema import ToolOutput
 from openjiuwen.core.single_agent import AgentCard
 
 TEAM_NAME = "task_team"
@@ -286,3 +287,19 @@ async def test_update_task_can_cancel_a_task_whose_owner_shut_down(db):
 
     assert result.success is True
     assert (await backend.task_manager.get("t1")).status == "cancelled"
+
+
+def test_submit_plan_renders_pending_dispatch_message():
+    """A scheduled task waiting for the scheduler must not read as submitted."""
+    tool = SubmitPlanTool(None, make_translator("cn"))
+    output = ToolOutput(
+        success=True,
+        data={
+            "task_id": "t1",
+            "status": "pending",
+            "pending_dispatch": True,
+            "message": "Task t1 is waiting for the scheduler to start it",
+        },
+    )
+
+    assert tool.render_for_llm(output) == "Task t1 is waiting for the scheduler to start it"
