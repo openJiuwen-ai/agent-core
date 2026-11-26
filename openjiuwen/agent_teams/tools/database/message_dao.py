@@ -362,7 +362,7 @@ class MessageDao:
 
         return await self._hydrate_rows_off_loop(rows)
 
-    async def _approval_mail_matches(
+    async def approval_mail_matches(
         self, session: AsyncSession, team_name: str, member_name: str, leader: str, expected_ids: frozenset[str],
     ) -> bool:
         """Check the prevalidated direct-mail identities inside the claim transaction."""

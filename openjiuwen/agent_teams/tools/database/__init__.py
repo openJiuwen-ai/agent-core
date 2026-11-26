@@ -124,15 +124,15 @@ class TeamDatabase:
         self.task: Optional[TaskDao] = None
         self.message: Optional[MessageDao] = None
 
-    async def _claim_approval_restart(
+    async def claim_approval_restart(
         self, team_name: str, member_name: str, leader: str, expected_ids: frozenset[str],
     ) -> bool:
         """Atomically claim a stopped teammate whose mail is still approval-only."""
         async with self._sessions.write() as session:
-            claimed = await self.member._claim_restart_in_session(
+            claimed = await self.member.claim_restart_in_session(
                 session, member_name, team_name, MemberStatus.STOPPED, role="teammate",
             )
-            if not claimed or not await self.message._approval_mail_matches(
+            if not claimed or not await self.message.approval_mail_matches(
                 session, team_name, member_name, leader, expected_ids,
             ):
                 await session.rollback()

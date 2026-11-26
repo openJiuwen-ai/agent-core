@@ -757,12 +757,12 @@ class MemberDao:
             return False
 
         async with self._sessions.write() as session:
-            claimed = await self._claim_restart_in_session(session, member_name, team_name, expected_status)
+            claimed = await self.claim_restart_in_session(session, member_name, team_name, expected_status)
             if claimed:
                 await session.commit()
             return claimed
 
-    async def _claim_restart_in_session(
+    async def claim_restart_in_session(
         self, session, member_name: str, team_name: str, expected_status: MemberStatus, *, role: str | None = None,
     ) -> bool:
         """Occupy the member row without committing the caller's transaction."""

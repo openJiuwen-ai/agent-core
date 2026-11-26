@@ -37,3 +37,9 @@ PR !3893 基线 `a97f6dfd6` 中，停止成员没有可读取中断的 runtime�
 按 D-20261126-1704-team-lifecycle-boundaries 实施：通知关闭只排空框架消息读取，当前回调请求停止时跳过自身取消，其余回调维持取消策略。审批接管在同一 write/session 内先占用 STOPPED 成员，再复核预先验证的审批 ID 集合及既有广播、群提及、群通知未读；资格失效则 rollback，不创建 runtime。事务结果确认承受重复取消；仅明确未接管且仍由当前 task 持有的预约可释放，实际启动和异常保留本轮尝试记录。接管后的实例继续正常收件。
 
 验证候选为 399177342 上的本地修复，Python 3.11、真实 SQLite、Native Harness 与 mock 模型。通知定向 10 项、审批恢复定向 28 项通过；关联回归 700 项通过、20 项跳过，仅排除此前 HEAD/develop 已复现的两项基线失败；原失败顺序链 53 项通过。独立代码复审 Approve，无阻塞项。未运行静态工具、完整 CI 或 PostgreSQL/MySQL 集成；验证时尚未提交或推送。整个 stop 的不可取消保证不在本次范围；原有条件清理 await 的取消边界保持。
+
+## 2026-11-26：门禁协作方法命名修复
+
+最新门禁评论 204213348 的静态报告完整返回 3 条未解决问题，均为本 PR 新增协作方法的跨类 protected-access。将 TeamDatabase.claim_approval_restart、MemberDao.claim_restart_in_session 和 MessageDao.approval_mail_matches 改为无前导下划线的协作接口，并同步调用及测试引用；事务、取消和审批判断逻辑不变，S_03/S_28 的行为契约无需调整。
+
+候选为 f2ef6588d 上的本地修复，Python 3.11、真实 SQLite 与 mock 模型。审批恢复、数据库并发和会话 watchdog 三个测试文件共 73 项通过。未运行本地静态工具；最新远端报告的 UT、开源合规和 Ruff 为 SUCCESS，新候选的远端静态检查仍待推送后确认。
