@@ -579,3 +579,121 @@ def test_add_column_idempotent_mysql_reraises_when_column_still_missing(monkeypa
 
     fake_conn.begin_nested.assert_not_called()
     fake_inspector.get_columns.assert_called_once_with("t")
+
+
+@pytest.mark.asyncio
+async def test_run_ddl_idempotent_swallows_already_exists_on_savepoint_path() -> None:
+    """_run_ddl_idempotent catches 'already exists' on SQLite/PG (savepoint path).
+
+    Direct unit test for the helper: pre-create a table, then call
+    _run_ddl_idempotent with a DDL callable that tries to CREATE TABLE the
+    same name (bypassing checkfirst to force the race-failure path). The
+    savepoint must isolate the failure so the outer transaction stays
+    committable and a follow-up write succeeds.
+    """
+    from openjiuwen.agent_teams.organization import db as org_db
+
+    database = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    await database.initialize()
+    assert database.engine is not None
+
+    async with database.engine.begin() as conn:
+        await conn.exec_driver_sql("CREATE TABLE ddl_idempotent_test (id INTEGER PRIMARY KEY)")
+        # The table already exists; _run_ddl_idempotent must swallow the
+        # "already exists" error via its SAVEPOINT + DBAPIError catch.
+        await conn.run_sync(
+            lambda sync_conn: org_db._run_ddl_idempotent(
+                sync_conn,
+                lambda: sync_conn.exec_driver_sql(
+                    "CREATE TABLE ddl_idempotent_test (id INTEGER PRIMARY KEY)"
+                ),
+                lambda: True,
+            )
+        )
+        # Surrounding transaction must still be committable. A follow-up write
+        # proves the transaction is alive — if the failed CREATE had poisoned
+        # it, this INSERT would raise InFailedSQLTransaction.
+        await conn.exec_driver_sql("INSERT INTO ddl_idempotent_test (id) VALUES (1)")
+
+    async with database.engine.connect() as conn:
+        rows = await conn.exec_driver_sql("SELECT id FROM ddl_idempotent_test WHERE id = 1")
+        assert rows.fetchone()[0] == 1
+
+    await database.close()
+
+
+def test_run_ddl_idempotent_mysql_skips_savepoint_and_rechecks():
+    """On MySQL _run_ddl_idempotent does not wrap the DDL in a SAVEPOINT.
+
+    DDL implicitly commits *whether the DDL succeeds or fails*, so the
+    savepoint is destroyed before ``begin_nested`` can roll back to it. The
+    helper instead runs the DDL bare and, when an ``already exists`` /
+    ``duplicate`` error is swallowed, calls the ``verify`` callable to
+    re-check that the DDL target actually exists.
+
+    Drives the MySQL branch with a hand-rolled fake connection: the real
+    implicit-commit behaviour cannot be reproduced on SQLite, so we verify
+    the helper takes the right branch (no ``begin_nested``, DDL issued,
+    ``verify`` called on swallow).
+    """
+    from unittest.mock import MagicMock, patch
+
+    from openjiuwen.agent_teams.organization import db as org_db
+
+    fake_conn = MagicMock()
+    fake_conn.dialect.name = "mysql"
+
+    fake_conn.exec_driver_sql.side_effect = OperationalError(
+        "CREATE TABLE t (id INT)",
+        {},
+        Exception("Table 't' already exists"),
+    )
+
+    fake_conn.begin_nested.side_effect = AssertionError("MySQL path must not call begin_nested")
+
+    # verify returns True — a concurrent process created the table, so the
+    # helper returns without re-raising.
+    verify = MagicMock(return_value=True)
+
+    org_db._run_ddl_idempotent(
+        fake_conn,
+        lambda: fake_conn.exec_driver_sql("CREATE TABLE t (id INT)"),
+        verify,
+    )
+
+    fake_conn.begin_nested.assert_not_called()
+    fake_conn.exec_driver_sql.assert_called_once()
+    verify.assert_called_once()
+
+
+def test_run_ddl_idempotent_mysql_reraises_when_verify_fails():
+    """On MySQL, if the 'already exists' error is swallowed but ``verify``
+    returns False (an inconsistent state — the DDL target should exist),
+    the helper re-raises rather than silently leaving it absent.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from openjiuwen.agent_teams.organization import db as org_db
+
+    fake_conn = MagicMock()
+    fake_conn.dialect.name = "mysql"
+
+    fake_conn.exec_driver_sql.side_effect = OperationalError(
+        "CREATE TABLE t (id INT)",
+        {},
+        Exception("Table 't' already exists"),
+    )
+
+    # verify returns False — the table is somehow still missing. The helper
+    # must surface this inconsistency.
+    verify = MagicMock(return_value=False)
+
+    with pytest.raises(OperationalError):
+        org_db._run_ddl_idempotent(
+            fake_conn,
+            lambda: fake_conn.exec_driver_sql("CREATE TABLE t (id INT)"),
+            verify,
+        )
+
+    fake_conn.begin_nested.assert_not_called()
+    verify.assert_called_once()

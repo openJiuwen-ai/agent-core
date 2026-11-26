@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import weakref
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import inspect
 from sqlalchemy.exc import DBAPIError
@@ -87,8 +87,60 @@ def _add_column_idempotent(sync_conn, table: str, column: str, col_type: str) ->
                 raise
 
 
+def _run_ddl_idempotent(
+    sync_conn,
+    ddl: Callable[[], None],
+    verify: Callable[[], bool],
+) -> None:
+    """Run a DDL callable, tolerating a concurrent run by another process.
+
+    Generalises :func:`_add_column_idempotent` to arbitrary DDL callables
+    (``SQLModel.metadata.create_all`` / ``Index.create``). The same
+    check-then-act TOCTOU race applies: two processes both inspect a table
+    or index as missing and both fire the ``CREATE`` statement. The DB's own
+    DDL lock serialises the two ``CREATE``s, but the second one fails:
+
+    - SQLite / PostgreSQL: ``already exists`` error. PG also puts the
+      transaction into an aborted state after the failed statement, so the
+      outer ``session.commit()`` would later raise
+      ``InFailedSQLTransaction``.
+    - MySQL: ``already exists`` / ``Duplicate key name`` error. MySQL's DDL
+      implicitly commits *whether the DDL succeeds or fails*, so there is no
+      savepoint to roll back to and no transaction state to poison.
+
+    On SQLite / PostgreSQL the DDL is wrapped in a ``SAVEPOINT``
+    (``begin_nested``) so the outer transaction stays committable when the
+    ``already exists`` error is swallowed. On MySQL the ``SAVEPOINT`` is
+    skipped (same reasoning as :func:`_add_column_idempotent` — the implicit
+    commit destroys it); the ``verify`` callable re-checks that the DDL
+    target actually exists after a swallowed error (the implicit commit
+    makes the post-DDL state the ground truth).
+    """
+    use_savepoint = sync_conn.dialect.name != "mysql"
+    try:
+        if use_savepoint:
+            with sync_conn.begin_nested():
+                ddl()
+        else:
+            ddl()
+    except DBAPIError as exc:
+        msg = str(exc).lower()
+        if "already exists" not in msg and "duplicate" not in msg:
+            raise
+        if not use_savepoint:
+            if not verify():
+                raise
+
+
 def ensure_org_static_tables(sync_conn) -> None:
-    SQLModel.metadata.create_all(sync_conn, tables=org_static_tables())
+    org_tables = org_static_tables()
+    _run_ddl_idempotent(
+        sync_conn,
+        lambda: SQLModel.metadata.create_all(sync_conn, tables=org_tables),
+        lambda: all(
+            t.name in set(inspect(sync_conn).get_table_names()) for t in org_tables
+        ),
+    )
     _ensure_org_task_columns(sync_conn)
     _ensure_org_summary_execution_columns(sync_conn)
     inspector = inspect(sync_conn)
@@ -97,7 +149,12 @@ def ensure_org_static_tables(sync_conn) -> None:
     task_table = SQLModel.metadata.tables["org_task"]
     for index in task_table.indexes:
         if index.name in {"ix_org_task_unclaimed_due", "ix_org_task_recreation_request"}:
-            index.create(sync_conn, checkfirst=True)
+            _run_ddl_idempotent(
+                sync_conn,
+                lambda idx=index: idx.create(sync_conn, checkfirst=True),
+                lambda idx=index: idx.name
+                in {ix["name"] for ix in inspect(sync_conn).get_indexes("org_task")},
+            )
 
 
 def _ensure_org_task_columns(sync_conn) -> None:

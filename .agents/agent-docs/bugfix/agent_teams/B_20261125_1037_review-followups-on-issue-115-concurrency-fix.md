@@ -312,3 +312,44 @@ ORM 对象保持过期，忠实模拟「另一 session 已提交、本 session �
 
 **契约同步**：`tools/AGENTS.md` 第 (4) 条追加 `_apply_new_edges` 上游标量行锁的
 说明（标量投影绕 identity map 的理由 + 锁序与 terminator 一致、不重引第五轮死锁）。
+
+### 第八轮检视：`create_all` / `CREATE INDEX` 跨进程并发未幂等
+
+第八轮检视指出 `ensure_org_static_tables` 只对 `ADD COLUMN`（`_add_column_idempotent`）
+做了跨进程幂等，同函数的 `SQLModel.metadata.create_all`（建 org 静态表）与
+`Index.create`（建 `org_task` 两个索引）仍走 `checkfirst=True` 的 inspect-then-create
+模式——与第五轮修 `ADD COLUMN` 前完全同构的 TOCTOU 竞态。
+
+**根因**：`checkfirst=True` 对每个表 / 索引先 `inspect`（不存在）再 `CREATE`，两步
+之间有窗口。PG/MySQL 跳过进程级写锁后，两个进程的 `_ddl_once` 可同时通过
+`_ORG_SCHEMA_READY` 复查（进程级 `WeakSet`，跨进程不共享）、同时进入
+`ensure_org_static_tables`。进程 A 先提交创建了全部表，进程 B 的 `checkfirst` 在
+A 提交前已读到「不存在」、随后 `CREATE TABLE` 撞 PG 的表级 DDL 锁等待 A，A 提交后
+B 的 `CREATE` 报 `already exists` → PG 事务进入 aborted 状态 → 后续
+`_add_column_idempotent` 全部 `InFailedSQLTransaction`。
+
+**修法**：新增 `_run_ddl_idempotent(sync_conn, ddl, verify)` 辅助，把
+`_add_column_idempotent` 的 SAVEPOINT + DBAPIError catch 模式泛化到任意 DDL callable。
+SQLite / PG 走 `begin_nested` 包住 DDL，吞 `already exists` / `duplicate` 错误后
+savepoint 回滚、外层事务恢复 clean；MySQL 跳过 savepoint（DDL 隐式提交销毁之），
+改为裸执行 + 吞错误后调 `verify` callable 复查 DDL 目标确实存在（隐式提交使
+post-DDL 状态成为 ground truth）。`ensure_org_static_tables` 的 `create_all` 与
+两个 `index.create` 全部改用此辅助。
+
+**为什么 `create_all` 的 savepoint 回滚安全**：`create_all` 在并发进程里是原子的
+（要么全部建、要么全部不建），不会出现「表 1、2 建了、表 3 没建」的半态。savepoint
+回滚只会发生在「某个表已存在（并发进程建的）」时，此时并发进程已提交、全部表都
+可见，回滚本进程建的那几张等价于回退到「全部表已由对方建好」的状态，后续的
+`_ensure_org_task_columns` 等 inspect-only 迁移自然短路。
+
+**回归测试**（`tests/unit_tests/agent_teams/organization/test_org_db.py`）：
+- `test_run_ddl_idempotent_swallows_already_exists_on_savepoint_path`：预建表后
+  调 `_run_ddl_idempotent`（DDL 直接 `CREATE TABLE` 同名，不走 checkfirst），
+  断言不抛异常且事务可继续写入（INSERT 成功）。
+- `test_run_ddl_idempotent_mysql_skips_savepoint_and_rechecks`：fake MySQL 连接
+  驱动 MySQL 分支——断言不调 `begin_nested`、DDL 执行一次、`verify` 被调。
+- `test_run_ddl_idempotent_mysql_reraises_when_verify_fails`：`verify` 返回 False
+  （不一致态）时 helper 必须 re-raise。
+
+**契约同步**：`tools/AGENTS.md` 第 (1) 条 DDL 锁清单追加 `_run_ddl_idempotent` 对
+`create_all` / `CREATE INDEX` 的覆盖说明。
