@@ -1411,7 +1411,7 @@ class ReActAgent(BaseAgent):
 
     async def _compose_prompt_sections(self, ctx: AgentCallbackContext) -> PromptComposeOutput | None:
         """Trigger prompt composition at the final post-rail render boundary."""
-        from openjiuwen.core.events import Event
+        from openjiuwen.core.events import Event, SessionContext
         from openjiuwen.core.runner import Runner
 
         bus = Runner.get_extension_bus()
@@ -1421,7 +1421,11 @@ class ReActAgent(BaseAgent):
 
         from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
 
-        bound_agent = get_agent_runtime().get(session.get_session_id(), agent_id=session.get_agent_id())
+        session_context = SessionContext(
+            session.get_session_id(),
+            agent_id=session.get_agent_id() or None,
+        )
+        bound_agent = get_agent_runtime().get(session_context.session_id, agent_id=session_context.agent_id)
         if bound_agent is None or not callable(getattr(bound_agent, "compose_prompt_sections", None)):
             # Standalone ReActAgent callers can publish the Bus for unrelated
             # events without having a DeepAgent composition owner.
@@ -1446,7 +1450,7 @@ class ReActAgent(BaseAgent):
         )
         output = await bus.trigger(
             Event(PROMPT_COMPOSE, compose_input),
-            session,
+            session_context,
         )
         if not isinstance(output, PromptComposeOutput):
             raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="prompt.compose returned an invalid output")

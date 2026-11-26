@@ -31,9 +31,11 @@ from openjiuwen.core.events.event_next import EventNext
 from openjiuwen.core.events.ops import EventHandlerOps
 from openjiuwen.core.events.types import OPS_BUILD_EVENT_TYPE, HandlerLevel
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.agent_team import Session as TeamSession
 from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentKind
@@ -133,6 +135,45 @@ async def test_prompt_compose_output_order_is_used_by_the_final_renderer(tmp_pat
     assert mock_llm.call_history
     system_message = mock_llm.call_history[0][0]
     assert system_message.content == "\n\n".join(expected_content)
+
+
+@pytest.mark.asyncio
+async def test_prompt_compose_normalizes_an_empty_card_id(tmp_path) -> None:
+    bus = await build_extension_bus()
+    observed_agent_ids: list[str | None] = []
+
+    async def observe_session_context(
+        event: Event,
+        ops: EventHandlerOps | None,
+        event_next: EventNext,
+    ) -> object:
+        assert ops is not None and ops.session_context is not None
+        observed_agent_ids.append(ops.session_context.agent_id)
+        return await event_next(event)
+
+    bus.register_event_handler(PROMPT_COMPOSE, observe_session_context, {}, HandlerLevel.USER)
+
+    async with harness_runner(bus=bus):
+        agent = create_deep_agent(
+            model=fake_model(),
+            card=AgentCard(id="", name="EmptyIdAgent"),
+            system_prompt="identity section",
+            max_iterations=2,
+            **default_agent_options(tmp_path),
+        )
+        session = Session(session_id="empty-card-id", card=agent.card)
+        runtime = get_agent_runtime()
+        runtime.bind(session.get_session_id(), agent)
+        try:
+            assert agent.react_agent is not None
+            output = await agent.react_agent._compose_prompt_sections(
+                AgentCallbackContext(agent=agent.react_agent, session=session)
+            )
+        finally:
+            runtime.unbind(session.get_session_id(), agent)
+
+    assert observed_agent_ids == [None]
+    assert output is not None
 
 
 @pytest.mark.asyncio
