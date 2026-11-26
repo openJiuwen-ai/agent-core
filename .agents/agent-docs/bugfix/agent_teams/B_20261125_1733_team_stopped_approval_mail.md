@@ -4,7 +4,7 @@ title: 停止成员的审批回执阻塞持久化 Team 完成
 type: B
 author: "MaxMadMax"
 author_email: "chengkunck@gmail.com"
-modules: [agent_teams]
+modules: [agent_teams, core.extension]
 files:
   - openjiuwen/agent_teams/agent/recovery_manager.py
   - openjiuwen/agent_teams/agent/spawn_manager.py
@@ -17,6 +17,7 @@ files:
   - openjiuwen/agent_teams/tools/database/__init__.py
   - openjiuwen/agent_teams/tools/database/member_dao.py
   - openjiuwen/agent_teams/tools/database/message_dao.py
+  - tests/unit_tests/core/extension/test_install_report.py
 designs: [D-20261125-1414-team-stopped-approval-recovery, D-20261126-1704-team-lifecycle-boundaries]
 ---
 
@@ -43,3 +44,11 @@ PR !3893 基线 `a97f6dfd6` 中，停止成员没有可读取中断的 runtime�
 最新门禁评论 204213348 的静态报告完整返回 3 条未解决问题，均为本 PR 新增协作方法的跨类 protected-access。将 TeamDatabase.claim_approval_restart、MemberDao.claim_restart_in_session 和 MessageDao.approval_mail_matches 改为无前导下划线的协作接口，并同步调用及测试引用；事务、取消和审批判断逻辑不变，S_03/S_28 的行为契约无需调整。
 
 候选为 f2ef6588d 上的本地修复，Python 3.11、真实 SQLite 与 mock 模型。审批恢复、数据库并发和会话 watchdog 三个测试文件共 73 项通过。未运行本地静态工具；最新远端报告的 UT、开源合规和 Ruff 为 SUCCESS，新候选的远端静态检查仍待推送后确认。
+
+## 2026-11-26：基线 Extension UT 门禁补充
+
+门禁评论 204222668 的完整报告对应 58e432f71，29,621 passed、493 skipped、2 xfailed、1 failed。唯一失败是 test_cross_domain_wait_and_reverse_dependency_protection 中 b 成功后 a 返回 FAILED。相关测试及生产代码与本地 develop 46014823e 一致。报告未包含错误码；在 b 启动前注入 1.2 秒延迟可复现 EXTENSION_DEPENDENCY_TIMEOUT，支持成功场景的 1 秒预算过短这一解释，不能据此确认 CI 的具体错误码。
+
+按本次 UT 修复要求，53767359e 仅将该成功场景的 a 等待预算调为 5 秒，与相邻用例一致，并在失败断言显示 error；生产默认 300 秒和专门的 0.05 秒超时测试不变。Python 3.11、真实文件报告和 Registry：无注入时修复前后 test_install_report.py 均为 34 项通过；同一 1.2 秒延迟下原测试失败，修复后通过。最小差异复查完成，未运行本地静态工具或完整 CI。
+
+PR 重开后，53767359e 的流水线 cb0d6487f2884dd5a90499e37a34d400 在 check_pr_size 失败：51/50 个文件、2434/6000 行。后续 UT 等阶段未执行，评论 204234768 引用的仍为 58e432f71 旧附件，SHA256 与上一报告相同。将独立 B_20261126_1900_extension-dependency-wait-ut 的核心证据并入本记录以恢复 50 文件边界；该独立记录由本节替代。新候选的实际 CI 结果仍待重跑。

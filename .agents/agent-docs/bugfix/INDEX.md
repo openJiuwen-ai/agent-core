@@ -80,7 +80,7 @@ generated: true
 
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
-| [B_20261126_1900_extension-dependency-wait-ut](openjiuwen/core/B_20261126_1900_extension-dependency-wait-ut.md) | B | 跨域依赖等待成功场景的 UT 时序容差 | MaxMadMax | 无独立 D：仅修正现有成功场景测试的等待预算和失败诊断，生产契约不变，无独立设计。 |
+| [B_20261125_1733_team_stopped_approval_mail](agent_teams/B_20261125_1733_team_stopped_approval_mail.md) | B | 停止成员的审批回执阻塞持久化 Team 完成 | MaxMadMax | [D-20261125-1414-team-stopped-approval-recovery](../designs/active/D-20261125-1414-team-stopped-approval-recovery/design.md)<br>[D-20261126-1704-team-lifecycle-boundaries](../designs/active/D-20261126-1704-team-lifecycle-boundaries/design.md) |
 
 <a id="module-core-context_engine"></a>
 
