@@ -18,6 +18,7 @@ from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY, 
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentRail,
+    mark_tool_skipped,
 )
 
 UserInput = Any
@@ -257,7 +258,7 @@ class BaseInterruptRail(AgentRail):
             content=str(tool_result),
             tool_call_id=tool_call_id,
         )
-        ctx.extra["_skip_tool"] = True
+        mark_tool_skipped(ctx)
         ctx.inputs.tool_result = tool_result
         ctx.inputs.tool_msg = msg
 

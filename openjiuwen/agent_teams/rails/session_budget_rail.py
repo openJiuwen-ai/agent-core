@@ -50,7 +50,7 @@ from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, mark_tool_skipped, tool_call_skipped
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails.llm_stability_rail import FORCE_SKIP_ALL_KEY
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -277,7 +277,7 @@ class SessionBudgetRail(DeepAgentRail):
         addressed to the ``user`` pseudo-member must still go through, or
         the leader could never deliver its concluding summary.
         """
-        if ctx.extra.get("_skip_tool") or not self._is_send_message(ctx.inputs.tool_name):
+        if tool_call_skipped(ctx) or not self._is_send_message(ctx.inputs.tool_name):
             return
         reason = self._state.exceeded
         if not reason:
@@ -296,7 +296,7 @@ class SessionBudgetRail(DeepAgentRail):
         """
         if not self._is_send_message(ctx.inputs.tool_name):
             return
-        if ctx.extra.get("_skip_tool") or not self._tool_succeeded(ctx):
+        if tool_call_skipped(ctx) or not self._tool_succeeded(ctx):
             return
         reason = await self._state.record_message()
         if reason:
@@ -349,7 +349,7 @@ class SessionBudgetRail(DeepAgentRail):
     @staticmethod
     def _reject_tool(ctx: AgentCallbackContext, error: str) -> None:
         tool_call_id = getattr(ctx.inputs.tool_call, "id", "")
-        ctx.extra["_skip_tool"] = True
+        mark_tool_skipped(ctx)
         ctx.inputs.tool_result = {"error": error}
         ctx.inputs.tool_msg = ToolMessage(content=error, tool_call_id=tool_call_id)
 

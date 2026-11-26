@@ -8,7 +8,7 @@ import json
 from typing import Any
 
 from openjiuwen.core.foundation.llm import ToolMessage
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, mark_tool_skipped
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.rails.base import DeepAgentRail
 
@@ -187,7 +187,7 @@ class ControlledSkillTreatmentRail(DeepAgentRail):
     def _reject_tool(ctx: AgentCallbackContext, message: str) -> None:
         tool_call = getattr(ctx.inputs, "tool_call", None)
         tool_call_id = str(getattr(tool_call, "id", "") or "")
-        ctx.extra["_skip_tool"] = True
+        mark_tool_skipped(ctx)
         ctx.inputs.tool_result = {"error": message}
         ctx.inputs.tool_msg = ToolMessage(content=message, tool_call_id=tool_call_id)
 

@@ -864,7 +864,7 @@ class TestToolInterruptReject:
         
         finish = ctx.consume_force_finish()
         assert finish is None
-        assert ctx.extra.get("_skip_tool") is True
+        assert ctx.tool_skipped is True
         assert "Tool execution skipped" in ctx.inputs.tool_msg.content
 
     @pytest.mark.asyncio
@@ -1233,7 +1233,7 @@ class TestToolRejectExample:
         
         # BEFORE reject: skip_tool, NO force_finish
         assert ctx.consume_force_finish() is None
-        assert ctx.extra.get("_skip_tool") is True
+        assert ctx.tool_skipped is True
         assert "Tool skipped" in ctx.inputs.tool_msg.content
 
     @pytest.mark.asyncio

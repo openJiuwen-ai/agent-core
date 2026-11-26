@@ -1413,7 +1413,11 @@ class AbilityManager:
         tool_calls = self._resolve_model_tool_call_names(tool_calls)
 
         # Each tool call gets an isolated callback context to avoid races
-        # between concurrent BEFORE/AFTER_TOOL_CALL hooks.
+        # between concurrent BEFORE/AFTER_TOOL_CALL hooks. ``extra`` stays the
+        # invoke-level dict on purpose: rails keep invoke-scoped state there
+        # (repeated-failure counters, skill shortlists) and rely on writes from
+        # one call being visible to the next. Per-call vetoes therefore travel
+        # on the context itself (``mark_tool_skipped``), not through ``extra``.
         tool_contexts: List[AgentCallbackContext] = []
         tasks = []
         for single_tool_call in tool_calls:
@@ -1676,7 +1680,16 @@ class AbilityManager:
             tag=None,
     ) -> Tuple[Any, ToolMessage]:
         """Execute one tool call under rail lifecycle events."""
-        skip_result = ctx.extra.pop("_skip_tool", None)
+        # A veto normally travels on this call's own context
+        # (``ctx.mark_tool_skipped()``), so a sibling call can neither observe
+        # nor consume it. The legacy ``extra["_skip_tool"]`` key is still
+        # honoured for out-of-tree rails and popped here so one call leaves no
+        # residue behind -- but that key lives in the invoke-shared dict, so in
+        # a concurrent batch a sibling may still consume it first and re-open
+        # the #2413 swap. The legacy path is best-effort only; rails outside
+        # this repo must migrate to ``mark_tool_skipped(ctx)``.
+        legacy_skip = ctx.extra.pop("_skip_tool", None)
+        skip_result = ctx.consume_tool_skip() or legacy_skip
 
         if skip_result:
             return ctx.inputs.tool_result, ctx.inputs.tool_msg

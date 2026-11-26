@@ -17,7 +17,12 @@ from openjiuwen.core.runner.callback import AbortError
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.interrupt.response import ToolCallInterruptRequest
 from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    ToolCallInputs,
+    clear_tool_skipped,
+    tool_call_skipped,
+)
 from openjiuwen.harness.rails.evolution.evolution_interrupt_rail import (
     EVOLUTION_APPROVAL_INTERRUPT_KIND,
     EVOLUTION_INTERRUPT_SOURCE,
@@ -254,7 +259,7 @@ async def test_evolve_interrupt_rejects_unrelated_context_session():
 
     await rail.before_tool_call(ctx)
 
-    assert ctx.extra["_skip_tool"] is True
+    assert tool_call_skipped(ctx) is True
     assert ctx.inputs.tool_result.success is False
     assert ctx.inputs.tool_result.error == "unknown evolution_review_ref"
 
@@ -464,7 +469,7 @@ async def test_evolve_resume_allow_once_continues_with_frozen_args():
     ctx.extra[EVOLUTION_RESUME_USER_INPUT_KEY] = {"action": "allow_once"}
     await rail.before_tool_call(ctx)
 
-    assert "_skip_tool" not in ctx.extra
+    assert not tool_call_skipped(ctx)
 
 
 @pytest.mark.asyncio
@@ -481,7 +486,7 @@ async def test_evolve_resume_ignores_generic_resume_key():
         await rail.before_tool_call(ctx)
 
     assert exc_info.value.cause.request.metadata["resume_user_input_key"] == EVOLUTION_RESUME_USER_INPUT_KEY
-    assert "_skip_tool" not in ctx.extra
+    assert not tool_call_skipped(ctx)
 
 
 @pytest.mark.asyncio
@@ -496,7 +501,7 @@ async def test_evolve_resume_accepts_payload_wrapped_by_tool_call_id():
     ctx.extra[EVOLUTION_RESUME_USER_INPUT_KEY] = {"call_001": {"action": "allow_once"}}
     await rail.before_tool_call(ctx)
 
-    assert "_skip_tool" not in ctx.extra
+    assert not tool_call_skipped(ctx)
 
 
 @pytest.mark.asyncio
@@ -577,7 +582,7 @@ async def test_evolve_resume_reject_skips_tool_with_named_tool_message():
     ctx.extra[EVOLUTION_RESUME_USER_INPUT_KEY] = {"action": "reject"}
     await rail.before_tool_call(ctx)
 
-    assert ctx.extra["_skip_tool"] is True
+    assert tool_call_skipped(ctx) is True
     assert ctx.inputs.tool_result.success is False
     assert "rejected" in ctx.inputs.tool_result.error
     assert isinstance(ctx.inputs.tool_msg, ToolMessage)
@@ -595,7 +600,7 @@ async def test_evolve_auto_save_does_not_interrupt():
 
     await rail.before_tool_call(ctx)
 
-    assert "_skip_tool" not in ctx.extra
+    assert not tool_call_skipped(ctx)
     assert json.loads(ctx.inputs.tool_call.arguments)["selected_proposal_ids"] == ["prop_1"]
 
 
@@ -612,7 +617,7 @@ async def test_evolve_auto_confirm_does_not_interrupt():
 
     await rail.before_tool_call(ctx)
 
-    assert "_skip_tool" not in ctx.extra
+    assert not tool_call_skipped(ctx)
 
 
 @pytest.mark.asyncio
@@ -638,7 +643,7 @@ async def test_evolve_requires_completed_review_ref_before_approval():
 
     await rail.before_tool_call(ctx)
 
-    assert ctx.extra["_skip_tool"] is True
+    assert tool_call_skipped(ctx) is True
     assert ctx.inputs.tool_result.success is False
     assert "evolution_review_ref" in ctx.inputs.tool_result.error
     assert isinstance(ctx.inputs.tool_msg, ToolMessage)
@@ -653,7 +658,7 @@ async def test_evolve_unknown_review_ref_returns_stable_error_before_approval():
 
     await rail.before_tool_call(ctx)
 
-    assert ctx.extra["_skip_tool"] is True
+    assert tool_call_skipped(ctx) is True
     assert ctx.inputs.tool_result.success is False
     assert ctx.inputs.tool_result.error == "unknown evolution_review_ref"
     assert ctx.inputs.tool_msg.content == "unknown evolution_review_ref"
@@ -667,7 +672,7 @@ async def test_evolve_rejects_unknown_proposal_before_approval():
 
     await rail.before_tool_call(ctx)
 
-    assert ctx.extra["_skip_tool"] is True
+    assert tool_call_skipped(ctx) is True
     assert ctx.inputs.tool_result.success is False
     assert "unknown proposal_id" in ctx.inputs.tool_result.error
     scope = runtime.resolve_scope(review_ref, session_id="session-1")
@@ -681,7 +686,7 @@ async def test_interrupt_without_runtime_submission_fails_fast():
 
     await rail.before_tool_call(ctx)
 
-    assert ctx.extra["_skip_tool"] is True
+    assert tool_call_skipped(ctx) is True
     assert ctx.inputs.tool_result.success is False
     assert "EvolutionInterruptRail is not configured" in ctx.inputs.tool_result.error
     assert isinstance(ctx.inputs.tool_msg, ToolMessage)
@@ -695,13 +700,13 @@ async def test_evolve_gate_failure_does_not_create_resume_trap():
     ctx = _evolve_ctx(None)
 
     await rail.before_tool_call(ctx)
-    ctx.extra.pop("_skip_tool")
+    clear_tool_skipped(ctx)
     ctx.inputs.tool_args = json.dumps(ctx.inputs.tool_args, ensure_ascii=False, sort_keys=True)
     ctx.extra[EVOLUTION_RESUME_USER_INPUT_KEY] = {"action": "allow_once"}
 
     await rail.before_tool_call(ctx)
 
-    assert ctx.extra["_skip_tool"] is True
+    assert tool_call_skipped(ctx) is True
     assert ctx.inputs.tool_result.success is False
     assert "evolution_review_ref" in ctx.inputs.tool_result.error
     assert "approval snapshot" not in ctx.inputs.tool_result.error
@@ -734,7 +739,7 @@ async def test_simplify_invalid_action_rejects_before_approval():
 
     await rail.before_tool_call(ctx)
 
-    assert ctx.extra["_skip_tool"] is True
+    assert tool_call_skipped(ctx) is True
     assert ctx.inputs.tool_result.success is False
     assert "record_id is required" in ctx.inputs.tool_result.error
     submission.prepare_simplify_submission.assert_awaited_once()

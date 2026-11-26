@@ -19,6 +19,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ModelCallInputs,
     ToolCallInputs,
+    mark_tool_skipped,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
 
@@ -186,7 +187,7 @@ class SecurityRail(DeepAgentRail):
         """Hard-block a tool call using the shared rail contract."""
         tool_call = ctx.inputs.tool_call
         tool_call_id = tool_call.id if tool_call else ""
-        ctx.extra["_skip_tool"] = True
+        mark_tool_skipped(ctx)
         ctx.inputs.tool_result = {"error": error_msg}
         ctx.inputs.tool_msg = ToolMessage(
             content=error_msg,

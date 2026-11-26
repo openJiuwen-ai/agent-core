@@ -302,8 +302,9 @@ class FakeReactAgent:
                             tool_args=tool.get("args", {}),
                         )
                         ctx.extra = {}
+                        ctx.clear_tool_skip()
                         await ctx.fire(AgentCallbackEvent.BEFORE_TOOL_CALL)
-                        if not ctx.extra.get("_skip_tool"):
+                        if not ctx.tool_skipped:
                             self.tool_running.set()
                             try:
                                 if self.tool_sleep_seconds > 0:
@@ -314,7 +315,7 @@ class FakeReactAgent:
                             self.completed_tools += 1
                         await ctx.fire(AgentCallbackEvent.AFTER_TOOL_CALL)
                         self.tool_contexts.append(
-                            SimpleNamespace(inputs=ctx.inputs, extra=dict(ctx.extra)),
+                            SimpleNamespace(inputs=ctx.inputs, extra=dict(ctx.extra), tool_skipped=ctx.tool_skipped),
                         )
 
             # Iteration fully succeeded: the rail snapshots this clean boundary.

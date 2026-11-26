@@ -40,7 +40,7 @@ description: 给修改 openjiuwen/harness（及被 spec 点名的 openjiuwen/cor
 | `openjiuwen/harness/rails/llm_retry_rail.py` | `LLMRetryRail` 父类：repeat 检测参数、`backoff_delay`、`_is_repeat_exception` / `_is_stream_timeout_exception` / `_is_transient_invoke_exception` | S_07 |
 | `openjiuwen/harness/rails/base.py` | `DeepAgentRail` 基类（多份 spec 的父类契约） | S_02 / S_07 / S_08 |
 | `openjiuwen/core/runner/`（`Runner.resource_mgr`） | 进程级工具注册表（S_09 并发安全前提）；`callback/framework.py` / `callback/chain.py` 钩子链按 priority 降序执行 | S_09 / S_10 |
-| `openjiuwen/core/single_agent/rail/base` | `AgentRail` / `AgentCallbackContext` / `ToolCallInputs`；`ctx.extra["_skip_tool"]` 跳过执行约定 | S_08 / S_10 |
+| `openjiuwen/core/single_agent/rail/base` | `AgentRail` / `AgentCallbackContext` / `ToolCallInputs`；`ctx.mark_tool_skipped()` / `ctx.tool_skipped` 跳过执行约定；否决标记 per-call，`tool_call_skipped(ctx)` 同时回读旧 `extra["_skip_tool"]`（读侧兼容）。但旧 key 的**读者**看不到 marker 否决，**写者**在并发下仍有 #2413 竞争——仓外 rail 读写两侧都须迁移（读 → `tool_call_skipped(ctx)`，写 → `mark_tool_skipped(ctx)`） | S_08 / S_10 |
 | `openjiuwen/core/foundation/llm` | `ToolMessage` 消息写入载体 | S_10 |
 | `openjiuwen/core/sys_operation/cwd` | `get_cwd` 相对路径基准 | S_10 |
 | `openjiuwen/harness/rails/`（`SysOperationRail`） | S_09 并发注册守卫的基类面 | S_09 |
