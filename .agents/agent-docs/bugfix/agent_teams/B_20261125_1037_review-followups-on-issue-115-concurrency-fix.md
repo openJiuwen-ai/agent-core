@@ -551,3 +551,76 @@ COLUMN`），同款 TOCTOU 命中后第二个进程会撞 `duplicate column`。�
 - 「静态表已存在 → 再 `initialize()`」「同 session_id 并发 bind」「单条消息 mark_read 后
   同 session 再 mark_read 同广播」等场景的语义复现脚本均与修复前行为等价（标量投影 +
   CAS 在无竞态时与 ORM 实体 setattr 行为相同；竞态下才显现保护效果）。
+
+### 第十三轮检视：拓扑排序 + _ensure_dynamic_table_indexes ADD COLUMN 幂等 + refresh 返回 stub 实体 + rowcount 防御
+
+第十二轮修完 verify 语义 / ALTER 幂等 / FOR UPDATE identity map 后,第十三轮检视点出 4 个新问题:
+
+1. **逐表 create_all 丢失跨表拓扑排序**(`engine._create_static_tables` /
+   `organization/db.ensure_org_static_tables`):第十二轮把 `create_all(tables=[all])`
+   拆为按 `static_tables()` 迭代顺序逐个 `_run_ddl_idempotent(create_all(tables=[t]),
+   verify=has_table(t.name))`,但 `static_tables()` 返回顺序是
+   `SQLModel.metadata.tables` 的注册顺序,不是 FK 依赖拓扑顺序。`team_member` FK →
+   `team_info`,如果 `team_member` 先建,PG/MySQL 会在 `CREATE TABLE` 时因 FK 目标
+   不存在而拒绝(SQLite 延迟到 INSERT 才检查,故本地测试不会暴露)。org 表当前无 FK
+   但同款修复以保前向安全。
+
+   **修法**:在逐表迭代前用 `sqlalchemy.sql.util.sort_tables(tables)` 做拓扑排序,
+   保证 child 的 CREATE 永远在 parent 之后跑。`create_all(tables=[all])` 内部本就用
+   `sort_tables`,本修复把同款排序显式带进逐表路径。
+
+2. **`_ensure_dynamic_table_indexes` 的 ADD COLUMN 仍是裸 ALTER**(`engine.py` line
+   818-874 等 13 条):第十二轮只修了 `_ensure_message_protocol_column` /
+   `_ensure_message_meta_column` 两条 message 列迁移,task 表的 13 条 ADD COLUMN
+   (`reviewer` / `review_round` / `max_review_rounds` / `note` / `summary` /
+   `parent_task_id` / `created_by` / `resume_pending` / `revision` /
+   `observed_revision` / `parent_revision` / `change_notes`)仍是裸
+   `exec_driver_sql('ALTER TABLE ... ADD COLUMN ...')`,跨进程并发首绑仍会撞
+   `duplicate column`。
+
+   同款问题存在于 `_ensure_team_member_role_column` / `_ensure_team_member_options_column`
+   / `_ensure_team_info_capability_columns`(第十二轮 B_ 文档已备注为 follow-up)。
+
+   **修法**:全部 16 条裸 ADD COLUMN 改用 `_add_column_idempotent(sync_conn, table,
+   column, col_type)` 包装,与 `organization/db.py` 的 `_ensure_org_task_columns`
+   同款——SAVEPOINT 包 ALTER + 吞 `duplicate column`/`already exists` +
+   `inspect.get_columns` 复查列确实在。
+
+3. **`_refresh_status_in_session` 返回只手填 3 字段的模型实例**(task_dao.py:218-222):
+   第十二轮把 ORM 实体 `setattr` 翻转改为标量 UPDATE CAS,但 CAS 成功后返回的是
+   `team_task_model(task_id=tid, status=new_status, updated_at=now)` —— 只填了 3 个
+   字段,`assignee` / `team_name` / `summary` 等全为默认。调用方
+   `_handle_unblocked_tasks` → `_start_human_assigned_task_if_ready` 用
+   `task.assignee` 决定是否自动启动 HITT 任务,line 1488 `not task.assignee` 永真 →
+   HITT 自动启动逻辑失效。`task_manager.py:276` 的 `status_by_id =
+   {t.task_id: t.status for t in mutation.refreshed_tasks}` 只用 task_id+status,
+   不受影响,但 `_handle_unblocked_tasks` 这条链路确实破坏了实体契约。
+
+   **修法**:CAS 成功后在同一 FOR UPDATE 锁下 `select(team_task_model).where(task_id=tid)`
+   re-read 完整行(此时锁仍持,row 是我们刚 UPDATE 的那行,re-read 是真正 DB 读不是
+   identity map 缓存——因为前面的标量投影 `(task_id, status)` 没进 identity map)。
+   代价是每条 refreshed task 多一次 round-trip,但只在状态翻转的少数 candidate 上
+   发生,不是每条 scanned candidate 都付。
+
+4. **新的 CAS 判定用 `rowcount == 1`,与同族 `(rowcount or 0)` 不一致**(task_dao.py:218):
+   同文件 `claim_task` / `start_task` / `reassign_task` 用 `result.rowcount == 1`
+   (line 1013/1078/1133),`update_member_status` 用 `(result.rowcount or 0) == 1` 防御
+   None。审查指出 `None == 1` 是 False 会丢更新事件,改 `(rowcount or 0) == 1` 与
+   `update_member_status` 一致。
+
+   **修法**:line 218 改 `if (update_result.rowcount or 0) == 1:`。
+
+**契约同步**:
+- `engine.py` 的 `_create_static_tables` docstring 追加拓扑排序说明。
+- `organization/db.py` 的 `ensure_org_static_tables` 注释追加拓扑排序说明。
+- 3 个 migration helper(`_ensure_team_member_role_column` /
+  `_ensure_team_member_options_column` / `_ensure_team_info_capability_columns`)的
+  ADD COLUMN 改用 `_add_column_idempotent`,注释说明根因。
+- `_ensure_dynamic_table_indexes` 的 13 条 ADD COLUMN 改用 `_add_column_idempotent`。
+- `_refresh_status_in_session` docstring 追加 re-read 完整行的契约说明。
+
+**验证**:
+- `tests/unit_tests/agent_teams/`(除 coordination / cli):4474 passed, 17 skipped,
+  2 xfailed。
+- 重点覆盖:`test_database` + `test_database_concurrency` + `test_message_manager` +
+  `test_task_manager` + `organization/test_org_db`:322 passed。

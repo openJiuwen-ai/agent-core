@@ -65,7 +65,15 @@ def ensure_org_static_tables(sync_conn) -> None:
     # instead of letting it race forward to create the rest. Per-table
     # verify = "is *this* table present" closes the race table-by-table
     # (mirroring ``engine._create_static_tables``).
-    for table in org_static_tables():
+    #
+    # Processed in SQLAlchemy's topological sort order (``sort_tables``) so a
+    # child table's CREATE never runs before its FK target exists; PG/MySQL
+    # enforce FK target existence at CREATE TABLE time (issue #115 review
+    # round 14). Org tables currently have no FK constraints, but the sort
+    # is kept for parity with ``_create_static_tables`` and forward-safety.
+    from sqlalchemy.sql.util import sort_tables
+
+    for table in sort_tables(org_static_tables()):
         _run_ddl_idempotent(
             sync_conn,
             lambda t=table: SQLModel.metadata.create_all(sync_conn, tables=[t]),

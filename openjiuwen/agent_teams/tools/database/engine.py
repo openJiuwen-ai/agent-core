@@ -520,8 +520,20 @@ def _create_static_tables(sync_conn) -> None:
       hand-rolled ``CREATE TABLE`` DDL string) so the FK constraint ordering
       and the dialect-specific DDL compilation stay SQLAlchemy's job; the
       ``tables=[one_table]`` argument scopes each call to exactly one table.
+
+    The tables are processed in SQLAlchemy's topological sort order
+    (``sqlalchemy.sort_tables``), so a child table's ``CREATE`` never runs
+    before its FK target exists. ``create_all(tables=[all])`` does this
+    internally, but per-table wrapping would otherwise use the
+    ``SQLModel.metadata.tables`` dict iteration order — which is the model
+    registration order, not the FK dependency order. PG/MySQL enforce FK
+    target existence at ``CREATE TABLE`` time (SQLite defers the check to
+    ``INSERT``), so an out-of-order per-table create would fail on the
+    child before the parent exists (issue #115 review round 14).
     """
-    for table in static_tables():
+    from sqlalchemy.sql.util import sort_tables
+
+    for table in sort_tables(static_tables()):
         _run_ddl_idempotent(
             sync_conn,
             lambda t=table: SQLModel.metadata.create_all(sync_conn, tables=[t]),
@@ -553,7 +565,16 @@ def _ensure_team_member_role_column(sync_conn) -> None:
     # ``schema.team`` import (which would close a circular dependency).
     # Keep in sync with ``TeamRole.TEAMMATE`` if that enum value ever changes.
     default_role = "teammate"
-    sync_conn.exec_driver_sql(f"ALTER TABLE team_member ADD COLUMN role TEXT NOT NULL DEFAULT '{default_role}'")
+    # Wrapped in _add_column_idempotent (issue #115 review round 14): the
+    # inspect-then-ALTER pattern is not atomic across processes. Two processes
+    # concurrently initialising the same PG/MySQL database both see the column
+    # missing and both issue ALTER TABLE ADD COLUMN; the DB's own DDL lock
+    # serialises the two ALTERs but the second fails with 'duplicate column
+    # name' (PG ProgrammingError SQLSTATE 42701; MySQL 1060), crashing
+    # initialize().
+    _add_column_idempotent(
+        sync_conn, "team_member", "role", f"TEXT NOT NULL DEFAULT '{default_role}'"
+    )
     team_logger.info(
         "Migrated legacy team_member table: added role column with default %s",
         default_role,
@@ -567,7 +588,9 @@ def _ensure_team_member_options_column(sync_conn) -> None:
         return
     columns = {col["name"] for col in inspector.get_columns("team_member")}
     if "options" not in columns:
-        sync_conn.exec_driver_sql("ALTER TABLE team_member ADD COLUMN options TEXT")
+        # Wrapped in _add_column_idempotent for cross-process TOCTOU
+        # (issue #115 review round 14, same as _ensure_team_member_role_column).
+        _add_column_idempotent(sync_conn, "team_member", "options", "TEXT")
         team_logger.info("Migrated legacy team_member table: added options column")
 
     if "model_ref_json" not in columns:
@@ -606,11 +629,15 @@ def _ensure_team_info_capability_columns(sync_conn) -> None:
         return
     columns = {col["name"] for col in inspector.get_columns("team_info")}
     if "dispatch_mode" not in columns:
-        sync_conn.exec_driver_sql("ALTER TABLE team_info ADD COLUMN dispatch_mode TEXT NOT NULL DEFAULT 'autonomous'")
+        # Wrapped in _add_column_idempotent for cross-process TOCTOU
+        # (issue #115 review round 14).
+        _add_column_idempotent(
+            sync_conn, "team_info", "dispatch_mode", "TEXT NOT NULL DEFAULT 'autonomous'"
+        )
         team_logger.info("Migrated legacy team_info table: added dispatch_mode column")
     if "enable_task_verification" not in columns:
-        sync_conn.exec_driver_sql(
-            "ALTER TABLE team_info ADD COLUMN enable_task_verification BOOLEAN NOT NULL DEFAULT 0"
+        _add_column_idempotent(
+            sync_conn, "team_info", "enable_task_verification", "BOOLEAN NOT NULL DEFAULT 0"
         )
         team_logger.info("Migrated legacy team_info table: added enable_task_verification column")
 
@@ -813,53 +840,55 @@ def _ensure_dynamic_table_indexes(
                 )
 
             # F_59: add the verify-gate ``reviewer`` column to pre-existing tables.
+            # Wrapped in _add_column_idempotent for cross-process TOCTOU
+            # (issue #115 review round 14, same as _ensure_team_member_role_column).
             task_columns = {c["name"] for c in inspector.get_columns(table_name)}
             if "reviewer" not in task_columns:
-                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN reviewer TEXT')
+                _add_column_idempotent(sync_conn, table_name, "reviewer", "TEXT")
                 team_logger.info("Migrated task table %s: added reviewer column", table_name)
 
             # F_62: review voting — round counter + per-task round ceiling.
             if "review_round" not in task_columns:
-                sync_conn.exec_driver_sql(
-                    f'ALTER TABLE "{table_name}" ADD COLUMN review_round INTEGER NOT NULL DEFAULT 0'
+                _add_column_idempotent(
+                    sync_conn, table_name, "review_round", "INTEGER NOT NULL DEFAULT 0"
                 )
                 team_logger.info("Migrated task table %s: added review_round column", table_name)
             if "max_review_rounds" not in task_columns:
-                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN max_review_rounds INTEGER')
+                _add_column_idempotent(sync_conn, table_name, "max_review_rounds", "INTEGER")
                 team_logger.info("Migrated task table %s: added max_review_rounds column", table_name)
 
             # F_118: author's completion note, read by handoff briefs / view_task.
             if "note" not in task_columns:
-                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN note TEXT')
+                _add_column_idempotent(sync_conn, table_name, "note", "TEXT")
                 team_logger.info("Migrated task table %s: added note column", table_name)
 
             # F_119: author's one-line completion summary, read by digests / briefs.
             if "summary" not in task_columns:
-                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN summary TEXT')
+                _add_column_idempotent(sync_conn, table_name, "summary", "TEXT")
                 team_logger.info("Migrated task table %s: added summary column", table_name)
 
             # F_128: member subtasks — parent link + creator.
             if "parent_task_id" not in task_columns:
-                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN parent_task_id TEXT')
+                _add_column_idempotent(sync_conn, table_name, "parent_task_id", "TEXT")
                 team_logger.info("Migrated task table %s: added parent_task_id column", table_name)
             if "created_by" not in task_columns:
-                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN created_by TEXT')
+                _add_column_idempotent(sync_conn, table_name, "created_by", "TEXT")
                 team_logger.info("Migrated task table %s: added created_by column", table_name)
             if "resume_pending" not in task_columns:
-                sync_conn.exec_driver_sql(
-                    f'ALTER TABLE "{table_name}" ADD COLUMN resume_pending BOOLEAN NOT NULL DEFAULT 0'
+                _add_column_idempotent(
+                    sync_conn, table_name, "resume_pending", "BOOLEAN NOT NULL DEFAULT 0"
                 )
                 team_logger.info("Migrated task table %s: added resume_pending column", table_name)
 
             # F_129: task versioning + edit notes.
             for column in ("revision", "observed_revision", "parent_revision"):
                 if column not in task_columns:
-                    sync_conn.exec_driver_sql(
-                        f'ALTER TABLE "{table_name}" ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0'
+                    _add_column_idempotent(
+                        sync_conn, table_name, column, "INTEGER NOT NULL DEFAULT 0"
                     )
                     team_logger.info("Migrated task table %s: added %s column", table_name, column)
             if "change_notes" not in task_columns:
-                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN change_notes TEXT')
+                _add_column_idempotent(sync_conn, table_name, "change_notes", "TEXT")
                 team_logger.info("Migrated task table %s: added change_notes column", table_name)
 
             # F_59: fold the legacy execution states into the condition-named

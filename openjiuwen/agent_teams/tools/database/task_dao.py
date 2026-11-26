@@ -215,12 +215,29 @@ async def _refresh_status_in_session(
             )
             .values(status=new_status, updated_at=now)
         )
-        if update_result.rowcount == 1:
-            refreshed.append(
-                team_task_model(
-                    task_id=tid, status=new_status, updated_at=now,
-                )
+        # ``(rowcount or 0)`` (mirrors claim_task / start_task / reassign_task
+        # in this file): defends against a backend that returns None for
+        # rowcount, where ``None == 1`` would be False and we'd silently drop
+        # the refresh event.
+        if (update_result.rowcount or 0) == 1:
+            # Re-read the full row under the existing FOR UPDATE lock so the
+            # returned entity satisfies the caller's contract — the HITT
+            # auto-start path (_start_human_assigned_task_if_ready) reads
+            # task.assignee, and the mutation-result consumer reads
+            # task.status. A 3-field stub (task_id/status/updated_at) would
+            # leave assignee as None and defeat the HITT auto-start (issue
+            # #115 review round 14, blocked). The re-SELECT is a current
+            # read under the row lock we already hold, so it sees the just-
+            # committed status (and READ COMMITTED gives it a fresh snapshot
+            # on PG/MySQL); the row is the only one matching the PK, so this
+            # is one extra round-trip per refreshed task, not per scanned
+            # candidate.
+            reloaded = await session.execute(
+                select(team_task_model).where(team_task_model.task_id == tid)
             )
+            row = reloaded.scalar_one_or_none()
+            if row is not None:
+                refreshed.append(row)
     return refreshed
 
 
