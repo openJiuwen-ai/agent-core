@@ -19,6 +19,11 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.util imp
     resolve_ratio_token_threshold,
 )
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression import RuleCompressionPipeline
+from openjiuwen.core.context_engine.processor.offload_text import (
+    OffloadText,
+    format_offload_read_hint,
+    suggest_read_limit,
+)
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.context_engine.token.encode_guard import CHARS_PER_TOKEN, estimate_tokens
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
@@ -418,6 +423,21 @@ class MessageSummaryOffloader(ContextProcessor):
                 offloaded_content=getattr(offloaded, "content", None),
             )
         return offloaded or original_message
+
+    def _offload_read_hint(
+        self,
+        context: ModelContext,
+        messages: list[BaseMessage],
+        offload_text: OffloadText,
+    ) -> str:
+        """Suggest a read_file page that stays within this processor's on-add offload threshold."""
+        content_tokens = self._count_messages_tokens(context, messages)
+        read_limit = suggest_read_limit(
+            offload_text,
+            content_tokens=content_tokens,
+            page_budget_tokens=self._add_message_token_threshold(context),
+        )
+        return format_offload_read_hint(offload_text, content_tokens=content_tokens, read_limit=read_limit)
 
     def _is_processable_tool_message(
         self,
