@@ -697,3 +697,107 @@ def test_run_ddl_idempotent_mysql_reraises_when_verify_fails():
 
     fake_conn.begin_nested.assert_not_called()
     verify.assert_called_once()
+
+
+def test_run_ddl_idempotent_savepoint_path_reraises_when_verify_fails():
+    """On the savepoint path (SQLite / PG), if the 'already exists' error is
+    swallowed but ``verify`` returns False (an inconsistent state — the DDL
+    target should exist), the helper re-raises rather than silently leaving
+    it absent.
+
+    The savepoint's rollback restores the transaction to a clean state, but
+    that alone does not confirm a concurrent process actually committed this
+    DDL target — ``verify`` does. Drives the savepoint branch with a
+    hand-rolled fake connection: the savepoint context manager is faked so
+    the DDL raises inside it and the exception propagates to the outer
+    ``except`` (matching real ``begin_nested``'s ROLLBACK-then-propagate
+    behaviour).
+    """
+    from unittest.mock import MagicMock, patch
+
+    from openjiuwen.agent_teams.organization import db as org_db
+
+    fake_conn = MagicMock()
+    fake_conn.dialect.name = "sqlite"
+
+    # The DDL raises "already exists" inside the savepoint; the helper must
+    # swallow it and then call verify.
+    fake_conn.exec_driver_sql.side_effect = OperationalError(
+        "CREATE TABLE t (id INT)",
+        {},
+        Exception("Table t already exists"),
+    )
+
+    # Fake the savepoint context manager so the DDL runs inside it. ``__exit__``
+    # returns False to propagate the exception to the outer try/except —
+    # matching real SQLAlchemy ``begin_nested``'s behaviour of issuing
+    # ROLLBACK TO SAVEPOINT and then letting the exception propagate.
+    class _FakeSavepoint:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    fake_conn.begin_nested.return_value = _FakeSavepoint()
+
+    # verify returns False — the table is somehow still missing. The helper
+    # must surface this inconsistency.
+    verify = MagicMock(return_value=False)
+
+    with pytest.raises(OperationalError):
+        org_db._run_ddl_idempotent(
+            fake_conn,
+            lambda: fake_conn.exec_driver_sql("CREATE TABLE t (id INT)"),
+            verify,
+        )
+
+    fake_conn.begin_nested.assert_called_once()
+    verify.assert_called_once()
+
+
+def test_add_column_idempotent_savepoint_path_reraises_when_column_still_missing():
+    """On the savepoint path (SQLite / PG), if the duplicate-column error is
+    swallowed but the ``inspect`` re-check finds the column still missing
+    (an inconsistent state — the column should have been added by a
+    concurrent process), the helper re-raises rather than silently leaving
+    it absent.
+
+    The savepoint's rollback restores the transaction to a clean state, but
+    that alone does not confirm a concurrent process actually committed this
+    column — the inspect re-check does. Drives the savepoint branch with a
+    hand-rolled fake connection.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from openjiuwen.agent_teams.organization import db as org_db
+
+    fake_conn = MagicMock()
+    fake_conn.dialect.name = "sqlite"
+
+    fake_conn.exec_driver_sql.side_effect = OperationalError(
+        "ALTER TABLE t ADD COLUMN c TEXT",
+        {},
+        Exception("duplicate column name: c"),
+    )
+
+    class _FakeSavepoint:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False  # propagate to outer except (see above test)
+
+    fake_conn.begin_nested.return_value = _FakeSavepoint()
+
+    # inspect reports the column is NOT present — inconsistent with the
+    # "duplicate column" error. The helper must surface this.
+    fake_inspector = MagicMock()
+    fake_inspector.get_columns.return_value = [{"name": "other"}]
+
+    with patch.object(org_db, "inspect", return_value=fake_inspector):
+        with pytest.raises(OperationalError):
+            org_db._add_column_idempotent(fake_conn, "t", "c", "TEXT")
+
+    fake_conn.begin_nested.assert_called_once()
+    fake_inspector.get_columns.assert_called_once_with("t")

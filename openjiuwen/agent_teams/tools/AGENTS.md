@@ -63,8 +63,10 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
   **`ddl_lock()` 是进程级 `asyncio.Lock`，跨进程不串行**——`ensure_org_static_tables` 的
   `create_all` / `CREATE INDEX` 与 `ADD COLUMN` 一样有 checkfirst 的 TOCTOU 竞态，故全部
   走 `_add_column_idempotent` / `_run_ddl_idempotent`（SAVEPOINT + DBAPIError catch，
-  MySQL 跳 savepoint 改 verify 复查），跨进程吞 `already exists` / `duplicate` 错误、
-  保持外层事务 committable。
+  MySQL 跳 savepoint），跨进程吞 `already exists` / `duplicate` 错误、保持外层事务
+  committable。**两条路径吞错后均复查 DDL 目标是否真存在**（savepoint 路径靠回滚恢复
+  事务状态 + `verify` / `inspect` 复查；MySQL 路径无 savepoint，复查直接读隐式提交后的
+  ground truth）——若目标仍缺失，re-raise 不一致态，不静默吞掉。
   (2) 状态翻转 / 删除走 CAS（`UPDATE/DELETE ... WHERE status=...` 看 `rowcount`）：
   `update_task_status` / `delete_task` / `cancel_task`（经 `_terminate_task_in_session`）/
   `delete_team` / `claim_task` / `reassign_task` / `start_task` / `observe_revision` 等。

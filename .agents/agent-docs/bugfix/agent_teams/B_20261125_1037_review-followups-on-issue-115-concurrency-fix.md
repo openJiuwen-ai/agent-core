@@ -239,7 +239,9 @@ docstring（53f1d5e38 已更新）措辞一致。
    `inspect.get_columns` 兜底验证列确实存在（隐式提交使 post-ALTER 状态成为 ground truth）；
    若列仍缺失则 re-raise（不一致状态）。
 
-   补 2 个迁移幂等单测：
+   补 2 个迁移幂等单测（与 `_add_column_idempotent` 修复同 commit `f8a4ceb90` 落地于
+   `tests/unit_tests/agent_teams/organization/test_org_db.py`，本 B_ 文档跨轮累积记录、
+   本节只回溯引用该轮已落地的测试，不在后续 commit 重复提供）：
    - `test_ensure_org_static_tables_is_idempotent_when_columns_already_exist`：先完整迁移，
      再在显式事务里调 `ensure_org_static_tables`，断言 commit 成功。
    - `test_add_column_idempotent_swallows_duplicate_column`：直接测 helper——预加列后调
@@ -353,3 +355,37 @@ post-DDL 状态成为 ground truth）。`ensure_org_static_tables` 的 `create_a
 
 **契约同步**：`tools/AGENTS.md` 第 (1) 条 DDL 锁清单追加 `_run_ddl_idempotent` 对
 `create_all` / `CREATE INDEX` 的覆盖说明。
+
+### 第九轮检视：savepoint 路径复查目标存在性 + 文档措辞消歧
+
+第九轮检视指出两个点：
+
+1. **`_run_ddl_idempotent` / `_add_column_idempotent` 仅在 MySQL 分支复查目标是否存在**：
+   savepoint 路径（SQLite/PG）吞 `already exists` / `duplicate column` 错误后只靠
+   savepoint 回滚恢复事务 clean 状态，不复查 DDL 目标是否真存在。若错误信息含
+   `already exists` 但实际并发进程并未提交该 DDL（半态、错误信息掩盖），savepoint
+   路径会静默吞掉而不验证，schema 缺失。
+
+   **修法**：把 MySQL 分支的复查逻辑提到两条路径共享——吞错后无条件调 `verify`
+   （`_run_ddl_idempotent`）或 `inspect.get_columns` 复查（`_add_column_idempotent`）。
+   savepoint 路径的回滚恢复事务状态，复查确认 DDL 目标已就位；若仍缺失，re-raise
+   不一致态。MySQL 路径无 savepoint 可回滚，复查直接读隐式提交后的 ground truth。
+
+2. **B_ 文档第六轮段落「补 2 个迁移幂等单测」措辞易被误读为本次变更未提供**：
+   检视者两轮都基于此措辞认为单测未随本次变更提供。实际上两条测试在第六轮
+   commit `f8a4ceb90` 已与 `_add_column_idempotent` 修复一起新增、落在
+   `tests/unit_tests/agent_teams/organization/test_org_db.py`。本 B_ 文档跨轮累积记录，
+   第六节回溯引用该轮已落地的测试，不在后续 commit 重复提供。
+
+   **修法**：在该处加注 commit `f8a4ceb90` 落地位置 + 「本节回溯引用、不在后续
+   commit 重复提供」的说明，消除「本次变更未提供」的误读。
+
+新增 2 个回归测试覆盖 savepoint 路径的复查 re-raise：
+- `test_run_ddl_idempotent_savepoint_path_reraises_when_verify_fails`：fake SQLite
+  连接驱动 savepoint 分支，DDL 在 savepoint 内抛 `already exists`，`verify` 返回 False
+  （不一致态）→ helper 必须 re-raise。savepoint 用 fake context manager（`__exit__`
+  返回 False 让异常传播到外层 `except`，匹配真实 `begin_nested` 的
+  ROLLBACK-then-propagate 行为）。
+- `test_add_column_idempotent_savepoint_path_reraises_when_column_still_missing`：
+  fake SQLite 连接驱动 savepoint 分支，ALTER 在 savepoint 内抛 `duplicate column`，
+  `inspect.get_columns` 返回不含目标列 → helper 必须 re-raise。

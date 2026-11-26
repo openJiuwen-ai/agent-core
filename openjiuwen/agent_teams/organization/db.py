@@ -61,9 +61,14 @@ def _add_column_idempotent(sync_conn, table: str, column: str, col_type: str) ->
     exit-time ``ROLLBACK TO SAVEPOINT`` would then raise a second
     ``DBAPIError`` ("SAVEPOINT does not exist"), masking the original
     "Duplicate column name" error and bypassing the message check below.
-    The implicit commit also leaves the post-ALTER state as the ground
-    truth, so a swallowed duplicate-column error is followed by an
-    ``inspect`` re-check confirming the column is actually present.
+
+    On **both** paths the column's existence is re-checked via ``inspect``
+    after a swallowed duplicate-column error. The savepoint path's rollback
+    restores the transaction to a clean state but does not, by itself,
+    confirm a concurrent process actually committed this column — the
+    inspect re-check does. If the column is somehow still missing, the
+    swallowed error was inconsistent with the post-ALTER state and the
+    helper re-raises rather than silently leaving the column absent.
     """
     use_savepoint = sync_conn.dialect.name != "mysql"
     try:
@@ -76,15 +81,15 @@ def _add_column_idempotent(sync_conn, table: str, column: str, col_type: str) ->
         msg = str(exc).lower()
         if "duplicate column" not in msg and "already exists" not in msg:
             raise
-        if not use_savepoint:
-            # MySQL: the implicit commit destroyed the savepoint, so
-            # re-verify the column actually exists — a concurrent process
-            # should have added it (that is why we got "Duplicate column
-            # name"); if it is somehow still missing, surface the
-            # inconsistency rather than silently leaving the column absent.
-            inspector = inspect(sync_conn)
-            if column not in {col["name"] for col in inspector.get_columns(table)}:
-                raise
+        # Re-verify on every path: the savepoint path's rollback restores
+        # the transaction to a clean state, but only this re-check confirms
+        # a concurrent process actually committed this column. The MySQL
+        # path has no savepoint to roll back to, so the implicit commit's
+        # post-ALTER state is the ground truth — the inspect reads it
+        # directly.
+        inspector = inspect(sync_conn)
+        if column not in {col["name"] for col in inspector.get_columns(table)}:
+            raise
 
 
 def _run_ddl_idempotent(
@@ -112,9 +117,16 @@ def _run_ddl_idempotent(
     (``begin_nested``) so the outer transaction stays committable when the
     ``already exists`` error is swallowed. On MySQL the ``SAVEPOINT`` is
     skipped (same reasoning as :func:`_add_column_idempotent` — the implicit
-    commit destroys it); the ``verify`` callable re-checks that the DDL
-    target actually exists after a swallowed error (the implicit commit
-    makes the post-DDL state the ground truth).
+    commit destroys it).
+
+    On **both** paths the ``verify`` callable is invoked after a swallowed
+    ``already exists`` / ``duplicate`` error to re-check that the DDL target
+    actually exists. The savepoint path's rollback restores the transaction
+    to a clean state but does not, by itself, confirm that a concurrent
+    process committed the very DDL we were attempting — verify does. If
+    verify reports the target still missing, the swallowed error was
+    inconsistent with the post-DDL state and the helper re-raises rather
+    than silently leaving the schema absent.
     """
     use_savepoint = sync_conn.dialect.name != "mysql"
     try:
@@ -127,9 +139,13 @@ def _run_ddl_idempotent(
         msg = str(exc).lower()
         if "already exists" not in msg and "duplicate" not in msg:
             raise
-        if not use_savepoint:
-            if not verify():
-                raise
+        # Re-verify on every path: the savepoint path's rollback restores
+        # the transaction to a clean state, but only ``verify`` confirms a
+        # concurrent process actually committed this DDL target. The MySQL
+        # path has no savepoint to roll back to, so the implicit commit's
+        # post-DDL state is the ground truth — verify reads it directly.
+        if not verify():
+            raise
 
 
 def ensure_org_static_tables(sync_conn) -> None:
