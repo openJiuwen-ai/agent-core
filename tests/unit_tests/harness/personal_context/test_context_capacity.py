@@ -42,6 +42,14 @@ def _commit_without_process_scheduling(manifest, *, deadline, cancelled):
     return commit(json.loads(manifest.read_text(encoding="utf-8")), seconds=max(0, deadline - time.monotonic()))
 
 
+@pytest.fixture(autouse=True)
+def _deterministic_capacity_commit(monkeypatch):
+    """Keep direct capacity assertions off the 100 ms child commit budget."""
+    from openjiuwen.harness.personal_context import context_capacity
+
+    monkeypatch.setattr(context_capacity, "_commit_candidate", _commit_without_process_scheduling)
+
+
 @pytest.mark.parametrize("value", [9, 10001, 50.5, "50", True, None])
 def test_capacity_rejects_invalid_config(value):
     with pytest.raises(BaseError):
