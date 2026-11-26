@@ -1032,7 +1032,37 @@ async def test_abort_sets_coordinator_flag() -> None:
 
     # Future should be resolved with abort error
     fut_result = await handler.wait_completion(timeout=1.0)
-    assert fut_result == {"error": "aborted"}
+    assert fut_result == {
+        "output": "aborted",
+        "result_type": "error",
+        "error": "aborted",
+        "termination_reason": "cancelled",
+    }
+
+
+@pytest.mark.asyncio
+async def test_task_loop_invoke_returns_abort_reason() -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=True))
+    slow_react = SlowReactAgent()
+    agent.set_react_agent(slow_react, initialized=True)
+
+    await Runner.start()
+    task = asyncio.create_task(Runner.run_agent(agent, {"query": "slow"}))
+    try:
+        async with asyncio.timeout(15):
+            await slow_react.started.wait()
+            await agent.abort()
+            assert await task == {
+                "output": "aborted",
+                "result_type": "error",
+                "error": "aborted",
+                "termination_reason": "cancelled",
+            }
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await Runner.stop()
 
 
 @pytest.mark.asyncio

@@ -142,6 +142,10 @@ class TaskLoopController(Controller):
   `error` 字段交付。轮次等待超时
   会先取消调度任务，随后返回 `error="completion_timeout"` 和
   `termination_reason="error"`。
+- 没有活动轮次时返回同样结构的错误结果，`error="no active round"`。
+  主动中止返回 `error="aborted"` 和 `termination_reason="cancelled"`。
+  等待任务被取消时，`last_result` 记录 `error="cancelled"` 和
+  `termination_reason="cancelled"`，并继续抛出 `CancelledError`。
 - `LoopCoordinator.get_state()` / `load_state()` 支持 checkpoint 恢复（冷恢复续跑，见 `S_02` 的 `DeepAgentState.stop_condition_state`）。
 
 ## 数据结构

@@ -383,6 +383,18 @@ async def test_handle_input_waits_for_completion() \
 
 
 @pytest.mark.asyncio
+async def test_wait_completion_without_active_round_returns_structured_error() -> None:
+    handler = TaskLoopEventHandler(_make_agent())
+
+    assert await handler.wait_completion() == {
+        "output": "no active round",
+        "result_type": "error",
+        "error": "no active round",
+        "termination_reason": "error",
+    }
+
+
+@pytest.mark.asyncio
 async def test_wait_completion_propagates_cancelled_error() -> None:
     """Cancelling the waiter must not convert cancellation into a normal result."""
     agent = _make_agent()
@@ -398,7 +410,12 @@ async def test_wait_completion_propagates_cancelled_error() -> None:
     with pytest.raises(asyncio.CancelledError):
         await wait_task
 
-    assert handler.last_result == {"error": "cancelled"}
+    assert handler.last_result == {
+        "output": "cancelled",
+        "result_type": "error",
+        "error": "cancelled",
+        "termination_reason": "cancelled",
+    }
 
 
 @pytest.mark.asyncio
