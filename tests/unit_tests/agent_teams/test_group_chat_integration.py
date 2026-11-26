@@ -482,6 +482,56 @@ async def test_host_notification_cancellation_preserves_in_flight_read(runtime, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("callbacks", [1, 2])
+async def test_host_callback_can_stop_its_own_team(runtime, callbacks):
+    from openjiuwen.agent_teams.agent.coordination.kernel import CoordinationKernel
+    from openjiuwen.agent_teams.group_chat.message_handler import GroupMessageHandler
+    from tests.unit_tests.agent_teams.test_coordination_lifecycle import _make_kernel_host
+
+    assert (await runtime.backend.spawn_host_managed_member(member_name="colleague", display_name="Colleague")).ok
+    host = _make_kernel_host()
+    host.team_name = "group"
+    host.resources.harness = None
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+    handler = GroupMessageHandler(host, SimpleNamespace(), SimpleNamespace(), None)
+    kernel._dispatcher = SimpleNamespace(group_message=handler)
+    runtime.agent.stop_coordination = kernel.stop
+    entered = 0
+    ready, release, stopped = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def callback(message):
+        nonlocal entered
+        entered += 1
+        if entered == callbacks:
+            ready.set()
+        await release.wait()
+        assert await runtime.manager.stop_team(team_name="group", session_id="session")
+        stopped.set()
+
+    await runtime.backend.register_host_managed_inbound("colleague", callback)
+    for index in range(callbacks):
+        posted = await runtime.backend.append_group_message(
+            "user", "Stop", client_message_id=f"stop-{index}", mentions=["colleague"],
+        )
+        handler._schedule_host_notification(runtime.backend, posted.message.message_id)
+    tasks = tuple(handler._host_notifications.values())
+    try:
+        await asyncio.wait_for(ready.wait(), timeout=1)
+        release.set()
+        await asyncio.wait_for(stopped.wait(), timeout=1)
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=1)
+    finally:
+        release.set()
+        await handler.cancel_host_notifications()
+    host.stream_controller.close_stream.assert_called()
+    host.session_manager.release_session.assert_called()
+    assert await runtime.manager.pool.get("group") is None
+    assert not handler._host_message_reads
+    assert await runtime.db.member.get_member("alice", "group") is not None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cancelled", [False, True])
 async def test_host_notification_query_failure_is_drained(cancelled):
     from openjiuwen.agent_teams.group_chat.message_handler import GroupMessageHandler
