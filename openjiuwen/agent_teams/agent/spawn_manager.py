@@ -426,7 +426,7 @@ class SpawnManager:
         )
 
     def schedule_approval_recovery(
-        self, checkpoint: _MemberApprovalCheckpoint, recover: Callable[[], Awaitable[None]]
+        self, checkpoint: _MemberApprovalCheckpoint, recover: Callable[[], Awaitable[bool]]
     ) -> None:
         member = checkpoint.member_name
         if (
@@ -440,7 +440,10 @@ class SpawnManager:
 
         def _release_finished_task(done: asyncio.Task) -> None:
             if self._approval_recovery_attempts.get(member) is done:
-                self._approval_recovery_attempts[member] = None
+                if not done.cancelled() and done.exception() is None and done.result() is False:
+                    del self._approval_recovery_attempts[member]
+                else:
+                    self._approval_recovery_attempts[member] = None
 
         task.add_done_callback(_release_finished_task)
 

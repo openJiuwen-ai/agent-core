@@ -91,6 +91,7 @@ generated: true
 | [D-20261110-1903-team-goal-mode](designs/active/D-20261110-1903-team-goal-mode/design.md) | D | Team Leader 与成员 Goal 模式设计方案 | alan_cheng | — |
 | [D-20261121-0832-group-member-notification](designs/proposals/D-20261121-0832-group-member-notification/design.md) | D | 群聊成员通知入口设计方案 | weichenhao | — |
 | [D-20261125-1414-team-stopped-approval-recovery](designs/active/D-20261125-1414-team-stopped-approval-recovery/design.md) | D | 恢复阻塞持久化团队完成的审批邮箱 | MaxMadMax | — |
+| [D-20261126-1704-team-lifecycle-boundaries](designs/active/D-20261126-1704-team-lifecycle-boundaries/design.md) | D | 收敛通知关闭与审批恢复接管边界 | MaxMadMax | — |
 | [SDD-0011](designs/archive/SDD-0011-evolvable-team-workspace/design.md) | D | 可演进 Team 工作区 | @xiajing | — |
 | [SDD-0015](designs/proposals/SDD-0015-agent-team-scheduled-dispatch/design.md) | D | AgentTeam 调度模式：任务图驱动的低通信协同与验证闭环 | @alan_cheng | — |
 | [SDD-0016](designs/archive/SDD-0016-third-party-agent-reliability/design.md) | D | 三方 Agent 可靠性设计 | @zhanglongmin | — |
@@ -279,7 +280,7 @@ generated: true
 | [B_20261117_1240_swarmflow-fork-round-boundary-attachment](bugfix/agent_teams/B_20261117_1240_swarmflow-fork-round-boundary-attachment.md) | B | Swarmflow fork 轮数边界被运行时附件消息整体前移一轮 | chenchunzhou | [SDD-0014](designs/active/SDD-0014-swarmflow-session-fork/design.md) |
 | [B_20261117_1626_directed-assignment-notice-dropped](bugfix/agent_teams/B_20261117_1626_directed-assignment-notice-dropped.md) | B | 定向指派/改派的通知被接收端 pending 判据丢弃，新 owner 永不唤醒 | xiajing | 无独立 D：缺陷修复只改消费端投递判据，不新增契约与机制；依据见 S_03（TASK_CLAIMED 定向投递）与 jiuwenswarm 问题 |
 | [B_20261118_1142_shared-templates-name-leader-only-tools](bugfix/agent_teams/B_20261118_1142_shared-templates-name-leader-only-tools.md) | B | 全员共享提示词模板点名 leader 专属工具误导 teammate | zhanglongmin | 无独立 D：日常文案修复，无独立设计文档；行为依据 F_76（提示词分层与渐进式披露）、F_122（framework 建队的 <team-policy> 投递）与 prompts/AGENTS.md 编辑规则 2。 |
-| [B_20261125_1733_team_stopped_approval_mail](bugfix/agent_teams/B_20261125_1733_team_stopped_approval_mail.md) | B | 停止成员的审批回执阻塞持久化 Team 完成 | MaxMadMax | [D-20261125-1414-team-stopped-approval-recovery](designs/active/D-20261125-1414-team-stopped-approval-recovery/design.md) |
+| [B_20261125_1733_team_stopped_approval_mail](bugfix/agent_teams/B_20261125_1733_team_stopped_approval_mail.md) | B | 停止成员的审批回执阻塞持久化 Team 完成 | MaxMadMax | [D-20261125-1414-team-stopped-approval-recovery](designs/active/D-20261125-1414-team-stopped-approval-recovery/design.md)<br>[D-20261126-1704-team-lifecycle-boundaries](designs/active/D-20261126-1704-team-lifecycle-boundaries/design.md) |
 | [S_01_public-api-and-spec-flow](specs/agent_teams/S_01_public-api-and-spec-flow.md) | S | S_01 公开 API 表面与 Spec 流 | alan_cheng | — |
 | [S_02_team-agent-architecture](specs/agent_teams/S_02_team-agent-architecture.md) | S | TeamAgent 架构规约 | alan_cheng | — |
 | [S_03_coordination-protocol](specs/agent_teams/S_03_coordination-protocol.md) | S | Coordination Protocol | alan_cheng | — |
