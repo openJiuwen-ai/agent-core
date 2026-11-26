@@ -11,6 +11,8 @@ from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from openjiuwen.harness.personal_context._run_token_usage_store import valid_usage_summary
+
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _PersonalContextState = Literal["CREATED", "CONFIGURED", "STARTING", "RUNNING", "STOPPING", "STOPPED", "FAILED"]
 _FetchState = Literal["STOPPED", "STARTING", "RUNNING", "STOPPING", "FAILED"]
@@ -126,7 +128,7 @@ class PersonalContextStatus(BaseModel):
         value: dict[str, dict[str, object]],
     ) -> dict[str, dict[str, object]]:
         for service_id, progress in value.items():
-            if not service_id or set(progress) - {"capacity_maintenance"} not in (
+            if not service_id or set(progress) - {"capacity_maintenance", "token_usage"} not in (
                 _FETCH_RUN_PROGRESS_FIELDS,
                 _FETCH_RUN_PROGRESS_FIELDS | _FETCH_RUN_RESULT_FIELDS,
             ):
@@ -138,6 +140,10 @@ class PersonalContextStatus(BaseModel):
             run_state = progress["run_state"]
             if run_state not in _FETCH_RUN_STATES:
                 raise ValueError("fetch run progress has an invalid run_state")
+            if "token_usage" in progress and (
+                run_state in {"idle", "running", "stopping"} or not valid_usage_summary(progress["token_usage"])
+            ):
+                raise ValueError("fetch run progress has invalid token usage")
             if "created_node_count" in progress:
                 for field in ("created_node_count", "updated_node_count"):
                     count = progress[field]
