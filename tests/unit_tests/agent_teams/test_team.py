@@ -1034,6 +1034,31 @@ async def test_is_team_completed_all_conditions_met(agent_team, db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
+async def test_is_team_completed_unstarted_member_is_settled(agent_team, db):
+    """懒拉起成员从未启动=无活跃工作，不得阻塞团队完成。"""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.UNSTARTED.value)
+    await _drain_one_task(agent_team)
+
+    snapshot = await agent_team.is_team_completed()
+
+    assert snapshot is not None
+    assert snapshot.member_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_is_team_completed_starting_member_returns_none(agent_team, db):
+    """spawn 在飞（STARTING）仍算活跃，必须阻塞完成判定。"""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.STARTING.value)
+    await _drain_one_task(agent_team)
+
+    assert await agent_team.is_team_completed() is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.level1
 async def test_is_team_completed_member_busy_returns_none(agent_team, db):
     """A non-leader member still BUSY blocks completion."""
