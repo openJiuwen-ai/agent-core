@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.coordination.dispatcher import EventDispatcher
     from openjiuwen.agent_teams.agent.scheduling import TeamScheduler
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+    from openjiuwen.agent_teams.harness.team_harness import _MemberApprovalCheckpoint
 
 
 class CoordinationKernel:
@@ -255,8 +256,8 @@ class CoordinationKernel:
         # database actually holds. No-op for every other role.
         await host.seed_member_registry()
         harness = resources.harness
-        approval_startup = isinstance(harness, TeamHarness) and harness._approval_startup_pending()
-        if not approval_startup:
+        approval_startup = harness.pending_approval_startup() if isinstance(harness, TeamHarness) else None
+        if approval_startup is None:
             await host.update_status(MemberStatus.READY)
         # Re-base the idle clock before the poll timers come back. A member
         # that was already idle when the team paused keeps its idle stamp
@@ -270,7 +271,7 @@ class CoordinationKernel:
         if not self._event_bus.is_running:
             if self._dispatcher is None:
                 raise RuntimeError("CoordinationKernel.start() requires setup() before start()")
-            if not approval_startup:
+            if approval_startup is None:
                 await self._event_bus.start(wake_callback=self._build_wake_callback())
         if infra.messager:
             team_name = host.team_name
@@ -297,17 +298,16 @@ class CoordinationKernel:
         # new message arrives. Runs last, once the kernel is fully live, and
         # is a no-op when there is nothing suspended to resume.
         await self.resume_paused_round()
-        if approval_startup:
-            await self._complete_approval_startup(harness)
+        if approval_startup is not None:
+            await self._complete_approval_startup(harness, approval_startup)
         if host.role == TeamRole.LEADER:
             # Everything a consumer needs before interacting has completed
             # by this point, so publish it on the stream (no-op without one).
             host.stream_controller.emit_team_recovered()
 
-    async def _complete_approval_startup(self, harness: TeamHarness) -> None:
+    async def _complete_approval_startup(self, harness: TeamHarness, binding: _MemberApprovalCheckpoint) -> None:
         """Take over the restart claim only after the member can read its mailbox."""
         member = self._host.team_member
-        binding = harness._approval_checkpoint
         claim = asyncio.create_task(member.db.member.try_transition_member_status(
             member.member_name, member.team_name, MemberStatus.RESTARTING, MemberStatus.READY,
         ))
@@ -320,11 +320,11 @@ class CoordinationKernel:
             raise
         if not binding.ready_written:
             raise RuntimeError("Member approval recovery lost its restart claim")
-        await member._publish_status_changed(MemberStatus.RESTARTING, MemberStatus.READY)
+        await member.publish_status_changed(MemberStatus.RESTARTING, MemberStatus.READY)
         # Transport can enqueue during startup, but it must not dispatch to
         # the restored harness before this runtime owns the restart claim.
         await self._event_bus.start(wake_callback=self._build_wake_callback())
-        harness._confirm_approval_startup()
+        harness.confirm_approval_startup()
 
     def _build_wake_callback(self):
         """Compose the bus wake callback: coordination first, scheduler second.
@@ -593,7 +593,7 @@ class CoordinationKernel:
         # approval restore can leave resources to dispose before reaching running.
         host = self._host
         harness = host.resources.harness
-        failed_approval_startup = isinstance(harness, TeamHarness) and harness._approval_startup_pending()
+        failed_approval_startup = isinstance(harness, TeamHarness) and harness.pending_approval_startup() is not None
         if self._lifecycle_state == "stopped" or (self._lifecycle_state == "idle" and not failed_approval_startup):
             return
         if host.role == TeamRole.LEADER:

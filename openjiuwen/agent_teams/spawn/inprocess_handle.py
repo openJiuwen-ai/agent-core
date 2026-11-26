@@ -11,6 +11,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
+from openjiuwen.core.common.logging import team_logger
+
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.harness.team_harness import _MemberApprovalCheckpoint
 
@@ -87,6 +89,21 @@ class InProcessSpawnHandle:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
+
+    async def wait_for_approval_startup(self, member_name: str) -> bool:
+        """Wait without cancelling the member task and prefer task exit over startup."""
+        binding = self.approval_checkpoint
+        task = self._task
+        if task is None or binding is None or binding.startup is None:
+            return False
+        await asyncio.wait((binding.startup, task), return_when=asyncio.FIRST_COMPLETED)
+        if not task.done():
+            return True
+        if not task.cancelled():
+            error = task.exception()
+            if error is not None:
+                team_logger.warning("Approval recovery startup failed for {}: {}", member_name, error)
+        return False
 
     async def wait_for_completion(self) -> int:
         """Block until the wrapped task finishes. Returns 0 on success."""

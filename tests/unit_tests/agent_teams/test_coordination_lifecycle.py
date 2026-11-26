@@ -72,6 +72,9 @@ def _make_kernel_host(
         ),
         spawn_manager=SimpleNamespace(
             spawned_handles={},
+            arm_approval_recovery=MagicMock(),
+            disarm_approval_recovery=MagicMock(),
+            cancel_approval_recovery_tasks=AsyncMock(),
             cancel_recovery_tasks=AsyncMock(),
             shutdown_all_handles=AsyncMock(),
         ),

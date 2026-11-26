@@ -125,10 +125,11 @@ class TeamMember:
             f"Member {self.member_name} status: {old_status.value} -> {new_status.value}"
         )
 
-        await self._publish_status_changed(old_status, new_status)
+        await self.publish_status_changed(old_status, new_status)
         return True
 
-    async def _publish_status_changed(self, old_status: MemberStatus, new_status: MemberStatus) -> None:
+    async def publish_status_changed(self, old_status: MemberStatus, new_status: MemberStatus) -> None:
+        """Notify the team after a member status transition has committed."""
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),

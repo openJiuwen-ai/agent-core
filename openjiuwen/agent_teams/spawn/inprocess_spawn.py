@@ -87,21 +87,28 @@ async def inprocess_spawn(
     teammate.configure(spec, ctx)
     harness = teammate.resources.harness
     binding = None
-    if (
-        (track_approval_checkpoint or approval_checkpoint is not None)
-        and ctx.role == TeamRole.TEAMMATE
-        and session_id
-        and ctx.member_name
-        and type(harness) is TeamHarness
-        and agent_spec.card is None
-        and team_agent.card.id != card_id
-        and not any(agent.card is not None and agent.card.id == card_id for agent in spec.agents.values())
-    ):
-        checkpointer = (
-            approval_checkpoint.checkpointer if approval_checkpoint is not None else CheckpointerFactory.get_checkpointer()
-        )
-        if type(checkpointer) is InMemoryCheckpointer:
-            binding = _MemberApprovalCheckpoint(team_name, ctx.member_name, session_id, card_id, checkpointer)
+    track_checkpoint = track_approval_checkpoint or approval_checkpoint is not None
+    if track_checkpoint and ctx.role == TeamRole.TEAMMATE and isinstance(harness, TeamHarness):
+        # Checkpoint provenance relies on the two built-in implementations.
+        harness_class = type(harness)
+        unique_member_card = agent_spec.card is None and team_agent.card.id != card_id
+        if unique_member_card:
+            unique_member_card = not any(
+                agent.card is not None and agent.card.id == card_id
+                for agent in spec.agents.values()
+            )
+        if harness_class is TeamHarness and unique_member_card:
+            if session_id and ctx.member_name:
+                checkpointer = (
+                    approval_checkpoint.checkpointer
+                    if approval_checkpoint is not None
+                    else CheckpointerFactory.get_checkpointer()
+                )
+                checkpointer_class = type(checkpointer)
+                if isinstance(checkpointer, InMemoryCheckpointer) and checkpointer_class is InMemoryCheckpointer:
+                    binding = _MemberApprovalCheckpoint(
+                        team_name, ctx.member_name, session_id, card_id, checkpointer
+                    )
 
     if approval_checkpoint is not None:
         if binding is None or (
@@ -116,7 +123,7 @@ async def inprocess_spawn(
         if binding.restore_snapshot is None or binding.current_snapshot() is not binding.restore_snapshot:
             raise RuntimeError("Original member approval checkpoint is unavailable")
     if binding is not None:
-        harness._approval_checkpoint = binding
+        harness.bind_approval_checkpoint(binding)
     # Attach the leader's session-level background task controller AFTER
     # configure (before it the teammate has no harness, so the call would be
     # a no-op): the teammate's swarmflow tool then registers its runs in the

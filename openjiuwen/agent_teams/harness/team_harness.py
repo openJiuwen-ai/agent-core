@@ -78,12 +78,12 @@ class _MemberApprovalCheckpoint:
     ready_written: bool = False
 
     def current_snapshot(self) -> object | None:
-        return self.checkpointer._agent_checkpoint_token(self.session_id, self.agent_id)
+        return self.checkpointer.agent_checkpoint_token(self.session_id, self.agent_id)
 
     def matches(self, child: Any) -> bool:
         return (
             child.get_session_id() == self.session_id
-            and child._checkpoint_agent_id() == self.agent_id
+            and child.checkpoint_agent_id() == self.agent_id
             and child.checkpointer() is self.checkpointer
         )
 
@@ -205,7 +205,8 @@ class TeamHarness:
         child = self._make_child_session(team_session)
         kv_cache_harness_session_lifecycle_hook.on_harness_session_created(self, child)
         binding = self._approval_checkpoint
-        snapshot = binding.restore_snapshot if self._approval_startup_pending() else None
+        pending_startup = self.pending_approval_startup()
+        snapshot = pending_startup.restore_snapshot if pending_startup is not None else None
         bound_child = binding is not None and isinstance(team_session, AgentTeamSession) and binding.matches(child)
         if snapshot is not None and (not bound_child or binding.current_snapshot() is not snapshot):
             raise RuntimeError("Original member approval checkpoint is unavailable")
@@ -227,13 +228,21 @@ class TeamHarness:
             self._approval_child = child
         self._seed_initial_plan_mode(child)
 
-    def _approval_startup_pending(self) -> bool:
-        binding = self._approval_checkpoint
-        return binding is not None and binding.startup is not None and not binding.startup.done()
+    def bind_approval_checkpoint(self, binding: _MemberApprovalCheckpoint) -> None:
+        """Bind the member checkpoint before its native harness starts."""
+        self._approval_checkpoint = binding
 
-    def _confirm_approval_startup(self) -> None:
+    def pending_approval_startup(self) -> _MemberApprovalCheckpoint | None:
+        """Return the checkpoint binding while approval recovery is starting."""
         binding = self._approval_checkpoint
         if binding is not None and binding.startup is not None and not binding.startup.done():
+            return binding
+        return None
+
+    def confirm_approval_startup(self) -> None:
+        """Signal that the restored member owns the claim and can read its mail."""
+        binding = self.pending_approval_startup()
+        if binding is not None:
             binding.startup.set_result(None)
 
     async def stop(self) -> None:
@@ -247,14 +256,11 @@ class TeamHarness:
         permanent teardown).
         """
         native = self._native
-        binding = (
-            self._approval_checkpoint
-            if self._active_agent_session is self._approval_child
-            and native is not None
-            and native.state is HarnessState.IDLE
-            and native.active_round is None
-            else None
-        )
+        child = self._active_agent_session
+        binding = None
+        if child is not None and native is not None and child is self._approval_child:
+            if native.state is HarnessState.IDLE and native.active_round is None:
+                binding = self._approval_checkpoint
         if native is not None and native.state is not HarnessState.TERMINATED:
             await native.stop()
         try:
@@ -377,19 +383,14 @@ class TeamHarness:
         """
         card = self._native.card if self._native is not None else None
         binding = self._approval_checkpoint
-        if (
-            binding is not None
-            and isinstance(team_session, AgentTeamSession)
-            and team_session.get_session_id() == binding.session_id
-            and card is not None
-            and card.id == binding.agent_id
-        ):
-            return team_session.create_agent_session(
-                card=card,
-                share_stream_writer=False,
-                member_name=self._member_name,
-                _checkpointer=binding.checkpointer,
-            )
+        if binding is not None and isinstance(team_session, AgentTeamSession) and card is not None:
+            if team_session.get_session_id() == binding.session_id and card.id == binding.agent_id:
+                return team_session.create_agent_session(
+                    card=card,
+                    share_stream_writer=False,
+                    member_name=self._member_name,
+                    _checkpointer=binding.checkpointer,
+                )
         if team_session is not None and hasattr(team_session, "create_agent_session"):
             return team_session.create_agent_session(
                 card=card,

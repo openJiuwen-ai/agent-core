@@ -717,7 +717,7 @@ class TeamRuntimeManager:
             from openjiuwen.agent_teams.harness.team_harness import TeamHarness
 
             harness = getattr(getattr(agent, "resources", None), "harness", None)
-            if isinstance(harness, TeamHarness) and harness._approval_startup_pending():
+            if isinstance(harness, TeamHarness) and harness.pending_approval_startup() is not None:
                 # A targeted restart did not become live. The leader's recovery
                 # task owns the claim and will release it after this teardown.
                 await agent.stop_coordination()

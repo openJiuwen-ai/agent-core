@@ -23,6 +23,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamRole,
     TeamRuntimeContext,
 )
+from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
 from openjiuwen.agent_teams.tools.member_options import (
     get_member_agent_template,
     get_member_builtin_model,
@@ -40,7 +41,6 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.state import TeamAgentState
     from openjiuwen.agent_teams.fork import ForkContext
     from openjiuwen.agent_teams.harness.team_harness import _MemberApprovalCheckpoint
-    from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
     from openjiuwen.core.runner.spawn.process_manager import SpawnedProcessHandle
     from openjiuwen.core.session.stream.base import OutputSchema
 
@@ -166,14 +166,13 @@ class SpawnManager:
         team_logger.info("[{}] spawning teammate: {}", self._configurator.member_name or "?", member_name)
 
         spec = self._configurator.spec
-        if approval_checkpoint is not None and (
-            not self._approval_recovery_open
-            or self._approval_checkpoints.get(member_name) is not approval_checkpoint
-            or ctx.cli_agent
-            or spec is None
-            or spec.spawn_mode != "inprocess"
-        ):
-            raise RuntimeError("Member approval recovery is no longer eligible")
+        if approval_checkpoint is not None:
+            owns_checkpoint = self._approval_recovery_open and (
+                self._approval_checkpoints.get(member_name) is approval_checkpoint
+            )
+            native_spawn = not ctx.cli_agent and spec is not None and spec.spawn_mode == "inprocess"
+            if not owns_checkpoint or not native_spawn:
+                raise RuntimeError("Member approval recovery is no longer eligible")
         # Keep the original evidence through bounded handle creation retries.
         if approval_checkpoint is None:
             self._approval_checkpoints.pop(member_name, None)
@@ -381,8 +380,11 @@ class SpawnManager:
                     await asyncio.sleep(2**attempt)
                 continue
 
-            if approval_checkpoint is not None and not await self._wait_for_approval_startup(member_name, handle):
-                return False
+            if approval_checkpoint is not None:
+                if not isinstance(handle, InProcessSpawnHandle):
+                    return False
+                if not await handle.wait_for_approval_startup(member_name):
+                    return False
             team_logger.info("Teammate {} restarted successfully", member_name)
             return True
 
@@ -393,18 +395,6 @@ class SpawnManager:
         if on_failed is not None and last_error is not None:
             await on_failed(last_error)
         return False
-
-    @staticmethod
-    async def _wait_for_approval_startup(member_name: str, handle: InProcessSpawnHandle | None) -> bool:
-        binding = handle.approval_checkpoint if handle is not None else None
-        if binding is None or binding.startup is None:
-            return False
-        await asyncio.wait((binding.startup, handle._task), return_when=asyncio.FIRST_COMPLETED)
-        if handle._task.done():
-            if not handle._task.cancelled() and (error := handle._task.exception()) is not None:
-                team_logger.warning("Approval recovery startup failed for {}: {}", member_name, error)
-            return False
-        return True
 
     def arm_approval_recovery(self) -> None:
         self._approval_recovery_attempts.clear()
@@ -419,16 +409,21 @@ class SpawnManager:
     def stopped_approval_checkpoints(self) -> list[_MemberApprovalCheckpoint]:
         if not self._approval_recovery_open or self._state.team_session is None:
             return []
-        return [
-            binding
-            for member, binding in self._approval_checkpoints.items()
-            if member not in self._approval_recovery_attempts
+        candidates = []
+        for member, binding in self._approval_checkpoints.items():
+            if not self._approval_recovery_available(member):
+                continue
+            if binding.exited and binding.saved_snapshot is not None:
+                if binding.current_snapshot() is binding.saved_snapshot:
+                    candidates.append(binding)
+        return candidates
+
+    def _approval_recovery_available(self, member: str) -> bool:
+        return (
+            member not in self._approval_recovery_attempts
             and member not in self._spawning
             and not self.has_live_handle(member)
-            and binding.exited
-            and binding.saved_snapshot is not None
-            and binding.current_snapshot() is binding.saved_snapshot
-        ]
+        )
 
     def schedule_approval_recovery(
         self, checkpoint: _MemberApprovalCheckpoint, recover: Callable[[], Awaitable[None]]
@@ -437,9 +432,7 @@ class SpawnManager:
         if (
             not self._approval_recovery_open
             or self._approval_checkpoints.get(member) is not checkpoint
-            or member in self._approval_recovery_attempts
-            or member in self._spawning
-            or self.has_live_handle(member)
+            or not self._approval_recovery_available(member)
         ):
             return
         task = self._track_recovery_task(asyncio.create_task(recover()))

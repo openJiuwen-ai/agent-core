@@ -261,7 +261,8 @@ class Session:
         return self._inner.stream_writer_manager(
         ).stream_output()
 
-    def _checkpoint_agent_id(self) -> str:
+    def checkpoint_agent_id(self) -> str:
+        """Return the agent identity used to key this session's checkpoint."""
         return self._inner.agent_id()
 
     async def pre_run(self, **kwargs):
