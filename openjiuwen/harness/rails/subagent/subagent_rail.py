@@ -109,7 +109,6 @@ class SubagentRail(DeepAgentRail):
             return
 
         configured_subagents = list(agent.deep_config.subagents)
-        available_agents = self._build_available_agents_description(configured_subagents)
         agent_id = getattr(getattr(agent, "card", None), "id", None)
 
         if self._runtime_mode():
@@ -136,7 +135,7 @@ class SubagentRail(DeepAgentRail):
                     create_task_tool(
                         parent_agent=agent,
                         available_agents=self._build_available_agents_description(
-                            sync_subagents
+                            sync_subagents, compact_browser_catalog=True
                         ),
                         language=self.system_prompt_builder.language,
                         agent_id=agent_id,
@@ -151,14 +150,16 @@ class SubagentRail(DeepAgentRail):
                 parent_agent=agent,
                 toolkit=self._toolkit,
                 language=self.system_prompt_builder.language,
-                available_agents=available_agents,
+                available_agents=self._build_available_agents_description(configured_subagents),
                 agent_id=agent_id,
             )
             mode = "async session"
         else:
             self.tools = create_task_tool(
                 parent_agent=agent,
-                available_agents=available_agents,
+                available_agents=self._build_available_agents_description(
+                    configured_subagents, compact_browser_catalog=True
+                ),
                 language=self.system_prompt_builder.language,
                 agent_id=agent_id,
                 allowed_subagent_types=self._subagent_names(configured_subagents),
@@ -184,9 +185,7 @@ class SubagentRail(DeepAgentRail):
         runtime_subagents, sync_subagents = self._partition_runtime_subagents(
             configured_subagents
         )
-        runtime_agents = self._build_available_agents_description(runtime_subagents)
-        sync_agents = self._build_available_agents_description(sync_subagents)
-        all_agents = self._build_available_agents_description(configured_subagents)
+        use_runtime = self._runtime_mode()
         refreshed = []
         for tool in self.tools:
             card = getattr(tool, "card", None)
@@ -194,20 +193,19 @@ class SubagentRail(DeepAgentRail):
             if name not in self._REFRESHABLE_TOOL_NAMES:
                 continue
             if name == "subagent_spawn":
-                available_agents = runtime_agents
-                allowed_types = self._subagent_names(runtime_subagents)
-            elif self._runtime_mode():
-                available_agents = sync_agents
-                allowed_types = self._subagent_names(sync_subagents)
+                available_subagents = runtime_subagents
+            elif use_runtime:
+                available_subagents = sync_subagents
             else:
-                available_agents = all_agents
-                allowed_types = self._subagent_names(configured_subagents)
+                available_subagents = configured_subagents
             card.description = get_tool_description(name, language).format(
-                available_agents=available_agents,
+                available_agents=self._build_available_agents_description(
+                    available_subagents, compact_browser_catalog=name == "task_tool",
+                ),
             )
             set_allowed_types = getattr(tool, "set_allowed_subagent_types", None)
             if callable(set_allowed_types):
-                set_allowed_types(allowed_types)
+                set_allowed_types(self._subagent_names(available_subagents))
             refreshed.append(name)
         if refreshed:
             logger.info("[SubagentRail] Refreshed available_agents for %s", ", ".join(refreshed))
@@ -372,15 +370,19 @@ class SubagentRail(DeepAgentRail):
         ),
     }
 
-    def _build_available_agents_description(self, subagents: List[SubAgentConfig | "DeepAgent"]) -> str:
+    def _build_available_agents_description(
+        self, subagents: list[SubAgentConfig | "DeepAgent"], *, compact_browser_catalog: bool = False,
+    ) -> str:
         if not subagents:
             return ""
 
         lines = []
+        english = self.system_prompt_builder.language == "en"
         for spec in subagents:
             agent_name, agent_desc = self._extract_agent_meta(spec)
+            browser_with_compact_catalog = agent_name == "browser_agent" and compact_browser_catalog
             concise_catalog = (
-                self.system_prompt_builder.language == "en"
+                (english or browser_with_compact_catalog)
                 and isinstance(spec, SubAgentConfig)
                 and not spec.tools
                 and agent_name in self._KNOWN_AGENT_TOOLS
@@ -394,7 +396,7 @@ class SubagentRail(DeepAgentRail):
                 lines.append("  Available Playwright capabilities:")
                 for capability in DEFAULT_BROWSER_CAPABILITIES:
                     description = f"    - {capability.name}: {capability.description}"
-                    if self.system_prompt_builder.language != "en":
+                    if not (english or compact_browser_catalog):
                         description += f" (Tools: {', '.join(capability.tool_names)})"
                     lines.append(description)
 

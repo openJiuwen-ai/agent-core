@@ -70,6 +70,25 @@ def test_model_and_execution_metadata_share_the_same_provider() -> None:
     assert card.input_params["required"] == ["subagent_type", "task_description"]
 
 
+@pytest.mark.parametrize(
+    ("language", "rules"),
+    [
+        ("en", (
+            "Browser interaction uses browser_agent",
+            "summary, evidence and partial results",
+            "retryable=true",
+        )),
+        ("cn", ("实际浏览器操作使用 browser_agent", "摘要、证据和部分结果", "retryable=true")),
+    ],
+)
+def test_task_tool_exposes_browser_routing_and_resume_checks_in_each_language(
+    language: str, rules: tuple[str, ...],
+) -> None:
+    card = build_tool_card("task_tool", "test-task-tool", language=language)
+    for rule in rules:
+        assert rule in card.description
+
+
 def test_live_catalog_keeps_custom_policy_and_browser_capabilities() -> None:
     rail = SubagentRail()
     rail.system_prompt_builder = SystemPromptBuilder(language="en")
@@ -91,3 +110,32 @@ def test_live_catalog_keeps_custom_policy_and_browser_capabilities() -> None:
     assert rail._build_available_agents_description([custom]).count("browser_agent") == 0
     rail.system_prompt_builder = SystemPromptBuilder(language="cn")
     assert "(Tools:" in rail._build_available_agents_description([browser])
+
+
+@pytest.mark.parametrize("persistent_runtime", [False, True])
+def test_chinese_task_tool_keeps_browser_categories_without_tool_name_lists(persistent_runtime: bool) -> None:
+    browser = SubAgentConfig(
+        agent_card=AgentCard(name="browser_agent", description="Browser policy"),
+        system_prompt="Browser task",
+    )
+    agent = SimpleNamespace(
+        card=AgentCard(name="parent"),
+        system_prompt_builder=SystemPromptBuilder(language="cn"),
+        deep_config=SimpleNamespace(subagents=[browser]),
+        ability_manager=SimpleNamespace(add_ability=lambda card, tool: None),
+    )
+    rail = SubagentRail(
+        enable_subagent_runtime=persistent_runtime,
+        synchronous_subagent_types={"browser_agent"},
+    )
+    rail.init(agent)
+    card = next(tool.card for tool in rail.tools if tool.card.name == "task_tool")
+    assert card.description.startswith("同步委派")
+    assert "browser_agent: Browser policy" in card.description
+    for capability in DEFAULT_BROWSER_CAPABILITIES:
+        assert f"{capability.name}: {capability.description}" in card.description
+        assert f"(Tools: {', '.join(capability.tool_names)})" not in card.description
+    registered = card.description
+    rail.refresh_available_agents(agent)
+    assert card.description == registered
+    assert card.input_params["required"] == ["subagent_type", "task_description"]
