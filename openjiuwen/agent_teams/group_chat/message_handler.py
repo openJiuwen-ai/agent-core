@@ -17,6 +17,23 @@ _MAX_HOST_NOTIFICATIONS = 32
 _HOST_NOTIFICATION_TIMEOUT = 10
 
 
+async def _finish_notification_task(task: asyncio.Future):
+    """Finish owned database I/O or its drain before propagating cancellation."""
+    cancelled = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+        except Exception:
+            break
+    if cancelled is not None:
+        if not task.cancelled():
+            task.exception()
+        raise cancelled
+    return task.result()
+
+
 class GroupMessageHandler(MessageHandler):
     """Consume group mentions with excerpts and chronological watermark updates.
 
@@ -69,16 +86,23 @@ class GroupMessageHandler(MessageHandler):
     async def _notify_host(self, backend, message_id: str) -> None:
         try:
             async with asyncio.timeout(_HOST_NOTIFICATION_TIMEOUT):
-                row = await backend.db.message.get_message(message_id)
+                # Cancelling a SQLite read can invalidate the shared memory
+                # connection. Finish the DAO scope, including session cleanup.
+                lookup = asyncio.create_task(backend.db.message.get_message(message_id))
+                row = await _finish_notification_task(lookup)
                 if row is not None and group_metadata(row):
                     await backend.notify_host_managed_inbound(conversation_message(row, get_session_id()))
         except Exception:
             team_logger.error("Host-managed notification failed; host must retry {}", message_id, exc_info=True)
 
-    def cancel_host_notifications(self) -> None:
-        """Cancel best-effort notifications before the session is released."""
-        for task in self._host_notifications.values():
-            task.cancel()
+    async def cancel_host_notifications(self) -> None:
+        """Cancel and drain notifications before the session is released."""
+        tasks = tuple(self._host_notifications.values())
+        for task in tasks:
+            if not task.done() and not task.cancelling():
+                task.cancel()
+        if tasks:
+            await _finish_notification_task(asyncio.gather(*tasks, return_exceptions=True))
 
     async def start_mentioned_members(self) -> None:
         """Start pending group recipients through the existing member lifecycle."""
