@@ -89,38 +89,98 @@ class SseClient(McpClient):
         """
         return timeout if timeout != NO_TIMEOUT else 60.0
 
+    def _cancel_pending_commands(self) -> None:
+        """Release waiters whose commands cannot run on the owner task."""
+        queue = self._cmd_queue
+        if queue is None:
+            return
+        while True:
+            try:
+                _, fut = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            if not fut.done():
+                fut.cancel()
+
+    @staticmethod
+    def _coerce_owner_error(error: BaseException) -> Exception:
+        """Convert an owner-command failure into a caller-facing exception."""
+        if isinstance(error, BaseExceptionGroup):
+            _, without_cancel = error.split(asyncio.CancelledError)
+            if without_cancel is None:
+                return RuntimeError("MCP transport command was cancelled during cleanup")
+            error = without_cancel
+        if isinstance(error, BaseExceptionGroup):
+            exception_group, _ = error.split(Exception)
+            if exception_group is not None:
+                exceptions = list(exception_group.exceptions)
+                error = exceptions[0] if len(exceptions) == 1 else exception_group
+        if isinstance(error, Exception):
+            return error
+        return RuntimeError(f"MCP transport command failed: {type(error).__name__}: {error}")
+
+    @classmethod
+    def _is_fatal_owner_error(cls, error: BaseException) -> bool:
+        """Return whether an owner-command error must stop the owner loop."""
+        if isinstance(error, BaseExceptionGroup):
+            return any(cls._is_fatal_owner_error(item) for item in error.exceptions)
+        return not isinstance(error, (Exception, asyncio.CancelledError))
+
     async def _owner_loop(self) -> None:
-        """Owner-task command queue"""
+        """Owner-task command queue.
+
+        Must settle every submitted future — including when teardown raises a
+        ``BaseExceptionGroup`` wrapping ``CancelledError`` (anyio task-group
+        shape). Matching only ``Exception`` would leave ``await fut`` hanging
+        while ``_lifecycle_lock`` is still held by disconnect/invalidate.
+        """
         logger.debug("[SseClient] Owner loop started")
-        while not self._stopping:
-            try:
-                cmd, fut = await self._cmd_queue.get()
-            except asyncio.CancelledError:
-                logger.debug("[SseClient] Owner loop cancelled")
-                break
-            try:
-                result = await cmd()
-                if not fut.done():
-                    fut.set_result(result)
-            except asyncio.CancelledError:
-                if not fut.done():
-                    fut.cancel()
-                logger.debug("[SseClient] Command cancelled in owner loop")
-                break
-            except Exception as exc:
-                logger.debug("[SseClient] Command failed in owner loop: %s", exc)
-                if not fut.done():
-                    fut.set_exception(exc)
-        logger.debug("[SseClient] Owner loop stopped")
+        try:
+            while not self._stopping:
+                try:
+                    cmd, fut = await self._cmd_queue.get()
+                except asyncio.CancelledError:
+                    logger.debug("[SseClient] Owner loop cancelled")
+                    break
+                try:
+                    result = await cmd()
+                    if not fut.done():
+                        fut.set_result(result)
+                except asyncio.CancelledError:
+                    if not fut.done():
+                        fut.cancel()
+                    logger.debug("[SseClient] Command cancelled in owner loop")
+                    break
+                except BaseException as exc:
+                    if isinstance(exc, BaseExceptionGroup):
+                        cancelled, _ = exc.split(asyncio.CancelledError)
+                        current = asyncio.current_task()
+                        if cancelled is not None and current is not None and current.cancelling() > 0:
+                            if not fut.done():
+                                fut.cancel()
+                            logger.debug("[SseClient] Command cancelled in owner loop")
+                            break
+                    logger.debug("[SseClient] Command failed in owner loop: %r", exc)
+                    if not fut.done():
+                        fut.set_exception(self._coerce_owner_error(exc))
+                    if self._is_fatal_owner_error(exc):
+                        raise
+        finally:
+            self._cancel_pending_commands()
+            logger.debug("[SseClient] Owner loop stopped")
 
     async def _submit(self, cmd: Callable[[], Any]) -> Any:
-        if self._owner_task is None or self._owner_task.done():
+        queue = self._cmd_queue
+        if self._owner_task is None or self._owner_task.done() or queue is None:
+            if queue is not None:
+                self._cancel_pending_commands()
             logger.debug("[SseClient] Creating new owner task")
-            self._cmd_queue = asyncio.Queue()
+            queue = asyncio.Queue()
+            self._cmd_queue = queue
             self._stopping = False
             self._owner_task = asyncio.create_task(self._owner_loop())
         fut = asyncio.get_running_loop().create_future()
-        await self._cmd_queue.put((cmd, fut))
+        queue.put_nowait((cmd, fut))
         return await fut
 
     async def _do_connect(self, *, timeout: float) -> bool:
@@ -211,11 +271,16 @@ class SseClient(McpClient):
             try:
                 await self._exit_stack.aclose()
             except BaseExceptionGroup as exc:
-                cancelled, _ = exc.split(asyncio.CancelledError)
-                if cancelled is not None:
-                    raise
-                logger.debug("[SseClient] teardown raised %r (ignored)", exc)
-                return False
+                cancelled, rest = exc.split(asyncio.CancelledError)
+                if cancelled is None:
+                    logger.debug("[SseClient] teardown raised %r (ignored)", exc)
+                    return False
+                # Re-surface pure cancellation as CancelledError so the outer
+                # watchdog-swallow / caller-cancel handler still applies. A raw
+                # BaseExceptionGroup would bypass ``except CancelledError``.
+                if rest is None:
+                    raise asyncio.CancelledError() from exc
+                raise
             except Exception as exc:
                 logger.debug("[SseClient] teardown raised %r (ignored)", exc)
                 return False
