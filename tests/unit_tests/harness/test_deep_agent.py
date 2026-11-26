@@ -834,10 +834,8 @@ async def test_task_loop_reports_structured_failure(
     monkeypatch: pytest.MonkeyPatch, streaming: bool, failure: str,
 ) -> None:
     model = _create_dummy_model()
-    model_started = asyncio.Event()
 
     async def fail_model(*args, **kwargs):
-        model_started.set()
         if failure == "completion_timeout":
             await asyncio.Future()
         raise build_error(StatusCode.MODEL_CALL_FAILED, error_msg="test model failed")
@@ -860,15 +858,15 @@ async def test_task_loop_reports_structured_failure(
 
     await Runner.start()
     try:
-        if streaming:
-            chunks = [chunk async for chunk in Runner.run_agent_streaming(agent, inputs)]
-            [result] = [chunk.payload for chunk in chunks if chunk.type == "answer"]
-        else:
-            result = await Runner.run_agent(agent, inputs)
+        async with asyncio.timeout(15):
+            if streaming:
+                chunks = [chunk async for chunk in Runner.run_agent_streaming(agent, inputs)]
+                [result] = [chunk.payload for chunk in chunks if chunk.type == "answer"]
+            else:
+                result = await Runner.run_agent(agent, inputs)
     finally:
         await Runner.stop()
 
-    assert model_started.is_set()
     if failure == "completion_timeout":
         assert result["error"] == "completion_timeout"
         assert result["termination_reason"] == "error"

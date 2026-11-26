@@ -361,6 +361,7 @@ class TaskLoopEventExecutor(TaskExecutor):
                 iter_inputs.result = {
                     "result_type": "error",
                     "error": str(exc),
+                    "termination_reason": reason.value,
                 }
                 ctx.inputs = iter_inputs
                 ctx.exception = exc
