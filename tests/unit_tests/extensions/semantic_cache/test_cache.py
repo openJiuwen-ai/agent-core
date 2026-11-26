@@ -429,6 +429,50 @@ class TestSemanticResponseCache(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(cache.stats.store_successes, 4)
 
+    async def test_lookup_semaphore_queue_timeout_does_not_trip_circuit_breaker(self):
+        cache = SemanticResponseCache(
+            self.backend,
+            enabled=True,
+            timeout=0.02,
+            max_concurrent_backend=1,
+            circuit_breaker_threshold=1,
+            circuit_breaker_cooldown=30.0,
+        )
+        gen = AsyncMock(return_value=GeneratedAnswer("fresh-answer", reusable=False))
+        await cache._lookup_semaphore.acquire()
+        try:
+            with patch("openjiuwen.extensions.semantic_cache.cache.llm_logger") as mock_logger:
+                r1, r2 = await asyncio.gather(
+                    cache.invoke("queued-1", scope=SCOPE, generate=gen, can_reuse=self.validate, eligible=True),
+                    cache.invoke("queued-2", scope=SCOPE, generate=gen, can_reuse=self.validate, eligible=True),
+                )
+        finally:
+            cache._lookup_semaphore.release()
+
+        self.assertFalse(r1.cache_hit)
+        self.assertFalse(r2.cache_hit)
+        self.assertEqual(r1.text, "fresh-answer")
+        self.assertEqual(r2.text, "fresh-answer")
+        self.assertEqual(self.backend.lookup.await_count, 0)
+        self.assertEqual(cache.stats.backend_errors, 0)
+        self.assertFalse(cache.circuit_open)
+        mock_logger.warning.assert_not_called()
+
+        self.backend.lookup.return_value = CacheCandidate("healthy", "cached-ok", SCOPE.key)
+        healthy = await cache.invoke("healthy", scope=SCOPE, generate=gen, can_reuse=self.validate, eligible=True)
+        self.assertTrue(healthy.cache_hit)
+        self.assertEqual(healthy.text, "cached-ok")
+        self.assertEqual(cache.stats.backend_errors, 0)
+        self.assertFalse(cache.circuit_open)
+
+        self.backend.lookup.side_effect = TimeoutError
+        timed_out = await cache.invoke(
+            "slow-backend", scope=SCOPE, generate=gen, can_reuse=self.validate, eligible=True
+        )
+        self.assertFalse(timed_out.cache_hit)
+        self.assertEqual(cache.stats.backend_errors, 1)
+        self.assertTrue(cache.circuit_open)
+
     async def test_stats_counters_accurate(self):
         cache = SemanticResponseCache(self.backend, enabled=True, timeout=0.02)
         await cache.invoke("bypass", scope=SCOPE, generate=self.generate, can_reuse=self.validate, eligible=False)

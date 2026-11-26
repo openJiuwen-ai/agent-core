@@ -244,20 +244,31 @@ class SemanticResponseCache:
                 self._consecutive_backend_errors,
             )
 
+    async def _acquire_lookup_permit(self) -> bool:
+        """Acquire a lookup concurrency permit within timeout; return False on queue timeout."""
+        if self._lookup_semaphore is None:
+            return True
+        try:
+            async with asyncio.timeout(self._timeout):
+                await self._lookup_semaphore.acquire()
+        except TimeoutError:
+            return False
+        return True
+
     async def _lookup_candidate(self, prompt: str, scope_key: str, *, is_probe: bool = False) -> CacheCandidate | None:
         """Look up a candidate from the backend, failing open on errors or malformed results."""
         key = (scope_key, prompt)
         if not is_probe and self._coalesce_misses and key in self._in_flight:
             return None
+        acquired = False
         try:
+            if not await self._acquire_lookup_permit():
+                return None
+            acquired = self._lookup_semaphore is not None
+            if acquired and not is_probe and self._coalesce_misses and key in self._in_flight:
+                return None
             async with asyncio.timeout(self._timeout):
-                if self._lookup_semaphore is not None:
-                    async with self._lookup_semaphore:
-                        if not is_probe and self._coalesce_misses and key in self._in_flight:
-                            return None
-                        candidate = await self._backend.lookup(prompt, scope_key)
-                else:
-                    candidate = await self._backend.lookup(prompt, scope_key)
+                candidate = await self._backend.lookup(prompt, scope_key)
             if candidate is not None and (
                 not isinstance(candidate, CacheCandidate)
                 or not isinstance(candidate.prompt, str)
@@ -273,6 +284,8 @@ class SemanticResponseCache:
             self._record_backend_error("lookup", scope_key, exc, is_probe=is_probe)
             return None
         finally:
+            if acquired and self._lookup_semaphore is not None:
+                self._lookup_semaphore.release()
             if is_probe:
                 self._circuit_probe_in_flight = False
 
