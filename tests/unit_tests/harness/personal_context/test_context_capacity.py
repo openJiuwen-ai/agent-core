@@ -549,7 +549,8 @@ async def test_busy_usage_ledger_skips_only_current_maintenance(tmp_path):
         result = await asyncio.wait_for(worker, 2)
         assert result["reason"] == "usage_busy" and result["removed_count"] == 0
         assert (tmp_path / "workspace/context/a/page.md").exists()
-    assert maintain_capacity(tmp_path, limit_bytes=8000)["removed_count"] > 0
+    result = maintain_capacity(tmp_path, limit_bytes=8000, commit_candidate=_commit_without_process_scheduling)
+    assert result["removed_count"] > 0
     assert not (tmp_path / "workspace/context/a/page.md").exists()
 
 
