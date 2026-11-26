@@ -26,18 +26,20 @@ from openjiuwen.symphony.retrieval.search.runtime.lexical import LexicalDocument
 from openjiuwen.symphony.shared.fingerprint.normalization import DataTypeVocabulary, normalize_io_name
 
 _SYSTEM_PROMPT = """
-First identify the results the user can accept independently and give each one a clear owner.
-Split supporting work only when it can be checked independently and its output is useful to the
-owner. Keep small or tightly coupled work, revisions and alternate formats of the same result together.
-Add a handoff only when another task needs the output. In the producer and consumer task descriptions,
-say how the named output will be used and what must survive integration, such as source locations
-for evidence-backed claims or verification results for code changes. Make the final owner responsible
-for preserving those details in the delivered artifact.
+Give each result the user can accept independently one owner. Split supporting work only if its output
+can be checked independently and enables a specific downstream decision or action. Keep small or tightly coupled work
+together, including revisions and alternate formats. Give successive changes to the same state one owner
+unless a permission boundary or an independently verifiable intermediate result requires a handoff.
+In the producer and consumer assignments, name the output, how it will be used and what must survive integration
+(such as source locations or test conditions).
 
-State what will be checked, by whom, and what counts as passing. Let the owner self-check routine work.
-When independent review is requested or needed to verify a consequential requirement, give the reviewer
-the assembled deliverable, relevant sources and acceptance criteria. Ask for issues with locations and
-evidence, and make the delivery owner check that fixes are present in the final version.
+In the delivery owner's assignment, identify the original requirements and relevant source material.
+List the supplied sources needed for acceptance in that task's external_inputs. Have the owner derive checks
+from the original request and sources, including obligations upstream work may have missed.
+Before delivery, inspect the final artifact or read back the affected state against those checks and the authorized scope.
+Correct only the affected work and verify the final version. Before retrying an action with side effects,
+check what already took effect. Let owners self-check routine work. When independent review is requested or needed
+for a consequential requirement, give the reviewer the assembled result, sources and criteria and ask for located evidence.
 
 Then assign roles, honoring any required assignments. For each capability the tasks need, choose a
 listed expert_id only when its stated specialty directly covers the core work. A shared topic, tool or

@@ -677,6 +677,7 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [F_20261125_1506_symphony-planning-reasoning](features/F_20261125_1506_symphony-planning-reasoning.md) | F | Symphony 在线规划继承模型推理设置 | lin-xiaoyu | 无独立 D：用户明确了在线规划与构图的模型设置，直接调整已有入口。 |
+| [F_20261126_1427_expert-task-handoffs](features/F_20261126_1427_expert-task-handoffs.md) | F | 专家任务的交接与最终验收 | lin-xiaoyu | 无独立 D：本轮沿用专家任务图和派发接口，调整已有规划指令。 |
 | [S_01_planning-reasoning](specs/openjiuwen/symphony/orchestration/S_01_planning-reasoning.md) | S | Symphony 在线规划的模型推理设置 | lin-xiaoyu | — |
 
 <a id="module-symphony-shared-fingerprint"></a>
