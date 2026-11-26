@@ -3,7 +3,6 @@
 
 import base64
 import hashlib
-import html
 import io
 import json
 import os
@@ -2026,7 +2025,7 @@ class EditFileTool(Tool):
     - External modification detection: mtime_ns + file-size dual check
     - Uniqueness validation: old_string must match exactly once unless replace_all=True
     - Quote tolerance: automatic straight/curly quote fallback when exact match fails
-    - XML desanitization: reverses HTML entity encoding via html.unescape()
+    - XML desanitization: reverses reserved XML abbreviations (no HTML entity decoding)
     - New file creation: old_string='' + non-existent path creates new file
     - EOL preservation: detects and preserves CRLF vs LF on write
     - Trailing whitespace stripping on new_string lines (skipped for .md / .mdx)
@@ -2091,7 +2090,10 @@ class EditFileTool(Tool):
 
     @classmethod
     def _desanitize(cls, value: str) -> str:
-        result = html.unescape(value)
+        # Only reverse the reserved XML abbreviations. Do NOT run html.unescape():
+        # decoding &amp; / &quot; / &#39; / &lt; / &gt; would corrupt legitimate literals
+        # in source code (e.g. an HTML-escaping helper in a webpage's JavaScript).
+        result = value
         for source, target in cls._DESANITIZATIONS.items():
             result = result.replace(source, target)
         return result
