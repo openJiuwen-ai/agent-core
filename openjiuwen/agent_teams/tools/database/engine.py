@@ -6,7 +6,7 @@
 import asyncio
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from typing import NamedTuple, TypeVar
 
@@ -92,15 +92,17 @@ class DbSessions:
     writer slot — writers never contend on the SQLite lock. For file-backed
     SQLite the reads and writes run on *separate* engines (a dedicated
     single-writer pool + a larger reader pool), so a slow write never starves
-    reader-connection availability. For ``:memory:`` and PostgreSQL / MySQL the
-    two factories are the same object (no split), and ``read()`` / ``write()``
-    still differ only by whether the write lock is held.
+    reader-connection availability. In-memory SQLite shares one connection,
+    so readers also take the lock before opening a session. PostgreSQL and
+    MySQL use separate pooled connections even with a shared factory.
     """
 
     def __init__(
         self,
         write_session_local: async_sessionmaker,
         read_session_local: async_sessionmaker | None = None,
+        *,
+        single_connection: bool = False,
     ) -> None:
         """Bind the write / read session factories and create the write lock.
 
@@ -109,10 +111,12 @@ class DbSessions:
             read_session_local: Session factory bound to the reader engine.
                 Defaults to ``write_session_local`` when no split exists
                 (``:memory:`` / PostgreSQL / MySQL).
+            single_connection: Serialize reads and writes that share one connection.
         """
         self._write_session_local = write_session_local
         self._read_session_local = read_session_local or write_session_local
         self._write_lock = asyncio.Lock()
+        self._single_connection = single_connection
 
     @property
     def write_locked(self) -> bool:
@@ -121,22 +125,25 @@ class DbSessions:
 
     @asynccontextmanager
     async def read(self) -> AsyncIterator[AsyncSession]:
-        """Yield a session for read-only work; the write lock is not held.
+        """Yield a read session, taking the shared lock for in-memory SQLite.
 
-        The whole block runs under ``_DB_SESSION_WATCHDOG_SECONDS`` so a
-        wedged driver surfaces as a loud ``TimeoutError`` instead of hanging
-        the caller forever.
+        Closing a reader on the shared SQLite connection can roll back a
+        writer's transaction. Hold the lock through session cleanup. The
+        watchdog covers the session block, excluding time spent waiting for
+        the connection lock.
         """
-        try:
-            async with asyncio.timeout(_DB_SESSION_WATCHDOG_SECONDS):
-                async with self._read_session_local() as session:
-                    yield session
-        except TimeoutError:
-            team_logger.warning(
-                "DbSessions.read() exceeded the %.0fs watchdog; the DB driver may be wedged",
-                _DB_SESSION_WATCHDOG_SECONDS,
-            )
-            raise
+        connection_guard = self._write_lock if self._single_connection else nullcontext()
+        async with connection_guard:
+            try:
+                async with asyncio.timeout(_DB_SESSION_WATCHDOG_SECONDS):
+                    async with self._read_session_local() as session:
+                        yield session
+            except TimeoutError:
+                team_logger.warning(
+                    "DbSessions.read() exceeded the %.0fs watchdog; the DB driver may be wedged",
+                    _DB_SESSION_WATCHDOG_SECONDS,
+                )
+                raise
 
     @asynccontextmanager
     async def write(self) -> AsyncIterator[AsyncSession]:

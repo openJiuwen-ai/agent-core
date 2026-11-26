@@ -170,7 +170,13 @@ class TeamDatabase:
         # write lock is database-wide, so all DAO tables must serialise
         # writes through the same lock. Reads go to the reader factory
         # (a separate pool for file-backed SQLite) — see DbSessions.
-        sessions = DbSessions(engines.write_session_local, engines.read_session_local)
+        sessions = DbSessions(
+            engines.write_session_local,
+            engines.read_session_local,
+            single_connection=(
+                self.config.db_type == DatabaseType.SQLITE and self.config.connection_string == ":memory:"
+            ),
+        )
         # Bind-time session-table DDL runs under the same write lock: the
         # engine-level variant (``engine.begin()``) bypassed it and could
         # hold both write-pool connections during concurrent binds.
