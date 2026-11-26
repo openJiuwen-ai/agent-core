@@ -39,23 +39,29 @@ design_note: 对 LSP 客户端通信层的三处确定性缺陷修复，不改�
 ## 修复决策
 
 1. EOF 分支改为 `self._on_crash(self._process.returncode)` 后再返回。安全性依据：
-   `_crash_reported` 标志保证回调至多触发一次；优雅停路径 `stop()` 先 cancel
-   reader task（走 `CancelledError` 分支），且 `_handle_crash` 对 STOPPING 状态
-   早退，不会误伤优雅关停。
+   `_on_crash` 开头检查 `_is_stopping`——优雅 `stop()` 期间 reader 可能在被
+   cancel 前观察到 EOF（exit 通知 await 先于 cancel，属事件循环内竞态），且
+   并非所有 `stop()` 调用方都处于 STOPPING 状态（如 `start()` 失败路径状态为
+   ERROR）；该守卫保证关停期 EOF 不计入崩溃、不虚增 `_crash_count`、不覆盖
+   真实 `_last_error`。`_crash_reported` 标志另保证崩溃回调至多触发一次。
 2. `on_timeout` 置异常后补 `self._pending.pop(msg_id, None)`；`_dispatch` 的两个
    `future.done()` 分支改为先 pop 再 return。
 3. Windows 分支复用 POSIX 分支的 `urllib.parse.quote(..., safe="/:")`，`safe` 保住
    驱动器冒号与分隔符；普通路径输出不变（`file:///C:/work/proj/main.py` 保持原样），
-   `file_uri_to_path` 解码端本就支持百分号解码，往返兼容。
+   `file_uri_to_path` 解码端本就支持百分号解码，往返兼容。对应测试加
+   `skipif(sys.platform != "win32")` 门禁（POSIX 上 `Path` 是 `PosixPath`，
+   Windows 路径语义断言只在 Windows runner 执行）。
 
 ## 回归证据
 
 基线为 `46014823e`（develop HEAD），环境为 Windows、Python 3.11、uv 同步测试环境。
 
-新增测试 `tests/unit_tests/harness/lsp/test_lsp_client.py` 共 8 项：
-- 修复前 5 失败 3 通过（EOF 不触发回调、pending future 空等、条目泄漏、URI 未编码
+新增测试 `tests/unit_tests/harness/lsp/test_lsp_client.py` 共 9 项：
+- 初版修复前 5 失败 3 通过（EOF 不触发回调、pending future 空等、条目泄漏、URI 未编码
   四个断言组全部命中预期失败）；
-- 修复后 8 项全部通过。
+- 检视意见追加 `_is_stopping` 守卫测试（`test_eof_during_stop_not_counted_as_crash`）
+  与 Windows 测试平台门禁（`TestPathToFileUri` 加 `skipif(sys.platform != "win32")`），
+  最终 9 项全部通过（Windows runner 上 9 跑 9 过，POSIX 上 6 跑 6 过、3 项按门禁跳过）。
 
 既有 LSP 回归无破坏：
 
@@ -63,7 +69,7 @@ design_note: 对 LSP 客户端通信层的三处确定性缺陷修复，不改�
 .venv/Scripts/python.exe -B -m pytest tests/unit_tests/harness/lsp/test_lsp_client.py tests/unit_tests/harness/tools/test_lsp_diagnostics.py tests/unit_tests/harness/tools/test_lsp_tool.py tests/unit_tests/harness/rails/test_lsp_rail.py -q
 ```
 
-结果 144 项通过（新增 8 + 既有 136），0 失败。URI 解码端额外验证
+结果 145 项通过（新增 9 + 既有 136），0 失败。URI 解码端额外验证
 `file:///C:/work/proj/main.py` 与 `file:///d%3A/foo` 解码不变。
 
 ## 遗留
