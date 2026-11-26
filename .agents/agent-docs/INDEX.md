@@ -22,6 +22,7 @@ generated: true
 | [agent_teams/memory](#module-agent_teams-memory) |
 | [agent_teams/observability](#module-agent_teams-observability) |
 | [agent_teams/workflow](#module-agent_teams-workflow) |
+| [core.extension](#module-core-extension) |
 | [core.runner.resources_manager](#module-core-runner-resources_manager) |
 | [core.session.tracer](#module-core-session-tracer) |
 | [core/context_engine](#module-core-context_engine) |
@@ -360,6 +361,14 @@ generated: true
 | [SDD-0030](designs/proposals/SDD-0030-swarmflow-agent-group-expert-worker/design.md) | D | Swarmflow 专家 worker：agent_template 算子参数复用专家团成员 | @chenchunzhou | — |
 | [SDD-0031](designs/proposals/SDD-0031-teammate-swarmflow-orchestration/design.md) | D | 集群模式teammate支持swarmflow工具 | @xiajing | — |
 | [B_20261102_1120_avatar-child-session-trace-root](bugfix/agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
+
+<a id="module-core-extension"></a>
+
+## core.extension
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261126_1900_extension-dependency-wait-ut](bugfix/openjiuwen/core/B_20261126_1900_extension-dependency-wait-ut.md) | B | 跨域依赖等待成功场景的 UT 时序容差 | MaxMadMax | 无独立 D：仅修正现有成功场景测试的等待预算和失败诊断，生产契约不变，无独立设计。 |
 
 <a id="module-core-runner-resources_manager"></a>
 

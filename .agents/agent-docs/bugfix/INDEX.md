@@ -16,6 +16,7 @@ generated: true
 |---|
 | [agent_teams](#module-agent_teams) |
 | [agent_teams/workflow](#module-agent_teams-workflow) |
+| [core.extension](#module-core-extension) |
 | [core/context_engine](#module-core-context_engine) |
 | [core/controller](#module-core-controller) |
 | [core/foundation/llm](#module-core-foundation-llm) |
@@ -73,6 +74,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261102_1120_avatar-child-session-trace-root](agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
+
+<a id="module-core-extension"></a>
+
+## core.extension
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261126_1900_extension-dependency-wait-ut](openjiuwen/core/B_20261126_1900_extension-dependency-wait-ut.md) | B | 跨域依赖等待成功场景的 UT 时序容差 | MaxMadMax | 无独立 D：仅修正现有成功场景测试的等待预算和失败诊断，生产契约不变，无独立设计。 |
 
 <a id="module-core-context_engine"></a>
 
