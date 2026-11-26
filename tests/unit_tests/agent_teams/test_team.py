@@ -10,6 +10,7 @@ from unittest.mock import (
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.team import (
@@ -165,6 +166,62 @@ class TestSpawnMember:
         assert member.team_name == "test_team"
         assert member.status == MemberStatus.UNSTARTED.value
         assert member.execution_status == ExecutionStatus.IDLE.value
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_spawn_member_skip_team_exists_bypasses_probe(
+            self, db, message_bus, sample_agent_card, monkeypatch):
+        """skip_team_exists=True 时不再读 team_info 存在性——探针打桩成必抛
+        也不会被调用；团队行缺失时只剩 create_member 的 FK 兜底拒绝。
+        默认路径仍保留探针（下一用例钉住）。"""
+
+        async def _must_not_be_called(*args, **kwargs):  # pragma: no cover
+            raise AssertionError("team_exists probe must be skipped")
+
+        monkeypatch.setattr(db.team, "team_exists", _must_not_be_called)
+
+        # 本用例的结果断言依赖 FK 兜底：在用例内显式钉住外键已启用，
+        # 不把结论押在 SQLite 默认值上（PRAGMA foreign_keys 默认 OFF）。
+        async with db.engine.connect() as conn:
+            fk_enabled = (await conn.execute(text("PRAGMA foreign_keys"))).scalar()
+        assert fk_enabled == 1
+
+        team = TeamBackend(
+            team_name="ghost_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+        )
+        result = await team.spawn_member(
+            member_name="member1",
+            display_name="Member One",
+            agent_card=sample_agent_card,
+            skip_team_exists=True,
+        )
+        assert not result.ok
+        assert result.reason
+        # 探针被跳过后不应出现探针的引导文案
+        assert "does not exist; call build_team first" not in (result.reason or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_spawn_member_default_probes_team_exists(self, db, message_bus, sample_agent_card):
+        """默认路径（工具侧单独 spawn）保留 team_exists 探针与引导文案。"""
+        team = TeamBackend(
+            team_name="ghost_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+        )
+        result = await team.spawn_member(
+            member_name="member1",
+            display_name="Member One",
+            agent_card=sample_agent_card,
+        )
+        assert not result.ok
+        assert "does not exist; call build_team first" in (result.reason or "")
 
     @pytest.mark.asyncio
     @pytest.mark.level0
