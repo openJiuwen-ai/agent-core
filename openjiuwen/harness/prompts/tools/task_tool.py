@@ -34,87 +34,27 @@ GENERAL_PURPOSE_AGENT_DESC: Dict[str, str] = {
 # Tool description (bilingual) - for tool registration ONLY
 # ---------------------------------------------------------------------------
 TASK_TOOL_DESCRIPTION_EN = (
-    "Synchronously run a fresh subagent. Give full objective/context/constraints/findings and "
-    "expected output; the child has no conversation history. Verify and synthesize its result. Use "
-    "resume_task_id only for the same unfinished/corrected browser task within the original deadline "
-    "and one-resume limit; a preserved cua_agent timeout session continues only missing work. For "
-    "browser_agent, supply browser_capabilities ([] for core-only); omit it for other types. Follow "
-    "system routing/evidence/recovery rules. Available types and capabilities:\n{available_agents}"
+    "Synchronously delegate to a listed subagent and wait for its result. A fresh subagent has no "
+    "conversation history. Give the objective, context, constraints, findings and expected output. "
+    "Verify and synthesize the result. Follow system routing, evidence and recovery rules.\n"
+    "Browser interaction uses browser_agent. Supply browser_capabilities ([] for core only); "
+    "omit it for other agents. Check the summary, evidence and partial results before resuming. "
+    "Reuse resume_task_id for the same incomplete browser task or a targeted correction, within "
+    "the original deadline and at most once. For a preserved cua_agent session after timeout "
+    "with retryable=true, reuse its ID. Describe only the unfinished work when resuming. "
+    "Omit resume_task_id for new work.\n\nAvailable types and capabilities:\n{available_agents}"
 )
 
-TASK_TOOL_DESCRIPTION_CN = """\
-启动新的子代理，自主处理复杂、多步骤任务。
-
-task_tool 启动专门的子代理来自主处理复杂任务。每种子代理类型都有\
-特定的能力和可用工具。
-
-可用代理类型及其工具：
-
-{available_agents}
-
-使用 task_tool 时，请通过 subagent_type 参数选择要使用的子代理类型。\
-使用 task_tool 时，必须显式指定 subagent_type，且其值必须与上方\
-「可用代理类型」列表中的名称完全一致。
-当 subagent_type 为 "browser_agent" 时，还必须指定 browser_capabilities，\
-并从上方浏览器能力目录中选择额外能力类别。仅使用核心浏览器能力时传入\
-空列表；其他子代理类型不要提供 browser_capabilities。
-
-何时不使用 task_tool：
-
-- 如果你想读取某个具体文件路径，直接用 read_file 或 glob，\
-比用 task_tool 更快
-- 如果你在查找某个具体的类定义（如 "class Foo"），\
-直接用 grep 或 glob，比用 task_tool 更快
-- 如果你在 2-3 个特定文件内搜索代码，\
-直接用 read_file，比用 task_tool 更快
-- 其他与上述代理描述无关的任务
-
-使用注意事项：
-
-- task_description 应包含完整的上下文信息——子代理没有本次对话的任何记忆
-- 子代理完成后会返回一条消息给你。该结果对用户不可见。\
-如需向用户展示结果，你应发送一条文字消息，简明总结子代理的结果。
-- 每次 task_tool 调用默认都是全新启动——请提供完整的任务描述。\
-只有在原期限内明确继续或纠正同一个浏览器任务，\
-或明确继续同一个未完成的桌面（cua_agent）任务时，才传入上次返回的 resume_task_id。
-- 若 cua_agent 返回 status="timeout" 且 retryable=true，其桌面会话已保留：\
-请用同一个 resume_task_id 继续，任务描述只写尚未完成的部分，不要从头重做。
-- 对 browser_agent，保留 browser_result.status 以及 summary、evidence 和带来源的 observations。\
-partial 中也可能已有可用答案。执行回执说明派发/ACK；summary 和完成判断由 worker 提供。\
-区分来源观察与原因推测，遵守原文限制，阻断列表为空不能证明页面没有障碍。不要为填字段槽而重复查询。
-- retryable=true 只是允许续跑，不是要求续跑。只有用户要求确实尚未回答时，\
-才可使用同一 resume_task_id 至多续跑一次；recommended_recovery 是提示，不是完成清单。\
-若 worker 报告 completed 但仍有明确未满足的用户要求，可带同一 resume_task_id 和定向修复指令显式纠正，\
-仍受原期限和一次续跑限制。否则报告已有结果，不要重做已满足的目标或新增要求。
-- 子代理的输出通常应当被信任。
-- 明确告知子代理你期望它写代码还是仅做调研\
-（搜索、读文件、抓取网页等），因为它不知道用户的意图。
-- 如果子代理的描述中提到应主动使用它，\
-你应尽量在用户没有明确要求时就使用它。自行判断。
-- 如果用户明确要求"并行"运行子代理，\
-你必须在同一条消息中发出多个 task_tool 调用。\
-例如，如果你需要同时启动 build-validator 子代理和 \
-test-runner 子代理，请在同一条消息中发出两个 tool 调用。
-
-## 如何写好任务描述
-
-像给一位刚走进房间的聪明同事做简报一样描述任务——子代理没看过本次对话，\
-不知道你尝试过什么，也不理解这个任务为什么重要。
-- 说明你想达成什么目标以及为什么。
-- 描述你已经了解到的信息或已排除的可能性。
-- 提供足够的问题背景，让子代理能够自主判断，\
-而不是只能机械执行狭窄的指令。
-- 如果需要简短回复，请明确说明（"在 200 字内汇报"）。
-- 查找类任务：直接给出精确命令。调研类任务：给出要回答的问题——\
-规定好的步骤在前提不成立时只会成为累赘。
-
-简短的命令式描述会产生浅层、泛泛的结果。
-
-**永远不要委托理解。** 不要写"根据你的发现修复 bug"或"根据调研结果实现它"。\
-这类说法把综合分析推给了子代理，而不是你自己完成。\
-写出的描述应能证明你已经理解了问题：\
-包含文件路径、行号、具体需要修改的内容。
-"""
+TASK_TOOL_DESCRIPTION_CN = (
+    "同步委派给列表中的子代理并等待结果。新子代理没有对话历史。"
+    "写明目标、上下文、约束、已有发现和期望输出。核验并综合结果，遵循系统的选路、证据和恢复规则。\n"
+    "实际浏览器操作使用 browser_agent。传入 browser_capabilities（仅用核心能力时传 []），"
+    "其他代理省略此参数。续跑前先检查摘要、证据和部分结果。"
+    "继续同一个未完成的浏览器任务或定向纠正结果时，使用原 resume_task_id，"
+    "在原期限内最多续跑一次。cua_agent 超时且 retryable=true、会话已保留时，使用原 ID。"
+    "续跑只描述未完成的部分，新任务省略 resume_task_id。\n\n"
+    "可用代理类型及能力：\n{available_agents}"
+)
 
 DESCRIPTION: Dict[str, str] = {
     "cn": TASK_TOOL_DESCRIPTION_CN,
@@ -126,24 +66,20 @@ DESCRIPTION: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 TASK_TOOL_PARAMS: Dict[str, Dict[str, str]] = {
     "subagent_type": {
-        "cn": "子代理类型（必填，须与上方「可用代理类型」列表中的名称完全一致；"
-              "不要使用列表中未出现的名称）",
-        "en": "Exact currently listed type; do not invent types.",
+        "cn": "当前可用代理列表中的准确类型名。",
+        "en": "Exact type name from the current list.",
     },
     "task_description": {
-        "cn": "任务描述（必填，需包含完整上下文）",
-        "en": "Required task description with full context for the subagent",
+        "cn": "目标、上下文、约束、已有发现和期望输出。",
+        "en": "Objective, context, constraints, findings and expected output.",
     },
     "browser_capabilities": {
-        "cn": "浏览器子代理所需的额外能力类别列表；仅使用核心能力时传入空列表",
-        "en": "Additional capability categories required by browser_agent; use an empty list for core-only tasks",
+        "cn": "仅 browser_agent 使用。填能力类别，仅用核心能力时传 []。",
+        "en": "Capability categories for browser_agent only. Use [] for core only.",
     },
     "resume_task_id": {
-        "cn": (
-            "仅在继续同一个未完成的浏览器或桌面（cua_agent）任务时，"
-            "传入上一次 task_tool 返回的 resume_task_id；新任务不要传"
-        ),
-        "en": "Continue the same unfinished browser/preserved cua task; omit for new work.",
+        "cn": "同一浏览器或桌面任务符合续跑条件时传入原 ID。新任务省略。",
+        "en": "Original ID for an eligible resume of the same browser or desktop task. Omit for new work.",
     },
 }
 

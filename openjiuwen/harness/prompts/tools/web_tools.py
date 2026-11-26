@@ -152,15 +152,9 @@ class FetchWebpageMetadataProvider(ToolMetadataProvider):
     def get_description(self, language: str = "cn") -> str:
         return {
             "cn": (
-                "按需要读取原始来源，返回状态码、标题和正文文本。通常先通过搜索发现相关 URL，"
-                "不要只依赖摘要或猜测文章 URL；证据足够即可停止，不必抓取多个页面。可设置 max_chars=0 关闭截断，也可以调大 "
-                "timeout_seconds 处理慢站点。"
-                "适用场景：文档、博客、新闻、API 参考等普通网页。"
-                "Content status 与 HTTP 状态不同；验证码、WAF、登录限制或动态空壳不是有效证据。"
-                "保留来源链接与表格字段；缺失值不得用相邻数字补全，也不能把过期行情说成实时行情。"
-                "代码仓地址（GitHub/GitLab/Gitee/Gitcode/Bitbucket 等）一般不适合用本工具——"
-                "网页只能看到渲染后的目录页;要读源码、看历史、跨文件搜索，"
-                "更顺手的方式是用 shell 工具(bash 或 powershell)执行 `git clone` 拉到本地。"
+                "抓取已知 URL 的状态码、标题和正文。HTTP 状态与内容状态不同，验证码、登录限制或空壳页面不能作证据。"
+                "读完相关来源，保留链接和字段对应关系。不得补写缺项、用相邻数字代替，或把过期数据当实时数据。"
+                "证据足够即停止，阅读仓库源码优先用 git clone。"
             ),
             "en": (
                 "Fetch a known URL's status/title/text. Challenges, auth and empty shells are not "
