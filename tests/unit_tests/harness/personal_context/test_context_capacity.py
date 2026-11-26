@@ -117,7 +117,11 @@ def test_old_suspension_marker_does_not_affect_read_publication_or_eviction(tmp_
     (candidate / "topic/page.md").write_text("# Updated\n" + "x" * 20000, encoding="utf-8")
     publish_with_usage(tmp_path, candidate, {})
     assert page.read_text(encoding="utf-8").startswith("# Updated")
-    assert maintain_capacity(tmp_path, limit_bytes=1000)["removed_count"] == 1
+    # In-process commit: the default child can be killed at the 100 ms lock
+    # budget under loaded xdist, which turns this into a flaky removed_count=0.
+    assert maintain_capacity(
+        tmp_path, limit_bytes=1000, commit_candidate=_commit_without_process_scheduling
+    )["removed_count"] == 1
     assert not page.exists()
     assert marker.read_text(encoding="utf-8") == "legacy suspension"
 
