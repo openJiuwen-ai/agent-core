@@ -348,3 +348,53 @@ class TestSseReconnectR1R2R6:
         assert await client.connect() is True
         assert client._owner_task is not None and not client._owner_task.done()
         await _stop(client)
+
+    @pytest.mark.asyncio
+    async def test_invalidate_for_lazy_reconnect_keeps_lazy_flag(self) -> None:
+        """Call-timeout detach must clear the session but keep lazy reconnect.
+
+        Public ``disconnect()`` clears ``_lazy_reconnect`` (final teardown).
+        Timeout recovery needs the opposite: tear down the zombie transport
+        while still allowing the next ``call_tool`` to rebuild.
+        """
+        client = _make_client()
+        state = _install_fake_lifecycle(client)
+        await client.connect()
+        assert client._session is not None
+        assert client._lazy_reconnect is True
+
+        ok = await client.invalidate_for_lazy_reconnect(timeout=0.5)
+        assert ok is True
+        assert client._session is None
+        assert client._lazy_reconnect is True
+        assert len(state["disconnect_tasks"]) >= 1
+        await _stop(client)
+
+    @pytest.mark.asyncio
+    async def test_do_disconnect_aclose_cleans_after_session_nulled(self) -> None:
+        """Even if ``_session`` was nulled early, aclose still tears the stack.
+
+        Call-timeout paths used to null ``_session`` then skip manual
+        ``__aexit__``; zombie SSE generators stayed open. aclose-based
+        teardown must still run when the ref is already gone.
+        """
+        client = _make_client()
+        aclose_calls: list[int] = []
+
+        class _Stack:
+            async def aclose(self) -> None:
+                aclose_calls.append(1)
+
+        client._exit_stack = _Stack()  # type: ignore[assignment]
+        client._session = None  # simulate timeout half-detach
+        client._client = object()
+        client._read = object()
+        client._write = object()
+
+        assert await client._do_disconnect(timeout=1.0) is True
+        assert aclose_calls == [1]
+        assert client._session is None
+        assert client._client is None
+        assert client._read is None
+        assert client._write is None
+        assert client._is_disconnected is True

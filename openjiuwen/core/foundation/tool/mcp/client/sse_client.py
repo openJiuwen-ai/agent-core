@@ -175,28 +175,29 @@ class SseClient(McpClient):
             return False
 
     async def _do_disconnect(self, *, timeout: float) -> bool:
+        """Tear down the transport (runs inside the owner task).
+
+        Prefer ``_exit_stack.aclose()`` (same shape as StreamableHttpClient) so
+        teardown still works after a call-timeout path nulled ``_session`` while
+        leaving the SSE generator / ClientSession on the stack. Manual
+        ``__aexit__`` gated on ``_session is not None`` would skip session cleanup
+        and leave a zombie connection that poisons the next reconnect.
+        """
         logger.debug("[SseClient] Disconnecting from %s", self._server_path)
         # Resolve the caller's deadline; NO_TIMEOUT falls back to a 10s
-        # defensive bound per resource so a receive_loop hung on a dead TCP
-        # connection (e.g. after RST) cannot block teardown forever.
-        # Note: this 10s ceiling is intentionally shorter than the 60s used by
-        # _resolve_timeout for connect / session calls — disconnect is a cleanup
-        # that must not block the caller for long, whereas a live call may
-        # legitimately wait up to the full 60s for a slow server.
+        # defensive bound so a receive_loop hung on a dead TCP connection
+        # cannot block teardown forever. Shorter than connect's 60s ceiling
+        # because disconnect is cleanup, not a live server wait.
         actual_timeout = timeout if timeout != NO_TIMEOUT else 10.0
 
-        # The only safe shape is to await ``__aexit__`` bare,
-        # in-task, with no enclosing scope. The deadline is enforced instead by
-        # a watchdog (``loop.call_later``) that cancels this owner task at
-        # ``actual_timeout``; ``disconnect()``'s trailing
-        # ``self._owner_task.cancel()`` remains the final backstop if even that
-        # fails to interrupt a hung receive_loop (e.g. httpx's sync recv on a
-        # dead TCP connection after RST).
         owner_task = asyncio.current_task()
         loop = asyncio.get_running_loop()
+        watchdog_fired = False
 
         def _cancel_owner(task: "asyncio.Task[Any]") -> None:
+            nonlocal watchdog_fired
             if not task.done():
+                watchdog_fired = True
                 logger.warning(
                     "[SseClient] disconnect watchdog fired after %ss; "
                     "cancelling owner task (receive_loop may be hung on a "
@@ -206,55 +207,61 @@ class SseClient(McpClient):
                 task.cancel()
 
         watchdog = loop.call_later(actual_timeout, _cancel_owner, owner_task)
-
         try:
-            if self._session is not None:
-                try:
-                    await self._session.__aexit__(None, None, None)
-                except asyncio.CancelledError:
-                    logger.debug("[SseClient] session __aexit__ cancelled")
+            try:
+                await self._exit_stack.aclose()
+            except BaseExceptionGroup as exc:
+                cancelled, _ = exc.split(asyncio.CancelledError)
+                if cancelled is not None:
                     raise
-                except Exception as e:
-                    logger.debug("[SseClient] session __aexit__ raised %r (ignored)", e)
-            if self._client is not None:
-                try:
-                    await self._client.__aexit__(None, None, None)
-                except asyncio.CancelledError:
-                    logger.debug("[SseClient] sse_client __aexit__ cancelled")
-                    raise
-                except Exception as e:
-                    logger.debug("[SseClient] sse_client generator __aexit__ raised %r (ignored)", e)
-            self._session = None
-            self._client = None
-            self._read = None
-            self._write = None
-            self._is_disconnected = True
+                logger.debug("[SseClient] teardown raised %r (ignored)", exc)
+                return False
+            except Exception as exc:
+                logger.debug("[SseClient] teardown raised %r (ignored)", exc)
+                return False
             logger.info("[SseClient] SSE client disconnected successfully")
             return True
         except asyncio.CancelledError:
-            # Watchdog fired: a __aexit__ hung past the deadline. Transport
-            # scopes may not have exited cleanly; clear references and let the
-            # owner task (about to be stopped by disconnect()) reap the rest.
+            # Watchdog-only cancel: clear refs and return False. A second
+            # cancel (caller interrupt) still propagates.
+            cancelling = getattr(owner_task, "cancelling", None)
+            if not watchdog_fired or (cancelling is not None and cancelling() > 1):
+                raise
+            uncancel = getattr(owner_task, "uncancel", None)
+            if uncancel is not None:
+                uncancel()
             logger.warning(
                 "[SseClient] disconnect aborted by watchdog after %ss; "
                 "transport scopes may not have exited cleanly.",
                 actual_timeout,
             )
+            return False
+        finally:
+            watchdog.cancel()
             self._session = None
             self._client = None
             self._read = None
             self._write = None
+            self._exit_stack = AsyncExitStack()
             self._is_disconnected = True
-            return False
-        except Exception as e:
-            logger.error("[SseClient] SSE disconnection failed: %s: %r", type(e).__name__, e)
-            return False
-        finally:
-            watchdog.cancel()
+
+    async def invalidate_for_lazy_reconnect(self, *, timeout: float = NO_TIMEOUT) -> bool:
+        """Detach a dead transport after call timeout without closing permanently.
+
+        Unlike ``disconnect()``, this keeps ``_lazy_reconnect`` so the next
+        ``call_tool`` may rebuild the SSE session. Prefer this over only
+        nulling ``_session`` from outside the owner task.
+        """
+        async with self._lifecycle_lock:
+            self._lazy_reconnect = True
+            return await self._submit(lambda: self._do_disconnect(timeout=timeout))
 
     async def _do_reconnect(self, *, timeout: float) -> bool:
         logger.debug("[SseClient] Executing reconnect sequence")
-        await self._do_disconnect(timeout=NO_TIMEOUT)
+        # Bound teardown so a hung zombie cannot consume the whole call timeout
+        # budget before connect even starts.
+        actual_timeout = self._resolve_timeout(timeout)
+        await self._do_disconnect(timeout=min(actual_timeout, 3.0))
         return await self._do_connect(timeout=timeout)
 
     async def connect(self, *, timeout: float = NO_TIMEOUT) -> bool:
