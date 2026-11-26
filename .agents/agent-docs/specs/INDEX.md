@@ -76,6 +76,7 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | — |
+| [S_02_session-conversation-store](core_runtime/S_02_session-conversation-store.md) | S | Session 共享对话存储与执行状态隔离规约 | Yanqing-Shi | — |
 
 <a id="module-core-controller"></a>
 
@@ -100,6 +101,7 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | — |
+| [S_02_session-conversation-store](core_runtime/S_02_session-conversation-store.md) | S | Session 共享对话存储与执行状态隔离规约 | Yanqing-Shi | — |
 
 <a id="module-extensions-a2a"></a>
 

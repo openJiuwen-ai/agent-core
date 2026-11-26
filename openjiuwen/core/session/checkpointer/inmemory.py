@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 from pymilvus.client.utils import is_successful
 
@@ -15,9 +16,13 @@ from openjiuwen.core.graph.store import (
 )
 from openjiuwen.core.session.checkpointer import Checkpointer
 from openjiuwen.core.session.checkpointer.base import Storage
+from openjiuwen.core.session.checkpointer.conversation_state import executor_checkpoint_state
 from openjiuwen.core.session.constants import FORCE_DEL_WORKFLOW_STATE_KEY
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.session import BaseSession
+
+if TYPE_CHECKING:
+    from openjiuwen.core.context_engine.schema.conversation import SessionConversationStore
 
 
 class InMemoryCheckpointer(Checkpointer):
@@ -28,6 +33,15 @@ class InMemoryCheckpointer(Checkpointer):
         from openjiuwen.core.graph import InMemoryStore
         self._graph_store = InMemoryStore()
         self._session_to_workflow_ids = {}
+        self._conversation_store = None
+
+    def conversation_store(self) -> "SessionConversationStore":
+        from openjiuwen.core.foundation.store.kv.in_memory_kv_store import InMemoryKVStore
+        from openjiuwen.core.session.checkpointer.conversation_store import KVSessionConversationStore
+
+        if self._conversation_store is None:
+            self._conversation_store = KVSessionConversationStore(InMemoryKVStore())
+        return self._conversation_store
 
     async def pre_workflow_execute(self, session: BaseSession, inputs: InteractiveInput):
         session_id = session.session_id()
@@ -443,10 +457,10 @@ class AgentStorage(BaseSingleStateStorage):
         return session.agent_id()
 
     def _get_state_to_save(self, session: BaseSession):
-        return session.state().get_state(copied=False)
+        return executor_checkpoint_state(session, session.state().get_state(copied=False))
 
     def _restore_state(self, session: BaseSession, state) -> None:
-        session.state().set_state(state)
+        session.state().set_state(executor_checkpoint_state(session, state))
 
 
 class WorkflowStorage(Storage):

@@ -20,6 +20,7 @@ from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.processor.base import ContextProcessor
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
+from openjiuwen.core.context_engine.schema.conversation import ConversationBinding
 from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.context_engine.token.string_length_counter import StringLengthCounter
 from openjiuwen.core.context_engine.token.tokenizer_manager import TokenizerArtifactManager
@@ -94,7 +95,7 @@ class ContextEngine:
         self._config = config or ContextEngineConfig()
         self._workspace = workspace
         self._sys_operation = sys_operation
-        self._context_pool: Dict[str, ModelContext] = dict()
+        self._context_pool: Dict[Tuple[str, str], ModelContext] = dict()
         from openjiuwen.core.context_engine.compaction import CompactionCoordinator
 
         self._compaction = CompactionCoordinator(self)
@@ -148,8 +149,11 @@ class ContextEngine:
         async def persist():
             effective_session = session or context.get_session_ref()
             if effective_session is not None:
-                await self.save_contexts(effective_session, context_ids=[context_id])
-                await effective_session.commit()
+                # compact_context owns the processor lock for the whole operation. The
+                # Session commit may run a host checkpointer that saves the contexts again.
+                with context.install_scope():
+                    await self.save_contexts(effective_session, context_ids=[context_id], processor_lock_held=True)
+                    await effective_session.commit()
 
         if trigger == "precompute":
             return await self._compaction.run(context, trigger, instructions, prepare, processor_types=processor_types)
@@ -260,6 +264,7 @@ class ContextEngine:
         processors: List[Tuple[str, BaseModel]] = None,
         history_messages: List[BaseMessage] = None,
         token_counter: TokenCounter = None,
+        allow_pending_tool_calls: bool = False,
     ) -> ModelContext:
         """
         Create or retrieve a ModelContext for the given session & context ID.
@@ -271,7 +276,9 @@ class ContextEngine:
         responsible for remote downloads before context creation.
 
         Message seeding:
-        - if `history_messages` is provided, it is used as-is;
+        - a bound Session always reads its shared record, including cache hits;
+          checkpoint state and history_messages do not seed that context;
+        - for unbound contexts, if `history_messages` is provided, it is used as-is;
         - else if `mem_scope_id` is given, the engine attempts to restore
           previous messages from long-term memory under that scope;
         - otherwise an empty message list is adopted.
@@ -291,7 +298,8 @@ class ContextEngine:
         """
         context_id = self._process_context_id(context_id)
         session_id = session.get_session_id() if session else "default_session_id"
-        full_context_id = f"{session_id}_{context_id}"
+        binding = self._conversation_binding(session, context_id)
+        full_context_id = (session_id, context_id)
         if full_context_id in self._context_pool:
             context = self._context_pool.get(full_context_id)
             if processors and isinstance(context, SessionModelContext) and not context.has_processors():
@@ -305,8 +313,16 @@ class ContextEngine:
                     "attached %d processor(s) to cached context %s, which was created without processors",
                     len(processors), full_context_id,
                 )
+            if binding is not None:
+                await context.load_conversation(binding, allow_pending_tool_calls=allow_pending_tool_calls)
+            elif isinstance(context, SessionModelContext) and context.get_conversation_binding() is not None:
+                raise build_error(
+                    StatusCode.CONTEXT_EXECUTION_ERROR,
+                    error_msg="cached shared context requires an explicit conversation binding",
+                )
+            else:
+                self._load_state_from_session(context, session, history_messages)
             context.set_session_ref(session)
-            self._load_state_from_session(context, session, history_messages)
             return context
 
         processor_instances = [
@@ -329,7 +345,7 @@ class ContextEngine:
             context_id,
             session_id,
             self._config,
-            history_messages=history_messages or [],
+            history_messages=[] if binding is not None else (history_messages or []),
             processors=processor_instances,
             token_counter=token_counter,
             session_ref=session,
@@ -337,7 +353,10 @@ class ContextEngine:
             sys_operation=self._sys_operation,
             window_mutators=self._window_mutators,
         )
-        self._load_state_from_session(context, session, history_messages)
+        if binding is not None:
+            await context.load_conversation(binding, allow_pending_tool_calls=allow_pending_tool_calls)
+        else:
+            self._load_state_from_session(context, session, history_messages)
         context.set_compaction_coordinator(self._compaction)
         self._context_pool[full_context_id] = context
         return context
@@ -413,7 +432,7 @@ class ContextEngine:
             ModelContext instance if found, otherwise None.
         """
         context_id = self._process_context_id(context_id)
-        full_context_id = f"{session_id}_{context_id}"
+        full_context_id = (session_id, context_id)
         return self._context_pool.get(full_context_id, None)
 
     async def compress_context(
@@ -703,7 +722,7 @@ class ContextEngine:
                 return
 
             for context_id in delete_context_list:
-                full_context_id = f"{session_id}_{context_id}"
+                full_context_id = (session_id, context_id)
                 del self._context_pool[full_context_id]
             await callback_trigger(
                 ContextEvents.CONTEXT_CLEARED,
@@ -714,7 +733,7 @@ class ContextEngine:
             return
 
         context_id = self._process_context_id(context_id)
-        full_context_id = f"{session_id}_{context_id}"
+        full_context_id = (session_id, context_id)
         if full_context_id not in self._context_pool:
             context_engine_logger.warning(
                 "Delete context failed, context does not exist",
@@ -727,12 +746,15 @@ class ContextEngine:
         await callback_trigger(ContextEvents.CONTEXT_CLEARED, context_id=context_id, session_id=session_id)
 
     @_fw.emit_after(ContextEvents.CONTEXT_OFFLOADED, result_key="result")
-    async def save_contexts(self, session: Session, context_ids: List[str] = None):
+    async def save_contexts(self, session: Session, context_ids: List[str] = None, *,
+                            processor_lock_held: bool = False):
         """
         Batch-persist multiple contexts and their runtime states.
 
         Each context's messages, sliding-window position, token count and statistics
-        are saved locally.
+        are saved locally. Bound contexts commit through their conversation store
+        and are excluded from Session checkpoint state; the host holds its
+        Session operation lock until the final save completes.
 
         Args:
             context_ids: List of target context identifiers to save.
@@ -746,6 +768,8 @@ class ContextEngine:
             return
         session_id = session.get_session_id()
         states = dict()
+        session_states = dict()
+        shared_context_ids = set()
         if context_ids is None:
             context_ids = [
                 context.context_id()
@@ -755,13 +779,33 @@ class ContextEngine:
 
         for context_id in context_ids:
             context_id = self._process_context_id(context_id)
-            full_context_id = f"{session_id}_{context_id}"
+            full_context_id = (session_id, context_id)
             context = self._context_pool.get(full_context_id)
             if context is None or not hasattr(context, "save_state"):
                 continue
+            binding = self._conversation_binding(session, context_id)
+            context_binding = context.get_conversation_binding() if isinstance(context, SessionModelContext) else None
+            if binding is not None or context_binding is not None:
+                if not self._bindings_match(binding, context_binding) or context.get_session_ref() is not session:
+                    raise build_error(
+                        StatusCode.CONTEXT_EXECUTION_ERROR,
+                        error_msg="refresh shared context with this Session before saving",
+                    )
+                await context.save_conversation(processor_lock_held=processor_lock_held)
+                shared_context_ids.add(context_id)
             context_state = context.save_state()
             states[context_id] = context_state
-        self._save_state_to_session(session, states)
+            if binding is None:
+                session_states[context_id] = context_state
+        if shared_context_ids:
+            # A partial save of a shared window must preserve unrelated local
+            # contexts while removing every shared checkpoint shadow.
+            existing = session.get_state("context") or {}
+            session_states = {
+                key: value for key, value in {**existing, **session_states}.items()
+                if self._conversation_binding(session, key) is None
+            }
+        self._save_state_to_session(session, session_states)
         return states
 
     @classmethod
@@ -818,6 +862,18 @@ class ContextEngine:
             ) from e
 
         return processor
+
+    @staticmethod
+    def _bindings_match(binding: ConversationBinding | None, context_binding: ConversationBinding | None) -> bool:
+        if binding is None or context_binding is None:
+            return False
+        return binding.key == context_binding.key and binding.store is context_binding.store
+
+    @staticmethod
+    def _conversation_binding(session: Session | None, context_id: str) -> ConversationBinding | None:
+        get_binding = getattr(session, "get_conversation_binding", None)
+        binding = get_binding(context_id) if callable(get_binding) else None
+        return binding if isinstance(binding, ConversationBinding) else None
 
     @staticmethod
     def _load_state_from_session(context: ModelContext, session: Session, history_messages: List[BaseMessage] = None):

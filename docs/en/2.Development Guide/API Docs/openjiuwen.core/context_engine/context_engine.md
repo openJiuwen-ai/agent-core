@@ -43,7 +43,7 @@ Create or retrieve the `ModelContext` corresponding to the specified session and
 - **context_id** (str, optional): Context ID, unique identifier for the current context within a session. Used to distinguish multiple contexts within the same session. Default value: `default_context_id`.
 - **session** (Session, optional): Session ID. If provided, reads the session ID from `session.get_session_id()` to isolate different sessions. When `None`, uses `"default_session_id"`. Default value: `None`.
 - **processors** (List[Tuple[str, BaseModel], optional): Processor configuration list, each item is `(processor_type, config)`, such as `[("MessageOffloader", MessageOffloaderConfig(...))]`. Default value: `None`.
-- **history_messages** (List[[BaseMessage](../../openjiuwen.core/foundation/llm/llm.md#class-openjiuwencorefoundationllmschemamessagebasemessage)], optional): Initial message list for the context. Default value: `None`.
+- **history_messages** (List[[BaseMessage](../../openjiuwen.core/foundation/llm/llm.md#class-openjiuwencorefoundationllmschemamessagebasemessage)], optional): Initial messages for an unbound context. Explicit shared bindings ignore this parameter and reread the store even on cache hits. Default value: `None`.
 - **token_counter** (TokenCounter, optional): Token counting strategy, used to count message and tool token consumption when constructing windows. An explicitly provided strategy is always used; when `None`, TiktokenCounter is used only if `ContextEngineConfig.enable_tiktoken_counter=True`, otherwise built-in character-based estimation is used. Default value: `None`.
 
 **Returns**:
@@ -151,6 +151,10 @@ async save_contexts(
 ```
 
 Batch save runtime state of multiple contexts. Messages, sliding window positions, token counts, and statistics of each context will be saved. When `context_ids` is `None`, persist all contexts under that session.
+
+Explicitly bound shared contexts commit to their conversation store; Session checkpoints retain unbound contexts.
+Partial shared saves preserve other local contexts. The host must hold its Session operation lock through final persistence.
+See [shared conversation storage](./conversation.md) for loading, cache refresh, compression, and offload behavior.
 
 **Parameters**:
 

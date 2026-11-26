@@ -20,8 +20,10 @@ generated: true
 | [core/controller](#module-core-controller) |
 | [core/foundation/llm](#module-core-foundation-llm) |
 | [core/foundation/llm/model_clients](#module-core-foundation-llm-model_clients) |
+| [core/foundation/store](#module-core-foundation-store) |
 | [core/runner/drunner/dmessage_queue](#module-core-runner-drunner-dmessage_queue) |
 | [core/session](#module-core-session) |
+| [core/session/checkpointer](#module-core-session-checkpointer) |
 | [core/session/tracer](#module-core-session-tracer) |
 | [core/single_agent](#module-core-single_agent) |
 | [core/sys_operation](#module-core-sys_operation) |
@@ -108,6 +110,14 @@ generated: true
 |---|---|---|---|---|
 | [B_20261117_1727_anthropic-output-limit-errors](openjiuwen/core/B_20261117_1727_anthropic-output-limit-errors.md) | B | 模型输出上限截断可见错误修复 | lizhiyuan | 无独立 D：用户在本轮会话确认的 Anthropic 输出上限错误处理范围，未形成独立设计文档。 |
 
+<a id="module-core-foundation-store"></a>
+
+## core/foundation/store
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261118_0610_db-kv-exclusive-set-atomic-insert](core_runtime/B_20261118_0610_db-kv-exclusive-set-atomic-insert.md) | B | DbBasedKVStore.exclusive_set 改为原子的“不存在才插入” | Yanqing-Shi | 无独立 D：共享会话检视（2026-11-17）指出的 KV 原子性缺陷；修复让实现符合 BaseKVStore.exclusive_set 既有文档契约，接口不变。 |
+
 <a id="module-core-runner-drunner-dmessage_queue"></a>
 
 ## core/runner/drunner/dmessage_queue
@@ -123,6 +133,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261103_1050_grandocean-review-feedback](core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
+
+<a id="module-core-session-checkpointer"></a>
+
+## core/session/checkpointer
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261118_0610_db-kv-exclusive-set-atomic-insert](core_runtime/B_20261118_0610_db-kv-exclusive-set-atomic-insert.md) | B | DbBasedKVStore.exclusive_set 改为原子的“不存在才插入” | Yanqing-Shi | 无独立 D：共享会话检视（2026-11-17）指出的 KV 原子性缺陷；修复让实现符合 BaseKVStore.exclusive_set 既有文档契约，接口不变。 |
 
 <a id="module-core-session-tracer"></a>
 

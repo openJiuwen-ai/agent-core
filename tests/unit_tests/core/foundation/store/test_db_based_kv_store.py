@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -136,6 +137,98 @@ def test_upsert_statement_compiles_for_dialect(name):
 def test_value_column_is_not_length_limited(name):
     dialect, _, column_type = _DIALECTS[name]
     assert KVStoreTable.__table__.c.value.type.compile(dialect=dialect) == column_type
+
+
+_INSERT_IF_ABSENT = {
+    "postgresql": ("ON CONFLICT", "DO NOTHING"),
+    "mysql": ("INSERT IGNORE INTO",),
+    "sqlite": ("ON CONFLICT", "DO NOTHING"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_DIALECTS))
+def test_exclusive_insert_statement_never_overwrites_for_dialect(name):
+    dialect = _DIALECTS[name][0]
+    sql = str(_store_for(dialect)._get_insert_if_absent_stmt("key", "value").compile(dialect=dialect))
+    assert all(clause in sql for clause in _INSERT_IF_ABSENT[name]), sql
+    assert "UPDATE" not in sql, sql
+
+
+class PauseBeforeWrite:
+    """Hold one store's first insert until the test releases it.
+
+    Wraps the store's session factory, so the pause sits at the database boundary
+    and the store's own logic runs unchanged on both sides of it. SQLite takes
+    its write lock at the first insert, so this is the last point where another
+    writer can still run.
+    """
+
+    def __init__(self, store: DbBasedKVStore) -> None:
+        self._factory = store.async_session
+        self.reached = asyncio.Event()
+        self.proceed = asyncio.Event()
+        store.async_session = self
+
+    def __call__(self):
+        session = self._factory()
+        execute = session.execute
+
+        async def paused(statement, *args, **kwargs):
+            if getattr(statement, "is_insert", False) and not self.reached.is_set():
+                self.reached.set()
+                await self.proceed.wait()
+            return await execute(statement, *args, **kwargs)
+
+        session.execute = paused
+        return session
+
+    async def wait_reached(self, timeout: float = 5.0) -> None:
+        await asyncio.wait_for(self.reached.wait(), timeout)
+
+
+@pytest_asyncio.fixture(name="two_sqlite_stores")
+async def get_two_sqlite_stores(tmp_path):
+    """Two stores, each with its own engine, over one SQLite file."""
+    url = f"sqlite+aiosqlite:///{tmp_path / 'kv.db'}"
+    engines = [create_async_engine(url), create_async_engine(url)]
+    stores = [DbBasedKVStore(engine) for engine in engines]
+    await stores[0]._create_table_if_not_exist()
+    yield stores
+    for engine in engines:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_exclusive_set_admits_exactly_one_writer(two_sqlite_stores):
+    first, second = two_sqlite_stores
+    pause = PauseBeforeWrite(second)
+    late = asyncio.create_task(second.exclusive_set("owner", "second"))
+    await pause.wait_reached()
+    assert await first.exclusive_set("owner", "first")
+    pause.proceed.set()
+    assert not await late
+    assert await first.get("owner") == "first"
+
+
+@pytest.mark.asyncio
+async def test_expired_exclusive_entry_is_taken_over_once(two_sqlite_stores):
+    first, second = two_sqlite_stores
+    assert await first.exclusive_set("owner", "stale", 1)
+    await asyncio.sleep(1.1)
+    pause = PauseBeforeWrite(second)
+    late = asyncio.create_task(second.exclusive_set("owner", "second"))
+    await pause.wait_reached()
+    assert await first.exclusive_set("owner", "first")
+    pause.proceed.set()
+    assert not await late
+    assert await first.get("owner") == "first"
+
+
+@pytest.mark.asyncio
+async def test_exclusive_set_refuses_an_existing_plain_value(sqlite_kv_store):
+    await sqlite_kv_store.set("plain", "10")
+    assert not await sqlite_kv_store.exclusive_set("plain", "taken")
+    assert await sqlite_kv_store.get("plain") == "10"
 
 
 @pytest.mark.asyncio

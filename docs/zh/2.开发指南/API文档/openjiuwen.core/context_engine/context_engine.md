@@ -43,7 +43,7 @@ async create_context(
 - **context_id** (str, 可选)：上下文ID，会话内当前上下文的唯一标识。用于区分同一会话内的多个上下文。默认值：`default_context_id`。
 - **session** (Session, 可选)：会话ID。若传入，会从 `session.get_session_id()` 读取会话ID，用于隔离不同会话。为 `None` 时使用 `"default_session_id"`。默认值：`None`。
 - **processors** (List[Tuple[str, BaseModel], 可选)：处理器配置列表，每项为 `(processor_type, config)`，如 `[("MessageOffloader", MessageOffloaderConfig(...))]`。默认值：`None`。
-- **history_messages** (List[[BaseMessage](../../openjiuwen.core/foundation/llm/llm.md#class-openjiuwencorefoundationllmschemamessagebasemessage)], 可选)：上下文的初始消息列表。默认值：`None`。
+- **history_messages** (List[[BaseMessage](../../openjiuwen.core/foundation/llm/llm.md#class-openjiuwencorefoundationllmschemamessagebasemessage)], 可选)：未绑定上下文的初始消息列表。显式绑定共享对话时忽略此参数，缓存命中也重新读取 store。默认值：`None`。
 - **token_counter** (TokenCounter, 可选)：Token 统计策略，用于在构造窗口时统计消息与工具的 Token 消耗。显式传入时始终使用该策略；为 `None` 时仅当 `ContextEngineConfig.enable_tiktoken_counter=True` 才使用 TiktokenCounter，否则使用内置的字符数估算。默认值：`None`。
 
 **返回**：
@@ -151,6 +151,10 @@ async save_contexts(
 ```
 
 批量保存多个上下文的运行时状态。各上下文的消息、滑动窗口位置、token计数与统计信息均会被保存。`context_ids` 为 `None` 时持久化该 session 下全部 context。
+
+显式绑定的共享 context 保存到 conversation store，Session checkpoint 只保存未绑定 context。
+共享窗口的部分保存会保留其他局部 context；调用者须持有宿主 Session 操作锁并等待最终保存。
+其加载、缓存刷新、压缩与 offload 行为见[共享对话存储](./conversation.md)。
 
 **参数**：
 

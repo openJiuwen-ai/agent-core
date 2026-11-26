@@ -17,6 +17,7 @@ from sqlalchemy import (
     Text,
     delete,
     select,
+    update,
 )
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.dialects.mysql import insert as mysql_insert
@@ -84,6 +85,26 @@ class DbBasedKVStore(BaseKVStore):
             )
         return stmt
 
+    def _get_insert_if_absent_stmt(self, key: str, value: str):
+        """Insert that the database itself skips when the key already exists."""
+        if self.engine.dialect.name == "mysql":
+            # The value column is LONGTEXT, so IGNORE can only skip the duplicate key.
+            return mysql_insert(KVStoreTable).values(key=key, value=value).prefix_with("IGNORE")
+        insert = postgresql_insert if self.engine.dialect.name == "postgresql" else sqlite_insert
+        return insert(KVStoreTable).values(key=key, value=value).on_conflict_do_nothing(index_elements=["key"])
+
+    @staticmethod
+    def _exclusive_entry_expired(raw: str, now: float) -> bool:
+        """Only an exclusive entry whose expiry has passed may be taken over."""
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(data, dict):
+            return False
+        expire_at = data.get(EXCLUSIVE_EXPIRY_KEY)
+        return expire_at is not None and expire_at <= now
+
     def _encode_value(self, value: str | bytes) -> str:
         """Encode value to string for database storage."""
         if isinstance(value, bytes):
@@ -110,26 +131,26 @@ class DbBasedKVStore(BaseKVStore):
     ) -> bool:
         await self._create_table_if_not_exist()
         now = time.time()
+        expire_at = now + expiry if expiry else None
+        val = json.dumps({EXCLUSIVE_VALUE_KEY: self._encode_value(value), EXCLUSIVE_EXPIRY_KEY: expire_at})
         async with self.async_session() as session:
             async with session.begin():
-                stmt = select(KVStoreTable).where(
-                    KVStoreTable.key == key
-                )
+                # One statement decides creation, so two concurrent callers can
+                # never both create the key: the database skips the later insert.
+                inserted = await session.execute(self._get_insert_if_absent_stmt(key, val))
+                if inserted.rowcount == 1:
+                    return True
+                stmt = select(KVStoreTable).where(KVStoreTable.key == key)
                 row = (await session.execute(stmt)).scalar_one_or_none()
-                if row is not None:
-                    try:
-                        data = json.loads(row.value)
-                        old_expire = data.get(EXCLUSIVE_EXPIRY_KEY)
-                        if old_expire is None or old_expire > now:
-                            return False
-                    except json.JSONDecodeError:
-                        return False
-                expire_at = now + expiry if expiry else None
-                encoded_value = self._encode_value(value)
-                val = json.dumps({EXCLUSIVE_VALUE_KEY: encoded_value, EXCLUSIVE_EXPIRY_KEY: expire_at})
-                stmt = self._get_upsert_stmt(key, val)
-                await session.execute(stmt)
-                return True
+                if row is None or not self._exclusive_entry_expired(row.value, now):
+                    return False
+                # Take over an expired entry only if no one replaced it since it was read.
+                taken = await session.execute(
+                    update(KVStoreTable)
+                    .where(KVStoreTable.key == key, KVStoreTable.value == row.value)
+                    .values(value=val)
+                )
+                return taken.rowcount == 1
 
     async def get(self, key: str) -> str | bytes | None:
         await self._create_table_if_not_exist()

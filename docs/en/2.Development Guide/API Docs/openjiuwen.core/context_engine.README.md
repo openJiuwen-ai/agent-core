@@ -14,3 +14,5 @@
 | [ContextEngine](./context_engine/context_engine.md) | Context engine class. |
 
 See [processor](./context_engine/processors.README.md) for the processor list.
+
+See [shared conversation storage](./context_engine/conversation.md) for explicit data types, storage, and Session bindings.
