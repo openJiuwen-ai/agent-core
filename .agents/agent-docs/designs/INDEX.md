@@ -20,6 +20,7 @@ generated: true
 | [agent_teams/workflow](#module-agent_teams-workflow) |
 | [core/foundation/llm](#module-core-foundation-llm) |
 | [extensions/observability](#module-extensions-observability) |
+| [extensions/semantic_cache](#module-extensions-semantic_cache) |
 | [harness](#module-harness) |
 | [harness_providers](#module-harness_providers) |
 | [未分类](#module-unclassified) |
@@ -135,6 +136,16 @@ generated: true
 | ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
 |---|---|---|---|---|---|
 | [D-20261112-1120-goal-assessment-isolation](active/D-20261112-1120-goal-assessment-isolation/design.md) | Goal 独立评估的轨迹与执行上下文隔离 | in-development | alan_cheng | observability | 2026-11-12 |
+
+<a id="module-extensions-semantic_cache"></a>
+
+## extensions/semantic_cache
+
+### 开发前 (proposals)
+
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
+|---|---|---|---|---|---|
+| [D-20261120-2155-semantic-response-cache](proposals/D-20261120-2155-semantic-response-cache/design.md) | 可选 RedisVL 语义响应缓存扩展设计方案 | draft | Liuchenbing-2026 | core | 2026-11-20 |
 
 <a id="module-harness"></a>
 
