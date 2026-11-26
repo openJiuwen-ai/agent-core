@@ -78,7 +78,6 @@ MEMBER_DEPARTED_STATUSES: frozenset[MemberStatus] = frozenset(
 
 MEMBER_UNREACHABLE_STATUSES: frozenset[MemberStatus] = frozenset({MemberStatus.SHUTDOWN})
 
-
 # State transition table for MemberStatus
 MEMBER_TRANSITIONS: Dict[MemberStatus, List[MemberStatus]] = {
     MemberStatus.UNSTARTED: [
@@ -146,14 +145,20 @@ MEMBER_TRANSITIONS: Dict[MemberStatus, List[MemberStatus]] = {
     ],
 }
 
-
 # Statuses a member can rest in when it has no active work. Consumed by the
 # team-completion check. Co-located with MemberStatus as its single source of
 # truth: status.py has no dependencies, whereas TASK_TERMINAL_STATUSES lives in
 # tools/database/graph.py only to avoid an import edge from the SQL layer back
 # into status.py.
+#
+# UNSTARTED belongs here: under the lazy-spawn model a predefined member that
+# was never delegated to stays UNSTARTED forever (``recover_team`` treats it as
+# a normal roster state). It has no runtime, so it can never hold
+# active work and must not block team completion. STARTING is deliberately
+# excluded: a spawn in flight may still produce a live member.
 MEMBER_SETTLED_STATUSES = frozenset(
     {
+        MemberStatus.UNSTARTED.value,
         MemberStatus.READY.value,
         MemberStatus.PAUSED.value,
         MemberStatus.STOPPED.value,
@@ -286,8 +291,8 @@ class TaskStatus(Enum):
 # with a self / back-edge for its rework loop.
 TASK_TRANSITIONS: Dict[TaskStatus, List[TaskStatus]] = {
     TaskStatus.PENDING: [
-        TaskStatus.PLANNING,      # plan_mode: reserve for planning
-        TaskStatus.IN_PROGRESS,   # claim (autonomous) / start (scheduled)
+        TaskStatus.PLANNING,  # plan_mode: reserve for planning
+        TaskStatus.IN_PROGRESS,  # claim (autonomous) / start (scheduled)
         TaskStatus.BLOCKED,
         TaskStatus.CANCELLED,
     ],
@@ -296,23 +301,23 @@ TASK_TRANSITIONS: Dict[TaskStatus, List[TaskStatus]] = {
         TaskStatus.CANCELLED,
     ],
     TaskStatus.PLANNING: [
-        TaskStatus.PLANNING,      # submit / reject rework loop
-        TaskStatus.IN_PROGRESS,   # approve_plan
-        TaskStatus.PENDING,       # reset
+        TaskStatus.PLANNING,  # submit / reject rework loop
+        TaskStatus.IN_PROGRESS,  # approve_plan
+        TaskStatus.PENDING,  # reset
         TaskStatus.BLOCKED,
         TaskStatus.CANCELLED,
     ],
     TaskStatus.IN_PROGRESS: [
-        TaskStatus.IN_REVIEW,     # member_complete_task (has reviewer)
-        TaskStatus.COMPLETED,     # member_complete_task (no reviewer)
-        TaskStatus.PENDING,       # reset
+        TaskStatus.IN_REVIEW,  # member_complete_task (has reviewer)
+        TaskStatus.COMPLETED,  # member_complete_task (no reviewer)
+        TaskStatus.PENDING,  # reset
         TaskStatus.BLOCKED,
         TaskStatus.CANCELLED,
     ],
     TaskStatus.IN_REVIEW: [
-        TaskStatus.COMPLETED,     # verify pass
-        TaskStatus.IN_PROGRESS,   # verify fail — rework loop
-        TaskStatus.PENDING,       # reset
+        TaskStatus.COMPLETED,  # verify pass
+        TaskStatus.IN_PROGRESS,  # verify fail — rework loop
+        TaskStatus.PENDING,  # reset
         TaskStatus.CANCELLED,
     ],
     TaskStatus.COMPLETED: [],
@@ -321,9 +326,9 @@ TASK_TRANSITIONS: Dict[TaskStatus, List[TaskStatus]] = {
 
 
 def is_valid_transition(
-    current_status: Enum,
-    new_status: Enum,
-    transitions: Dict[Enum, List[Enum]]
+        current_status: Enum,
+        new_status: Enum,
+        transitions: Dict[Enum, List[Enum]]
 ) -> bool:
     """Check if a state transition is valid
 
