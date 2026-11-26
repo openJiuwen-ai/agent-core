@@ -1243,7 +1243,9 @@ async def test_write_file_rejects_partial_read_with_resumable_hint(sys_op, temp_
     res = await write_tool.invoke({"file_path": file_path, "content": "overwrite"})
     assert res.success is False
     assert "fully read" in res.error
-    assert "offset=1000" in res.error
+    # 1-based resume hint (upstream contract): internal gap starts at 0-based
+    # line 1000, so the hint advertises offset=1001.
+    assert "offset=1001" in res.error
     state = _FILE_READ_REGISTRY[file_path]
     assert state.total_lines == total_lines
     assert _first_unread_offset(state.read_ranges) == 1000
