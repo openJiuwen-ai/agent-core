@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/task_loop/`（8 个模块）、`openjiuwen/harness/schema/loop_event.py`、`openjiuwen/harness/schema/stop_condition.py`、`openjiuwen/harness/schema/task.py` |
-| 最近一次修订日期 | 2026-08-23 |
+| 最近一次修订日期 | 2026-11-26 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -136,8 +136,12 @@ class TaskLoopController(Controller):
 错误 / 返回语义：
 
 - `can_pause` / `can_cancel` → 布尔；`pause` / `cancel` 幂等。
-- `wait_completion` 返回 round 结果；`_cancel_timed_out_round` 取消后返回
-  `_error_result(error, output)`（`{"error": ..., "output": ...}`）。
+- `wait_completion` 返回 round 结果。执行失败和等待超时的结果均包含
+  `error`、`output`、`result_type="error"` 和 `termination_reason`。
+  执行失败保留内层 Agent 已记录的终止原因，缺省为 `error`，错误详情通过
+  `error` 字段交付。轮次等待超时
+  会先取消调度任务，随后返回 `error="completion_timeout"` 和
+  `termination_reason="error"`。
 - `LoopCoordinator.get_state()` / `load_state()` 支持 checkpoint 恢复（冷恢复续跑，见 `S_02` 的 `DeepAgentState.stop_condition_state`）。
 
 ## 数据结构

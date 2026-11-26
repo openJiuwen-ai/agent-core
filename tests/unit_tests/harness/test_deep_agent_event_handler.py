@@ -330,7 +330,12 @@ async def test_handle_task_failed_signals() -> None:
     fut_result = await handler.wait_completion(
         timeout=1.0
     )
-    assert fut_result["error"] == "timeout"
+    assert fut_result == {
+        "output": "Task loop round failed.",
+        "result_type": "error",
+        "error": "timeout",
+        "termination_reason": "error",
+    }
 
 
 @pytest.mark.asyncio
@@ -421,6 +426,7 @@ async def test_wait_completion_timeout_cancels_task_and_returns_error() -> None:
         "output": "Task loop round timed out after 0.01 seconds.",
         "result_type": "error",
         "error": "completion_timeout",
+        "termination_reason": "error",
     }
     handler._task_scheduler.cancel_task.assert_awaited_once_with(
         ack["task_id"]

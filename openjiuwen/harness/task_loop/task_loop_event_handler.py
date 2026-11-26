@@ -29,6 +29,7 @@ from openjiuwen.core.controller.schema.task import (
 from openjiuwen.core.controller.schema.task import (
     TaskStatus as CoreTaskStatus,
 )
+from openjiuwen.core.single_agent.rail.base import AgentTerminationReason
 from openjiuwen.harness.task_loop.loop_queues import (
     LoopQueues,
 )
@@ -46,12 +47,18 @@ if TYPE_CHECKING:
 _CANCEL_WAIT_TIMEOUT = 1.5
 
 
-def _error_result(error: str, output: Optional[str] = None) -> Dict[str, Any]:
+def _error_result(
+    error: str,
+    output: Optional[str] = None,
+    *,
+    termination_reason: Optional[str] = None,
+) -> Dict[str, Any]:
     """Build an error result that survives the answer-stream adapter."""
     return {
         "output": output or error,
         "result_type": "error",
         "error": error,
+        "termination_reason": termination_reason or AgentTerminationReason.ERROR.value,
     }
 
 
@@ -577,7 +584,12 @@ class TaskLoopEventHandler(EventHandler):
         )
 
         self._resolve_future(
-            {"error": str(error_msg)}, round_id,
+            _error_result(
+                str(error_msg),
+                output="Task loop round failed.",
+                termination_reason=(event.metadata or {}).get("termination_reason"),
+            ),
+            round_id,
         )
 
         return {
