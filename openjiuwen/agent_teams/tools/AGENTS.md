@@ -69,6 +69,11 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
   「表不存在」并发 `CREATE TABLE`，第二个失败（PG `ProgrammingError` 42P07 / MySQL 1050），
   `retry_on_transient` 不覆盖 `already exists`，会崩 `initialize()`。故 `_ensure_session_tables`
   的每个 `Table.create` 同样包进 `_run_ddl_idempotent`（`verify = inspect.has_table`）。
+  **`initialize_engine._create_static_tables` 的 `create_all` 也走同款包装**——`initialize_engine`
+  在 `DbSessions` 发布前直接跑在 writer engine 上、无 `ddl_lock()` 可取，两个进程并发首次
+  `initialize()` 同一 PG/MySQL 库时同款 TOCTOU 命中（`team_info` / `team_member` 等静态表），
+  故 `_create_static_tables` 也用 `_run_ddl_idempotent` 包住 `SQLModel.metadata.create_all(
+  tables=static_tables())`（`verify = all(t.name in has_table_names for t in static_tables())`）。
   **`_add_column_idempotent` / `_run_ddl_idempotent` 住在 `tools/database/engine.py`，
   `organization/db.py` re-export 它们**（同一份原语服务 per-session 动态表 DDL 与 org 静态表 DDL）。
   **两条路径吞错后均复查 DDL 目标是否真存在**（savepoint 路径靠回滚恢复

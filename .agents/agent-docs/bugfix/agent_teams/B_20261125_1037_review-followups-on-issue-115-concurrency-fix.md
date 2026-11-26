@@ -435,3 +435,52 @@ truth。
   `test_message_manager.py`：536 passed。
 - 自构造并发首次 bind 复现脚本：两个独立 `TeamDatabase` 实例并发
   `create_cur_session_tables()` 同一 `session_id`，修复前必崩，修复后两路都返回 `True`。
+
+### 第十一轮检视：`_create_static_tables` 同款 TOCTOU 未收编
+
+第十一轮检视指出：第十轮只收编了 `_ensure_session_tables`（per-session 动态表）和
+`ensure_org_static_tables`（org 静态表）的 `create_all` / `Table.create` TOCTOU，但
+同款 DDL 入口 `_create_static_tables`（`initialize_engine` 跑在 writer engine 上的静态表
+`SQLModel.metadata.create_all(tables=static_tables())`）依旧是裸 `create_all(checkfirst=True)`，
+没走 `_run_ddl_idempotent`。
+
+**根因**：`initialize_engine` 在 `DbSessions` 发布前直接跑在 writer engine 上，无法取
+`sessions.ddl_lock()`（`ddl_lock()` 是 `DbSessions` 的方法）。`static_tables()`（`team_info`
+/ `team_member` 等）的 `create_all` 也是 SQLAlchemy `checkfirst=True` 的 in-process TOCTOU：
+两个进程并发首次 `initialize()` 同一 PG/MySQL 库时，两边 checkfirst 都读到「表不存在」并发
+`CREATE TABLE`，DB 表级 DDL 锁串行后第二个失败（PG `ProgrammingError` 42P07 / MySQL 1050）。
+该错误不在 `_TRANSIENT_DB_ERRORS`（`OperationalError` / `SATimeoutError` / `TimeoutError`）
+也不匹配 `_TRANSIENT_OPERATIONAL_MARKERS`（`"locked"` / `"busy"`），`retry_on_transient`
+不重试 → 异常经 `initialize_engine` 的 try/except 冒出 `initialize()` → bind 失败（issue #115
+现象 5 形态）。
+
+**修法**：`_create_static_tables` 改用 `_run_ddl_idempotent` 包住
+`SQLModel.metadata.create_all(sync_conn, tables=static_tables())`，
+`verify = all(t.name in set(inspect(sync_conn).get_table_names()) for t in static_tables())`
+——与 `ensure_org_static_tables` 同形。savepoint 路径吞 `already exists` 后复查所有静态表
+是否都真在；MySQL 路径无 savepoint，复查直接读隐式提交后的 ground truth。
+
+**契约同步**：
+- `engine.py` 的 `_create_static_tables` docstring 扩展说明这次 wrap 的根因（checkfirst 的
+  in-process TOCTOU、`initialize_engine` 在 `DbSessions` 发布前直接跑 writer engine 无
+  `ddl_lock()` 可取、`retry_on_transient` 不覆盖 `already exists`）。
+- `tools/AGENTS.md` 第 (1) 条 DDL 锁契约追加「`initialize_engine._create_static_tables`
+  的 `create_all` 也走同款包装」一段，补齐「DDL 锁 + CAS + 行锁」三件套对静态表 `create_all`
+  路径的覆盖说明。
+
+**验证**：
+- `tests/unit_tests/agent_teams/organization/test_org_db.py` + `test_database.py` +
+  `test_database_concurrency.py` + `TestCascadeDelete`：198 passed。
+- 「静态表已存在 → 再 `initialize()`」复现脚本：两个独立 `TeamDatabase` 实例先后
+  `initialize()` 同一文件后端，修复前裸 `create_all(checkfirst=True)` 对静态表已存在场景安全，
+  修复后 `_run_ddl_idempotent` 走 has_table=True → 不发 CREATE → 直接返回，行为等价。
+  SQLite 文件锁串行写、不暴露真竞态窗口；PG/MySQL 上两个进程并发首次 `initialize()` 才能真
+  复现，修复前必崩 `already exists`、修复后两路都返回成功。
+
+**未收编的同款 TOCTOU**：`_ensure_team_member_role_column` /
+`_ensure_team_member_options_column` / `_ensure_team_info_capability_columns` 三个
+migration helper 也是 in-process check-then-ALTER（`if "X" in columns` → `ALTER TABLE ADD
+COLUMN`），同款 TOCTOU 命中后第二个进程会撞 `duplicate column`。本次未收编这三个（第十一轮
+检视只点名了 `_create_static_tables`），可作下一轮 follow-up：把它们的 ALTER 全部换成
+`_add_column_idempotent` 包装即可（与 `organization/db.py` 的 `_ensure_org_task_columns`
+同款）。

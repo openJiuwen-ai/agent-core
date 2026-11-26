@@ -487,8 +487,29 @@ def _create_static_tables(sync_conn) -> None:
     ``create_cur_session_tables()`` and must not leak into an unrelated
     database. Creating them here would also make schema setup cost grow with
     the process's session history instead of with the schema itself.
+
+    The ``create_all`` is wrapped in :func:`_run_ddl_idempotent` rather than
+    relying on SQLAlchemy's checkfirst=True alone: ``checkfirst`` is an
+    in-process ``has_table`` probe → ``CREATE`` pair, not atomic across
+    processes. ``initialize_engine`` runs directly on the writer engine
+    (no ``DbSessions`` is published yet, so no ``ddl_lock()`` is available
+    here), and two processes concurrently initialising the same PG/MySQL
+    database both read "missing" and both issue ``CREATE TABLE``; the DB's
+    own DDL lock serialises the two ``CREATE``s but the second one fails
+    with ``already exists`` (PG ``ProgrammingError`` SQLSTATE 42P07; MySQL
+    1050). ``retry_on_transient`` does not cover ``already exists`` (it is
+    not in ``_TRANSIENT_OPERATIONAL_MARKERS`` and PG raises
+    ``ProgrammingError``, not ``OperationalError``), so without this wrapper
+    the second ``initialize()`` crashes — the same issue-115 symptom-5 shape
+    closed for ``_ensure_session_tables`` / ``ensure_org_static_tables``.
     """
-    SQLModel.metadata.create_all(sync_conn, tables=static_tables())
+    _run_ddl_idempotent(
+        sync_conn,
+        lambda: SQLModel.metadata.create_all(sync_conn, tables=static_tables()),
+        lambda: all(
+            t.name in set(inspect(sync_conn).get_table_names()) for t in static_tables()
+        ),
+    )
 
 
 def _ensure_team_member_role_column(sync_conn) -> None:
