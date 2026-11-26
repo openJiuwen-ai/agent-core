@@ -224,9 +224,17 @@ class RecoveryManager:
         ``cleanup_first=True`` tears down the old handles before restart;
         ``False`` assumes coordination teardown already cleared them.
         """
+        import asyncio
         for member_name, member_status in recoverable_members:
             if cleanup_first:
-                await self._spawn_manager.cleanup_teammate(member_name)
+                try:
+                    await self._spawn_manager.cleanup_teammate(member_name)
+                except asyncio.CancelledError:
+                    # cleanup 的取消回抛约定：取消展开时句柄已 pop；持久态若
+                    # 停在 READY/BUSY/RESTARTING 会指向不存在的运行时，
+                    # 归一到 ERROR 后原取消继续上抛。
+                    await self._spawn_manager.mark_restart_aborted(member_name)
+                    raise
             if not await self._mark_teammate_restarting_for_session_switch(
                 member_name,
                 member_status,

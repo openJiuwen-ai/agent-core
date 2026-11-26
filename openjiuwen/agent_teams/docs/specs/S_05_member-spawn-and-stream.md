@@ -168,6 +168,67 @@
     条链，再把异常往外抛会污染上层 shutdown。重构清理路径时必须保留，并检查
     `import contextlib` 还在（之前漏过一次）。`shutdown_all_handles` 自己不 suppress，
     它逐个走 `cleanup_teammate` 并 `try/except` 记日志后继续。
+
+    这里的吞只针对**内层**取消（await 成员任务 / 心跳任务时带出的
+    `CancelledError`）。调用方任务自身被取消时，`cleanup_teammate` 仍要在
+    `finally` 里拆完 `dispose`，再把 `CancelledError` 补回抛——asyncio 的取消只
+    投递一次，静默吞掉会让 `wait_for` 超时或进程 shutdown 的停止请求一直等到
+    leader 自然结束。`shutdown_all_handles` 同样先记下取消、拆完剩余成员并清空
+    `spawned_handles`，最后统一回抛。
+
+    **cleanup 内部按阶段隔离**：`cleanup_teammate` 的心跳停等
+    （`stop_health_check`）与杀进程（`force_kill`）各自独立 `try`——心跳被
+    内层取消或报错只记日志，**必须继续 `force_kill`**，否则成员任务连同其
+    EventBus 会留在进程里（正是本 spec 要防的泄漏）。每阶段记录
+    `cleanup <phase> observed cancellation (caller cancelled during cleanup:
+    true/false)`，phase=`health check` / `force_kill` / `dispose coordination`。
+
+    **判据必须用本次清理期间的增量而非存量**：`Task.cancelling()` 是累计
+    计数，早先已被上层消化的取消不会清零，若用 `cancelling() > 0` 会让后续
+    *成功* 的清理被误判为被取消。实现取清理入口快照 `count_before`，仅当
+    `count > count_before`（本次期间新到的取消请求；内层任务取消不改本任务
+    计数）才回抛。`kernel._run_teardown_steps` / `_teardown_tail` / dispose
+    兜底用的是同一判据——内层取消只记 WARNING 继续，不再冒充调用方取消。
+    `_run_teardown_steps` 返回 `TeardownOutcome(caller_cancelled,
+    interrupted_step)`：调用方取消打断某一步时记录步名。
+
+    **dispose 的 latch 以步骤是否跑完为准**：dispose 的
+    `_disposed` / `_lifecycle_state="stopped"` 只在 `interrupted_step is None`
+    时置位；被打断的步骤（await 被调用方取消炸断）并未释放自己的资源，
+    若照样 latch，后续 dispose 会 no-op、唯一的重试点消失。部分完成的
+    dispose **保持可重试**（各步骤幂等），调用方取消仍在末尾补回抛。
+
+    **延迟取消让位于在途异常**：`_teardown_tail` 运行在 `finally`
+    里，若主链正带着异常展开（`propagating_error` 非空），末尾补抛
+    `CancelledError` 会把那个异常顶掉，调用方永远看不到真正的失败原因。
+    此时取消只记 WARNING（`deferred cancellation suppressed; the in-flight
+    <type> keeps propagating`），原异常继续上抛；只有主链正常完成时才恢复
+    取消语义（回抛 `CancelledError`）。
+
+    **restart 被取消时的状态归一**：`restart_teammate` 及其所有
+    调用方（`recover_team` / `on_teammate_unhealthy` /
+    `recovery_manager.restart_for_session_switch` 的 `cleanup_first`）捕获
+    取消后调 `SpawnManager.mark_restart_aborted()`。`restart_teammate` 内
+    **清理、上下文构建（`build_context_from_db`，会 await DB）与重试循环
+    同在一层取消归一之内**——任一 await 处被取消都不得把成员留在
+    `RESTARTING`。归一细节：仅当当前状态属于
+    `STARTING/READY/BUSY/RESTARTING` 才归一到 `ERROR`；`PAUSED/STOPPED/
+    SHUTDOWN` 是 leader pause/stop 或退场的权威结论，**不得覆盖**（取消展开
+    与 leader 标记可能交错，覆盖会让持久态与团队结论矛盾）。**若该成员已有
+    活 spawn handle（重启在取消前已成功产出运行时），则完全不改状态**——
+    把活成员写成 ERROR 是错误的，后续状态归成员启动路径所有；只有句柄缺失
+    才走归一。读状态失败或再次取消则保持原状并记 WARNING。
+
+    **归一写必须是条件写（CAS）**：调用
+    `TeamBackend.set_member_status(..., allowed_from=...)`，DAO 侧是单条
+    `UPDATE ... WHERE status IN (allowed_from)`（`MemberDao.update_member_status_if_in`）——
+    只有该行**当前**状态仍在 `STARTING/READY/BUSY/RESTARTING` 内才落
+    `ERROR`，否则落空并只记 INFO。**不能**依赖调用方都在同一 leader 任务
+    链内串行：`on_teammate_unhealthy` 由 `handle.on_unhealthy` 以
+    `asyncio.ensure_future` 派发到 `recovery_tasks`，是与 leader 的
+    pause/stop 标记**并发**的独立任务——纯 read-then-write 会在读后 leader
+    写入 `PAUSED/STOPPED` 时把它覆盖成 `ERROR`。`recover_team` /
+    `restart_for_session_switch` 虽在 leader 任务链内串行，也统一走条件写。
 12. **transient-retry 状态是 per-cycle 私有**：`_retry_attempt` /
     `_swallow_failed_round` 由 `StreamController.start()` 在每个 run cycle 入口重置，
     `_swallow_failed_round` 另在每个 round `started` 事件上清零（`_map_round`）。

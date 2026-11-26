@@ -572,3 +572,628 @@ async def test_mark_live_teammates_skips_starting_member():
 
     marked = [c.args[0] for c in team_backend.set_member_status.call_args_list]
     assert marked == ["m-ready"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_dispose_stops_event_bus_and_is_idempotent():
+    """成员任务结束后的 dispose 必须停掉 EventBus 与轮询任务，且可重复调用。"""
+    host = _make_kernel_host()
+    kernel = CoordinationKernel(host)
+    bus = EventBus(
+        role=TeamRole.TEAMMATE,
+        mailbox_poll_interval=0.05,
+        task_poll_interval=0.05,
+    )
+    await bus.start()
+    assert bus.is_running is True
+    kernel._event_bus = bus
+
+    await kernel.dispose()
+
+    assert bus.is_running is False
+    assert bus._mailbox_poll_task is None
+    assert bus._task_poll_task is None
+    host.session_manager.release_session.assert_called_once_with()
+    host.stream_controller.close_stream.assert_called_once_with()
+    host.resources.harness.dispose.assert_awaited_once_with()
+
+    # 幂等：再次调用不再触碰已拆资源。
+    await kernel.dispose()
+    host.session_manager.release_session.assert_called_once_with()
+    host.resources.harness.dispose.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_pause_failure_still_tears_down_member_handles():
+    """pause 中段失败也必须取消成员句柄，不能留下成员轮询。"""
+    host = _make_kernel_host()
+    host.stream_controller.pause_agent = AsyncMock(side_effect=RuntimeError("pause boom"))
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+    bus = EventBus(
+        role=TeamRole.LEADER,
+        mailbox_poll_interval=0.05,
+        task_poll_interval=0.05,
+    )
+    await bus.start()
+    kernel._event_bus = bus
+
+    with pytest.raises(RuntimeError):
+        await kernel.pause()
+
+    assert bus.is_running is False
+    host.spawn_manager.cancel_recovery_tasks.assert_awaited()
+    host.spawn_manager.shutdown_all_handles.assert_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_stop_failure_still_tears_down_handles():
+    """stop 中段失败也必须取消成员句柄。"""
+    host = _make_kernel_host()
+    host.persist_allocator_state = MagicMock(side_effect=RuntimeError("persist boom"))
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+    bus = EventBus(
+        role=TeamRole.LEADER,
+        mailbox_poll_interval=0.05,
+        task_poll_interval=0.05,
+    )
+    await bus.start()
+    kernel._event_bus = bus
+
+    with pytest.raises(RuntimeError):
+        await kernel.stop()
+
+    assert bus.is_running is False
+    host.spawn_manager.shutdown_all_handles.assert_awaited()
+
+
+def _ordered_member_backend(host: SimpleNamespace, calls: list[str]) -> SimpleNamespace:
+    """成员兜底链路的有序桩：mark → cancel → shutdown 依次记入 ``calls``。"""
+    team_backend = SimpleNamespace(
+        list_member_roster=AsyncMock(
+            return_value=[SimpleNamespace(member_name="m", status="busy")]
+        ),
+        set_member_status=AsyncMock(
+            side_effect=lambda *args, **kwargs: calls.append("mark")
+        ),
+    )
+    host.infra.team_backend = team_backend
+    host.spawn_manager.spawned_handles = {"m": object()}
+    host.spawn_manager.cancel_recovery_tasks = AsyncMock(
+        side_effect=lambda: calls.append("cancel")
+    )
+    host.spawn_manager.shutdown_all_handles = AsyncMock(
+        side_effect=lambda: calls.append("shutdown")
+    )
+    return team_backend
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_pause_fallback_marks_paused_before_tearing_down_members():
+    """pause 中段失败停在标记之前：兜底必须先写 PAUSED 再拆句柄。"""
+    calls: list[str] = []
+    host = _make_kernel_host()
+    host.stream_controller.pause_agent = AsyncMock(side_effect=RuntimeError("pause boom"))
+    team_backend = _ordered_member_backend(host, calls)
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    with pytest.raises(RuntimeError, match="pause boom"):
+        await kernel.pause()
+
+    assert calls == ["mark", "cancel", "shutdown"]
+    team_backend.set_member_status.assert_awaited_once_with("m", MemberStatus.PAUSED)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_stop_fallback_marks_stopped_before_tearing_down_members():
+    """stop 中段失败停在标记之前：兜底必须先写 STOPPED 再拆句柄。"""
+    calls: list[str] = []
+    host = _make_kernel_host()
+    host.persist_allocator_state = MagicMock(side_effect=RuntimeError("persist boom"))
+    team_backend = _ordered_member_backend(host, calls)
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    with pytest.raises(RuntimeError, match="persist boom"):
+        await kernel.stop()
+
+    assert calls == ["mark", "cancel", "shutdown"]
+    team_backend.set_member_status.assert_awaited_once_with("m", MemberStatus.STOPPED)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_stop_fallback_latches_stopped_lifecycle():
+    """stop 中段失败：兜底拆完句柄后内存态必须落 stopped（与 pause 兜底对称）。
+
+    否则后续 pause/stop 会把已拆的资源当运行中再跑一遍。
+    """
+    host = _make_kernel_host()
+    host.persist_allocator_state = MagicMock(side_effect=RuntimeError("persist boom"))
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    with pytest.raises(RuntimeError, match="persist boom"):
+        await kernel.stop()
+
+    assert kernel._lifecycle_state == "stopped"
+    host.spawn_manager.shutdown_all_handles.assert_awaited_once()
+
+    # 再 pause 属幂等早退：不得对已拆成员再跑一轮暂停链。
+    await kernel.pause()
+    host.stream_controller.pause_agent.assert_not_awaited()
+    host.spawn_manager.shutdown_all_handles.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_stop_fallback_releases_permanent_resources_when_chain_aborts():
+    """stop 中段失败并 latch stopped 后，主链没走到的永久资源必须兜底释放。
+
+    latch 之后内核不再重试，未释放的 stream/memory/harness/messager/session
+    会一直泄漏到进程退出——兜底链必须把它们全部收掉。
+    """
+    memory_manager = SimpleNamespace(
+        extract_after_round=AsyncMock(),
+        close=AsyncMock(),
+    )
+    messager = SimpleNamespace(
+        stop=AsyncMock(),
+        unregister_direct_message_handler=AsyncMock(),
+        unsubscribe=AsyncMock(),
+    )
+    host = _make_kernel_host(memory_manager=memory_manager, messager=messager)
+    host.persist_allocator_state = MagicMock(side_effect=RuntimeError("persist boom"))
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    with pytest.raises(RuntimeError, match="persist boom"):
+        await kernel.stop()
+
+    assert kernel._lifecycle_state == "stopped"
+    host.stream_controller.close_stream.assert_called_once()
+    memory_manager.close.assert_awaited_once()
+    host.resources.harness.dispose.assert_awaited_once()
+    messager.stop.assert_awaited_once()
+    host.session_manager.release_session.assert_called_once_with()
+    # 主链没到记忆抽取：兜底不得补跑（提取只在正常 stop 语义里发生）。
+    memory_manager.extract_after_round.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_stop_fallback_step_failure_does_not_block_remaining_release():
+    """兜底释放链单步失败（如 harness dispose 抛错）不得阻断后续释放。"""
+    memory_manager = SimpleNamespace(
+        extract_after_round=AsyncMock(),
+        close=AsyncMock(),
+    )
+    messager = SimpleNamespace(
+        stop=AsyncMock(),
+        unregister_direct_message_handler=AsyncMock(),
+        unsubscribe=AsyncMock(),
+    )
+    host = _make_kernel_host(memory_manager=memory_manager, messager=messager)
+    host.persist_allocator_state = MagicMock(side_effect=RuntimeError("persist boom"))
+    host.resources.harness.dispose = AsyncMock(
+        side_effect=RuntimeError("harness boom")
+    )
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    with pytest.raises(RuntimeError, match="persist boom"):
+        await kernel.stop()
+
+    memory_manager.close.assert_awaited_once()
+    messager.stop.assert_awaited_once()
+    host.session_manager.release_session.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_pause_fallback_handle_teardown_survives_mark_failure():
+    """标记失败（DB 不可用）不得阻断成员句柄拆除，原异常照常上抛。"""
+    calls: list[str] = []
+    host = _make_kernel_host()
+    host.stream_controller.pause_agent = AsyncMock(side_effect=RuntimeError("pause boom"))
+    team_backend = _ordered_member_backend(host, calls)
+    team_backend.list_member_roster = AsyncMock(side_effect=RuntimeError("db gone"))
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    with pytest.raises(RuntimeError, match="pause boom"):
+        await kernel.pause()
+
+    assert calls == ["cancel", "shutdown"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_pause_fallback_persists_pending_resume_and_lifecycle():
+    """pause 主链中断：兜底拆成员后必须补写 lifecycle + pending-resume。"""
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.session_manager.team_session = session
+    host.resources.harness.state = HarnessState.PAUSED
+    host.resources.harness.paused_query = "the original task"
+    host.stream_controller.pause_agent = AsyncMock(
+        side_effect=RuntimeError("pause boom")
+    )
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    with pytest.raises(RuntimeError, match="pause boom"):
+        await kernel.pause()
+
+    assert read_pending_resume(session, "test-team") == {
+        "query": "the original task",
+        "paused_at_idle": False,
+    }
+    assert "paused" in str(session.state)
+    assert kernel._lifecycle_state == "paused"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_pause_fallback_latches_paused_after_members_torn_down():
+    """成员已拆、收尾段失败：内存态仍必须落 paused（不能停在 running）。
+
+    主链的 ``_lifecycle_state = "paused"`` 在末尾；成员拆除成功（
+    ``members_still_live=False``）之后、落 paused 之前失败时，旧兜底条件
+    不生效，内核会停在 running，后续 pause/stop 把已释放资源再跑一遍。
+    """
+    host = _make_kernel_host()
+    host.session_manager.release_session = MagicMock(
+        side_effect=RuntimeError("release boom")
+    )
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    with pytest.raises(RuntimeError, match="release boom"):
+        await kernel.pause()
+
+    assert kernel._lifecycle_state == "paused"
+    host.spawn_manager.shutdown_all_handles.assert_awaited_once()
+
+    # 已落 paused：再 pause 属幂等早退，不得重跑暂停链。
+    await kernel.pause()
+    host.stream_controller.pause_agent.assert_awaited_once()
+    host.spawn_manager.shutdown_all_handles.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_pause_fallback_releases_pause_scope_resources_when_chain_aborts():
+    """pause 主链在关流/释放 session 之前中断：兜底必须补做，latch 后无法再补。"""
+    host = _make_kernel_host()
+    host.stream_controller.pause_agent = AsyncMock(
+        side_effect=RuntimeError("pause boom")
+    )
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    with pytest.raises(RuntimeError, match="pause boom"):
+        await kernel.pause()
+
+    assert kernel._lifecycle_state == "paused"
+    host.stream_controller.close_stream.assert_called_once()
+    host.session_manager.release_session.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_pause_fallback_persistence_survives_members_already_torn_down():
+    """成员已拆后主链中断：lifecycle/pending-resume 也必须补写。"""
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.session_manager.team_session = session
+    host.resources.harness.state = HarnessState.PAUSED
+    host.resources.harness.paused_query = "the original task"
+    host.session_manager.release_session = MagicMock(
+        side_effect=RuntimeError("release boom")
+    )
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    with pytest.raises(RuntimeError, match="release boom"):
+        await kernel.pause()
+
+    assert kernel._lifecycle_state == "paused"
+    assert read_pending_resume(session, "test-team") == {
+        "query": "the original task",
+        "paused_at_idle": False,
+    }
+    assert "paused" in str(session.state)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_dispose_cancels_leader_timers():
+    """dispose 必须回收 leader-only 的接管提示/预算收尾定时器。"""
+    host = _make_kernel_host()
+    kernel = CoordinationKernel(host)
+    nudge = asyncio.create_task(asyncio.sleep(60))
+    wake = asyncio.create_task(asyncio.sleep(60))
+    kernel._takeover_nudge_task = nudge
+    kernel._budget_wake_task = wake
+
+    await kernel.dispose()
+
+    assert kernel._takeover_nudge_task is None
+    assert kernel._budget_wake_task is None
+    for task in (nudge, wake):
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+def _failing_bus_stub(exc: BaseException) -> SimpleNamespace:
+    """EventBus stub whose ``stop`` raises — isolation tests only."""
+    return SimpleNamespace(
+        pause_polls=AsyncMock(),
+        stop=AsyncMock(side_effect=exc),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_stop_fallback_survives_event_bus_stop_failure():
+    """stop 兜底中「停 EventBus」失败不得连带跳过成员句柄拆除。"""
+    host = _make_kernel_host()
+    host.persist_allocator_state = MagicMock(side_effect=RuntimeError("persist boom"))
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+    kernel._event_bus = _failing_bus_stub(RuntimeError("bus boom"))
+
+    with pytest.raises(RuntimeError, match="persist boom"):
+        await kernel.stop()
+
+    kernel._event_bus.stop.assert_awaited()
+    host.spawn_manager.cancel_recovery_tasks.assert_awaited()
+    host.spawn_manager.shutdown_all_handles.assert_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_pause_fallback_survives_event_bus_stop_failure():
+    """pause 兜底中「停 EventBus」失败不得连带跳过成员句柄拆除。"""
+    host = _make_kernel_host()
+    host.stream_controller.pause_agent = AsyncMock(side_effect=RuntimeError("pause boom"))
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+    kernel._event_bus = _failing_bus_stub(RuntimeError("bus boom"))
+
+    with pytest.raises(RuntimeError, match="pause boom"):
+        await kernel.pause()
+
+    host.spawn_manager.cancel_recovery_tasks.assert_awaited()
+    host.spawn_manager.shutdown_all_handles.assert_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_member_teardown_failure_does_not_skip_handle_shutdown():
+    """兜底内 cancel_recovery_tasks 失败也不得跳过 shutdown_all_handles。"""
+    host = _make_kernel_host()
+    host.spawn_manager.cancel_recovery_tasks = AsyncMock(side_effect=RuntimeError("cancel boom"))
+    host.stream_controller.pause_agent = AsyncMock(side_effect=RuntimeError("pause boom"))
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    with pytest.raises(RuntimeError, match="pause boom"):
+        await kernel.pause()
+
+    host.spawn_manager.shutdown_all_handles.assert_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_stop_tail_inner_cancellation_does_not_hijack_original_error():
+    """兜底步骤冒出的内层取消不得冒充调用方取消，也不得覆盖原始异常。"""
+    host = _make_kernel_host()
+    host.persist_allocator_state = MagicMock(side_effect=RuntimeError("persist boom"))
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+    kernel._event_bus = _failing_bus_stub(asyncio.CancelledError())
+
+    with pytest.raises(RuntimeError, match="persist boom"):
+        await kernel.stop()
+
+    host.spawn_manager.cancel_recovery_tasks.assert_awaited()
+    host.spawn_manager.shutdown_all_handles.assert_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_stop_tail_re_raises_only_when_caller_cancelled():
+    """调用方任务被取消：拆完句柄后把 CancelledError 回抛给调用方。"""
+    entered = asyncio.Event()
+
+    async def _blocked_drain() -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    host = _make_kernel_host()
+    host.stream_controller.drain_agent_task = AsyncMock(
+        side_effect=_blocked_drain
+    )
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    task = asyncio.create_task(kernel.stop())
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    host.spawn_manager.shutdown_all_handles.assert_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_stop_tail_cancellation_does_not_mask_original_error():
+    """主链异常在途时 tail 收到调用方取消：原异常必须继续上抛。
+
+    ``finally`` 里新抛的 CancelledError 会顶掉正在传播的异常，调用方将
+    永远看不到真正的失败原因；取消只允许记日志，不得覆盖主链异常。
+    """
+    entered = asyncio.Event()
+
+    async def _blocked_bus_stop() -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    host = _make_kernel_host()
+    host.persist_allocator_state = MagicMock(side_effect=RuntimeError("persist boom"))
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+    kernel._event_bus = SimpleNamespace(
+        pause_polls=AsyncMock(),
+        stop=AsyncMock(side_effect=_blocked_bus_stop),
+    )
+
+    task = asyncio.create_task(kernel.stop())
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(RuntimeError, match="persist boom"):
+        await task
+
+    host.spawn_manager.shutdown_all_handles.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_early_return_swallows_event_bus_stop_failure():
+    """幂等早退路径：EventBus 停失败只记日志，不把调用方拖崩。"""
+    host = _make_kernel_host()
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "stopped"
+    kernel._event_bus = _failing_bus_stub(RuntimeError("bus boom"))
+
+    await kernel.stop()  # 不抛
+
+    kernel._event_bus.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_dispose_stops_bus_when_an_early_step_fails():
+    """dispose 早段（pause_polls）失败也必须停 EventBus 并走完后续释放。"""
+    host = _make_kernel_host()
+    kernel = CoordinationKernel(host)
+    bus = SimpleNamespace(
+        pause_polls=AsyncMock(side_effect=RuntimeError("polls boom")),
+        stop=AsyncMock(),
+    )
+    kernel._event_bus = bus
+
+    await kernel.dispose()
+
+    bus.stop.assert_awaited()
+    host.session_manager.release_session.assert_called_once_with()
+    host.resources.harness.dispose.assert_awaited_once_with()
+    assert kernel._disposed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_dispose_continues_after_a_step_fails():
+    """dispose 后段失败（harness）不跳过 session 释放；异常不外抛。"""
+    host = _make_kernel_host()
+    host.resources.harness.dispose = AsyncMock(side_effect=RuntimeError("harness boom"))
+    kernel = CoordinationKernel(host)
+    kernel._event_bus = SimpleNamespace(
+        pause_polls=AsyncMock(),
+        stop=AsyncMock(),
+    )
+
+    await kernel.dispose()
+
+    host.session_manager.release_session.assert_called_once_with()
+    assert kernel._disposed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_start_after_dispose_is_rejected():
+    """dispose 是终态：再次 start 必须拒绝，不能新起无人回收的 EventBus。"""
+    host = _make_kernel_host()
+    kernel, bus = _kernel_with_live_bus(host)
+    await bus.start()
+    await kernel.dispose()
+    assert bus.is_running is False
+
+    with pytest.raises(RuntimeError, match="disposed"):
+        await kernel.start(None)
+
+    assert bus.is_running is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_dispose_swallows_inner_cancellation_and_completes():
+    """步骤内部任务取消（非调用方取消）不得让 dispose 误报被取消。"""
+    host = _make_kernel_host()
+    kernel = CoordinationKernel(host)
+    bus = SimpleNamespace(
+        pause_polls=AsyncMock(side_effect=asyncio.CancelledError()),
+        stop=AsyncMock(),
+    )
+    kernel._event_bus = bus
+
+    await kernel.dispose()  # 不抛
+
+    bus.stop.assert_awaited()
+    host.session_manager.release_session.assert_called_once_with()
+    assert kernel._disposed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_dispose_interrupted_step_stays_retryable():
+    """调用方取消打断某步：不得 latch，二次 dispose 必须重跑并补齐。
+
+    旧契约「取消后一律 latch、不重试」把被中断步骤的半成品资源当成已释放；
+    现按步骤结局判定：有 interrupted_step 时不 latch，保留唯一的重试点。
+    """
+    entered = asyncio.Event()
+    calls = {"harness": 0}
+
+    async def _blocked_harness_dispose() -> None:
+        calls["harness"] += 1
+        if calls["harness"] == 1:
+            entered.set()
+            await asyncio.Event().wait()
+
+    host = _make_kernel_host()
+    host.resources.harness.dispose = AsyncMock(
+        side_effect=_blocked_harness_dispose
+    )
+    kernel = CoordinationKernel(host)
+    kernel._event_bus = SimpleNamespace(
+        pause_polls=AsyncMock(),
+        stop=AsyncMock(),
+    )
+
+    task = asyncio.create_task(kernel.dispose())
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # harness 步被调用方取消打断：未 latch，可重试；后续步骤仍按隔离链跑过。
+    assert kernel._disposed is False
+    host.session_manager.release_session.assert_called_once_with()
+
+    await kernel.dispose()
+
+    assert calls["harness"] == 2
+    assert kernel._disposed is True
+    assert kernel._lifecycle_state == "stopped"
+    assert host.session_manager.release_session.call_count == 2
