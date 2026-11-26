@@ -84,6 +84,13 @@ def is_retryable_transport_error(error: Exception) -> bool:
     )
 
 
+def should_attempt_reconnect(client: Any, error: Exception) -> bool:
+    """Retry an empty SSE session only after a prior successful connection."""
+    if isinstance(error, RuntimeError) and "not connected" in str(error).lower():
+        return bool(getattr(client, "_lazy_reconnect", False))
+    return is_retryable_transport_error(error)
+
+
 def _get_reconnect_lock(client: Any) -> asyncio.Lock:
     """Per-instance reconnect lock, lazily initialized.
 
@@ -186,7 +193,7 @@ def with_reconnect(method):
                 return await method(self, *args, **kwargs)
             except Exception as e:
                 # Only retry on transport-layer errors and if we have remaining attempts.
-                if attempt < attempts - 1 and is_retryable_transport_error(e):
+                if attempt < attempts - 1 and should_attempt_reconnect(self, e):
                     logger.warning(
                         "[mcp-reconnect] %s.%s hit transport error (attempt %d/%d), reconnecting: %r",
                         type(self).__name__, method.__name__, attempt + 1, attempts, e,

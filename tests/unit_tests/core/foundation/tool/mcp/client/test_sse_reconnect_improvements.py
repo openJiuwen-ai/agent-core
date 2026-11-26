@@ -20,7 +20,10 @@ import pytest
 from typing import Any
 
 from openjiuwen.core.foundation.tool.mcp.base import McpServerConfig
-from openjiuwen.core.foundation.tool.mcp.client.reconnect import is_retryable_transport_error
+from openjiuwen.core.foundation.tool.mcp.client.reconnect import (
+    is_retryable_transport_error,
+    should_attempt_reconnect,
+)
 from openjiuwen.core.foundation.tool.mcp.client.sse_client import SseClient
 
 
@@ -43,6 +46,7 @@ def _install_fake_lifecycle(client: SseClient) -> dict[str, Any]:
         state["connect_tasks"].append(asyncio.current_task())
         client._session = object()
         client._is_disconnected = False
+        client._lazy_reconnect = True
         return True
 
     async def _fake_disconnect(*, timeout: float = -1) -> bool:
@@ -200,6 +204,45 @@ class TestSseReconnectR1R2R6:
         RuntimeError propagate without reconnecting."""
         err = RuntimeError("Not connected to SSE server")
         assert is_retryable_transport_error(err) is False
+
+    @pytest.mark.asyncio
+    async def test_empty_session_recovers_only_after_prior_connect(self) -> None:
+        client = _make_client()
+        guard = RuntimeError("Not connected to SSE server")
+        assert should_attempt_reconnect(client, guard) is False
+
+        _install_fake_lifecycle(client)
+        await client.connect()
+        client._session = None
+        assert should_attempt_reconnect(client, guard) is True
+
+        class _RecoveredSession:
+            async def list_tools(self):
+                return type("Tools", (), {"tools": []})()
+
+        reconnect_calls = []
+
+        async def _recover(*, timeout: float = -1) -> bool:
+            reconnect_calls.append(timeout)
+            client._session = _RecoveredSession()
+            return True
+
+        client.reconnect = _recover
+        assert await client.list_tools(timeout=0.5) == []
+        assert reconnect_calls == [0.5]
+        await _stop(client)
+
+    @pytest.mark.asyncio
+    async def test_explicit_disconnect_disables_lazy_recovery(self) -> None:
+        client = _make_client()
+        _install_fake_lifecycle(client)
+        await client.connect()
+        assert client._lazy_reconnect is True
+        await client.disconnect()
+        assert client._lazy_reconnect is False
+        assert should_attempt_reconnect(
+            client, RuntimeError("Not connected to SSE server")
+        ) is False
 
     @pytest.mark.asyncio
     async def test_retryable_markers_match_case_insensitively(self) -> None:

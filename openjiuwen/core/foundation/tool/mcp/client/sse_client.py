@@ -50,6 +50,8 @@ class SseClient(McpClient):
         # sections atomic and avoid nested-lock deadlock surface.
         self._lifecycle_lock: asyncio.Lock = asyncio.Lock()
         self._reconnect_future: Optional[asyncio.Future] = None
+        # A successful connection may recover lazily; explicit close disables it.
+        self._lazy_reconnect: bool = False
 
     @staticmethod
     def _extract_auth_provider(auth_result: Any) -> Any:
@@ -151,6 +153,7 @@ class SseClient(McpClient):
             # and kills the owner loop.
             await asyncio.wait_for(self._session.initialize(), timeout=actual_timeout)
             self._is_disconnected = False
+            self._lazy_reconnect = True
             logger.info("[SseClient] SSE client connected successfully to %s", self._server_path)
             return True
 
@@ -248,6 +251,7 @@ class SseClient(McpClient):
         logger.debug("[SseClient] Requesting disconnect")
         async with self._lifecycle_lock:
             result = await self._submit(lambda: self._do_disconnect(timeout=timeout))
+            self._lazy_reconnect = False
             # A public disconnect is a final teardown: stop the owner task so it
             # doesn't leak.
             self._stopping = True
@@ -285,6 +289,7 @@ class SseClient(McpClient):
                 logger.debug("[SseClient] Waiting for in-flight reconnect")
             else:
                 self._stopping = False
+                self._lazy_reconnect = True
                 self._reconnect_future = asyncio.get_running_loop().create_future()
                 fut = None
 
