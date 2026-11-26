@@ -348,20 +348,19 @@ async def test_expert_task_plan_preserves_evidence_and_final_acceptance(tmp_path
     assert graph["nodes"]["task-2"]["metadata"]["inputs"] == [evidence]
     assert graph["nodes"]["task-2"]["metadata"]["external_inputs"] == [protocol.name]
     assert graph["metadata"]["missing_inputs"] == []
-    prompt = model.planning_prompts[0]
-    assert "checked independently" in prompt
-    assert "small or tightly coupled work" in prompt
-    assert "what must survive integration" in prompt
-    assert "downstream decision or action" in prompt
-    assert "successive changes to the same state" in prompt
-    assert "original requirements and relevant source material" in prompt
+    prompt = " ".join(model.planning_prompts[0].split())
+    assert "tasks array is the list of assignments to dispatch to child agents" in prompt
+    assert "final delivery owned by the main agent outside the tasks array and handoffs" in prompt
+    assert "Give successive changes to the same artifact or mutable state one owner" in prompt
+    assert "specify the source boundary, the question to answer" in prompt
+    assert "precise evidence locations, applicable conditions, and unresolved questions" in prompt
+    assert "state what it is responsible for deciding" in prompt
+    assert "Include the relevant original user requirements, applicable sources" in prompt
     assert "its basis in the user request or an applicable source" in prompt
-    assert "Preserve explicit scope and exclusions" in prompt
-    assert "verifiable checks that preserve their meaning and the requested output format" in " ".join(prompt.split())
-    assert "Leave planner-chosen methods adjustable" in prompt
-    assert "inspect the final artifact or read back the affected state" in prompt
-    assert "check what already took effect" in prompt
-    assert "final version" in prompt
+    assert "Preserve scope, exclusions, meaning, and requested output formats" in prompt
+    assert "Keep planner-chosen methods adjustable" in prompt
+    assert "verify changes after correction" in prompt
+    assert "inspect existing state before retrying an action with side effects" in prompt
 
 
 @pytest.mark.asyncio
