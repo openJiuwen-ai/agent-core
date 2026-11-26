@@ -7,10 +7,9 @@ from __future__ import annotations
 
 import json
 import weakref
-from typing import Any, Callable
+from typing import Any
 
 from sqlalchemy import inspect
-from sqlalchemy.exc import DBAPIError
 from sqlmodel import SQLModel
 
 from openjiuwen.agent_teams.organization.schema import (
@@ -19,9 +18,28 @@ from openjiuwen.agent_teams.organization.schema import (
     org_static_tables,
 )
 from openjiuwen.agent_teams.tools.database import TeamDatabase
-from openjiuwen.agent_teams.tools.database.engine import DbSessions, retry_on_transient
+from openjiuwen.agent_teams.tools.database.engine import (
+    DbSessions,
+    _add_column_idempotent,
+    _run_ddl_idempotent,
+    retry_on_transient,
+)
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
+
+# ``_add_column_idempotent`` / ``_run_ddl_idempotent`` are defined in
+# ``tools/database/engine.py`` (the lower layer) so the per-session dynamic
+# table DDL path (``_ensure_session_tables``) and the org static-table path
+# share the same idempotent CREATE/ALTER primitives. They are re-exported
+# here so existing ``org_db._add_column_idempotent`` / ``org_db._run_ddl_idempotent``
+# callers and tests keep working unchanged.
+__all__ = (
+    "_add_column_idempotent",
+    "_run_ddl_idempotent",
+    "OrgDbContext",
+    "json_dumps",
+    "json_loads",
+)
 
 _ORG_TASK_NEW_COLUMNS = (
     ("aggregation_json", "TEXT"),
@@ -34,118 +52,6 @@ _ORG_TASK_NEW_COLUMNS = (
     ("recreated_from_task_id", "TEXT"),
     ("recreation_request_id", "TEXT"),
 )
-
-
-def _add_column_idempotent(sync_conn, table: str, column: str, col_type: str) -> None:
-    """Add a column, tolerating a concurrent add by another process.
-
-    The check-then-ALTER pattern is not atomic across processes: two
-    processes can both see the column missing and both issue
-    ``ALTER TABLE ... ADD COLUMN``. The DB's own DDL lock serialises the
-    two ALTERs, but the second one fails:
-    - SQLite: ``OperationalError`` "duplicate column name".
-    - PostgreSQL: ``ProgrammingError`` (SQLSTATE 42701) "column ... already
-      exists". PG also puts the transaction into an aborted state after the
-      failed statement, so the outer ``session.commit()`` would later raise
-      ``InFailedSQLTransaction``.
-    - MySQL: ``OperationalError`` (1060) "Duplicate column name".
-
-    On SQLite / PostgreSQL the ALTER is wrapped in a SAVEPOINT
-    (``begin_nested``) so the outer transaction stays committable when the
-    duplicate-column error is swallowed — the savepoint rolls back to the
-    pre-ALTER state, restoring the transaction to a healthy state.
-
-    On MySQL the SAVEPOINT is skipped: MySQL's DDL implicitly commits
-    *whether the DDL succeeds or fails*, which destroys any active
-    SAVEPOINT before ``begin_nested`` can roll back to it. The savepoint's
-    exit-time ``ROLLBACK TO SAVEPOINT`` would then raise a second
-    ``DBAPIError`` ("SAVEPOINT does not exist"), masking the original
-    "Duplicate column name" error and bypassing the message check below.
-
-    On **both** paths the column's existence is re-checked via ``inspect``
-    after a swallowed duplicate-column error. The savepoint path's rollback
-    restores the transaction to a clean state but does not, by itself,
-    confirm a concurrent process actually committed this column — the
-    inspect re-check does. If the column is somehow still missing, the
-    swallowed error was inconsistent with the post-ALTER state and the
-    helper re-raises rather than silently leaving the column absent.
-    """
-    use_savepoint = sync_conn.dialect.name != "mysql"
-    try:
-        if use_savepoint:
-            with sync_conn.begin_nested():
-                sync_conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-        else:
-            sync_conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-    except DBAPIError as exc:
-        msg = str(exc).lower()
-        if "duplicate column" not in msg and "already exists" not in msg:
-            raise
-        # Re-verify on every path: the savepoint path's rollback restores
-        # the transaction to a clean state, but only this re-check confirms
-        # a concurrent process actually committed this column. The MySQL
-        # path has no savepoint to roll back to, so the implicit commit's
-        # post-ALTER state is the ground truth — the inspect reads it
-        # directly.
-        inspector = inspect(sync_conn)
-        if column not in {col["name"] for col in inspector.get_columns(table)}:
-            raise
-
-
-def _run_ddl_idempotent(
-    sync_conn,
-    ddl: Callable[[], None],
-    verify: Callable[[], bool],
-) -> None:
-    """Run a DDL callable, tolerating a concurrent run by another process.
-
-    Generalises :func:`_add_column_idempotent` to arbitrary DDL callables
-    (``SQLModel.metadata.create_all`` / ``Index.create``). The same
-    check-then-act TOCTOU race applies: two processes both inspect a table
-    or index as missing and both fire the ``CREATE`` statement. The DB's own
-    DDL lock serialises the two ``CREATE``s, but the second one fails:
-
-    - SQLite / PostgreSQL: ``already exists`` error. PG also puts the
-      transaction into an aborted state after the failed statement, so the
-      outer ``session.commit()`` would later raise
-      ``InFailedSQLTransaction``.
-    - MySQL: ``already exists`` / ``Duplicate key name`` error. MySQL's DDL
-      implicitly commits *whether the DDL succeeds or fails*, so there is no
-      savepoint to roll back to and no transaction state to poison.
-
-    On SQLite / PostgreSQL the DDL is wrapped in a ``SAVEPOINT``
-    (``begin_nested``) so the outer transaction stays committable when the
-    ``already exists`` error is swallowed. On MySQL the ``SAVEPOINT`` is
-    skipped (same reasoning as :func:`_add_column_idempotent` — the implicit
-    commit destroys it).
-
-    On **both** paths the ``verify`` callable is invoked after a swallowed
-    ``already exists`` / ``duplicate`` error to re-check that the DDL target
-    actually exists. The savepoint path's rollback restores the transaction
-    to a clean state but does not, by itself, confirm that a concurrent
-    process committed the very DDL we were attempting — verify does. If
-    verify reports the target still missing, the swallowed error was
-    inconsistent with the post-DDL state and the helper re-raises rather
-    than silently leaving the schema absent.
-    """
-    use_savepoint = sync_conn.dialect.name != "mysql"
-    try:
-        if use_savepoint:
-            with sync_conn.begin_nested():
-                ddl()
-        else:
-            ddl()
-    except DBAPIError as exc:
-        msg = str(exc).lower()
-        if "already exists" not in msg and "duplicate" not in msg:
-            raise
-        # Re-verify on every path: the savepoint path's rollback restores
-        # the transaction to a clean state, but only ``verify`` confirms a
-        # concurrent process actually committed this DDL target. The MySQL
-        # path has no savepoint to roll back to, so the implicit commit's
-        # post-DDL state is the ground truth — verify reads it directly.
-        if not verify():
-            raise
 
 
 def ensure_org_static_tables(sync_conn) -> None:

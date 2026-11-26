@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import NamedTuple, TypeVar
 
 from sqlalchemy import event, inspect
-from sqlalchemy.exc import NoSuchTableError, OperationalError
+from sqlalchemy.exc import DBAPIError, NoSuchTableError, OperationalError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -99,6 +99,86 @@ _TRANSIENT_OPERATIONAL_MARKERS = ("locked", "busy")
 # wedged driver rarely recovers within seconds, so retry it only once instead
 # of the full ``_DB_RETRY_ATTEMPTS`` (bounds the worst case at ~2x watchdog).
 _WATCHDOG_RETRY_ATTEMPTS = 2
+
+
+def _add_column_idempotent(sync_conn, table: str, column: str, col_type: str) -> None:
+    """Add a column, tolerating a concurrent add by another process.
+
+    The check-then-ALTER pattern is not atomic across processes: two
+    processes can both see the column missing and both issue
+    ``ALTER TABLE ... ADD COLUMN``. The DB's own DDL lock serialises the
+    two ALTERs, but the second one fails:
+
+    - SQLite: ``OperationalError`` "duplicate column name".
+    - PostgreSQL: ``ProgrammingError`` (SQLSTATE 42701) "column ... already
+      exists". PG also puts the transaction into an aborted state after the
+      failed statement, so the outer ``session.commit()`` would later raise
+      ``InFailedSQLTransaction``.
+    - MySQL: ``OperationalError`` (1060) "Duplicate column name".
+
+    On SQLite / PostgreSQL the ALTER is wrapped in a SAVEPOINT
+    (``begin_nested``) so the outer transaction stays committable when the
+    duplicate-column error is swallowed. On MySQL the SAVEPOINT is skipped
+    (DDL implicitly commits, destroying any active savepoint).
+
+    On **both** paths the column's existence is re-checked via ``inspect``
+    after a swallowed duplicate-column error; if the column is somehow still
+    missing, the helper re-raises rather than silently leaving the column
+    absent.
+    """
+    use_savepoint = sync_conn.dialect.name != "mysql"
+    try:
+        if use_savepoint:
+            with sync_conn.begin_nested():
+                sync_conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+        else:
+            sync_conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+    except DBAPIError as exc:
+        msg = str(exc).lower()
+        if "duplicate column" not in msg and "already exists" not in msg:
+            raise
+        inspector = inspect(sync_conn)
+        if column not in {col["name"] for col in inspector.get_columns(table)}:
+            raise
+
+
+def _run_ddl_idempotent(
+    sync_conn,
+    ddl: Callable[[], None],
+    verify: Callable[[], bool],
+) -> None:
+    """Run a DDL callable, tolerating a concurrent run by another process.
+
+    Generalises :func:`_add_column_idempotent` to arbitrary DDL callables
+    (``SQLModel.metadata.create_all`` / ``Table.create`` / ``Index.create``).
+    The same check-then-act TOCTOU race applies: two processes both inspect
+    a table or index as missing and both fire the ``CREATE`` statement; the
+    DB's own DDL lock serialises the two ``CREATE``s but the second fails
+    with ``already exists``.
+
+    On SQLite / PostgreSQL the DDL is wrapped in a ``SAVEPOINT``
+    (``begin_nested``) so the outer transaction stays committable when the
+    ``already exists`` error is swallowed; on MySQL the ``SAVEPOINT`` is
+    skipped (DDL implicitly commits).
+
+    On **both** paths the ``verify`` callable is invoked after a swallowed
+    error to re-check the DDL target actually exists. If verify reports the
+    target still missing, the helper re-raises rather than silently leaving
+    the schema absent.
+    """
+    use_savepoint = sync_conn.dialect.name != "mysql"
+    try:
+        if use_savepoint:
+            with sync_conn.begin_nested():
+                ddl()
+        else:
+            ddl()
+    except DBAPIError as exc:
+        msg = str(exc).lower()
+        if "already exists" not in msg and "duplicate" not in msg:
+            raise
+        if not verify():
+            raise
 
 
 class DbSessions:
@@ -1045,7 +1125,34 @@ async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
 
 
 async def _ensure_session_tables(session: AsyncSession) -> None:
-    """Create / ensure the per-session dynamic tables on an open session."""
+    """Create / ensure the per-session dynamic tables on an open session.
+
+    The per-table ``CREATE TABLE`` is wrapped in :func:`_run_ddl_idempotent`
+    rather than relying on SQLAlchemy's ``checkfirst=True`` alone: ``checkfirst``
+    is an in-process ``has_table`` probe → ``CREATE`` pair, not atomic across
+    processes. Two teammate processes concurrently binding the same
+    ``session_id`` (e.g. on a PG/MySQL backend) can both read "missing" and
+    both issue ``CREATE TABLE``; the DB's own DDL lock serialises the two
+    ``CREATE``s but the second one fails with ``already exists``
+    (PG: ``ProgrammingError`` / SQLSTATE 42P07; MySQL: 1050). ``ddl_lock()``
+    is a process-local ``asyncio.Lock`` and does not serialise the two
+    processes. ``_run_ddl_idempotent`` swallows the ``already exists`` error
+    under a SAVEPOINT (skipped on MySQL — implicit DDL commit destroys it)
+    and re-verifies via ``inspect().has_table`` that the table is in fact
+    present; if it is somehow still missing the helper re-raises instead of
+    silently leaving the schema absent. ``retry_on_transient`` does not
+    cover ``already exists`` (it is not in ``_TRANSIENT_OPERATIONAL_MARKERS``
+    and PG raises ``ProgrammingError``, not ``OperationalError``), so without
+    this wrapper the second bind crashes ``initialize()``.
+    """
+
+    def _create_idempotent(sync_conn, table) -> None:
+        _run_ddl_idempotent(
+            sync_conn,
+            lambda: table.create(sync_conn, checkfirst=True),
+            lambda: inspect(sync_conn).has_table(table.name),
+        )
+
     task_model = _get_task_model()
     dep_model = _get_task_dependency_model()
     message_model = _get_message_model()
@@ -1059,7 +1166,7 @@ async def _ensure_session_tables(session: AsyncSession) -> None:
     candidates = _current_session_migration_tables()
     existing_before_create = await conn.run_sync(_snapshot_existing_tables, candidates)
     for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
-        await conn.run_sync(model.__table__.create, checkfirst=True)
+        await conn.run_sync(_create_idempotent, model.__table__)
     await conn.run_sync(_ensure_message_protocol_column)
     await conn.run_sync(_ensure_message_meta_column)
     await conn.run_sync(_ensure_dynamic_table_indexes, candidates, existing_before_create)

@@ -517,6 +517,7 @@ def test_add_column_idempotent_mysql_skips_savepoint_and_rechecks(monkeypatch):
     from sqlalchemy.exc import OperationalError  # OperationalError is a DBAPIError subclass
 
     from openjiuwen.agent_teams.organization import db as org_db
+    from openjiuwen.agent_teams.tools.database import engine as engine_module
 
     fake_conn = MagicMock()
     fake_conn.dialect.name = "mysql"
@@ -539,7 +540,9 @@ def test_add_column_idempotent_mysql_skips_savepoint_and_rechecks(monkeypatch):
     fake_inspector = MagicMock()
     fake_inspector.get_columns.return_value = [{"name": "c"}]
 
-    with patch.object(org_db, "inspect", return_value=fake_inspector):
+    # The helpers now live in ``engine_module`` (org_db re-exports them), so
+    # ``inspect`` is resolved in the engine namespace — patch it there.
+    with patch.object(engine_module, "inspect", return_value=fake_inspector):
         org_db._add_column_idempotent(fake_conn, "t", "c", "TEXT")
 
     fake_conn.begin_nested.assert_not_called()
@@ -558,6 +561,7 @@ def test_add_column_idempotent_mysql_reraises_when_column_still_missing(monkeypa
     from sqlalchemy.exc import OperationalError
 
     from openjiuwen.agent_teams.organization import db as org_db
+    from openjiuwen.agent_teams.tools.database import engine as engine_module
 
     fake_conn = MagicMock()
     fake_conn.dialect.name = "mysql"
@@ -573,7 +577,9 @@ def test_add_column_idempotent_mysql_reraises_when_column_still_missing(monkeypa
     fake_inspector = MagicMock()
     fake_inspector.get_columns.return_value = [{"name": "other"}]
 
-    with patch.object(org_db, "inspect", return_value=fake_inspector):
+    # The helpers now live in ``engine_module`` (org_db re-exports them), so
+    # ``inspect`` is resolved in the engine namespace — patch it there.
+    with patch.object(engine_module, "inspect", return_value=fake_inspector):
         with pytest.raises(OperationalError):
             org_db._add_column_idempotent(fake_conn, "t", "c", "TEXT")
 
@@ -771,6 +777,7 @@ def test_add_column_idempotent_savepoint_path_reraises_when_column_still_missing
     from unittest.mock import MagicMock, patch
 
     from openjiuwen.agent_teams.organization import db as org_db
+    from openjiuwen.agent_teams.tools.database import engine as engine_module
 
     fake_conn = MagicMock()
     fake_conn.dialect.name = "sqlite"
@@ -795,7 +802,9 @@ def test_add_column_idempotent_savepoint_path_reraises_when_column_still_missing
     fake_inspector = MagicMock()
     fake_inspector.get_columns.return_value = [{"name": "other"}]
 
-    with patch.object(org_db, "inspect", return_value=fake_inspector):
+    # The helpers now live in ``engine_module`` (org_db re-exports them), so
+    # ``inspect`` is resolved in the engine namespace — patch it there.
+    with patch.object(engine_module, "inspect", return_value=fake_inspector):
         with pytest.raises(OperationalError):
             org_db._add_column_idempotent(fake_conn, "t", "c", "TEXT")
 

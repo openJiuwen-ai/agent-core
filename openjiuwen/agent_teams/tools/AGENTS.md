@@ -64,7 +64,14 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
   `create_all` / `CREATE INDEX` 与 `ADD COLUMN` 一样有 checkfirst 的 TOCTOU 竞态，故全部
   走 `_add_column_idempotent` / `_run_ddl_idempotent`（SAVEPOINT + DBAPIError catch，
   MySQL 跳 savepoint），跨进程吞 `already exists` / `duplicate` 错误、保持外层事务
-  committable。**两条路径吞错后均复查 DDL 目标是否真存在**（savepoint 路径靠回滚恢复
+  committable。**同款竞态也存在于 `_ensure_session_tables` 的 `Table.create(checkfirst=True)`**：
+  两个 teammate 进程并发首次 bind 同一 `session_id`（PG/MySQL 后端）时，两边 checkfirst 都读
+  「表不存在」并发 `CREATE TABLE`，第二个失败（PG `ProgrammingError` 42P07 / MySQL 1050），
+  `retry_on_transient` 不覆盖 `already exists`，会崩 `initialize()`。故 `_ensure_session_tables`
+  的每个 `Table.create` 同样包进 `_run_ddl_idempotent`（`verify = inspect.has_table`）。
+  **`_add_column_idempotent` / `_run_ddl_idempotent` 住在 `tools/database/engine.py`，
+  `organization/db.py` re-export 它们**（同一份原语服务 per-session 动态表 DDL 与 org 静态表 DDL）。
+  **两条路径吞错后均复查 DDL 目标是否真存在**（savepoint 路径靠回滚恢复
   事务状态 + `verify` / `inspect` 复查；MySQL 路径无 savepoint，复查直接读隐式提交后的
   ground truth）——若目标仍缺失，re-raise 不一致态，不静默吞掉。
   (2) 状态翻转 / 删除走 CAS（`UPDATE/DELETE ... WHERE status=...` 看 `rowcount`）：

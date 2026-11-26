@@ -389,3 +389,49 @@ post-DDL 状态成为 ground truth）。`ensure_org_static_tables` 的 `create_a
 - `test_add_column_idempotent_savepoint_path_reraises_when_column_still_missing`：
   fake SQLite 连接驱动 savepoint 分支，ALTER 在 savepoint 内抛 `duplicate column`，
   `inspect.get_columns` 返回不含目标列 → helper 必须 re-raise。
+
+### 第十轮检视：`_ensure_session_tables` 的 `CREATE TABLE` 跨进程竞态
+
+第十轮检视指出：`_run_ddl_idempotent` / `_add_column_idempotent` 把组织静态表迁移
+（`organization/db.py` 的 `ensure_org_static_tables`）包成了 idempotent，但同类「跨进程
+并发首次 bind 同一 `session_id`」的动态会话表路径（`create_cur_session_tables` →
+`_ensure_session_tables`，`engine.py:1141`）依旧是 `model.__table__.create(checkfirst=True)`
+的 inspect-then-CREATE。
+
+**根因**：SQLAlchemy 的 `checkfirst=True` 是进程内的 `has_table` 探针 → `CREATE` 两步，
+不是原子的。`ddl_lock()` 是进程级 `asyncio.Lock`，跨进程不串行（同一份 B_ 文档第 (1) 条
+已记录此约束）。两个 teammate 进程并发首次 bind 同一 `session_id`（PG/MySQL 后端）时：
+两边 `checkfirst` 都读到「表不存在」→ 都发 `CREATE TABLE`；DB 的表级 DDL 锁串行后第二个
+失败（PG `ProgrammingError` SQLSTATE 42P07；MySQL 1050）。该错误不属于
+`_TRANSIENT_DB_ERRORS`（`OperationalError` / `SATimeoutError` / `TimeoutError`）也不匹配
+`_TRANSIENT_OPERATIONAL_MARKERS`（`"locked"` / `"busy"`），`retry_on_transient` 不重试，
+`create_cur_session_tables` 也不捕获 → 异常经 `TeamDatabase._wire_up` 冒出 `initialize()`，
+bind 失败（issue #115 现象 5 的形态）。SQLite 上单进程内 `write()` 持进程锁兜底，但同一
+文件后端跨进程（如独立 CLI 成员）仍有这个窗口。
+
+**修法**：把 `_add_column_idempotent` / `_run_ddl_idempotent` 从 `organization/db.py`
+搬到 `tools/database/engine.py`（更下层、被 `organization/db.py` import），作为 per-session
+动态表 DDL 与 org 静态表 DDL 共享的 idempotent CREATE/ALTER 原语。`organization/db.py`
+改为 import 后 re-export，保留 `org_db._add_column_idempotent` / `org_db._run_ddl_idempotent`
+属性（既有调用方与测试零改动）。`_ensure_session_tables` 的每个
+`model.__table__.create(checkfirst=True)` 改包到 `_run_ddl_idempotent` ——
+`verify = lambda: inspect(sync_conn).has_table(table.name)` —— savepoint 路径吞
+`already exists` 后复查表是否真在；MySQL 路径无 savepoint，复查直接读隐式提交后的 ground
+truth。
+
+**契约同步**：
+- `engine.py` 的 `_ensure_session_tables` docstring 扩展说明这次 wrap 的根因（checkfirst 的
+  in-process TOCTOU、`ddl_lock()` 跨进程不串行、`retry_on_transient` 不覆盖
+  `already exists`）。
+- 3 条 MySQL/savepoint 分支 fake-conn 单测（`test_add_column_idempotent_mysql_*` /
+  `test_add_column_idempotent_savepoint_path_reraises_when_column_still_missing`）改 patch
+  `engine_module.inspect` 而非 `org_db.inspect` —— helper 现在住在 `engine.py`，`inspect`
+  在其命名空间解析。其余 5 条测试（含 `test_run_ddl_idempotent_savepoint_path_reraises_*
+  `）不受影响（它们用真实 SQLite 跑 helper，不走 mock inspect）。
+
+**验证**：
+- `tests/unit_tests/agent_teams/organization/test_org_db.py`（23 用例）、
+  `test_database.py`、`test_database_concurrency.py`、`test_task_manager.py`、
+  `test_message_manager.py`：536 passed。
+- 自构造并发首次 bind 复现脚本：两个独立 `TeamDatabase` 实例并发
+  `create_cur_session_tables()` 同一 `session_id`，修复前必崩，修复后两路都返回 `True`。
