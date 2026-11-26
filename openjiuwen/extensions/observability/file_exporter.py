@@ -72,26 +72,42 @@ class TraceFileExporter(SpanExporter):
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         """Append every ended span (one OTLP JSON line each) to today's file.
 
-        Writes straight to disk — no buffering, so nothing is held back
-        for a later flush. Called asynchronously by BatchSpanProcessor.
+        Encodes and writes one line at a time under the append lock: a batch
+        of large chat spans never materializes as a whole in memory, and a
+        span that fails to encode no longer discards its batch — the lines
+        before it are already on disk and the ones after it still get written.
+        The file is opened lazily, after the first encodable line: an empty
+        batch neither creates a stub file nor refreshes the day file's mtime,
+        which retention measures.
+        Called asynchronously by BatchSpanProcessor.
         """
-        lines: list[str] = []
-        for span in spans or ():
-            # on_end only fires after end, but drop any not-yet-ended defensively.
-            if getattr(span, "end_time", None) is None:
-                continue
-            lines.append(_encode_span_line(span))
-
-        if lines:
-            file_path = os.path.join(self.root_dir, f"traces-{time.strftime('%Y-%m-%d')}.jsonl")
-            try:
-                with self._lock:
-                    with open(file_path, "a", encoding="utf-8") as f:
-                        for line in lines:
-                            f.write(line)
-                            f.write("\n")
-            except OSError as exc:
-                team_logger.warning("file_exporter: append failed to {} - {}", file_path, exc)
+        file_path = os.path.join(self.root_dir, f"traces-{time.strftime('%Y-%m-%d')}.jsonl")
+        try:
+            with self._lock:
+                handle = None
+                try:
+                    for span in spans or ():
+                        # on_end only fires after end, but drop any not-yet-ended defensively.
+                        if getattr(span, "end_time", None) is None:
+                            continue
+                        try:
+                            line = _encode_span_line(span)
+                        except Exception as exc:
+                            team_logger.warning(
+                                "file_exporter: encode failed for span {} - {}",
+                                getattr(span, "name", "<unknown>"),
+                                exc,
+                            )
+                            continue
+                        if handle is None:
+                            handle = open(file_path, "a", encoding="utf-8")
+                        handle.write(line)
+                        handle.write("\n")
+                finally:
+                    if handle is not None:
+                        handle.close()
+        except OSError as exc:
+            team_logger.warning("file_exporter: append failed to {} - {}", file_path, exc)
 
         self._maybe_cleanup()
         return SpanExportResult.SUCCESS

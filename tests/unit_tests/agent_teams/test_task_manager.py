@@ -477,6 +477,33 @@ async def test_add_graph_auto_generates_missing_task_ids(task_manager):
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_add_graph_task_created_event_carries_assignee(task_manager, message_bus):
+    """Created events state the assignee from creation time (B_20261116).
+
+    Scheduled dispatch seeds every task PENDING with an assignee; the
+    TaskCreatedEvent's member_name carries it so trajectory lane grouping can
+    attribute a pending task to its owner before the scheduler starts it.
+    Unassigned creations keep member_name unset.
+    """
+    result = await task_manager.add_graph(
+        [
+            TaskGraphSpec(title="Owned", content="c", task_id="t-owned", assignee="member1"),
+            TaskGraphSpec(title="Pool", content="c", task_id="t-pool"),
+        ]
+    )
+    assert result.ok, result.reason
+
+    created_payloads = {
+        call.kwargs["message"].payload["task_id"]: call.kwargs["message"].payload
+        for call in message_bus.publish.call_args_list
+        if getattr(call.kwargs.get("message"), "event_type", None) == TeamEvent.TASK_CREATED
+    }
+    assert created_payloads["t-owned"]["member_name"] == "member1"
+    assert created_payloads["t-pool"].get("member_name") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_add_graph_empty_specs(task_manager):
     """An empty batch is a no-op success."""
     result = await task_manager.add_graph([])
@@ -1724,8 +1751,8 @@ async def test_complete_persists_note_on_the_row(task_manager):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_submit_for_review_persists_note_too(task_manager):
-    """A reviewed task lands in IN_REVIEW with the note already on the row for reviewers."""
+async def test_submit_for_review_persists_note_too(task_manager, monkeypatch):
+    """The review note and delivery version reflect the row committed by the DAO."""
     graph = await task_manager.add_graph(
         [
             TaskGraphSpec(
@@ -1739,13 +1766,26 @@ async def test_submit_for_review_persists_note_too(task_manager):
     )
     assert graph.ok
     assert await task_manager.claim("r1")
+    delivered = []
+    task_manager.set_task_acceptance_listener(
+        AsyncMock(), on_delivery=lambda task_id, version: delivered.append((task_id, version)),
+    )
+    task_dao = task_manager.db.task
+    submit = task_dao.submit_for_review
 
+    async def submit_after_edit(task_id, **kwargs):
+        assert await task_dao.update_task(task_id, content="revised while submitting") is not None
+        return await submit(task_id, **kwargs)
+
+    monkeypatch.setattr(task_dao, "submit_for_review", submit_after_edit)
     result = await task_manager.complete("r1", note="see pr #12")
 
     assert result.ok
     detail = await task_manager.get_task_detail("r1")
     assert detail.status == TaskStatus.IN_REVIEW.value
     assert detail.note == "see pr #12"
+    committed = await task_dao.get_task("r1")
+    assert delivered == [("r1", f"{committed.revision}:{committed.review_round}")]
 
 
 @pytest.mark.asyncio

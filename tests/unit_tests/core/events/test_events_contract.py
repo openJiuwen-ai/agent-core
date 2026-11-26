@@ -263,6 +263,9 @@ _EVENTS_EXPORTS = [
     "EventHandlerOps",
     "ExtensionEventBusProtocol",
     "ExtensionEventBus",
+    "HostPackageInstallRequest",
+    "PackageInstallOutcome",
+    "register_host_package_lifecycle",
 ]
 
 

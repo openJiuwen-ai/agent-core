@@ -61,7 +61,13 @@ from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
+from openjiuwen.core.single_agent.interrupt.response import InterruptKind
+from openjiuwen.core.single_agent.interrupt.state import (
+    INTERRUPTION_KEY,
+    match_answers,
+    pending_interrupts,
+    retarget_stale_permission_answer,
+)
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -151,6 +157,18 @@ def _query_text(query: "str | list[str] | InteractiveInput") -> str | None:
     return None
 
 
+def _in_flight_round_already_carries_answer(query: Any, incoming: Any) -> bool:
+    """Return whether the running round already admitted this interrupt answer."""
+    if not isinstance(query, InteractiveInput) or not isinstance(incoming, InteractiveInput):
+        return False
+    for field in ("interrupt_answers", "user_inputs"):
+        running = getattr(query, field, None) or {}
+        asked = getattr(incoming, field, None) or {}
+        if isinstance(running, dict) and isinstance(asked, dict) and set(asked) & set(running):
+            return True
+    return False
+
+
 class NativeHarness(DeepAgent):
     """Concurrent-safe multi-round interaction wrapper that is itself a DeepAgent.
 
@@ -172,6 +190,7 @@ class NativeHarness(DeepAgent):
         agent_spec: "DeepAgentSpec",
         build_context: "BuildContext | None" = None,
         extra_rails: "list[AgentRail] | None" = None,
+        is_team_agent: bool = False,
     ) -> None:
         """Initialize a NativeHarness that configures itself from a spec.
 
@@ -188,6 +207,9 @@ class NativeHarness(DeepAgent):
             extra_rails: Additional rails not declared in ``agent_spec.rails``
                 (transitional team-side rails; folded into the spec later).
                 Mounted after the spec rails.
+            is_team_agent: Whether this harness is owned by ``TeamHarness``.
+                Standalone NativeHarness consumers keep the normal prompt event
+                path; team-owned harnesses render their member-local builder.
         """
         from openjiuwen.harness.factory import apply_deep_agent_parts
 
@@ -199,12 +221,7 @@ class NativeHarness(DeepAgent):
 
         self._agent_spec = agent_spec
         self._build_context = build_context
-        if self._react_agent is not None:
-            # The inner ReActAgent emits model-call usage events.  Keep the
-            # team member's build-time identity on that request path without
-            # coupling core usage code to the team package.
-            self._react_agent._usage_build_context = build_context
-            self._react_agent._usage_agent_id = self.card.id
+        self._is_team_agent = is_team_agent
         self._extra_rails: list[AgentRail] = list(extra_rails) if extra_rails else []
         self._session: Session | None = None
         self.track_completed_turn_fork = False
@@ -258,6 +275,26 @@ class NativeHarness(DeepAgent):
         # model/tool/react-iteration hooks bridge onto the inner ReActAgent,
         # AFTER_TASK_ITERATION stays on this outer DeepAgent.
         self.add_rail(self._snapshot_rail)
+
+    def _wire_inner_react_agent(self, react_agent: Any) -> None:
+        """Apply harness-local prompt and usage identity to an inner agent."""
+        react_agent.set_runtime_context(
+            is_team_agent=self._is_team_agent,
+            usage_build_context=self._build_context,
+            usage_agent_id=self.card.id,
+        )
+
+    def _create_react_agent(self) -> Any:
+        """Create an inner agent while preserving the harness mode contract."""
+        react_agent = super()._create_react_agent()
+        self._wire_inner_react_agent(react_agent)
+        return react_agent
+
+    def set_react_agent(self, react_agent: Any, initialized: bool = False) -> "NativeHarness":
+        """Replace the inner agent without dropping harness-owned wiring."""
+        super().set_react_agent(react_agent, initialized)
+        self._wire_inner_react_agent(react_agent)
+        return self
 
     # ------------------------------------------------------------------
     # Read-only accessors
@@ -510,10 +547,33 @@ class NativeHarness(DeepAgent):
             self.ability_manager.teardown_tools()
         except Exception:
             logger.exception("[NativeHarness] tool teardown failed during stop")
+        # Round-end also drops instance-namespaced callbacks: the native is
+        # rebuilt next cycle with a new instance id, and without this the old
+        # registrations stay pinned in Runner.callback_framework (issue#5240).
+        # Rails dual-write ``_BRIDGE_EVENTS`` onto the inner ``_react_agent``
+        # namespace, so that manager must be cleared too — otherwise each
+        # TeamHarness rebuild leaves a react-agent namespace behind and RSS
+        # still grows linearly across rounds.
+        try:
+            await self._agent_callback_manager.clear()
+        except Exception:
+            logger.exception("[NativeHarness] callback clear failed during stop")
+        react_agent = self._react_agent
+        if react_agent is not None and react_agent is not self:
+            react_callbacks = getattr(react_agent, "agent_callback_manager", None) or getattr(
+                react_agent, "_agent_callback_manager", None
+            )
+            if react_callbacks is not None:
+                try:
+                    await react_callbacks.clear()
+                except Exception:
+                    logger.exception(
+                        "[NativeHarness] react agent callback clear failed during stop"
+                    )
         logger.info("[NativeHarness] stopped session=%s", self.session_id)
 
     async def dispose(self) -> None:
-        """Permanently destroy this native: stop it, then release its resources.
+        """Permanently destroy this native: aclose it, then release its resources.
 
         Distinct from :meth:`stop`, which is round-end teardown — the native is
         rebuilt next cycle on the same session, so its ``sys_operation`` (id
@@ -525,19 +585,23 @@ class NativeHarness(DeepAgent):
         individually — only ``Runner.stop`` would otherwise clear it at process
         exit.
 
-        The supervisor is stopped first because the permanent-teardown path does
-        not always run round-end ``finalize_round`` beforehand (e.g. an external
-        ``stop_team`` or a session switch): the native may still be alive with
-        its ``ContextEngine`` reading/writing through ``sys_operation``, so
-        removing it under a live supervisor would yank a resource still in use.
-        ``stop`` is idempotent, so this is a no-op when ``finalize_round`` already
-        stopped the native. Idempotent overall and safe to call more than once.
+        ``aclose`` (which calls ``stop``) is used instead of ``stop`` alone so
+        callbacks, tools, react agent, and subagent controls are released in one
+        place. The supervisor is stopped first because the permanent-teardown
+        path does not always run round-end ``finalize_round`` beforehand (e.g. an
+        external ``stop_team`` or a session switch): the native may still be
+        alive with its ``ContextEngine`` reading/writing through
+        ``sys_operation``, so removing it under a live supervisor would yank a
+        resource still in use. ``aclose``/``stop`` are idempotent, so this is a
+        no-op when ``finalize_round`` already stopped the native. Idempotent
+        overall and safe to call more than once.
         """
-        await self.stop()
+        await self.aclose()
 
         from openjiuwen.core.runner import Runner
 
         config = self.deep_config
+        await self.close_team_memory()
         await self._close_memory_managers(config)
         sys_op = config.sys_operation if config is not None else None
         if sys_op is None:
@@ -546,6 +610,20 @@ class NativeHarness(DeepAgent):
         # (or a dispose after Runner.stop already cleared everything) is a no-op.
         if Runner.resource_mgr.get_sys_operation(sys_op.id) is not None:
             Runner.resource_mgr.remove_sys_operation(sys_op.id)
+
+    async def close_team_memory(self) -> None:
+        """Drain this responder's memory rails and return their runtime leases.
+
+        Also used before replacing a terminated native; unlike dispose, this
+        preserves sys_operation and other resources reused by the next cycle.
+        """
+        from openjiuwen.harness.rails.memory.jiuwen_team_memory_rail import JiuwenTeamMemoryRail
+
+        for rail in self.find_rails_by_type((JiuwenTeamMemoryRail,)):
+            try:
+                await rail.aclose()
+            except Exception:
+                logger.exception("[NativeHarness] closing team memory failed")
 
     async def _close_memory_managers(self, config: Any) -> None:
         """Release the memory index managers this member's rails opened.
@@ -632,7 +710,9 @@ class NativeHarness(DeepAgent):
         IDLE on completion rather than continuing the task plan.
 
         Behavior by phase:
-        - IDLE: starts a new round with ``content``.
+        - IDLE: queues ordinary input while a permission interrupt is pending;
+          otherwise starts a round with ``content``. Use ``InteractiveInput``
+          to answer the pending permission.
         - RUNNING + immediate=True: steers the active round (injected at the
           next ReAct iteration top).
         - RUNNING + immediate=False: enqueued as a follow-up; consumed when the
@@ -648,6 +728,22 @@ class NativeHarness(DeepAgent):
         Returns:
             The monotonic sequence id of this message.
         """
+        return await self._send(content, immediate=immediate, run_context=run_context)
+
+    async def resume_interrupt(
+        self, content: InteractiveInput, *, run_context: RunContext | None = None,
+    ) -> str:
+        """Match and admit a Team answer in the supervisor's control command."""
+        return await self._send(content, run_context=run_context, require_pending_interrupt=True)
+
+    async def _send(
+        self,
+        content: Any,
+        *,
+        immediate: bool = False,
+        run_context: RunContext | None = None,
+        require_pending_interrupt: bool = False,
+    ) -> str:
         self._require_alive()
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         msg = InboxMessage(
@@ -656,7 +752,7 @@ class NativeHarness(DeepAgent):
             immediate=immediate,
             run_context=run_context,
         )
-        await self._control.put(_CmdSend(msg=msg, ack=ack))
+        await self._control.put(_CmdSend(msg=msg, ack=ack, require_pending_interrupt=require_pending_interrupt))
         return await ack
 
     async def abort(self, *, immediate: bool = False) -> None:
@@ -940,6 +1036,47 @@ class NativeHarness(DeepAgent):
 
     async def _on_send(self, cmd: _CmdSend) -> None:
         """Route a send according to current phase."""
+        if cmd.require_pending_interrupt:
+            if cmd.ack.done():
+                return
+            reason = None
+            if self._st.phase in (HarnessState.RUNNING, HarnessState.PAUSING):
+                active = self._st.active
+                query = active.original_query if active is not None else None
+                if _in_flight_round_already_carries_answer(query, cmd.msg.content):
+                    # This click is the card the running round already admitted.
+                    reason = "interrupt_already_resolved"
+                else:
+                    reason = "interrupt_resume_busy"
+            elif self._session is None:
+                reason = "interrupt_resume_unavailable"
+            elif not isinstance(cmd.msg.content, InteractiveInput):
+                reason = "unsupported_interactive_input"
+            else:
+                try:
+                    pending = pending_interrupts(self._session.get_state(INTERRUPTION_KEY))
+                except Exception:
+                    logger.warning("interrupt resume could not read pending state", exc_info=True)
+                    pending = None
+                if not pending:
+                    # Nothing is waiting yet. That is not proof the tool id is wrong.
+                    reason = "interrupt_resume_unavailable"
+                else:
+                    matched = match_answers(cmd.msg.content, pending)
+                    if (not matched.answers or matched.unmatched) and retarget_stale_permission_answer(
+                        cmd.msg.content, pending,
+                    ):
+                        matched = match_answers(cmd.msg.content, pending)
+                    if not matched.answers or matched.unmatched:
+                        reason = "unsupported_interactive_input"
+            if reason is not None:
+                # Expected non-admission must not escape and terminate the supervisor.
+                cmd.ack.set_exception(build_error(
+                    StatusCode.DEEPAGENT_RUNTIME_ERROR,
+                    error_msg="Interrupt answer was not admitted.",
+                    details={"operation": "interrupt_admission", "reason": reason},
+                ))
+                return
         seq = self._st.next_seq()
         msg = InboxMessage(
             seq=seq,
@@ -950,12 +1087,24 @@ class NativeHarness(DeepAgent):
 
         phase = self._st.phase
         if phase is HarnessState.IDLE:
-            active = self._start_round(
-                msg.content,
-                run_context=msg.run_context,
-            )
-            await self._transition(HarnessState.RUNNING)
-            await self._emit_round("started", active.round_id)
+            if (
+                not isinstance(msg.content, InteractiveInput)
+                and self._session is not None
+                and any(
+                    item.kind == InterruptKind.PERMISSION
+                    for item in pending_interrupts(self._session.get_state(INTERRUPTION_KEY))
+                )
+            ):
+                # IDLE can still own a permission interrupt. Ordinary input is
+                # a follow-up, not an unaddressed answer to the paused tool.
+                self._st.pending_queue.append(msg)
+            else:
+                active = self._start_round(
+                    msg.content,
+                    run_context=msg.run_context,
+                )
+                await self._transition(HarnessState.RUNNING)
+                await self._emit_round("started", active.round_id)
         elif phase is HarnessState.RUNNING:
             active = self._st.active
             if msg.immediate and active is not None:

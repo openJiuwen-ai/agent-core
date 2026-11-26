@@ -10,6 +10,17 @@ nine package management events on an EventBus, then triggers install, reload,
 and uninstall. ``Runtime`` writes a loaded package to the Bus in one pass.
 """
 
+from openjiuwen.core.extension.bundle import (
+    BUNDLE_FLAG,
+    MAX_BUNDLE_MEMBERS,
+    BundleMember,
+    BundleSpec,
+    bundle_version_dir,
+    dependency_levels,
+    is_bundle_document,
+    read_bundle_json,
+    read_bundle_spec,
+)
 from openjiuwen.core.extension.install_report import PackageInstallReport, PackageInstallState
 from openjiuwen.core.extension.errors import ExtensionFailure, OperationError, operation_error
 from openjiuwen.core.extension.management import (
@@ -44,10 +55,14 @@ __all__ = [
     "ActivationCandidate",
     "ActivationReport",
     "ActivePackageRecord",
+    "BUNDLE_FLAG",
+    "BundleMember",
+    "BundleSpec",
     "ExtensionFailure",
     "ExtensionPlan",
     "ExtensionRegistrar",
     "HandlerDeclaration",
+    "MAX_BUNDLE_MEMBERS",
     "ManagementContext",
     "Manifest",
     "McpServerSpec",
@@ -63,9 +78,14 @@ __all__ = [
     "Registry",
     "ResolveInstallResult",
     "Runtime",
+    "bundle_version_dir",
+    "dependency_levels",
     "dispatch_management_event",
     "ensure_management_events",
+    "is_bundle_document",
     "operation_error",
     "order_key",
+    "read_bundle_json",
+    "read_bundle_spec",
     "resolve_install_set",
 ]

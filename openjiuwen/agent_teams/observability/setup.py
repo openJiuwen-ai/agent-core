@@ -84,7 +84,7 @@ def _init_team_runtime(
     init_observability(config, additional_span_processors=additional_span_processors)
 
 
-def acquire_observability(config: ObservabilityConfig) -> bool:
+def acquire_observability(config: ObservabilityConfig, *, export: bool = True) -> bool:
     """Initialize Team observability while holding its provider demand.
 
     Use this instead of :func:`init_observability` in a process that may also
@@ -94,6 +94,11 @@ def acquire_observability(config: ObservabilityConfig) -> bool:
     Args:
         config: Observability configuration for the Team runtime. Ignored when
             a provider already exists — OpenTelemetry keeps the first one.
+        export: Whether Team also wants captured spans exported. A caller that
+            needs spans captured but not exported (for example a trajectory
+            store) passes False to hold the provider up without opening the
+            export gate. Refreshed on every call, so config hot-reloads flip
+            the gate in place.
 
     Returns:
         Whether a provider already existed, i.e. Team is reusing one owned by
@@ -103,6 +108,7 @@ def acquire_observability(config: ObservabilityConfig) -> bool:
         "team",
         observability_config=config,
         initializer=_init_team_runtime,
+        export=export,
     )
 
 

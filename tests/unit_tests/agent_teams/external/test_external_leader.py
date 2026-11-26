@@ -3,6 +3,7 @@
 
 """A team leader driven by a third-party harness instead of the local DeepAgent."""
 
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -10,6 +11,9 @@ from pydantic import ValidationError
 
 from openjiuwen.agent_teams.external.cli_agent import spawn as cli_spawn
 from openjiuwen.agent_teams.external.member_runtime import ExternalHarnessMemberRuntime, checkpoint_to_dict
+from openjiuwen.agent_teams.rails.team_context import get_team_backend
+from openjiuwen.agent_teams.schema.build_context import BuildContext
+from openjiuwen.core.sys_operation.execution_environment import ExecutionEnvironment
 from openjiuwen.agent_teams.schema.blueprint import LeaderSpec, StorageSpec, TeamAgentSpec, TransportSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec
@@ -88,6 +92,42 @@ def test_leader_with_cli_agent_is_built_on_the_external_runtime() -> None:
     assert "OPENJIUWEN_TEAM_JOIN" not in runtime.harness.config.env
     # Nobody is above the leader: a failed turn has to reach the user's stream.
     assert runtime._adapter._emit_turn_failure is True
+
+
+@dataclass
+class _IdentityBuildContext(BuildContext):
+    """Platform context whose policy names the member it was derived for."""
+
+    async def resolve_execution_environment(self) -> ExecutionEnvironment:
+        assert get_team_backend(self) is not None, "the member's team backend must be injected"
+        return ExecutionEnvironment(overrides={"GIT_AUTHOR_NAME": self.member_name})
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_external_member_starts_with_the_platform_execution_environment() -> None:
+    """The per-member policy a native member gets per tool call reaches the provider env."""
+    base_context = _IdentityBuildContext()
+    spec = _spec("ext_leader_env", build_context=base_context)
+    _agent, runtime = await _started_leader(spec, _TeamSession())
+    try:
+        context = runtime.harness.start_contexts[-1]
+        assert context.env["GIT_AUTHOR_NAME"] == context.agent_name
+        assert context.agent_name
+        # The member's extras are its own: the platform's base context is untouched.
+        assert get_team_backend(base_context) is None
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_external_member_without_a_platform_context_gets_no_policy_env() -> None:
+    _agent, runtime = await _started_leader(_spec("ext_leader_no_env"), _TeamSession())
+    try:
+        assert dict(runtime.harness.start_contexts[-1].env) == {}
+    finally:
+        await runtime.stop()
 
 
 @pytest.mark.asyncio

@@ -60,3 +60,7 @@ Spec 构建和 NativeHarness 装配把 resolver 绑定到本 agent 的 AbilityMa
 
 本能力覆盖框架工具执行作用域内接入 shell 环境协议的调用。不自动配置外部 MCP 服务、
 浏览器服务和独立第三方 CLI 的进程环境，也不构成防止 shell 自行覆盖变量的安全边界。
+
+2026-11-23 修订：团队中跑在三方 harness provider 上的成员，已由
+F_20261123_1059_external-member-execution-environment 在 provider 启动时注入同一份成员环境；
+其余独立第三方 CLI 仍在本边界之外。

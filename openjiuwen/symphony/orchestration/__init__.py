@@ -8,10 +8,14 @@ from openjiuwen.symphony.orchestration.contracts import (
     GraphMutationResult,
     OrchestrationPlan,
     OrchestrationProgress,
+    PlanningInput,
 )
 from openjiuwen.symphony.orchestration.service import OrchestrationService, PrepareArtifactHook
+from openjiuwen.symphony.orchestration.routing import PlanningContext, RoutingCapability
 
 __all__ = [
+    "PlanningContext",
+    "RoutingCapability",
     "CapabilityGraph",
     "GraphArtifactStatus",
     "GraphBuildResult",
@@ -20,5 +24,6 @@ __all__ = [
     "OrchestrationPlan",
     "OrchestrationProgress",
     "OrchestrationService",
+    "PlanningInput",
     "PrepareArtifactHook",
 ]

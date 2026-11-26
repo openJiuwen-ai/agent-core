@@ -42,16 +42,6 @@ _DEFAULT_MAX_SCAN_ASSET_FILES = 100_000
 _DEFAULT_MAX_SCAN_ASSET_BYTES = 2 * 1024 * 1024 * 1024
 _EXCLUDED_DIRECTORY_NAMES = frozenset(
     {
-        ".cache",
-        ".git",
-        ".hg",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".svn",
-        ".tox",
-        ".venv",
-        ".ssh",
         "__pycache__",
         "cache",
         "caches",
@@ -95,9 +85,6 @@ _KEY_MATERIAL_SUFFIXES = frozenset(
 )
 _SENSITIVE_EXACT_FILENAMES = frozenset(
     {
-        ".netrc",
-        ".npmrc",
-        ".pypirc",
         "authorized_keys",
         "id_dsa",
         "id_ecdsa",
@@ -180,7 +167,7 @@ class ScanResult(Sequence[CapabilityDescriptor]):
 
 
 class SkillFolderScanner:
-    """Discover ``SKILL.md`` files only below an explicitly supplied root."""
+    """Discover ``SKILL.md`` files below a supplied root, skipping dot-prefixed entries."""
 
     def __init__(
         self,
@@ -439,9 +426,11 @@ def _read_directory_entries(
     budget.directories += 1
     entries: list[_SafeDirectoryEntry] = []
     with os.scandir(directory) as iterator:
-        for entry in iterator:
-            if len(entries) >= max_entries:
+        for entry_count, entry in enumerate(iterator, start=1):
+            if entry_count > max_entries:
                 _raise_inventory_error("a scanned directory exceeds the configured entry limit")
+            if entry.name.startswith("."):
+                continue
             try:
                 entry_stat = entry.stat(follow_symlinks=False)
                 mode = entry_stat.st_mode
@@ -472,6 +461,8 @@ def _discover_entrypoints(
     max_entrypoints: int,
     budget: _ScanBudget,
     excluded_paths: tuple[Path, ...] = (),
+    filename: str = "SKILL.md",
+    stop_at_entrypoint: bool = False,
 ) -> tuple[list[Path], list[ScanDiagnostic]]:
     entrypoints: list[Path] = []
     diagnostics: list[ScanDiagnostic] = []
@@ -499,10 +490,13 @@ def _discover_entrypoints(
             continue
 
         subdirectories: list[Path] = []
+        found_entrypoint = False
         for entry in children:
             child = directory / entry.name
             if child in excluded_paths:
                 continue
+            if entry.name == filename:
+                found_entrypoint = True
             child_mode = entry.mode
             if child_mode is None:
                 diagnostics.append(
@@ -523,7 +517,7 @@ def _discover_entrypoints(
                     )
                 )
                 continue
-            if stat.S_ISREG(child_mode) and child.name == "SKILL.md":
+            if stat.S_ISREG(child_mode) and child.name == filename:
                 if len(entrypoints) >= max_entrypoints:
                     _raise_inventory_error("Skill discovery exceeds the configured entrypoint limit")
                 entrypoints.append(child)
@@ -533,7 +527,8 @@ def _discover_entrypoints(
             if max_depth is None or depth < max_depth:
                 subdirectories.append(child)
 
-        pending.extend((child, depth + 1) for child in reversed(subdirectories))
+        if not (stop_at_entrypoint and found_entrypoint):
+            pending.extend((child, depth + 1) for child in reversed(subdirectories))
 
     entrypoints.sort(key=lambda item: (_relative_display(item, root).casefold(), _relative_display(item, root)))
     return entrypoints, diagnostics
@@ -812,8 +807,6 @@ def _diagnostic_sort_key(diagnostic: ScanDiagnostic) -> tuple[str, str, str]:
 
 def _exclude_directory(name: str) -> bool:
     lowered = name.casefold()
-    if lowered == ".env" or lowered.startswith(".env.") or lowered == ".envrc":
-        return True
     if lowered in _EXCLUDED_DIRECTORY_NAMES or lowered.endswith(".cache"):
         return True
     normalized = normalize_sensitive_name(name)
@@ -838,9 +831,7 @@ def _exclude_directory(name: str) -> bool:
 
 def _exclude_file(name: str) -> bool:
     lowered = name.casefold()
-    if lowered == ".env" or lowered.startswith(".env.") or lowered == ".envrc":
-        return True
-    if lowered in {".git", "__pycache__", "cache"}:
+    if lowered in {"__pycache__", "cache"}:
         return True
     if lowered in _SENSITIVE_EXACT_FILENAMES or Path(lowered).suffix in _KEY_MATERIAL_SUFFIXES:
         return True

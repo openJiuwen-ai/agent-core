@@ -14,7 +14,7 @@ Built-in guardrails that hook into the `DeepAgent` lifecycle. Rails are register
 | `JiuwenMemoryRail` | Integrates a host-provided memory provider and combines interrupted requests with user answers before syncing a turn. |
 | `ProgressiveToolRail` | Dynamically loads and unloads tools based on relevance to the current task. |
 | `SecurityRail` | Applies security policies such as command allowlists and path validation. |
-| `SkillUseRail` | Enables the agent to discover and invoke learned skills; it does not generate, approve, or persist evolution records. |
+| `SkillUseRail` | Discovers skills with lazy `auto_list` and `all` modes; supports directly configured ReActAgent instances, see [usage and example](../../Advanced%20Usage/Agent%20Skills.md#lazy-skill-loading-with-a-directly-configured-reactagent). |
 | `SkillEvolutionRail` | Evolves existing regular skills from trajectories or user requests, with optional approval before `EvolutionStore` persistence; active review runs through the rail-owned `evolve_review_task`. |
 | `SubagentRail` | Manages sub-agent spawning via `enable_async_subagent` flag — sync mode registers `TaskTool`, async mode registers `session` tools. |
 | `TaskCompletionRail` | Evaluates whether the current task is complete and triggers the stop condition. |

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -42,6 +43,7 @@ class JiuwenMemoryCodingRail(DeepAgentRail):
     priority = 75
     PREFETCH_TIMEOUT = 6.0
     SYNC_TIMEOUT = 130.0
+    _structured_turns = False
 
     def __init__(
         self, provider: MemoryProvider, *, user_id: str = "__default__",
@@ -71,6 +73,7 @@ class JiuwenMemoryCodingRail(DeepAgentRail):
             extract_output=JiuwenMemoryRail.extract_assistant_output,
             is_background=JiuwenMemoryRail.is_background_run,
             unwrap_envelope=JiuwenMemoryRail.unwrap_jiuwenswarm_envelope,
+            structured=self._structured_turns,
         ))
         self._owners[id(agent)] = owner
         try:
@@ -192,17 +195,22 @@ class JiuwenMemoryCodingRail(DeepAgentRail):
         owner = self._owner(ctx)
         if owner is None or not self._initialized:
             return
+        self._submit_finished_turn(owner, ctx)
+
+    def _submit_finished_turn(self, owner, ctx: Any) -> None:
         completed = owner.turns.finish(ctx)
         if completed is None:
             return
         query, output = completed
+        self._enqueue_write(lambda: self._sync_turn(query, output, owner.agent))
 
+    def _enqueue_write(self, write: Callable[[], Awaitable[None]]) -> None:
         async def sync() -> None:
             # One lock for all owners: a slow turn never overlaps the next write.
             async with self._write_lock:
                 try:
                     await asyncio.wait_for(
-                        self._provider.sync_turn(query, output, **self._identity),
+                        write(),
                         timeout=self.SYNC_TIMEOUT,
                     )
                 except Exception as exc:
@@ -211,6 +219,10 @@ class JiuwenMemoryCodingRail(DeepAgentRail):
         task = asyncio.create_task(sync())
         self._writes.add(task)
         task.add_done_callback(self._writes.discard)
+
+    async def _sync_turn(self, query: str, output: str, agent: Any) -> None:
+        """Scene hook; Coding continues to use the provider's ordinary extraction."""
+        await self._provider.sync_turn(query, output, **self._identity)
 
     async def drain(self) -> None:
         """Wait for writes already submitted by any owner."""

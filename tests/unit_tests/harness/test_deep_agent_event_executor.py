@@ -4,6 +4,8 @@
 # pylint: disable=protected-access
 from __future__ import annotations
 
+import asyncio
+
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
@@ -119,19 +121,51 @@ class FakeReactAgent:
 
 
 class FakeCallbackManager:
-    """Minimal callback manager stub."""
+    """Minimal callback manager stub recording fired events.
+
+    Installed on the DeepAgent (``ctx.fire`` resolves
+    ``ctx.agent.agent_callback_manager``), not on the inner react agent.
+    """
+
+    def __init__(self) -> None:
+        self.fired: List[AgentCallbackEvent] = []
+        self.results: List[Optional[Dict[str, Any]]] = []
+        self.exceptions: List[BaseException] = []
+        self.fail_after_with: Optional[BaseException] = None
 
     async def execute(
         self,
         event: AgentCallbackEvent,
         ctx: Any,
     ) -> None:
-        pass
+        self.fired.append(event)
+        self.results.append(
+            dict(getattr(ctx.inputs, "result", None) or {})
+        )
+        self.exceptions.append(getattr(ctx, "exception", None))
+        if (
+            self.fail_after_with is not None
+            and event == AgentCallbackEvent.AFTER_TASK_ITERATION
+        ):
+            raise self.fail_after_with
 
     async def unregister_rail(
         self, rail: Any, agent: Any
     ) -> None:
         pass
+
+
+class CancellingReactAgent(FakeReactAgent):
+    """Inner agent that raises CancelledError, like a timed-out round task."""
+
+    async def invoke(
+        self,
+        inputs: Dict[str, Any],
+        session: Any = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        self.invoke_calls.append(inputs)
+        raise asyncio.CancelledError()
 
 
 def _make_deps(
@@ -353,3 +387,125 @@ async def test_build_deep_executor_factory() \
         executor, TaskLoopEventExecutor
     )
     assert executor._deep_agent is agent
+
+
+def _install_recording_manager(
+    agent: DeepAgent,
+    fail_after_with: Optional[BaseException] = None,
+) -> FakeCallbackManager:
+    """Swap in a recording manager on the DeepAgent (what ctx.fire uses)."""
+    manager = FakeCallbackManager()
+    manager.fail_after_with = fail_after_with
+    agent._agent_callback_manager = manager
+    return manager
+
+
+@pytest.mark.asyncio
+async def test_cancelled_round_fires_after_once_and_reraises() \
+        -> None:
+    """A cancelled round still runs AFTER_TASK_ITERATION exactly once.
+
+    Cleanup must carry the cancelled marker so rails can skip heavy work,
+    and the CancelledError must propagate (asyncio cancel contract) with no
+    TASK_FAILED/TASK_COMPLETION chunk.
+    """
+    agent = _make_agent()
+    agent.set_react_agent(CancellingReactAgent(), initialized=True)
+    manager = _install_recording_manager(agent)
+
+    deps, tm = _make_deps()
+    session = FakeSession()
+    core_task = CoreTask(
+        session_id="s1",
+        task_id="tc1",
+        task_type=DEEP_TASK_TYPE,
+        description="will be cancelled",
+        status=CoreTaskStatus.SUBMITTED,
+    )
+    await tm.add_task(core_task)
+
+    executor = TaskLoopEventExecutor(deps, agent)
+    chunks: List[Any] = []
+    with pytest.raises(asyncio.CancelledError):
+        async for chunk in executor.execute_ability("tc1", session):
+            chunks.append(chunk)
+
+    assert chunks == []  # cancel is control flow, not a failure chunk
+
+    after_idx = [
+        i for i, e in enumerate(manager.fired)
+        if e == AgentCallbackEvent.AFTER_TASK_ITERATION
+    ]
+    assert len(after_idx) == 1
+    idx = after_idx[0]
+    assert manager.results[idx].get("stop_reason") == "cancelled"
+    assert isinstance(
+        manager.exceptions[idx], asyncio.CancelledError
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_round_cleanup_cancelled_still_reraises() \
+        -> None:
+    """A cancel landing inside the cleanup fire re-raises, no double fire."""
+    agent = _make_agent()
+    agent.set_react_agent(CancellingReactAgent(), initialized=True)
+    _install_recording_manager(
+        agent, fail_after_with=asyncio.CancelledError()
+    )
+
+    deps, tm = _make_deps()
+    session = FakeSession()
+    core_task = CoreTask(
+        session_id="s1",
+        task_id="tc2",
+        task_type=DEEP_TASK_TYPE,
+        description="will be cancelled",
+        status=CoreTaskStatus.SUBMITTED,
+    )
+    await tm.add_task(core_task)
+
+    executor = TaskLoopEventExecutor(deps, agent)
+    with pytest.raises(asyncio.CancelledError):
+        async for _chunk in executor.execute_ability("tc2", session):
+            pass
+
+    manager = agent._agent_callback_manager
+    assert manager.fired.count(
+        AgentCallbackEvent.AFTER_TASK_ITERATION
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_success_path_unchanged_single_after_event() \
+        -> None:
+    """The happy path still fires AFTER_TASK_ITERATION exactly once."""
+    agent = _make_agent()
+    manager = _install_recording_manager(agent)
+
+    deps, tm = _make_deps()
+    session = FakeSession()
+    core_task = CoreTask(
+        session_id="s1",
+        task_id="ok1",
+        task_type=DEEP_TASK_TYPE,
+        description="hello world",
+        status=CoreTaskStatus.SUBMITTED,
+    )
+    await tm.add_task(core_task)
+
+    executor = TaskLoopEventExecutor(deps, agent)
+    chunks = []
+    async for chunk in executor.execute_ability("ok1", session):
+        chunks.append(chunk)
+
+    assert len(chunks) == 1
+    assert chunks[0].payload.type == EventType.TASK_COMPLETION
+    assert manager.fired.count(
+        AgentCallbackEvent.AFTER_TASK_ITERATION
+    ) == 1
+    assert "stop_reason" not in (
+        manager.results[manager.fired.index(
+            AgentCallbackEvent.AFTER_TASK_ITERATION
+        )]
+    )

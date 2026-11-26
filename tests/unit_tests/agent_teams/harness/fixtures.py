@@ -171,6 +171,21 @@ class FakeReactAgent:
         # Observability for assertions.
         self.completed_iterations: int = 0
         self.completed_tools: int = 0
+        self.is_team_agent: bool = False
+        self.usage_build_context: Any = None
+        self.usage_agent_id: str | None = None
+
+    def set_runtime_context(
+        self,
+        *,
+        is_team_agent: bool,
+        usage_build_context: Any = None,
+        usage_agent_id: str | None = None,
+    ) -> None:
+        """Mirror the public runtime-context hook used by NativeHarness."""
+        self.is_team_agent = is_team_agent
+        self.usage_build_context = usage_build_context
+        self.usage_agent_id = usage_agent_id
 
     @property
     def agent_callback_manager(self) -> AgentCallbackManager:

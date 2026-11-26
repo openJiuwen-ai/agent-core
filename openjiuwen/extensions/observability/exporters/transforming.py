@@ -19,9 +19,36 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.extensions.observability.otlp_codec import ADDRESSED_ATTRIBUTE_KEYS
+from openjiuwen.extensions.observability.sequence_registry import materialize_stated_value
 
 #: A read-only span transform: returns a new span, never mutates the input.
 SpanTransform = Callable[[ReadableSpan], ReadableSpan]
+
+
+def materialize_span_references(span: ReadableSpan) -> ReadableSpan:
+    """Return a span copy whose restated attributes state their full content.
+
+    A sequence reference names content held by this process, so an exporter
+    that ships spans off-process must resolve it first: the standard OTLP
+    exporters serialize the span as-is, and a reference on the wire states
+    content nobody off-process can reach. Attributes that are not references
+    are left untouched, and the input span is returned as-is when nothing
+    needs resolving.
+    """
+    attributes = dict(span.attributes or {})
+    resolved = False
+    for key in ADDRESSED_ATTRIBUTE_KEYS:
+        value = attributes.get(key)
+        if not isinstance(value, str):
+            continue
+        materialized = materialize_stated_value(value)
+        if materialized is not value:
+            attributes[key] = materialized
+            resolved = True
+    if not resolved:
+        return span
+    return clone_readable_span(span, attributes)
 
 
 def clone_readable_span(
@@ -100,4 +127,5 @@ __all__ = [
     "SpanTransform",
     "TransformingSpanExporter",
     "clone_readable_span",
+    "materialize_span_references",
 ]

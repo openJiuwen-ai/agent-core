@@ -69,7 +69,7 @@ def _shutdown_agent_runtime() -> None:
     reset_state()
 
 
-def acquire_observability(config: ObservabilityConfig) -> bool:
+def acquire_observability(config: ObservabilityConfig, *, export: bool = True) -> bool:
     """Turn single-agent tracing on, initializing the provider if needed.
 
     Initialization errors are propagated so the caller can distinguish an
@@ -78,6 +78,11 @@ def acquire_observability(config: ObservabilityConfig) -> bool:
     Args:
         config: Observability configuration for this runtime. Ignored when a
             provider already exists — OpenTelemetry keeps the first one.
+        export: Whether this runtime also wants captured spans exported. A
+            caller that needs spans captured but not exported (for example a
+            trajectory store) passes False to hold the provider up without
+            opening the export gate. Refreshed on every call, so config
+            hot-reloads flip the gate in place.
 
     Returns:
         Whether a provider already existed, i.e. this runtime is reusing one
@@ -89,6 +94,7 @@ def acquire_observability(config: ObservabilityConfig) -> bool:
             _RUNTIME_KEY,
             observability_config=config,
             initializer=_init_agent_runtime,
+            export=export,
         )
         _tracing_enabled = True
         return provider_existed

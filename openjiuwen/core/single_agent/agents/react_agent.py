@@ -24,7 +24,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterable, List
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import BaseError, build_error, raise_error
+from openjiuwen.core.common.exception.errors import BaseError, ModelError, build_error, raise_error
 from openjiuwen.core.common.logging import logger
 
 try:
@@ -63,9 +63,6 @@ from openjiuwen.core.foundation.llm import (
     ToolMessage,
     UserMessage,
 )
-from openjiuwen.core.foundation.llm import (
-    ToolCall as ToolCall,
-)
 from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
     ModelRequestConfig,
@@ -101,21 +98,42 @@ from openjiuwen.core.single_agent.rail.base import (
     MODEL_VISIBLE_OUTPUT_EMITTED_KEY,
     AgentCallbackContext,
     AgentCallbackEvent,
+    AgentTerminationReason,
     InvokeInputs,
     ModelCallInputs,
     SteeringDrainInputs,
     UserMessageInputs,
     bind_usage_attribution,
     bind_usage_invocation_id,
+    claim_terminal_frame,
+    current_termination_reason,
     current_usage_attribution,
     current_usage_delegation,
     current_usage_invocation_id,
     rail,
+    reason_for_result,
+    record_termination_reason,
     reset_usage_attribution,
     reset_usage_invocation_id,
+    terminal_frame_reason,
+    termination_reason_of,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.single_agent.tool_call_events import react_tool_call_scope
+
+
+def _is_model_error(err: BaseError) -> bool:
+    """Whether a framework error belongs to the model error family.
+
+    Production model errors are built from ``StatusCode.MODEL_*`` (whose name
+    carries the ``MODEL_`` prefix) and map to the generic ``FrameworkError``
+    class; an explicitly constructed ``ModelError`` counts as well.
+    """
+    if isinstance(err, ModelError):
+        return True
+    status = getattr(err, "status", None)
+    return str(getattr(status, "name", "")).startswith("MODEL_")
+
 
 _IDENTITY_SECTION = "identity"
 _SKILLS_SECTION = "legacy_skills"
@@ -610,6 +628,9 @@ class ReActAgent(BaseAgent):
         self._llm = None
         self.prompt_builder: SystemPromptBuilder = SystemPromptBuilder()
         self.system_prompt_builder: SystemPromptBuilder = self.prompt_builder
+        self._is_team_agent = False
+        self._usage_build_context: Any = None
+        self._usage_agent_id: str | None = None
         super().__init__(card)
         self._hitl_handler = ToolInterruptHandler(self)
         self._ability_manager.set_context_engine(self.context_engine)
@@ -637,6 +658,27 @@ class ReActAgent(BaseAgent):
         exception recovery follow it; cancellation still propagates.
         """
         self._final_request_check = check
+
+    @property
+    def is_team_agent(self) -> bool:
+        """Whether this agent is running as a member of an agent team."""
+        return self._is_team_agent
+
+    def set_runtime_context(
+        self,
+        *,
+        is_team_agent: bool,
+        usage_build_context: Any = None,
+        usage_agent_id: str | None = None,
+    ) -> None:
+        """Set host-owned runtime metadata for nested harness execution.
+
+        Harnesses use this public boundary to configure prompt composition mode
+        and usage attribution without reaching into private agent state.
+        """
+        self._is_team_agent = is_team_agent
+        self._usage_build_context = usage_build_context
+        self._usage_agent_id = usage_agent_id
 
     async def _final_request_finish(self, ctx: AgentCallbackContext) -> Optional[Dict[str, Any]]:
         """The installed check's result for this final request; None when none is installed or it allows the call."""
@@ -1289,7 +1331,10 @@ class ReActAgent(BaseAgent):
             return
         session_id = ctx.session.get_session_id() if ctx.session is not None else context.session_id()
         try:
-            await sync_to_context(context, session_id)
+            if self._is_team_agent:
+                await sync_to_context(context, session_id, trigger_events=False)
+            else:
+                await sync_to_context(context, session_id)
         except Exception as exc:  # noqa: BLE001 - attachment updates must not block the model
             logger.warning(
                 "[ReActAgent] prompt attachment history sync failed: %s",
@@ -1378,7 +1423,16 @@ class ReActAgent(BaseAgent):
         return context_window, usage_prompt_sections
 
     async def _compose_prompt_sections(self, ctx: AgentCallbackContext) -> PromptComposeOutput | None:
-        """Trigger prompt composition at the final post-rail render boundary."""
+        """Trigger prompt composition at the final post-rail render boundary.
+
+        Team members already have their own builder populated by
+        ``TeamPolicyRail``. They share a session id, so the CORE
+        ``prompt.compose`` handler cannot use that id to identify the current
+        member without risking another member's builder being rendered here.
+        """
+        if self._is_team_agent:
+            return None
+
         from openjiuwen.core.events import Event
         from openjiuwen.core.runner import Runner
 
@@ -2089,7 +2143,10 @@ class ReActAgent(BaseAgent):
                 phase="post_call",
                 usage_metadata=getattr(ai_message, "usage_metadata", None),
             )
-            self._raise_for_model_response_error(ai_message)
+            self._raise_for_model_response_error(
+                ai_message,
+                configured_output_limit=self._has_configured_output_limit(),
+            )
             return ai_message
 
         # Streaming path: accumulate chunks via __add__, write to session in real-time
@@ -2195,7 +2252,10 @@ class ReActAgent(BaseAgent):
             phase="post_call",
             usage_metadata=ai_message.usage_metadata,
         )
-        self._raise_for_model_response_error(ai_message)
+        self._raise_for_model_response_error(
+            ai_message,
+            configured_output_limit=self._has_configured_output_limit(),
+        )
         if ai_message.usage_metadata:
             perf_metrics = {}
             call_latency = (time.monotonic() - call_start_time) * 1000
@@ -2242,24 +2302,37 @@ class ReActAgent(BaseAgent):
             )
         return ai_message
 
+    def _has_configured_output_limit(self) -> bool:
+        """Return whether this agent explicitly limits a single model response."""
+        model_config = getattr(self._config, "model_config_obj", None)
+        if isinstance(model_config, dict):
+            return model_config.get("max_tokens") is not None
+        return getattr(model_config, "max_tokens", None) is not None
+
     @staticmethod
-    def _raise_for_model_response_error(message: AssistantMessage) -> None:
+    def _raise_for_model_response_error(
+        message: AssistantMessage,
+        *,
+        configured_output_limit: bool = False,
+    ) -> None:
         """Turn provider error responses into rail-visible exceptions."""
         finish_reason = str(getattr(message, "finish_reason", "") or "").strip().lower()
         usage = getattr(message, "usage_metadata", None)
         code = int(getattr(usage, "code", 0) or 0)
         content = getattr(message, "content", "")
-        no_answer = not getattr(message, "tool_calls", None) and not (isinstance(content, str) and content.strip())
-        if finish_reason in {"length", "max_tokens"} and no_answer:
-            # A reasoning model can spend its whole output budget thinking and stop
-            # before any answer or tool call. Treating that as the final answer
-            # would end the turn with an empty "successful" result.
+        no_answer = not getattr(message, "tool_calls", None) and not (
+            isinstance(content, str) and content.strip()
+        )
+        if finish_reason in {"length", "max_tokens"} and (configured_output_limit or no_answer):
+            # A response that has no answer is always incomplete. When the
+            # caller explicitly sets max_tokens, a partial answer or tool call
+            # is incomplete as well and must be surfaced to the session.
             output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
             raise_error(
                 StatusCode.MODEL_CALL_FAILED,
                 error_msg=(
                     f"model hit its output limit (finish_reason={finish_reason}, output_tokens={output_tokens}) "
-                    "before producing an answer or a tool call"
+                    "before completing the response"
                 ),
                 details={"finish_reason": finish_reason, "output_tokens": output_tokens},
             )
@@ -2868,10 +2941,12 @@ class ReActAgent(BaseAgent):
     def _build_interrupt_result(self, state: InterruptionState) -> Dict[str, Any]:
         """Build the interrupt result dict returned to the caller."""
         pending_entry = state.interrupted_workflows[state.pending_workflow_id]
+        record_termination_reason(AgentTerminationReason.TOOL_INTERRUPT)
         return {
             "result_type": "interrupt",
             "workflow_execution_state": pending_entry.workflow_execution_state,
             "component_ids": [state.pending_component_id],
+            "termination_reason": AgentTerminationReason.TOOL_INTERRUPT.value,
         }
 
     async def _commit_interrupt(
@@ -3367,11 +3442,23 @@ class ReActAgent(BaseAgent):
                             tools = await self.ability_manager.list_tool_info()
                             tools_revision = self.ability_manager.registry_revision
 
-                        ai_message = await self._call_model(
-                            ctx,
-                            context,
-                            tools,
-                        )
+                        try:
+                            ai_message = await self._call_model(
+                                ctx,
+                                context,
+                                tools,
+                            )
+                        except BaseError as err:
+                            # The model error family ends the
+                            # run as model_error; any other framework error is a plain
+                            # error and keeps the frame-less stream it has always had. The
+                            # exception still propagates unchanged.
+                            ctx.finish(
+                                AgentTerminationReason.MODEL_ERROR
+                                if _is_model_error(err)
+                                else AgentTerminationReason.ERROR
+                            )
+                            raise
 
                         finish = ctx.consume_force_finish()
                         if finish:
@@ -3381,6 +3468,12 @@ class ReActAgent(BaseAgent):
 
                         if not isinstance(ai_message, AssistantMessage):
                             invoke_inputs.result = ai_message if isinstance(ai_message, dict) else {}
+                            # Java parity: the non-AssistantMessage branch maps by
+                            # result_type with MODEL_ERROR as its fallback
+                            # (agent-core-java ReActAgent#terminationReasonForResult call site).
+                            record_termination_reason(
+                                reason_for_result(invoke_inputs.result, AgentTerminationReason.MODEL_ERROR)
+                            )
                             break
 
                         await context.add_messages(
@@ -3438,10 +3531,13 @@ class ReActAgent(BaseAgent):
                                     "finish_reason": ai_message.finish_reason or "null",
                                     "reasoning_present": bool(ai_message.reasoning_content),
                                 }
+                                # No usable final answer from the model.
+                                ctx.finish(AgentTerminationReason.MODEL_ERROR)
                                 break
                             await self.context_engine.save_contexts(session)
                             result = {"output": ai_message.content, "result_type": "answer"}
                             invoke_inputs.result = result
+                            ctx.finish(AgentTerminationReason.TEXT_TERMINATION)
                             break
 
                         results = await self._execute_tool_call(ctx, ai_message.tool_calls, session, context)
@@ -3499,7 +3595,13 @@ class ReActAgent(BaseAgent):
                                 await self.context_engine.save_contexts(session)
 
             # after_invoke rails have fired; return result (possibly adapted by rails via ctx.extra)
-            return ctx.extra.get("invoke_result", invoke_inputs.result)
+            final_result = ctx.extra.get("invoke_result", invoke_inputs.result)
+            if isinstance(final_result, dict):
+                # The invoke result carries the same reason as the
+                # terminal frame (a dict a rail injected may lack the key).
+                reason = ctx.termination_reason or reason_for_result(final_result, AgentTerminationReason.ERROR)
+                final_result = {**final_result, "termination_reason": str(reason)}
+            return final_result
         except asyncio.CancelledError:
             # 外部取消（非工具级 CancelledError）。工具级 CancelledError
             # 在 AbilityManager.execute 中会被转成 ToolMessage，不会传播到这里。
@@ -3533,6 +3635,8 @@ class ReActAgent(BaseAgent):
                     if not abort_persisted:
                         await session.commit()
             finally:
+                # The invoke scope (reset, classification, exception
+                # publication and restore) is owned by AgentCallbackContext.lifecycle.
                 reset_usage_attribution(attribution_token)
                 reset_usage_invocation_id(invocation_token)
 
@@ -3564,11 +3668,17 @@ class ReActAgent(BaseAgent):
         This is outside the tool loop: even a provider that ignores the tool-free
         request cannot execute another tool. Cancellation still propagates through
         invoke's normal abort/persistence path.
+
+        The exhaustion reason is recorded only on the returns that
+        actually deliver this result. The finalization call can end the run by
+        itself — a rail's forceFinish (its consumption records ``force_finish``
+        or ``cancelled``) or a cancellation (the AFTER_INVOKE fallback records
+        ``cancelled``) — and an entry-time record would win over both.
         """
         result = {
             "output": "Max iterations reached without completion",
             "result_type": "error",
-            "termination_reason": "max_iterations",
+            "termination_reason": AgentTerminationReason.MAX_ITERATIONS.value,
             "iterations_used": int(ctx.extra.get("_react_iteration", 0)),
             "truncated_by_max_iterations": True,
             "max_iterations": ctx.extra.get("_iteration_limit", self._config.max_iterations),
@@ -3583,6 +3693,7 @@ class ReActAgent(BaseAgent):
             strategy,
         )
         if strategy == "error":
+            ctx.finish(AgentTerminationReason.MAX_ITERATIONS)
             return result
 
         observations = list(ctx.extra.get("_iteration_observations", []))
@@ -3595,6 +3706,7 @@ class ReActAgent(BaseAgent):
         result["observations"] = observations
         if strategy == "return_observations":
             # Do not label partial tool evidence as a successful answer.
+            ctx.finish(AgentTerminationReason.MAX_ITERATIONS)
             return result
 
         await context.add_messages(
@@ -3615,6 +3727,9 @@ class ReActAgent(BaseAgent):
             if finish is not None:
                 return finish.result
             if isinstance(answer, dict):
+                # The run still ended by exhausting its iterations; a rail that
+                # force-finished already recorded its own reason first.
+                ctx.finish(AgentTerminationReason.MAX_ITERATIONS)
                 return answer
             if ctx.consume_model_continue_request() or ctx.has_pending_steering():
                 result["finalization_error"] = "Finalization requires further model work or pending user input"
@@ -3634,6 +3749,7 @@ class ReActAgent(BaseAgent):
             result["finalization_error"] = str(exc)
         finally:
             ctx.extra.pop("_finalizing_max_iterations", None)
+        ctx.finish(AgentTerminationReason.MAX_ITERATIONS)
         return result
 
     async def write_invoke_result_to_stream(
@@ -3641,7 +3757,13 @@ class ReActAgent(BaseAgent):
         result: Dict[str, Any],
         session: Session,
     ) -> None:
-        """Public wrapper — delegates to the internal implementation."""
+        """Public wrapper — delegates to the internal implementation.
+
+        Each run's terminal frame is written at most once: writing the same
+        result object a second time is dropped (the next run has its own
+        result). The delivered ``termination_reason`` value set is an additive
+        wire contract; consumers must ignore unknown values.
+        """
         await self._write_invoke_result_to_stream(result, session)
 
     async def _write_invoke_result_to_stream(
@@ -3674,13 +3796,47 @@ class ReActAgent(BaseAgent):
                     if hasattr(schema, "payload") and hasattr(schema.payload, "id") and schema.payload.id == pending_id:
                         await session.write_stream(schema)
         else:
+            if not claim_terminal_frame(result):
+                # At most one answer-class terminal frame per run.
+                logger.debug("terminal frame already written; dropping duplicate result_type=%s", result_type)
+                return
+            # The frame always describes the run the payload belongs to: the
+            # reason invoke wrote into the payload wins, then a record still in
+            # scope, then the payload's own result_type mapping.
+            declared = result.get("termination_reason")
+            reason: Union[AgentTerminationReason, str] = (
+                declared if declared else current_termination_reason() or terminal_frame_reason(result)
+            )
             await session.write_stream(
                 OutputSchema(
                     type="answer",
                     index=0,
-                    payload={**result, "output": result.get("output", ""), "result_type": result_type},
+                    payload={
+                        **result,
+                        "output": result.get("output", ""),
+                        "result_type": result_type,
+                        "termination_reason": str(reason),
+                    },
                 )
             )
+
+    async def _write_best_effort_frame(
+        self,
+        result: Dict[str, Any],
+        session: Session,
+        note: str,
+    ) -> None:
+        """Write a terminal frame that is a courtesy, not a promise.
+
+        A consumer that stopped reading must not change how the run ended: the
+        caller's error is what propagates, so a failed delivery is logged, not
+        raised. Cancellation is not swallowed here — it propagates as usual.
+        ``note`` labels the frame in the warning line when delivery fails.
+        """
+        try:
+            await self._write_invoke_result_to_stream(result, session)
+        except Exception:  # noqa: BLE001 - the caller's cause must win
+            logger.warning("%s frame not delivered", note, exc_info=True)
 
     async def stream(
         self,
@@ -3740,6 +3896,7 @@ class ReActAgent(BaseAgent):
 
         async def stream_process():
             nonlocal abort_persisted
+            result_received = False
             try:
                 final_result = await self.invoke(
                     inputs,
@@ -3747,21 +3904,52 @@ class ReActAgent(BaseAgent):
                     _streaming=True,
                     _stream_lifecycle_owner=True,
                 )
+                result_received = True
                 if isinstance(final_result, list):
                     for schema in final_result:
                         await session.write_stream(schema)
                 else:
                     await self._write_invoke_result_to_stream(final_result, session)
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as cancelled:
                 if _background_task_lifecycle is not None:
                     _background_task_lifecycle.begin_finalization(asyncio.current_task())
+                # Best-effort cancelled frame (the consumer may
+                # already be gone; delivery is not a hard promise). The reason
+                # was recorded by the AFTER_INVOKE fallback inside invoke.
+                cancelled_reason = termination_reason_of(cancelled) or AgentTerminationReason.CANCELLED
+                # A cancellation that lands while this run's own result is
+                # being written must not add a second terminal frame — the run ended
+                # by delivering a result, the frame already describes it.
+                if not result_received:
+                    await self._write_best_effort_frame(
+                        {
+                            "output": "Cancelled by user",
+                            "result_type": "cancelled",
+                            "termination_reason": str(cancelled_reason),
+                        },
+                        session,
+                        "cancelled",
+                    )
                 abort_persisted = await self._handle_context_abort(
                     session,
                     marker="[Request cancelled by user]",
                     commit_session=self.is_agent_session,
                 )
                 raise
-            except BaseError:
+            except BaseError as err:
+                # Only a model-class framework error gets a terminal frame; other
+                # BaseError keep the frame-less stream they had before. The frame
+                # is written before the abort marker, matching the cancel branch.
+                if termination_reason_of(err) is AgentTerminationReason.MODEL_ERROR:
+                    await self._write_best_effort_frame(
+                        {
+                            "output": str(err),
+                            "result_type": "error",
+                            "termination_reason": AgentTerminationReason.MODEL_ERROR.value,
+                        },
+                        session,
+                        "model-error",
+                    )
                 abort_persisted = await self._handle_context_abort(
                     session,
                     marker="[Request interrupted by an unexpected error]",

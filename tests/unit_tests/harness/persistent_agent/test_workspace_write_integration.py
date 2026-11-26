@@ -3,6 +3,7 @@
 """Agent-core integration coverage for the PA-16 write boundary."""
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -168,6 +169,48 @@ def make_write_components(tmp_path, *, writer=None, scope=None, execution=None):
     base = writer or AtomicFileWriter()
     adapter = WorkspaceWriteAdapter(base)
     return rail, adapter, base
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["write_file", "edit_file"])
+@pytest.mark.parametrize("path_form", ["relative", "absolute_with_parent"])
+async def test_full_access_writes_accept_the_original_authorized_path(tmp_path, tool_name, path_form):
+    target = tmp_path / "sessions/session-a/probe.txt"
+    target.parent.mkdir(parents=True)
+    if tool_name == "edit_file":
+        target.write_text("before", encoding="utf-8")
+    scope = replace(scope_for(tmp_path), host_wide=True, allowed_write_roots=(Path(tmp_path.anchor),))
+    rail, adapter, base = make_write_components(tmp_path, scope=scope, writer=AtomicFileWriter(tool_name))
+    rail.permission_profile = "full_access"
+    requested = "sessions/session-a/probe.txt"
+    if path_form == "absolute_with_parent":
+        requested = str(tmp_path) + "/sessions/session-a/../session-a/probe.txt"
+    args = {"file_path": requested, "content": "after", "old_string": "before", "new_string": "after"}
+    ctx = tool_context(tool_name, args)
+    await rail.before_tool_call(ctx)
+    try:
+        result = await adapter.invoke(ctx.inputs.tool_args)
+    finally:
+        await rail.after_tool_call(ctx)
+    assert result.success
+    assert target.read_text(encoding="utf-8") == "after"
+    assert base.calls[0][0]["file_path"] == str(target.resolve())
+    condition = base.calls[0][1]["_persistent_conditional_write"]
+    assert ("expected_content_sha256" in condition) == (tool_name == "edit_file")
+
+
+@pytest.mark.asyncio
+async def test_full_access_rejects_a_path_changed_after_preflight(tmp_path):
+    scope = replace(scope_for(tmp_path), host_wide=True, allowed_write_roots=(Path(tmp_path.anchor),))
+    rail, adapter, base = make_write_components(tmp_path, scope=scope)
+    rail.permission_profile = "full_access"
+    ctx = tool_context("write_file", {"file_path": "approved.txt", "content": "body"})
+    await rail.before_tool_call(ctx)
+    try:
+        result = await adapter.invoke({"file_path": "another.txt", "content": "body"})
+    finally:
+        await rail.after_tool_call(ctx)
+    assert not result.success and not base.calls
 
 
 @pytest.mark.asyncio

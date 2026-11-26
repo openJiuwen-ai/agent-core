@@ -692,13 +692,14 @@ async def test_spawned_member_is_built_from_its_row_snapshot_even_after_the_pack
     backend = _backend(db)
     tool = _tools(backend, catalog)["spawn_expert"]
     assert (await tool.invoke({"expert": "clip", "group": "designer", "member_name": "clip-1"})).success
-    snapshot_at_spawn = get_member_agent_template(await backend.get_member("clip-1")).snapshot
+    template_at_spawn = get_member_agent_template(await backend.get_member("clip-1"))
 
     # Upgrade, then uninstall the package: the row alone rebuilds the member.
     _expert_package(packages["designer"] / "agents" / "clip", "clip", description="changed")
     shutil.rmtree(packages["designer"])
-    snapshot, external = _template_fields(await backend.get_member("clip-1"))
-    assert snapshot == snapshot_at_spawn
+    snapshot, external, ref = _template_fields(await backend.get_member("clip-1"))
+    assert snapshot == template_at_spawn.snapshot
+    assert ref == template_at_spawn.ref
     assert external is None
 
     spec = TeamAgentSpec(agents={"leader": DeepAgentSpec(), "teammate": _teammate_base()})
@@ -721,7 +722,7 @@ async def test_predefined_and_spawned_members_assemble_identically(
     tool = _tools(backend, catalog)["spawn_expert"]
     assert (await tool.invoke({"expert": "clip", "group": "designer", "member_name": "clip-1"})).success
     row = await backend.get_member("clip-1")
-    snapshot, _ = _template_fields(row)
+    snapshot, _, _ = _template_fields(row)
     spawned_spec = apply_template_snapshot(_teammate_base(), snapshot)
 
     assert spawned_spec.agent_template_spec == predefined.spec.agent_template_spec
@@ -895,7 +896,7 @@ async def test_external_expert_registers_an_external_cli_member_with_the_merged_
     assert [Path(skill["dir"]).name for skill in merged.skills] == ["skill", "claude-expert-skill"]
 
     # Cold recovery / process spawn: the config is read back from the row.
-    _, template_external = _template_fields(row)
+    _, template_external, _ = _template_fields(row)
     spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()}, external_cli_agents=[declared])
     assert _external_cli_config_for_member(spec, "cli-1", "claude", template_external) == merged
     assert _external_cli_config_for_member(spec, "cli-1", "claude") == declared
@@ -1101,7 +1102,7 @@ async def test_snapshot_of_a_deleted_package_fails_loudly_when_mounted(
 
     backend = _backend(db)
     assert (await _tools(backend, catalog)["spawn_expert"].invoke({"expert": "finance", "member_name": "f-1"})).success
-    snapshot, _ = _template_fields(await backend.get_member("f-1"))
+    snapshot, _, _ = _template_fields(await backend.get_member("f-1"))
     shutil.rmtree(packages["finance"])
     with pytest.raises(Exception, match="lookup.py"):
         resolve_agent_template_parts(AgentTemplateSpec.model_validate(snapshot), BuildContext(language="cn"))

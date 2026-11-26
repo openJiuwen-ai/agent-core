@@ -28,6 +28,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Awaitable, Callable, Iterable, Mapping, NoReturn, Sequence, TypeVar, cast
 from urllib.parse import unquote, urlsplit, urlunsplit
 
+from filelock import Timeout
+
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, Model, UserMessage
@@ -35,6 +37,7 @@ from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
 from openjiuwen.harness.personal_context.agent_support import run_personal_context_agent
 from openjiuwen.harness.personal_context.config import PersonalContextConfig
+from openjiuwen.harness.personal_context.context_usage import context_update_lock, publish_with_usage
 from openjiuwen.harness.personal_context.file_tools import _ReclusterApply, _ReclusterPlan
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.path_safety import (
@@ -1044,6 +1047,20 @@ async def _cancel_safe_to_thread(
     return task.result()
 
 
+@contextlib.asynccontextmanager
+async def _publication_lock(lock: asyncio.Lock):
+    """Never leave another operation waiting indefinitely for publication."""
+    try:
+        async with asyncio.timeout(0.5):
+            await lock.acquire()
+    except TimeoutError as exc:
+        raise _publish_error("context publication is busy; retry later") from exc
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 _COOPERATIVE_THREAD_CANCELLATIONS: dict[asyncio.Task[object], threading.Event] = {}
 
 
@@ -1548,6 +1565,7 @@ def _validate_context_capacities(
     max_subdirectories_per_directory: int | None = None,
     repairable: bool = False,
     capacity_exempt: bool = False,
+    changed_paths: set[str] | None = None,
 ) -> None:
     """Validate direct page and child-directory capacities throughout Context."""
 
@@ -1565,7 +1583,7 @@ def _validate_context_capacities(
         if max_subdirectories_per_directory is None
         else max_subdirectories_per_directory
     )
-    for directory in _context_directories(context_root):
+    for directory in _validation_directories(context_root, changed_paths):
         if _directory_ordinary_markdown_count(directory) > max_pages:
             raise error("candidate Context directory page capacity is exceeded")
         if _directory_direct_subdirectory_count(directory) > max_subdirectories:
@@ -2970,12 +2988,16 @@ def _description_context_targets(description: Path, *, context_root: Path) -> se
     return targets
 
 
-def _validate_description_coverage(context_root: Path, *, repairable: bool = False) -> None:
+def _validate_description_coverage(
+    context_root: Path, *, repairable: bool = False, changed_paths: set[str] | None = None,
+    baseline_root: Path | None = None,
+    baseline: Mapping[str, tuple[int, str]] | None = None,
+) -> None:
     """Require every directory description to link all direct pages and child descriptions."""
 
     error = _pipeline_error if repairable else _publish_error
     _assert_no_symlinks(context_root)
-    for directory in _context_directories(context_root):
+    for directory in _validation_directories(context_root, changed_paths):
         description = directory / "description.md"
         if not _path_is_file(description) or _path_is_link_or_reparse(description):
             raise error("candidate description coverage is incomplete")
@@ -3002,8 +3024,42 @@ def _validate_description_coverage(context_root: Path, *, repairable: bool = Fal
             if not _path_is_file(child_description) or _path_is_link_or_reparse(child_description):
                 raise error("candidate description coverage is incomplete")
             expected.add(child_description.relative_to(context_root).as_posix())
+        expected.difference_update(_inherited_navigation_omissions(
+            context_root, directory, expected, baseline_root=baseline_root, baseline=baseline,
+            changed_paths=changed_paths,
+        ))
         if not expected.issubset(_description_context_targets(description, context_root=context_root)):
             raise error("candidate description coverage is incomplete")
+
+
+def _inherited_navigation_omissions(
+    context_root: Path,
+    directory: Path,
+    expected: set[str],
+    *,
+    baseline_root: Path | None,
+    baseline: Mapping[str, tuple[int, str]] | None,
+    changed_paths: set[str] | None,
+) -> set[str]:
+    """Do not blame an Agent for an unchanged page already absent from navigation."""
+    if baseline_root is None or baseline is None or changed_paths is None:
+        return set()
+    baseline_description = baseline_root / directory.relative_to(context_root) / "description.md"
+    relative_description = baseline_description.relative_to(baseline_root).as_posix()
+    if not _path_is_file(baseline_description) or baseline.get(relative_description) != (
+        _extended_path(baseline_description).stat().st_size, _hash_file(baseline_description),
+    ):
+        # Program repairs made before the Agent baseline are part of its input.
+        # Removing those links is a new regression, not an inherited omission.
+        return set()
+    previous_targets = (
+        _description_context_targets(baseline_description, context_root=baseline_root)
+        if _path_is_file(baseline_description) else set()
+    )
+    return {
+        relative for relative in expected - changed_paths - previous_targets
+        if _path_is_file(baseline_root / relative)
+    }
 
 
 def _validate_context_root_layout(context_root: Path, *, repairable: bool = False) -> None:
@@ -3023,6 +3079,44 @@ def _navigation_directories_for_changed_paths(context_root: Path, changed_paths:
     }
 
 
+def _validation_directories(context_root: Path, changed_paths: set[str] | None) -> set[Path]:
+    """Include changed files' directories and the ancestors that expose them."""
+    if changed_paths is None:
+        return set(_context_directories(context_root))
+    directories: set[Path] = set()
+    for directory in _navigation_directories_for_changed_paths(context_root, changed_paths):
+        while directory.is_relative_to(context_root):
+            if _path_is_dir(directory):
+                directories.add(directory)
+            if directory == context_root:
+                break
+            directory = directory.parent
+    return directories
+
+
+def _include_new_directories(
+    context_root: Path,
+    changed_paths: set[str],
+    *,
+    baseline_root: Path | None,
+    baseline: Mapping[str, tuple[int, str]] | None = None,
+) -> set[str]:
+    """File snapshots omit empty directories; include their required navigation."""
+    previous = {PurePosixPath(".")}
+    if baseline_root is not None and _path_is_dir(baseline_root):
+        previous.update(
+            PurePosixPath(directory.relative_to(baseline_root).as_posix())
+            for directory in _context_directories(baseline_root)
+        )
+    for relative in baseline or ():
+        previous.update(PurePosixPath(relative).parents)
+    return changed_paths | {
+        (PurePosixPath(directory.relative_to(context_root).as_posix()) / "description.md").as_posix()
+        for directory in _context_directories(context_root)
+        if PurePosixPath(directory.relative_to(context_root).as_posix()) not in previous
+    }
+
+
 def _finalize_semantic_context(
     context_root: Path,
     *,
@@ -3032,25 +3126,27 @@ def _finalize_semantic_context(
     capacity_exempt: bool = False,
     navigation_changed_paths: set[str] | None = None,
 ) -> set[str]:
-    affected_directories = (
-        None
-        if navigation_changed_paths is None
-        else _navigation_directories_for_changed_paths(context_root, navigation_changed_paths)
-    )
-    changed = _render_context_navigation(
+    changed = _refresh_related_documents(context_root)
+    validation_paths = None if navigation_changed_paths is None else navigation_changed_paths | changed
+    changed.update(_render_context_navigation(
         context_root,
         fallback_references=fallback_references,
-        affected_directories=affected_directories,
-    )
-    changed.update(_refresh_related_documents(context_root))
+        affected_directories=(
+            None if validation_paths is None
+            else _navigation_directories_for_changed_paths(context_root, validation_paths)
+        ),
+    ))
+    if validation_paths is not None:
+        validation_paths.update(changed)
     _validate_context_root_layout(context_root, repairable=True)
-    _validate_description_coverage(context_root, repairable=True)
+    _validate_description_coverage(context_root, repairable=True, changed_paths=validation_paths)
     _validate_context_capacities(
         context_root,
         max_pages_per_directory=max_pages_per_directory,
         max_subdirectories_per_directory=max_subdirectories_per_directory,
         repairable=True,
         capacity_exempt=capacity_exempt,
+        changed_paths=validation_paths,
     )
     return changed
 
@@ -3066,28 +3162,30 @@ async def _finalize_semantic_context_hybrid(
     navigation_changed_paths: set[str] | None = None,
     refresh_related_documents: bool = True,
 ) -> set[str]:
-    affected_directories = (
-        None
-        if navigation_changed_paths is None
-        else _navigation_directories_for_changed_paths(context_root, navigation_changed_paths)
-    )
-    changed = _render_context_navigation(
+    if refresh_related_documents:
+        changed = await _refresh_related_documents_hybrid(context_root, embed_texts=embed_texts)
+    else:
+        changed = await _retain_valid_related_documents(context_root)
+    validation_paths = None if navigation_changed_paths is None else navigation_changed_paths | changed
+    changed.update(_render_context_navigation(
         context_root,
         fallback_references=fallback_references,
-        affected_directories=affected_directories,
-    )
-    if refresh_related_documents:
-        changed.update(await _refresh_related_documents_hybrid(context_root, embed_texts=embed_texts))
-    else:
-        changed.update(await _retain_valid_related_documents(context_root))
+        affected_directories=(
+            None if validation_paths is None
+            else _navigation_directories_for_changed_paths(context_root, validation_paths)
+        ),
+    ))
+    if validation_paths is not None:
+        validation_paths.update(changed)
     _validate_context_root_layout(context_root, repairable=True)
-    _validate_description_coverage(context_root, repairable=True)
+    _validate_description_coverage(context_root, repairable=True, changed_paths=validation_paths)
     _validate_context_capacities(
         context_root,
         max_pages_per_directory=max_pages_per_directory,
         max_subdirectories_per_directory=max_subdirectories_per_directory,
         repairable=True,
         capacity_exempt=capacity_exempt,
+        changed_paths=validation_paths,
     )
     return changed
 
@@ -7275,6 +7373,7 @@ def _classify_reference_target(
     final_context_root: Path,
     source_root: Path,
     error: Callable[[str], BaseError],
+    validate_target: bool = True,
 ) -> tuple[str, str] | None:
     destination = _markdown_destination(raw_target)
     if destination is None:
@@ -7296,7 +7395,7 @@ def _classify_reference_target(
         if relative.suffix.casefold() != ".md":
             return None
         candidate_target = context_root / relative
-        if not _path_is_file(candidate_target) or _path_is_link_or_reparse(candidate_target):
+        if validate_target and (not _path_is_file(candidate_target) or _path_is_link_or_reparse(candidate_target)):
             raise error("candidate Markdown reference target is missing")
         return "context", relative.as_posix()
     if logical_target.is_relative_to(logical_source_root):
@@ -7304,7 +7403,8 @@ def _classify_reference_target(
         if len(relative.parts) != 1 or relative.suffix.casefold() != ".md":
             raise error("candidate atomic source reference is invalid")
         source_id = relative.stem
-        _reference_source_path(source_root, source_id, error=error)
+        if validate_target:
+            _reference_source_path(source_root, source_id, error=error)
         return "source", source_id
     raise error("candidate Markdown reference leaves the allowed roots")
 
@@ -7316,11 +7416,19 @@ def _validate_reference_graph(
     source_root: Path,
     alias_targets: Mapping[str, str] | None = None,
     repairable: bool,
+    changed_paths: set[str] | None = None,
+    changed_source_ids: set[str] | None = None,
+    baseline_root: Path | None = None,
+    baseline: Mapping[str, tuple[int, str]] | None = None,
 ) -> None:
     """Require every Context Markdown to reach an atomic source."""
 
     error = _pipeline_error if repairable else _publish_error
     _assert_no_symlinks(context_root)
+    if changed_paths is not None:
+        changed_paths = _include_new_directories(
+            context_root, changed_paths, baseline_root=baseline_root or final_context_root, baseline=baseline,
+        )
     pages = {
         page.relative_to(context_root).as_posix(): page
         for page in _walk_tree_paths(context_root)
@@ -7333,6 +7441,7 @@ def _validate_reference_graph(
     context_edges: dict[str, set[str]] = {relative: set() for relative in pages}
     source_edges: dict[str, set[str]] = {relative: set() for relative in pages}
     page_texts: dict[str, str] = {}
+    reference_errors: dict[str, BaseError] = {}
     for relative, page in pages.items():
         try:
             text = _extended_path(page).read_text(encoding="utf-8")
@@ -7340,34 +7449,69 @@ def _validate_reference_graph(
             raise error("candidate Markdown reference graph could not be read") from exc
         page_texts[relative] = text
         if "[[ref:" in _SHORT_REFERENCE.sub("", text):
-            raise error("candidate contains a malformed or unresolved short source reference")
+            reference_errors[relative] = error("candidate contains a malformed or unresolved short source reference")
         reference_text = _markdown_reference_text(text)
         for token_match in _SHORT_REFERENCE.finditer(reference_text):
             token = token_match.group(0)
             source_id = alias_targets.get(token) if alias_targets is not None else None
             if source_id is None:
-                raise error("candidate contains an unknown short source reference")
-            _reference_source_path(source_root, source_id, error=error)
+                reference_errors[relative] = error("candidate contains an unknown short source reference")
+                continue
             source_edges[relative].add(source_id)
         page_relative = PurePosixPath(relative)
         for raw_target in _MARKDOWN_LINK.findall(reference_text):
-            classified = _classify_reference_target(
-                raw_target,
-                page_relative=page_relative,
-                context_root=context_root,
-                final_context_root=final_context_root,
-                source_root=source_root,
-                error=error,
-            )
+            try:
+                classified = _classify_reference_target(
+                    raw_target,
+                    page_relative=page_relative,
+                    context_root=context_root,
+                    final_context_root=final_context_root,
+                    source_root=source_root,
+                    error=error,
+                    validate_target=False,
+                )
+            except BaseError as exc:
+                reference_errors[relative] = exc
+                continue
             if classified is None:
                 continue
             kind, target = classified
             if kind == "source":
                 source_edges[relative].add(target)
             elif target == relative:
-                raise error("candidate Markdown contains a self-reference")
+                reference_errors[relative] = error("candidate Markdown contains a self-reference")
             else:
                 context_edges[relative].add(target)
+                if target not in pages:
+                    reference_errors[relative] = error("candidate Markdown reference target is missing")
+
+    valid_sources: set[str] = set()
+    source_errors: dict[str, BaseError] = {}
+    for source_id in {target for targets in source_edges.values() for target in targets}:
+        try:
+            _reference_source_path(source_root, source_id, error=error)
+        except BaseError as exc:
+            source_errors[source_id] = exc
+        else:
+            valid_sources.add(source_id)
+    affected = set(pages) if changed_paths is None else set(changed_paths)
+    affected.update(
+        relative for relative, targets in source_edges.items() if targets.intersection(changed_source_ids or ())
+    )
+    while True:
+        expanded = affected | {
+            relative for relative, targets in context_edges.items() if targets.intersection(affected)
+        }
+        if expanded == affected:
+            break
+        affected = expanded
+    affected.intersection_update(pages)
+    for relative in sorted(affected):
+        if relative in reference_errors:
+            raise reference_errors[relative]
+        for source_id in source_edges[relative]:
+            if source_id in source_errors:
+                raise source_errors[source_id]
 
     pages_by_directory: dict[PurePosixPath, set[str]] = {}
     for relative in pages:
@@ -7375,7 +7519,14 @@ def _validate_reference_graph(
         pages_by_directory.setdefault(directory, set()).add(relative)
     directory_paths = set(pages_by_directory)
     directory_paths.add(PurePosixPath("."))
+    validation_directories = {
+        PurePosixPath(directory.relative_to(context_root).as_posix())
+        for directory in _validation_directories(context_root, changed_paths)
+    }
+    directory_paths.update(validation_directories)
     for directory in sorted(directory_paths, key=lambda value: (len(value.parts), value.as_posix())):
+        if directory not in validation_directories:
+            continue
         description = (directory / "description.md").as_posix()
         if description.startswith("./"):
             description = description[2:]
@@ -7388,6 +7539,10 @@ def _validate_reference_graph(
         }
         direct_directories = {child for child in directory_paths if child != directory and child.parent == directory}
         expected = direct_pages | {(child / "description.md").as_posix() for child in direct_directories}
+        expected.difference_update(_inherited_navigation_omissions(
+            context_root, context_root.joinpath(*directory.parts), expected,
+            baseline_root=baseline_root, baseline=baseline, changed_paths=changed_paths,
+        ))
         missing = expected - context_edges[description]
         if missing:
             raise error("candidate description.md does not link every direct child")
@@ -7399,11 +7554,12 @@ def _validate_reference_graph(
         if current in reachable_from_root:
             continue
         reachable_from_root.add(current)
-        pending.extend(context_edges[current] - reachable_from_root)
-    if reachable_from_root != set(pages):
+        pending.extend(context_edges.get(current, set()) - reachable_from_root)
+    required_reachable = set(pages) if changed_paths is None else set(changed_paths).intersection(pages)
+    if not required_reachable.issubset(reachable_from_root):
         raise error("candidate Context contains an orphan Markdown page")
 
-    source_reachable = {relative for relative, targets in source_edges.items() if targets}
+    source_reachable = {relative for relative, targets in source_edges.items() if targets.intersection(valid_sources)}
     while True:
         expanded = source_reachable | {
             relative for relative, targets in context_edges.items() if targets.intersection(source_reachable)
@@ -7411,8 +7567,8 @@ def _validate_reference_graph(
         if expanded == source_reachable:
             break
         source_reachable = expanded
-    if source_reachable != set(pages):
-        stranded = sorted(set(pages) - source_reachable)
+    if not affected.issubset(source_reachable):
+        stranded = sorted(affected - source_reachable)
         details: list[str] = []
         for relative in stranded[:5]:
             if _INERT_REFERENCE_TOKEN.search(page_texts.get(relative, "")):
@@ -7781,6 +7937,8 @@ class ContextPipelineService:
                         with contextlib.suppress(asyncio.CancelledError):
                             await event_task
                     raise
+            except Timeout:
+                self._fail_active(_publish_error("Context publication is busy; retry the collection"))
             except BaseError as error:
                 self._fail_active(error)
             except Exception:
@@ -7810,13 +7968,17 @@ class ContextPipelineService:
         elif tag == "finish":
             if payload is not None:
                 raise _pipeline_error("finish event payload must be None")
-            await self._finish_run_event(safe_service, safe_run)
+            # Normal preparation also reads the published tree. Maintenance
+            # must yield throughout it, not merely during the final replacement.
+            async with context_update_lock(self._home):
+                await self._finish_run_event(safe_service, safe_run)
         elif tag == "retain":
             if payload is not None:
                 raise _pipeline_error("retain event payload must be None")
             if (safe_service, safe_run) not in self._invalidated_run_keys:
                 self._cancelled_run_keys.discard((safe_service, safe_run))
-            await self._finish_run_event(safe_service, safe_run, retaining=True)
+            async with context_update_lock(self._home):
+                await self._finish_run_event(safe_service, safe_run, retaining=True)
         elif tag == "abort":
             if payload is not None:
                 raise _pipeline_error("abort event payload must be None")
@@ -8757,6 +8919,11 @@ class ContextPipelineService:
             *,
             preserve_existing_paths: bool,
         ) -> tuple[dict[str, tuple[int, str]], dict[str, str]]:
+            await _cancel_safe_to_thread(
+                _repair_inherited_navigation,
+                candidate_context,
+                source_ids=set(effective_source_ids.values()) | effective_deleted_source_ids,
+            )
             if preserve_existing_paths:
                 baseline = await _cancel_safe_to_thread(_snapshot_managed_files, candidate_context)
                 return baseline, {relative: relative for relative in baseline}
@@ -9183,6 +9350,10 @@ class ContextPipelineService:
                         source_root=self._source_meta_root,
                         alias_targets=alias_targets,
                         repairable=True,
+                        changed_paths=changed_paths,
+                        changed_source_ids=set(effective_source_ids.values()) | effective_deleted_source_ids,
+                        baseline_root=self._context_root,
+                        baseline=context_baseline,
                     )
                 if preserve_existing_paths:
                     _validate_context_partition_integrity(
@@ -9527,7 +9698,7 @@ class ContextPipelineService:
         run_time: datetime | None = None,
     ) -> None:
         del batch
-        async with self._publish_lock:
+        async with _publication_lock(self._publish_lock):
             relocations = cast(dict[str, str], processed.get("_context_relocations", {}))
             _assert_path_chain_no_symlinks(self._home / "workspace")
             candidate_context = sandbox / "context"
@@ -9535,11 +9706,22 @@ class ContextPipelineService:
             candidate_prepared = bool(
                 processed.get("_filesystem_candidate_prepared") or processed.get("_agent_candidate_prepared")
             )
+            effective_deleted_source_ids = deleted_source_ids or set()
+            effective_source_ids = _managed_source_ids_for_processed(
+                processed,
+                source_ids_by_logical_id=source_ids_by_logical_id,
+                alias_targets=alias_targets,
+            )
             if not candidate_prepared:
                 await _cancel_safe_to_thread(_copy_tree, self._context_root, candidate_context)
             candidate_context.mkdir(parents=True, exist_ok=True)
             await _cancel_safe_to_thread(_assert_no_symlinks, candidate_context)
             if not candidate_prepared:
+                await _cancel_safe_to_thread(
+                    _repair_inherited_navigation,
+                    candidate_context,
+                    source_ids=set(effective_source_ids.values()) | effective_deleted_source_ids,
+                )
                 await _cancel_safe_to_thread(
                     _normalize_context_candidate,
                     candidate_context,
@@ -9550,12 +9732,6 @@ class ContextPipelineService:
                     relocations=relocations,
                 )
 
-            effective_deleted_source_ids = deleted_source_ids or set()
-            effective_source_ids = _managed_source_ids_for_processed(
-                processed,
-                source_ids_by_logical_id=source_ids_by_logical_id,
-                alias_targets=alias_targets,
-            )
             retaining = processed.get("_retaining") is True
             publication_baseline = (
                 {} if retaining else await _cancel_safe_to_thread(_snapshot_managed_files, candidate_context)
@@ -9582,7 +9758,7 @@ class ContextPipelineService:
                 )
                 if not retaining:
                     navigation_changed_paths.update(_changed_context_paths(candidate_context, publication_baseline))
-            elif processed.get("_filesystem_candidate_profile") in {"rules", "balanced"}:
+            elif processed.get("_filesystem_candidate_profile") in {"rules", "balanced", "agent"}:
                 prepared_changes = processed.get("_agent_changed_context_paths")
                 navigation_changed_paths = (
                     {relative for relative in prepared_changes if isinstance(relative, str)}
@@ -9590,6 +9766,15 @@ class ContextPipelineService:
                     else set()
                 )
                 navigation_changed_paths.update(_changed_context_paths(candidate_context, publication_baseline))
+            before_usage = {}
+            before = await _cancel_safe_to_thread(
+                _snapshot_context_nodes, self._context_root, relocations=relocations, usage=before_usage,
+            )
+            if navigation_changed_paths is not None:
+                navigation_changed_paths.update(
+                    relative for relative in set(before) | set(publication_baseline)
+                    if before.get(relative, (None,))[0] != publication_baseline.get(relative, (None, None))[1]
+                )
             retained_rules_candidate_is_finalized = (
                 processed.get("_retaining") is True
                 and candidate_prepared
@@ -9616,15 +9801,6 @@ class ContextPipelineService:
                 source_root=self._source_meta_root,
                 book=cast(Mapping[str, Mapping[str, str]], processed.get("source_link_book", {})),
             )
-            await _cancel_safe_to_thread(
-                _validate_candidate,
-                candidate_context,
-                final_context_root=self._context_root,
-                source_root=self._source_meta_root,
-                max_pages_per_directory=self._config.max_pages_per_directory,
-                max_subdirectories_per_directory=self._config.max_subdirectories_per_directory,
-                capacity_exempt=capacity_exempt,
-            )
             if alias_targets is not None:
                 await _cancel_safe_to_thread(
                     _resolve_short_references,
@@ -9633,12 +9809,35 @@ class ContextPipelineService:
                     source_root=self._source_meta_root,
                     alias_targets=alias_targets,
                 )
+            # Measure this publication under the same lock as the commit, not
+            # across the whole fetch (other services can publish in between).
+            after_usage = {}
+            after = await _cancel_safe_to_thread(
+                _snapshot_context_nodes, candidate_context, usage=after_usage, previous=(before, before_usage),
+            )
+            validation_paths = {
+                relative for relative in set(before) | set(after)
+                if before.get(relative, (None,))[0] != after.get(relative, (None,))[0]
+            }
+            await _cancel_safe_to_thread(
+                _validate_candidate,
+                candidate_context,
+                final_context_root=self._context_root,
+                source_root=self._source_meta_root,
+                max_pages_per_directory=self._config.max_pages_per_directory,
+                max_subdirectories_per_directory=self._config.max_subdirectories_per_directory,
+                capacity_exempt=capacity_exempt,
+                changed_paths=validation_paths,
+            )
+            if alias_targets is not None:
                 await _cancel_safe_to_thread(
                     _validate_reference_graph,
                     candidate_context,
                     final_context_root=self._context_root,
                     source_root=self._source_meta_root,
                     repairable=False,
+                    changed_paths=validation_paths,
+                    changed_source_ids=set(effective_source_ids.values()) | effective_deleted_source_ids,
                 )
             self._raise_if_publication_fenced((service_id, run_id))
             if self._progress_callback is not None:
@@ -9646,16 +9845,12 @@ class ContextPipelineService:
             actual_profile = processed.get("actual_profile")
             if self._profile_callback is not None and isinstance(actual_profile, str):
                 self._profile_callback(service_id, run_id, actual_profile)
-            # Measure this publication under the same lock as the commit, not
-            # across the whole fetch (other services can publish in between).
-            before = await _cancel_safe_to_thread(_snapshot_context_nodes, self._context_root, relocations=relocations)
-            after = await _cancel_safe_to_thread(_snapshot_context_nodes, candidate_context)
             result = _count_published_nodes(before, after, relocations=relocations)
             committed = False
 
             def commit() -> None:
                 nonlocal committed
-                _commit_context_tree(candidate_context, self._context_root)
+                publish_with_usage(self._home, candidate_context, relocations, snapshots=(before_usage, after_usage))
                 committed = True
 
             try:
@@ -9797,6 +9992,8 @@ def _record_context_relocations(relocations: dict[str, str] | None, mapping: Map
 
 def _snapshot_context_nodes(
     root: Path, *, relocations: Mapping[str, str] | None = None,
+    usage: dict[str, tuple[str, str, float] | None] | None = None,
+    previous: tuple[dict, dict] | None = None,
 ) -> dict[str, tuple[str, str]]:
     """Keep exact and relocation fingerprints for graph Markdown nodes."""
 
@@ -9824,6 +10021,18 @@ def _snapshot_context_nodes(
             markdown = _extended_path(root / relative).read_text(encoding="utf-8")
             relocated = rewrite_markdown_prose(markdown, lambda text: _MARKDOWN_LINK_TOKEN.sub(relocate_link, text))
             result[relative] = (fingerprint, hashlib.sha256(relocated.encode("utf-8")).hexdigest())
+            if usage is not None and not _is_program_description(relative):
+                try:
+                    from openjiuwen.harness.personal_context.context_usage import _fingerprint
+
+                    cached = previous[1].get(relative) if previous is not None else None
+                    unchanged = cached is not None and previous[0].get(relative, (None,))[0] == fingerprint
+                    original = cached[0] if unchanged else _fingerprint(root, relative, {}, markdown=markdown)
+                    mapped = _fingerprint(root, relative, relocations, markdown=markdown) if relocations else original
+                    usage[relative] = (original, mapped, _extended_path(root / relative).stat().st_mtime)
+                except Exception as exc:
+                    usage[relative] = None
+                    logger.warning("PersonalContext optional usage fingerprint failed (%s)", type(exc).__name__)
     return result
 
 
@@ -10219,6 +10428,10 @@ def _validate_filesystem_agent_result(
                 source_root=source_root,
                 alias_targets=alias_targets,
                 repairable=True,
+                changed_paths=changed_paths,
+                changed_source_ids=deleted_source_ids,
+                baseline_root=baseline_root,
+                baseline=context_baseline,
             )
     except BaseError as error:
         # Publish/path/sandbox failures are security or integrity failures;
@@ -10341,6 +10554,7 @@ def _validate_agent_candidate(
     if len(files) > _MAX_AGENT_CONTEXT_FILES:
         raise _pipeline_error("agent context file count exceeds the safety limit")
     baseline_paths = set(baseline)
+    changed_paths = set(changed_paths)
     candidate_paths: set[str] = set()
     root_description = context_root / "description.md"
     if require_description:
@@ -10373,7 +10587,12 @@ def _validate_agent_candidate(
             raise _publish_error("agent context file could not be inspected") from exc
         if size > _MAX_AGENT_CONTEXT_FILE_BYTES:
             raise _pipeline_error("agent context file exceeds the safety limit")
+        changed = relative not in baseline_paths or (size, _hash_file(path)) != baseline[relative]
+        if changed:
+            changed_paths.add(relative)
         if _is_program_description(relative):
+            if relative not in changed_paths:
+                continue
             try:
                 description_text = _extended_path(path).read_text(encoding="utf-8")
             except OSError as exc:
@@ -10387,7 +10606,7 @@ def _validate_agent_candidate(
             continue
         if path.suffix.lower() != ".md":
             raise _pipeline_error("agent context contains a non-Markdown page")
-        if relative not in baseline_paths or (size, _hash_file(path)) != baseline[relative]:
+        if changed:
             _validate_agent_pages(context_root, [relative])
             if require_single_h1:
                 try:
@@ -10404,6 +10623,7 @@ def _validate_agent_candidate(
         candidate_paths,
         baseline_paths=baseline_paths,
     )
+    changed_paths.update(baseline_paths - candidate_paths)
     deleted_source_ids = deleted_source_ids or set()
     candidate_managed_pages_by_source = (
         _validate_agent_managed_source_identity(
@@ -10470,6 +10690,9 @@ def _validate_agent_candidate(
         if not _path_is_file(page) or _path_is_link_or_reparse(page):
             raise _pipeline_error("agent changed page is missing")
 
+    changed_paths = _include_new_directories(
+        context_root, changed_paths, baseline_root=baseline_root, baseline=baseline,
+    )
     if materialized_baseline is not None:
         # This check is intentionally kept here for direct balanced callers;
         # the DeepAgent validator performs the same check before returning.
@@ -10485,13 +10708,16 @@ def _validate_agent_candidate(
         _validate_unchanged_tree(materialized_root, materialized_baseline, name="materialized-source")
     if require_description:
         _validate_context_root_layout(context_root, repairable=True)
-        _validate_description_coverage(context_root, repairable=True)
+        _validate_description_coverage(
+            context_root, repairable=True, changed_paths=changed_paths, baseline_root=baseline_root, baseline=baseline,
+        )
     _validate_context_capacities(
         context_root,
         max_pages_per_directory=max_pages_per_directory,
         max_subdirectories_per_directory=max_subdirectories_per_directory,
         repairable=True,
         capacity_exempt=capacity_exempt,
+        changed_paths=changed_paths,
     )
     _validate_description_navigation(
         context_root,
@@ -10499,6 +10725,7 @@ def _validate_agent_candidate(
         source_root=source_root,
         repairable=True,
         allowed_missing=allowed_missing_pages,
+        changed_paths=changed_paths,
     )
 
 
@@ -10536,6 +10763,41 @@ def _prepare_agent_candidate(
     candidate_context = sandbox / "context"
     _copy_tree(context_root, candidate_context)
     candidate_context.mkdir(parents=True, exist_ok=True)
+
+
+def _repair_inherited_navigation(context_root: Path, *, source_ids: set[str]) -> None:
+    """Repair inherited gaps in source directories before the Agent baseline."""
+    _assert_no_symlinks(context_root)
+    touched: set[str] = {"description.md"}
+    for page in (_walk_tree_paths(context_root) if source_ids else ()):
+        if page.suffix.casefold() != ".md" or _is_program_description(page.name) or not _path_is_file(page):
+            continue
+        markdown = _extended_path(page).read_text(encoding="utf-8")
+        if any(source_id in markdown for source_id in source_ids):
+            touched.add(page.relative_to(context_root).as_posix())
+    missing: set[Path] = set()
+    for directory in _validation_directories(context_root, touched):
+        description = directory / "description.md"
+        if not _path_is_file(description):
+            missing.add(directory)
+        expected: set[str] = set()
+        for entry in _extended_path(directory).iterdir():
+            child = directory / entry.name
+            if _path_is_dir(child):
+                expected.add((child / "description.md").relative_to(context_root).as_posix())
+                if not _path_is_file(child / "description.md"):
+                    missing.add(child)
+            elif _path_is_file(child) and child.suffix.casefold() == ".md" and child.name != "description.md":
+                expected.add(child.relative_to(context_root).as_posix())
+        targets = (
+            _description_context_targets(description, context_root=context_root)
+            if _path_is_file(description)
+            else set()
+        )
+        if not expected.issubset(targets):
+            missing.add(directory)
+    if missing:
+        _render_context_navigation(context_root, affected_directories=missing)
 
 
 def _materialize_candidate_source(
@@ -10741,8 +11003,13 @@ def _validate_candidate(
     max_pages_per_directory: int | None = None,
     max_subdirectories_per_directory: int | None = None,
     capacity_exempt: bool = False,
+    changed_paths: set[str] | None = None,
 ) -> None:
     _assert_no_symlinks(context_root)
+    if changed_paths is not None:
+        changed_paths = _include_new_directories(
+            context_root, changed_paths, baseline_root=final_context_root or context_root,
+        )
     _assert_canonical_description_names(context_root)
     description = context_root / "description.md"
     try:
@@ -10755,17 +11022,19 @@ def _validate_candidate(
         if _path_is_file(entry) and entry.suffix.casefold() != ".md":
             raise _publish_error("candidate Context contains a non-Markdown file")
     _validate_context_root_layout(context_root)
-    _validate_description_coverage(context_root)
+    _validate_description_coverage(context_root, changed_paths=changed_paths)
     _validate_context_capacities(
         context_root,
         max_pages_per_directory=max_pages_per_directory,
         max_subdirectories_per_directory=max_subdirectories_per_directory,
         capacity_exempt=capacity_exempt,
+        changed_paths=changed_paths,
     )
     _validate_description_navigation(
         context_root,
         final_context_root=final_context_root,
         source_root=source_root,
+        changed_paths=changed_paths,
     )
 
 
@@ -10776,12 +11045,14 @@ def _validate_description_navigation(
     source_root: Path | None = None,
     repairable: bool = False,
     allowed_missing: set[str] | None = None,
+    changed_paths: set[str] | None = None,
 ) -> None:
     """Require Context navigation and verified source links to resolve safely."""
 
     resolved_final_context = (final_context_root or context_root).resolve()
     resolved_source_root = source_root.resolve() if source_root is not None else None
     error = _pipeline_error if repairable else _publish_error
+    directories = _validation_directories(context_root, changed_paths)
 
     def location(page: Path, target: str) -> str:
         source = page.relative_to(context_root).as_posix()
@@ -10791,6 +11062,10 @@ def _validate_description_navigation(
 
     for page in _walk_tree_paths(context_root):
         if page.name.casefold() != "description.md" or not _path_is_file(page):
+            continue
+        if page.parent not in directories and not (
+            changed_paths and _description_context_targets(page, context_root=context_root).intersection(changed_paths)
+        ):
             continue
         try:
             text = _extended_path(page).read_text(encoding="utf-8")

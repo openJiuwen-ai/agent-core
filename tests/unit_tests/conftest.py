@@ -2,7 +2,23 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Shared fixtures; load harness dependencies only when MoA tests request them."""
 
+import pytest
 import pytest_asyncio
+
+
+@pytest.fixture(autouse=True)
+def _reset_termination_reason_carrier():
+    """Keep the module-level termination-reason carrier from leaking across tests.
+
+    The carrier lives in a ContextVar that the main thread keeps between tests,
+    so a test that records a reason outside any invoke would otherwise be read
+    by a later test's frame writer.
+    """
+    from openjiuwen.core.single_agent.rail.base import reset_termination_reason
+
+    reset_termination_reason()
+    yield
+    reset_termination_reason()
 
 
 @pytest_asyncio.fixture
