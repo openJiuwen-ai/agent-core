@@ -97,6 +97,36 @@ def _make_kernel_host(
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+@pytest.mark.parametrize("operation", ["pause", "stop"])
+async def test_kernel_drains_host_notifications_before_session_release(operation):
+    host = _make_kernel_host()
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+    kernel._event_bus = SimpleNamespace(stop=AsyncMock(), is_running=True)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def drain():
+        kernel._event_bus.stop.assert_awaited_once()
+        entered.set()
+        await release.wait()
+        host.session_manager.release_session.assert_not_called()
+
+    kernel._dispatcher = SimpleNamespace(
+        group_message=SimpleNamespace(cancel_host_notifications=drain),
+        team_completion=SimpleNamespace(wait_for_completion_publish=AsyncMock()),
+    )
+    task = asyncio.create_task(getattr(kernel, operation)())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        host.session_manager.release_session.assert_not_called()
+    finally:
+        release.set()
+        await task
+    host.session_manager.release_session.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_start_stop_sets_running_flag():
     """start() sets is_running, stop() clears it."""
     loop = EventBus(role=TeamRole.LEADER)

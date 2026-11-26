@@ -426,7 +426,7 @@ class CoordinationKernel:
         if self._event_bus:
             await self._event_bus.stop()
         if self._dispatcher is not None:
-            self._dispatcher.group_message.cancel_host_notifications()
+            await self._dispatcher.group_message.cancel_host_notifications()
         self.close_stream()
         host.session_manager.release_session()
         # team_member status update is owned by ``TeamRuntimeManager.finalize_member``
@@ -635,7 +635,7 @@ class CoordinationKernel:
         if self._event_bus is not None:
             await self._event_bus.stop()
         if self._dispatcher is not None:
-            self._dispatcher.group_message.cancel_host_notifications()
+            await self._dispatcher.group_message.cancel_host_notifications()
         self.close_stream()
         # Permanent teardown (not round-end): stop the native and drop its
         # process-global sys_operation so a stopped/discarded member does not
