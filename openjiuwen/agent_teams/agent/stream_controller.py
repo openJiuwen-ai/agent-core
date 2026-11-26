@@ -137,6 +137,9 @@ class StreamController:
         # task_failed (reset when the next round starts).
         self._retry_attempt: int = 0
         self._swallow_failed_round: bool = False
+        # Last task_failed text in this cycle. Identical 181001 + HTTP 400
+        # texts mean a deterministic parameter error — stop redriving.
+        self._last_failed_text: str = ""
 
     def _member_name(self) -> Optional[str]:
         bp = self._get_blueprint()
@@ -206,6 +209,7 @@ class StreamController:
         self._terminal_interrupt_resume_closed = False
         self._retry_attempt = 0
         self._swallow_failed_round = False
+        self._last_failed_text = ""
         await harness.subscribe(on_state=self._map_state, on_round=self._map_round)
         if self._forward_task is None or self._forward_task.done():
             self._forward_task = asyncio.create_task(self._forward_outputs())
@@ -336,7 +340,18 @@ class StreamController:
             return False
         code, text = detected
         harness = self._resources.harness
-        if harness is not None and code in _RETRYABLE_ERROR_CODES and self._retry_attempt < _MAX_RETRY_ATTEMPTS:
+        identical_deterministic_400 = (
+            code == 181001
+            and "Error code: 400" in text
+            and text == self._last_failed_text
+        )
+        if (
+            harness is not None
+            and code in _RETRYABLE_ERROR_CODES
+            and self._retry_attempt < _MAX_RETRY_ATTEMPTS
+            and not identical_deterministic_400
+        ):
+            self._last_failed_text = text
             self._retry_attempt += 1
             team_logger.warning(
                 "DeepAgent round transient error (code=%s, attempt=%d/%d): %s",
@@ -349,6 +364,7 @@ class StreamController:
             await self._emit_retry_output(code, text)
             await harness.send(_RETRY_QUERY)
             return True
+        self._last_failed_text = text
         team_logger.error(
             "DeepAgent round failed (code=%s, attempts=%d): %s",
             code,
@@ -392,6 +408,9 @@ class StreamController:
             await self._update_execution(ExecutionStatus.STARTING)
             await self._update_execution(ExecutionStatus.RUNNING)
         elif kind == "finished":
+            # Successful round ends the identical-400 streak so a later, unrelated
+            # failure with the same text can still get one retry attempt.
+            self._last_failed_text = ""
             await self._update_execution(ExecutionStatus.COMPLETING)
             await self._update_execution(ExecutionStatus.COMPLETED)
             await self._update_execution(ExecutionStatus.IDLE)

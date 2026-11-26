@@ -615,7 +615,9 @@ class TestDisabledThinkingCompatibility:
             ),
             (
                 _disabled_request_kwargs.__func__(),
-                _OpenAIStyleError("Bad request: invalid temperature", status_code=400),
+                # Unrelated 400 must not trigger thinking fallback; sampling
+                # fallback is covered by TestSamplingParamCompatibility.
+                _OpenAIStyleError("Bad request: invalid max_tokens", status_code=400),
             ),
         ],
     )
@@ -721,6 +723,212 @@ class TestDisabledThinkingCompatibility:
                 )]
 
         assert "minimax-m3" not in client._models_rejecting_disabled_thinking
+
+
+def _invalid_temperature_error() -> _OpenAIStyleError:
+    return _OpenAIStyleError(
+        "Error code: 400 - {'error': {'message': "
+        "'invalid temperature: only 1 is allowed for this model'}}",
+        status_code=400,
+        body={
+            "error": {
+                "message": "invalid temperature: only 1 is allowed for this model",
+            }
+        },
+    )
+
+
+def _invalid_top_p_error() -> _OpenAIStyleError:
+    return _OpenAIStyleError(
+        "Error code: 400 - {'error': {'message': 'invalid top_p: not allowed'}}",
+        status_code=400,
+        body={"error": {"message": "invalid top_p: not allowed"}},
+    )
+
+
+class TestSamplingParamCompatibility:
+    """Sampling-param rejection fallback (temperature / top_p), process-wide cache."""
+
+    def setup_method(self) -> None:
+        OpenAIModelClient._MODELS_REJECTING_SAMPLING.clear()
+
+    def teardown_method(self) -> None:
+        OpenAIModelClient._MODELS_REJECTING_SAMPLING.clear()
+
+    @staticmethod
+    def _expected_cache_key(client: OpenAIModelClient) -> tuple[str, str]:
+        key = client._sampling_cache_key({"model": client.model_config.model_name})
+        assert key is not None
+        return key
+
+    @pytest.mark.asyncio
+    async def test_invoke_retries_without_temperature_and_caches_by_api_base_model(self):
+        client = _make_client()
+        sdk_client = _mock_sdk_client(
+            _invalid_temperature_error(),
+            _response("fallback"),
+            _response("cached"),
+        )
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            result = await client.invoke("hello")
+            cached_result = await client.invoke("hello again")
+
+        assert result.content == "fallback"
+        assert cached_result.content == "cached"
+        assert sdk_client.chat.completions.create.call_count == 3
+
+        first_call = sdk_client.chat.completions.create.call_args_list[0].kwargs
+        retry_call = sdk_client.chat.completions.create.call_args_list[1].kwargs
+        cached_call = sdk_client.chat.completions.create.call_args_list[2].kwargs
+
+        assert first_call["temperature"] == 0.95
+        assert "temperature" not in retry_call
+        assert "top_p" not in retry_call
+        assert "temperature" not in cached_call
+        assert "top_p" not in cached_call
+        assert self._expected_cache_key(client) in OpenAIModelClient._MODELS_REJECTING_SAMPLING
+
+    @pytest.mark.asyncio
+    async def test_stream_retries_without_temperature(self):
+        client = _make_client()
+        sdk_client = _mock_sdk_client(
+            _invalid_temperature_error(),
+            _stream_response_with_finish("a", "b"),
+        )
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            chunks = [chunk.content async for chunk in client.stream("hello")]
+
+        assert chunks == ["a", "b"]
+        assert sdk_client.chat.completions.create.call_count == 2
+        retry_call = sdk_client.chat.completions.create.call_args_list[1].kwargs
+        assert "temperature" not in retry_call
+        assert "top_p" not in retry_call
+
+    @pytest.mark.asyncio
+    async def test_cache_is_process_wide_across_new_client_instances(self):
+        first = _make_client()
+        sdk_first = _mock_sdk_client(_invalid_temperature_error(), _response("fallback"))
+        with patch.object(first, "_create_async_openai_client", return_value=sdk_first):
+            await first.invoke("hello")
+
+        second = _make_client()
+        sdk_second = _mock_sdk_client(_response("cached"))
+        with patch.object(second, "_create_async_openai_client", return_value=sdk_second):
+            result = await second.invoke("hello again")
+
+        assert result.content == "cached"
+        assert sdk_second.chat.completions.create.call_count == 1
+        assert "temperature" not in sdk_second.chat.completions.create.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_top_p_rejection_also_strips_sampling_params(self):
+        client = _make_client()
+        sdk_client = _mock_sdk_client(_invalid_top_p_error(), _response("ok"))
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            result = await client.invoke("hello", top_p=0.9)
+
+        assert result.content == "ok"
+        assert sdk_client.chat.completions.create.call_count == 2
+        retry_call = sdk_client.chat.completions.create.call_args_list[1].kwargs
+        assert "temperature" not in retry_call
+        assert "top_p" not in retry_call
+
+    @pytest.mark.asyncio
+    async def test_explicit_temperature_zero_with_disabled_thinking_extra_body(self):
+        """Image-probe style: temperature=0 + thinking off; only sampling is stripped."""
+        client = _make_client()
+        sdk_client = _mock_sdk_client(_invalid_temperature_error(), _response("ok"))
+        request_kwargs = {
+            "temperature": 0,
+            "extra_body": {
+                "routing": "blue",
+                "thinking": {"type": "disabled"},
+            },
+            "enable_thinking": False,
+        }
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            result = await client.invoke("probe", **request_kwargs)
+
+        assert result.content == "ok"
+        assert sdk_client.chat.completions.create.call_count == 2
+        first_call = sdk_client.chat.completions.create.call_args_list[0].kwargs
+        retry_call = sdk_client.chat.completions.create.call_args_list[1].kwargs
+        assert first_call["temperature"] == 0
+        assert first_call["extra_body"] == {
+            "routing": "blue",
+            "thinking": {"type": "disabled"},
+        }
+        assert "temperature" not in retry_call
+        assert "top_p" not in retry_call
+        assert retry_call["extra_body"] == {
+            "routing": "blue",
+            "thinking": {"type": "disabled"},
+        }
+        assert retry_call["enable_thinking"] is False
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            _OpenAIStyleError("Bad request: invalid max_tokens", status_code=400),
+            _OpenAIStyleError("Unauthorized", status_code=401),
+            _OpenAIStyleError("Forbidden", status_code=403),
+            _OpenAIStyleError("Timed out", status_code=408),
+            _OpenAIStyleError("Rate limited", status_code=429),
+            _OpenAIStyleError("Server error", status_code=500),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_non_sampling_errors_do_not_retry(self, error):
+        client = _make_client()
+        sdk_client = _mock_sdk_client(error)
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            with pytest.raises(BaseError):
+                await client.invoke("hello")
+
+        assert sdk_client.chat.completions.create.call_count == 1
+        assert OpenAIModelClient._MODELS_REJECTING_SAMPLING == set()
+
+    @pytest.mark.asyncio
+    async def test_sampling_fallback_failure_is_not_retried_again(self):
+        client = _make_client()
+        sdk_client = _mock_sdk_client(
+            _invalid_temperature_error(),
+            _OpenAIStyleError("fallback failed", status_code=400),
+        )
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            with pytest.raises(BaseError) as exc_info:
+                await client.invoke("hello")
+
+        assert "fallback failed" in str(exc_info.value)
+        assert sdk_client.chat.completions.create.call_count == 2
+        assert OpenAIModelClient._MODELS_REJECTING_SAMPLING == set()
+
+    @pytest.mark.asyncio
+    async def test_no_sampling_params_in_request_does_not_retry(self):
+        client = _make_client()
+        params = {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}]}
+        error = _invalid_temperature_error()
+        assert client._retry_params_without_sampling(params, error) is None
+
+    def test_thinking_rejection_still_preferred_over_sampling(self):
+        client = _make_client()
+        error = _unsupported_disabled_thinking_error()
+        params = {
+            "model": "MiniMax-M3",
+            "temperature": 0.95,
+            "extra_body": {"thinking": {"type": "disabled"}},
+            "enable_thinking": False,
+        }
+        thinking_retry = client._retry_params_without_disabled_thinking(params, error)
+        assert thinking_retry is not None
+        # Temperature rejection helpers must not claim a thinking-only 400.
+        assert client._is_sampling_param_rejection(error) is False
 
 
 def test_deepseek_endpoint_profile_adds_reasoning_content_to_assistant_messages():

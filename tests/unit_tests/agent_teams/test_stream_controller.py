@@ -432,6 +432,102 @@ async def test_handle_retry_exhaustion_after_prior_retry_unswallows() -> None:
     assert sc._swallow_failed_round is False
 
 
+_IDENTICAL_400_TEXT = (
+    "[181001] model call failed, reason: openAI API async stream error: "
+    "BadRequestError: Error code: 400 - invalid temperature: only 1 is allowed for this model"
+)
+_OTHER_400_TEXT = (
+    "[181001] model call failed, reason: openAI API async stream error: "
+    "BadRequestError: Error code: 400 - tool call arguments incomplete"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_handle_retry_stops_on_repeated_identical_400() -> None:
+    """同一 400 文案连续两次 → 第二次不再 redrive，失败透传。"""
+    runtime = _FakeRuntime()
+    sc = _make_controller(runtime)
+
+    first = await sc._handle_retry(_task_failed_chunk(_IDENTICAL_400_TEXT))
+    assert first is True
+    assert runtime.sent == [(_RETRY_QUERY, False)]
+    assert sc._retry_attempt == 1
+
+    second = await sc._handle_retry(_task_failed_chunk(_IDENTICAL_400_TEXT))
+    assert second is False
+    assert runtime.sent == [(_RETRY_QUERY, False)]
+    assert sc._swallow_failed_round is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_handle_retry_continues_when_400_texts_differ() -> None:
+    """两次 400 文案不同 → 仍按瞬态重试（例如上下文修复后仍可能成功）。"""
+    runtime = _FakeRuntime()
+    sc = _make_controller(runtime)
+
+    first = await sc._handle_retry(_task_failed_chunk(_IDENTICAL_400_TEXT))
+    second = await sc._handle_retry(_task_failed_chunk(_OTHER_400_TEXT))
+
+    assert first is True
+    assert second is True
+    assert runtime.sent == [(_RETRY_QUERY, False), (_RETRY_QUERY, False)]
+    assert sc._retry_attempt == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_handle_retry_still_retries_non_400_181001() -> None:
+    """429 / 超时等非 400 的 181001 仍可重试，不受同文案连停影响。"""
+    runtime = _FakeRuntime()
+    sc = _make_controller(runtime)
+    text = "[181001] model call failed, reason: Error code: 429 - rate limit"
+
+    first = await sc._handle_retry(_task_failed_chunk(text))
+    second = await sc._handle_retry(_task_failed_chunk(text))
+
+    assert first is True
+    assert second is True
+    assert runtime.sent == [(_RETRY_QUERY, False), (_RETRY_QUERY, False)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_start_resets_last_failed_text_for_identical_400_gate() -> None:
+    """新一轮 start 复位 last_failed_text，跨周期不误伤。"""
+    runtime = _FakeRuntime()
+    sc = _make_controller(runtime)
+
+    await sc._handle_retry(_task_failed_chunk(_IDENTICAL_400_TEXT))
+    assert sc._last_failed_text == _IDENTICAL_400_TEXT
+
+    await sc.start()
+    assert sc._last_failed_text == ""
+
+    again = await sc._handle_retry(_task_failed_chunk(_IDENTICAL_400_TEXT))
+    assert again is True
+    assert len(runtime.sent) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_finished_round_clears_last_failed_text_so_later_400_can_retry() -> None:
+    """成功 finished 后清空 streak：之后再出现同文案 400 仍可重试一次。"""
+    runtime = _FakeRuntime()
+    sc = _make_controller(runtime)
+
+    await sc._handle_retry(_task_failed_chunk(_IDENTICAL_400_TEXT))
+    assert sc._last_failed_text == _IDENTICAL_400_TEXT
+
+    await sc._map_round("finished")
+    assert sc._last_failed_text == ""
+
+    again = await sc._handle_retry(_task_failed_chunk(_IDENTICAL_400_TEXT))
+    assert again is True
+    assert len(runtime.sent) == 2
+
+
 # ----------------------------------------------------------------------
 # Phase → MemberStatus mapping
 # ----------------------------------------------------------------------
