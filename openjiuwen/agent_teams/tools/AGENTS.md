@@ -79,6 +79,16 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
   直接 `_MutationFailure("Team ... not found")`，不插孤儿边。`_check_cycle_and_compute_new_edges`
   本身不取锁——它是 `mutate_dependency_graph` 的纯计算子步骤，串行化由调用方
   在加边前取 team 行锁保证。
+  **`_apply_new_edges` 另对每条新边的上游（`depends_on_task_id`）端点取
+  `select(task_id, status).where(...).with_for_update()` 的标量行锁**——不是
+  (3) 类的整行 FOR UPDATE：上游行已被 `_load_endpoints_and_validate` 载入本
+  session 的 identity map，整行 FOR UPDATE 会回退缓存对象的过期属性而非现读
+  DB，故用**标量列投影绕过 identity map** 读 `status`。该锁闭合「加边与上游
+  并发完成」竞态：验证读到的上游仍在执行，上游随后完成提交（其 dep 扫描还看
+  不到这条边，不解锁下游），加边再按过期读写入 `resolved=False` → 下游永久
+  BLOCKED。锁序与 `_terminate_task_in_session` 一致（上游 task → dep 行 → 下游
+  task），不重引第五轮移除的 dep→task 反向死锁；team_info 行锁不被 terminator
+  触碰，不增冲突。
   **bind-time 动态表 DDL 同样在 `write()` 内执行**（
   `create_cur_session_tables(sessions)` 收 `DbSessions` 不收 engine）；经
   `engine.begin()` 直连会绕过 `ddl_lock()` + `write()`，并发 bind 占满写池（F_83）。

@@ -3700,6 +3700,77 @@ async def test_mutate_dependency_graph_rejects_terminal_target(db):
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_add_edge_to_upstream_completed_after_validation_is_born_resolved(db):
+    """An edge whose upstream completes between the validation read and the
+    edge insert is born ``resolved=True``.
+
+    Regression for the concurrent add-edge / complete-upstream race: the
+    plain SELECT in ``_load_endpoints_and_validate`` may read the upstream
+    as still executing; the upstream then commits a terminal transition
+    whose dependency scan sees no edge yet (so it resolves nothing for the
+    downstream); the edge insert then wrote ``resolved=False`` from the
+    stale read, leaving the downstream permanently ``BLOCKED`` — the
+    completion event that should have unblocked it had already fired.
+
+    ``_apply_new_edges`` now re-reads the upstream status under
+    ``SELECT ... FOR UPDATE`` so ``resolved`` reflects the upstream's
+    *current* terminal status at insert time. This test fakes the
+    interleaving by flipping the upstream to terminal inside the same
+    transaction, between the validation read and the edge insert — the
+    property under test is "the insert uses a fresh upstream status, not
+    the stale validation snapshot".
+    """
+    from sqlalchemy import update as sql_update
+
+    from openjiuwen.agent_teams.tools.database.task_dao import (
+        _apply_new_edges,
+        _check_cycle_and_compute_new_edges,
+        _load_endpoints_and_validate,
+    )
+    from openjiuwen.agent_teams.tools.models import _get_task_model
+
+    await db.team.create_team(team_name="team_race", display_name="Race", leader_member_name="leader")
+    await db.task.create_task("A", "team_race", "A", "c", "in_progress")
+    await db.task.create_task("B", "team_race", "B", "c", "pending")
+
+    async with db.sessions.write() as session:
+        # Validation read: upstream A is still IN_PROGRESS.
+        endpoint_tasks = await _load_endpoints_and_validate(session, [("B", "A")])
+        assert endpoint_tasks["A"].status == "in_progress"
+
+        # The upstream completes between the validation read and the edge
+        # insert — the concurrent terminal transition whose dep scan sees
+        # no edge yet, so it resolves nothing for B. ``synchronize_session``
+        # is disabled so the validation-time ORM object in
+        # ``endpoint_tasks`` stays stale (as it would in the real race,
+        # where the commit happens in a *different* session that this
+        # session's identity map never learns about); the DB now holds
+        # ``completed``.
+        team_task_model = _get_task_model()
+        await session.execute(
+            sql_update(team_task_model)
+            .where(team_task_model.task_id == "A")
+            .values(status="completed"),
+            execution_options={"synchronize_session": False},
+        )
+
+        new_edge_set = await _check_cycle_and_compute_new_edges(session, "team_race", [("B", "A")])
+        await _apply_new_edges(session, "team_race", new_edge_set, endpoint_tasks)
+        await session.commit()
+
+    deps_b = await db.task.get_task_dependencies("B")
+    assert len(deps_b) == 1
+    assert deps_b[0].resolved is True, (
+        "edge to an upstream that completed between validation and insert "
+        "must be born resolved, not stale-blocked"
+    )
+
+    b = await db.task.get_task("B")
+    assert b.status == "pending", "B must not be left BLOCKED by a stale upstream read"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_has_unread_messages_honors_include_broadcast(db) -> None:
     """has_unread_messages gates broadcasts behind the include_broadcast flag."""
     await db.team.create_team(team_name="t1", display_name="T1", leader_member_name="leader")

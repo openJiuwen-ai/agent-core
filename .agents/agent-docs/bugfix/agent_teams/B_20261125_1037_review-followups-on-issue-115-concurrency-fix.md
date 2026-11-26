@@ -13,6 +13,7 @@ files:
 - openjiuwen/agent_teams/tools/database/engine.py
 - openjiuwen/agent_teams/organization/db.py
 - openjiuwen/agent_teams/tools/AGENTS.md
+- tests/unit_tests/agent_teams/test_database.py
 - tests/unit_tests/agent_teams/test_db_sessions_watchdog.py
 - tests/unit_tests/agent_teams/organization/test_org_db.py
 designs: []
@@ -266,3 +267,48 @@ docstring（53f1d5e38 已更新）措辞一致。
   通过 `_add_column_idempotent` 跨进程兜底：SQLite/PG 走 SAVEPOINT + DBAPIError，
   MySQL 跳过 savepoint（DDL 隐式提交销毁之）改为 ALTER + `inspect` 兜底验证。
   方向不退——退回进程写锁会重新引入 issue #115 的 30s 看门狗堆积。
+
+### 第七轮检视：加边与上游并发完成竞态（`_apply_new_edges` 的 `resolved` 决策用过期读）
+
+第七轮检视点名 `_apply_new_edges` 的 `resolved` 决策：
+
+> 当给 B 添加对 A 的依赖时，这里可能先读到 A 仍在执行。若 A 随后完成并提交，
+> `complete_task(A)` 扫描依赖时还看不到这条边。加边事务接着按之前读到的状态写入
+> `resolved=False`，使 B 进入 BLOCKED。两次操作都返回成功，但 A 已完成，B 无法
+> 通过这次完成事件解锁。
+
+**根因**：第五轮把环校验的 dep `FOR UPDATE` 换成 team_info 行锁后，闭合了「两个并发
+加边各自通过环校验、合并成环」的竞态，但 `_apply_new_edges` 决定 `resolved` 用的
+仍是 `_load_endpoints_and_validate` 的**普通 SELECT 快照**（`endpoint_tasks[dep_id].status`）。
+team_info 行锁不与 `_terminate_task_in_session`（不锁 team_info）串行化，故加边与上游
+完成可交错：加边读到 A 仍在执行 → A 完成提交（其 dep 扫描看不到新边，不解锁 B）→
+加边按过期读写入 `resolved=False` → B 永久 BLOCKED（本应解锁它的完成事件已发完）。
+
+**修法**：`_apply_new_edges` 在插边前对每条新边的上游端点取
+`select(task_id, status).where(...).with_for_update()` 的**标量行锁**，用现读的
+`status` 决定 `resolved`。两点关键：
+
+1. **标量列投影，不是整行 FOR UPDATE**：上游行已被 `_load_endpoints_and_validate`
+   载入本 session 的 identity map，整行 `select(Model).with_for_update()` 会回退
+   identity map 里缓存对象的**过期属性**而非现读 DB（session 内 FOR UPDATE 不刷新
+   已加载对象的属性）；标量 `select(task_id, status)` 绕过 identity map，读 live
+   committed 值（PG/MySQL `READ COMMITTED` 下每条语句取新快照，FOR UPDATE 读看到
+   并发完成提交）。这条 identity-map 行为经实验确认（同 session 内整行 FOR UPDATE
+   回退缓存属性，`populate_existing=True` 在 aiosqlite 路径下也未刷新；标量列投影
+   稳定读到 in-transaction / committed 的现值）。
+2. **锁序与 `_terminate_task_in_session` 一致**：本路径锁上游 task（FOR UPDATE）→
+   插 dep 行 → 刷新下游 task（FOR UPDATE），即 task→dep→task；terminator 锁 task
+   （CAS）→ dep 行（UPDATE）→ 下游 task（refresh FOR UPDATE），同序。不重引第五轮
+   移除的 dep→task 反向死锁。team_info 行锁不被 terminator 触碰，不增冲突。
+
+**回归测试** `test_add_edge_to_upstream_completed_after_validation_is_born_resolved`
+（`tests/unit_tests/agent_teams/test_database.py`）：在单事务内复刻交错——验证读 A=
+in_progress → 在同事务内把 A 翻成 completed（`synchronize_session=False` 使验证时
+ORM 对象保持过期，忠实模拟「另一 session 已提交、本 session 的 identity map 尚未
+得知」）→ 调 `_apply_new_edges`。修前断言失败（`resolved=False`、B 卡 BLOCKED），
+修后通过（`resolved=True`、B 保持 PENDING）。SQLite 上 `FOR UPDATE` 被剥离，故测
+的是「插边用现读上游状态、不用过期 `endpoint_tasks` 快照」这一不变量，而非 PG/MySQL
+行锁行为本身——后者仍需 swarm 侧 PG/MySQL 端到端复测。
+
+**契约同步**：`tools/AGENTS.md` 第 (4) 条追加 `_apply_new_edges` 上游标量行锁的
+说明（标量投影绕 identity map 的理由 + 锁序与 terminator 一致、不重引第五轮死锁）。

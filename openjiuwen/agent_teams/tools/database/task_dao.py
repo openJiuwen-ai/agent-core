@@ -455,13 +455,68 @@ async def _apply_new_edges(
     new_edge_set: set[tuple[str, str]],
     endpoint_tasks: Dict[str, TeamTaskBase],
 ) -> None:
-    """Insert dependency rows for the freshly computed new edges."""
+    """Insert dependency rows for the freshly computed new edges.
+
+    The ``resolved`` flag of each edge is decided from the upstream task's
+    *current* status, re-read under a ``SELECT ... FOR UPDATE`` row lock on
+    every upstream endpoint, rather than the plain-SELECT snapshot taken
+    earlier in ``_load_endpoints_and_validate``. The lock closes the race
+    against a concurrent ``_terminate_task_in_session`` on the same upstream
+    task: without it, the validation read may see the upstream still
+    executing; the upstream then completes and commits — its dependency
+    scan sees no edge yet, so it resolves nothing for this downstream — and
+    this insert writes ``resolved=False`` from the stale read, leaving the
+    downstream permanently ``BLOCKED`` (the completion event that should
+    have unblocked it already fired). Locking the upstream current-read
+    makes the two serialise: either the edge is inserted before the
+    completion (the terminator's dep scan then finds and resolves it) or
+    after it (the insert reads the terminal status and births the edge
+    already resolved).
+
+    The status is read as a scalar column projection
+    (``task_id, status``), not as an ORM entity: the upstream rows were
+    already loaded into the session's identity map by
+    ``_load_endpoints_and_validate``, and an entity SELECT would return
+    those cached objects with their stale attributes instead of the
+    current DB value. A scalar projection bypasses the identity map and
+    reads the live committed value (under ``READ COMMITTED`` — see
+    ``engine.py`` — each statement takes a fresh snapshot, so the FOR
+    UPDATE read sees the concurrent completion).
+
+    Lock ordering stays compatible with ``_terminate_task_in_session``:
+    that path locks the upstream task (CAS), then its dep rows, then the
+    downstream task (refresh); this path locks the upstream task
+    (FOR UPDATE), then inserts its dep row, then the downstream task
+    (refresh) — same task→dep→downstream order, so the two never deadlock.
+    The ``team_info`` row lock taken earlier in
+    ``mutate_dependency_graph`` is never touched by the terminator, so it
+    adds no conflict.
+    """
     if not new_edge_set:
         return
 
+    team_task_model = _get_task_model()
     task_dependency_model = _get_task_dependency_model()
+
+    # Current-read the upstream endpoints' status under a row lock, as a
+    # scalar projection so the identity map does not hand back the stale
+    # validation snapshot. See the docstring for the race.
+    upstream_ids = {dep_id for _, dep_id in new_edge_set}
+    upstream_status: Dict[str, str] = {}
+    if upstream_ids:
+        upstream_result = await session.execute(
+            select(team_task_model.task_id, team_task_model.status)
+            .where(team_task_model.task_id.in_(list(upstream_ids)))
+            .with_for_update()
+        )
+        upstream_status = {row[0]: row[1] for row in upstream_result.all()}
+
     for tid, dep_id in new_edge_set:
-        dep_status = endpoint_tasks[dep_id].status
+        # Fall back to the validated status only if the upstream vanished
+        # between the validation read and this locked read (a concurrent
+        # hard delete) — existence was already validated, so this is a
+        # defensive default, not the expected path.
+        dep_status = upstream_status.get(dep_id, endpoint_tasks[dep_id].status)
         initial_resolved = dep_status in TASK_TERMINAL_STATUSES
         session.add(
             task_dependency_model(
