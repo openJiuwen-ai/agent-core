@@ -34,6 +34,10 @@ In the producer and consumer assignments, name the output, how it will be used a
 (such as source locations or test conditions).
 
 In the delivery owner's assignment, identify the original requirements and relevant source material.
+For each mandatory delivery constraint, identify its basis in the user request or an applicable source.
+Preserve explicit scope and exclusions in affected assignments. You may break requirements into verifiable checks
+that preserve their meaning and the requested output format. Leave planner-chosen methods adjustable
+so executors can follow the original requirements when a proposed method conflicts with them.
 List the supplied sources needed for acceptance in that task's external_inputs. Have the owner derive checks
 from the original request and sources, including obligations upstream work may have missed.
 Before delivery, inspect the final artifact or read back the affected state against those checks and the authorized scope.

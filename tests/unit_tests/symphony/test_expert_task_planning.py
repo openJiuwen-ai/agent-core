@@ -355,6 +355,10 @@ async def test_expert_task_plan_preserves_evidence_and_final_acceptance(tmp_path
     assert "downstream decision or action" in prompt
     assert "successive changes to the same state" in prompt
     assert "original requirements and relevant source material" in prompt
+    assert "its basis in the user request or an applicable source" in prompt
+    assert "Preserve explicit scope and exclusions" in prompt
+    assert "verifiable checks that preserve their meaning and the requested output format" in " ".join(prompt.split())
+    assert "Leave planner-chosen methods adjustable" in prompt
     assert "inspect the final artifact or read back the affected state" in prompt
     assert "check what already took effect" in prompt
     assert "final version" in prompt
