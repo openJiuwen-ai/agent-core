@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -50,6 +51,17 @@ def _parse_chunk(chunk: Any) -> tuple[str | None, dict[str, Any]]:
 def _tool_info(payload: dict[str, Any]) -> dict[str, Any]:
     tool_info = payload.get("tool_call") or payload.get("tool_result") or payload
     return tool_info if isinstance(tool_info, dict) else {}
+
+
+def _parse_todo_snapshot(rendered: str | None) -> list[dict[str, str]] | None:
+    if not rendered:
+        return None
+    try:
+        result = json.loads(rendered)
+    except ValueError:
+        return None
+    todos = result.get("todos") if isinstance(result, dict) else None
+    return todos if isinstance(todos, list) else None
 
 
 class ActivityProjector:
@@ -186,6 +198,7 @@ class ActivityProjector:
         tool_call_id: str | None = None,
         ok: bool | None = None,
         dropped: int | None = None,
+        todo_snapshot: list[dict[str, str]] | None = None,
     ) -> SubagentActivity:
         return SubagentActivity(
             subagent_id=self._subagent_id,
@@ -199,6 +212,7 @@ class ActivityProjector:
             at_ms=time.time() * 1000,
             dropped=dropped,
             phase_id=self._phase_id,
+            todo_snapshot=todo_snapshot,
         )
 
     def _project_tool_call(self, payload: dict[str, Any], task_id: str) -> SubagentActivity:
@@ -241,6 +255,7 @@ class ActivityProjector:
             tool_name=tool_name,
             tool_call_id=tool_call_id,
             ok=ok if isinstance(ok, bool) else None,
+            todo_snapshot=_parse_todo_snapshot(_pick_str(info, "rendered_result")) if tool_name == "todo_write" else None,
         )
 
     def _project_error(self, payload: dict[str, Any], task_id: str) -> SubagentActivity:

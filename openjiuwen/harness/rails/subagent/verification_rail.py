@@ -38,9 +38,7 @@ VERIFICATION_ALLOWED_TOOLS: frozenset[str] = frozenset({
     "list_files",
     "web_search",
     "web_fetch",
-    "todo_create",
-    "todo_list",
-    "todo_modify",
+    "todo_write",
     "skill_tool",
     "tool_search",
 })

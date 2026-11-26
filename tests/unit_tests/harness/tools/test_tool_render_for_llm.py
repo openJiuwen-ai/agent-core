@@ -33,7 +33,7 @@ from openjiuwen.harness.tools.skills.list_skill import ListSkillTool
 from openjiuwen.harness.tools.subagent.session_tools import SessionsCancelTool
 from openjiuwen.harness.tools.subagent.subagent_tools import SubagentListTool, SubagentWaitTool
 from openjiuwen.harness.tools.subagent.task_tool import TaskTool
-from openjiuwen.harness.tools.todo import TodoCreateTool, TodoGetTool, TodoListTool
+from openjiuwen.harness.tools.todo import TodoWriteTool
 from openjiuwen.harness.tools.tool_discovery.tool_search import ToolSearchTool
 from openjiuwen.harness.tools.worktree import ExitWorktreeTool
 
@@ -257,11 +257,8 @@ def test_discovery_tools_render_text() -> None:
 
 @pytest.mark.level1
 def test_dict_returning_tools_render_text() -> None:
-    assert TodoCreateTool(_OP, language="en").render_for_llm({"message": "Created 1 task"}) == "Created 1 task"
-    tasks = {"todos": [{"id": "t1", "content": "Write", "status": "pending", "depends_on": ["t0"]}]}
-    assert TodoListTool(_OP, language="en").render_for_llm(tasks) == "- [pending] t1: Write (depends on: t0)"
-    assert TodoListTool(_OP, language="en").render_for_llm({"todos": []}) == "No active tasks."
-    assert TodoGetTool(_OP, language="en").render_for_llm({"todo": {"id": "t1", "description": None}}) == "id: t1"
+    snapshot = {"revision": "r1", "todos": [{"id": "t1", "content": "Write", "status": "pending"}]}
+    assert json.loads(TodoWriteTool(".").render_for_llm(snapshot)) == snapshot
 
     assert SubmitGoalReportTool(None, language="en").render_for_llm(
         {"result": "report_accepted", "status": "continue"}

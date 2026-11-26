@@ -24,12 +24,8 @@ from openjiuwen.core.single_agent.rail.base import (
     ToolCallInputs,
 )
 from openjiuwen.harness import create_deep_agent
-from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig, SysOperation
-from openjiuwen.harness.tools.todo import (
-    TodoCreateTool,
-    TodoListTool,
-    TodoModifyTool,
-)
+from tempfile import TemporaryDirectory
+from openjiuwen.harness.tools.todo import TodoWriteTool
 
 API_BASE = os.getenv("API_BASE", "")
 API_KEY = os.getenv("API_KEY", "")
@@ -85,30 +81,14 @@ class TestDeepAgentTodoE2E(unittest.IsolatedAsyncioTestCase):
             )
 
     def _get_todo_tools(self):
-        sys_op_card = SysOperationCard(
-            id="sys_operation_for_todo_tool",
-            mode=OperationMode.LOCAL,
-            work_config=LocalWorkConfig(
-                work_dir="./workspace"
-            )
-        )
-        Runner.resource_mgr.add_sys_operation(sys_op_card)
-        sys_operation = Runner.resource_mgr.get_sys_operation("sys_operation_for_todo_tool")
-
-        if not isinstance(sys_operation, SysOperation):
-            raise TypeError(f"Expected SysOperation, got {type(sys_operation)}")
-
-        todo_create = TodoCreateTool(operation=sys_operation)
-        todo_list = TodoListTool(operation=sys_operation)
-        todo_modify = TodoModifyTool(operation=sys_operation)
-        Runner.resource_mgr.add_tool(todo_create)
-        Runner.resource_mgr.add_tool(todo_list)
-        Runner.resource_mgr.add_tool(todo_modify)
-        return [todo_create.card, todo_list.card, todo_modify.card]
+        workspace = self.enterContext(TemporaryDirectory())
+        tool = TodoWriteTool(workspace)
+        Runner.resource_mgr.add_tool(tool)
+        return [tool.card]
 
     @pytest.mark.asyncio
     @unittest.skip("skip system test")
-    async def test_deep_agent_todo_create_list_modify(self):
+    async def test_deep_agent_todo_write(self):
         """测试Todo工具：创建、列表、修改。"""
         self._require_llm_config()
 
@@ -128,12 +108,9 @@ class TestDeepAgentTodoE2E(unittest.IsolatedAsyncioTestCase):
         session = create_agent_session(session_id=self._session_id)
 
         query = (
-            "请严格按顺序执行以下任务，并且每一步都必须调用工具：\n"
-            "1. 创建一个待办事项列表，包含3个任务：完成需求分析、编写代码、测试验证；\n"
-            "2. 列出当前的待办事项；\n"
-            "3. 修改第一个任务的状态为已完成；\n"
-            "4. 再次列出待办事项确认修改；\n"
-            "5. 最后输出一句中文总结。"
+            "用 todo_write 创建三条待办：完成需求分析、编写代码、测试验证。"
+            "读取写入结果返回的 revision 和列表，再调用 todo_write 提交完整列表，"
+            "将第一条设为 completed。最后输出一句中文总结。"
         )
         result = await agent.invoke({"query": query}, session=session)
         self.assertIsInstance(result, dict)
@@ -142,10 +119,8 @@ class TestDeepAgentTodoE2E(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bool(result["output"]))
 
         tool_counts = Counter(tool_trace.tool_calls)
-        self.assertGreaterEqual(tool_counts.get("todo_create", 0), 1)
-        self.assertGreaterEqual(tool_counts.get("todo_list", 0), 2)
-        self.assertGreaterEqual(tool_counts.get("todo_modify", 0), 1)
-        self.assertGreaterEqual(sum(tool_counts.values()), 4)
+        self.assertEqual(set(tool_counts), {"todo_write"})
+        self.assertGreaterEqual(tool_counts["todo_write"], 2)
 
 
 if __name__ == "__main__":

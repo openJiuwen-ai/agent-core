@@ -89,7 +89,7 @@ def test_init_registers_tools_with_workspace() -> None:
     rail.init(agent)
 
     assert rail.tools is not None
-    assert len(rail.tools) > 0
+    assert [tool.card.name for tool in rail.tools] == ["todo_write"]
     assert rail.workspace is not None
     assert rail.workspace.root_path == f"/tmp/test_ws"
 
@@ -102,7 +102,7 @@ def test_init_registers_without_workspace() -> None:
     rail.init(agent)
 
     assert rail.tools is not None
-    assert len(rail.tools) > 0
+    assert [tool.card.name for tool in rail.tools] == ["todo_write"]
     assert rail.workspace is not None
 
 
@@ -140,6 +140,7 @@ def test_priority_is_90() -> None:
 def _make_ctx(session=None):
     """Build a minimal AgentCallbackContext mock."""
     ctx = MagicMock()
+    ctx.agent.prompt_attachment_manager = None
     if not session:
         session = Session()
     ctx.session = session
@@ -191,11 +192,6 @@ async def test_after_task_iteration_bridges_todos() -> None:
 
     plan = TaskPlan(goal="test", tasks=plan_tasks)
     state = DeepAgentState(iteration=1, task_plan=plan)
-    saved_todos: List[TodoItem] = []
-
-    def _capture_saved(session_id: str, todos_list: List[TodoItem]) -> None:
-        saved_todos.extend(todos_list)
-
     ctx = _make_ctx(session=MagicMock())
     ctx.session.get_session_id.return_value = "sess-1"
     ctx.agent.load_state.return_value = state
@@ -203,12 +199,11 @@ async def test_after_task_iteration_bridges_todos() -> None:
     tool = rail._find_todo_tool()
     assert tool is not None
     tool.load_todos = AsyncMock(return_value=todos)
-    tool.save_todos = AsyncMock(side_effect=_capture_saved)
+    tool.sync_statuses = AsyncMock()
 
     await rail.after_task_iteration(ctx)
 
-    tool.save_todos.assert_called_once()
-    assert saved_todos[0].status == TodoStatus.IN_PROGRESS
+    tool.sync_statuses.assert_awaited_once_with("sess-1", {task.id: task.status for task in plan_tasks})
 
 
 @pytest.mark.asyncio
@@ -233,11 +228,6 @@ async def test_after_task_iteration_syncs_todo_status_from_plan() -> None:
 
     plan = TaskPlan(goal="test", tasks=plan_tasks)
     state = DeepAgentState(iteration=2, task_plan=plan)
-    saved_todos: List[TodoItem] = []
-
-    def _capture_saved(session_id: str, todos_list: List[TodoItem]) -> None:
-        saved_todos.extend(todos_list)
-
     ctx = _make_ctx(session=MagicMock())
     ctx.session.get_session_id.return_value = "sess-sync-1"
     ctx.agent.load_state.return_value = state
@@ -245,13 +235,11 @@ async def test_after_task_iteration_syncs_todo_status_from_plan() -> None:
     tool = rail._find_todo_tool()
     assert tool is not None
     tool.load_todos = AsyncMock(return_value=todos)
-    tool.save_todos = AsyncMock(side_effect=_capture_saved)
+    tool.sync_statuses = AsyncMock()
 
     await rail.after_task_iteration(ctx)
 
-    tool.save_todos.assert_called_once()
-    assert saved_todos[0].status == TodoStatus.COMPLETED
-    assert saved_todos[1].status == TodoStatus.PENDING
+    tool.sync_statuses.assert_awaited_once_with("sess-sync-1", {task.id: task.status for task in plan_tasks})
 
 
 @pytest.mark.asyncio
@@ -274,7 +262,7 @@ async def test_bridge_skips_when_plan_exists() -> None:
     tool = rail._find_todo_tool()
     assert tool is not None
     tool.load_todos = AsyncMock(return_value=existing_todos)
-    tool.save_todos = AsyncMock()
+    tool.sync_statuses = AsyncMock()
 
     await rail.after_task_iteration(ctx)
 
@@ -407,7 +395,7 @@ async def test_after_tool_call_pushes_steering_message() -> None:
     rail.init(agent)
 
     ctx = _make_ctx()
-    ctx.inputs = ToolCallInputs(tool_name="todo_create")
+    ctx.inputs = ToolCallInputs(tool_name="todo_write")
     ctx.context = MagicMock()
     ctx.session = MagicMock()
     ctx.session.get_session_id.return_value = "test-session-id"
@@ -439,7 +427,7 @@ async def test_after_tool_call_counts_all_tools() -> None:
     rail.init(agent)
 
     ctx = _make_ctx()
-    ctx.inputs = ToolCallInputs(tool_name="todo_create")
+    ctx.inputs = ToolCallInputs(tool_name="todo_write")
     ctx.session = MagicMock()
     ctx.session.get_session_id.return_value = "test-session-id"
 
@@ -460,7 +448,7 @@ async def test_after_invoke_removes_tool_call_count() -> None:
     rail.init(agent)
 
     ctx = _make_ctx()
-    ctx.inputs = ToolCallInputs(tool_name="todo_create")
+    ctx.inputs = ToolCallInputs(tool_name="todo_write")
     ctx.session = MagicMock()
     ctx.session.get_session_id.return_value = "test-session-id"
 
@@ -485,7 +473,7 @@ async def test_after_tool_call_custom_interval() -> None:
     rail.init(agent)
 
     ctx = _make_ctx()
-    ctx.inputs = ToolCallInputs(tool_name="todo_create")
+    ctx.inputs = ToolCallInputs(tool_name="todo_write")
     ctx.session = MagicMock()
     ctx.session.get_session_id.return_value = "test-session-id"
     ctx.push_steering = MagicMock()
@@ -515,7 +503,7 @@ async def test_after_tool_call_skips_when_disabled() -> None:
     rail.init(agent)
 
     ctx = _make_ctx()
-    ctx.inputs = ToolCallInputs(tool_name="todo_create")
+    ctx.inputs = ToolCallInputs(tool_name="todo_write")
     ctx.session = MagicMock()
     ctx.session.get_session_id.return_value = "test-session-id"
     ctx.push_steering = MagicMock()

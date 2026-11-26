@@ -284,6 +284,7 @@ class SubagentActivity:
     at_ms: float = 0.0
     dropped: int | None = None
     phase_id: int = 0
+    todo_snapshot: list[dict[str, str]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -303,6 +304,8 @@ class SubagentActivity:
             payload["ok"] = self.ok
         if self.dropped is not None:
             payload["dropped"] = self.dropped
+        if self.todo_snapshot is not None:
+            payload["todo_snapshot"] = self.todo_snapshot
         return payload
 
     @classmethod
@@ -311,6 +314,7 @@ class SubagentActivity:
         ok = ok_raw if isinstance(ok_raw, bool) else None
         dropped_raw = raw.get("dropped")
         dropped = int(dropped_raw) if dropped_raw is not None else None
+        snapshot = raw.get("todo_snapshot")
         return cls(
             subagent_id=str(raw.get("subagent_id") or ""),
             task_id=str(raw.get("task_id") or ""),
@@ -323,6 +327,7 @@ class SubagentActivity:
             at_ms=float(raw.get("at_ms") or 0.0),
             dropped=dropped,
             phase_id=int(raw.get("phase_id") or 0),
+            todo_snapshot=snapshot if isinstance(snapshot, list) else None,
         )
 
     def is_persistable(self) -> bool:

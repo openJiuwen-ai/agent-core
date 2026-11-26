@@ -3,11 +3,13 @@
 """TaskPlanningRail — registers todo tools on DeepAgent."""
 from __future__ import annotations
 
+import json
 from typing import Dict, Optional, List
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentKind
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import (
@@ -24,7 +26,7 @@ from openjiuwen.harness.schema.task import (
     TodoItem,
     TodoStatus,
 )
-from openjiuwen.harness.tools import TodoTool
+from openjiuwen.harness.tools.todo import TodoWriteTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
 
@@ -80,13 +82,6 @@ class TaskPlanningRail(DeepAgentRail):
     def init(self, agent) -> None:
         """Register todo tools on the agent."""
         from openjiuwen.harness.deep_agent import DeepAgent
-        from openjiuwen.harness.tools import (
-            TodoCreateTool,
-            TodoListTool,
-            TodoModifyTool,
-            TodoGetTool,
-        )
-
         if not (
             isinstance(agent, DeepAgent)
             and agent.deep_config
@@ -105,32 +100,16 @@ class TaskPlanningRail(DeepAgentRail):
         agent_id = getattr(getattr(agent, "card", None), "id", None)
         language = self.system_prompt_builder.language if self.system_prompt_builder else "cn"
 
-        tool_configs = [
-            (TodoCreateTool, False),
-            (TodoListTool, False),
-            (TodoGetTool, False),
-            (TodoModifyTool, False),
-        ]
-
-        existing_tools = []
-        for ability in agent.ability_manager.list():
-            if isinstance(ability, ToolCard):
-                tool_instance = Runner.resource_mgr.get_tool(tool_id=ability.id)
-                if tool_instance:
-                    for i, (tool_class, found) in enumerate(tool_configs):
-                        if isinstance(tool_instance, tool_class):
-                            tool_configs[i] = (tool_class, True)
-                            existing_tools.append(tool_instance)
-                            break
-
-        tools = existing_tools.copy()
         try:
-            for tool_class, found in tool_configs:
-                if not found:
-                    new_tool = tool_class(self.sys_operation, workspace_dir, language, agent_id)
-                    agent.ability_manager.add_ability(new_tool.card, new_tool)
-                    tools.append(new_tool)
-            self.tools = tools
+            for ability in agent.ability_manager.list():
+                if isinstance(ability, ToolCard) and ability.name == "todo_write":
+                    tool = Runner.resource_mgr.get_tool(tool_id=ability.id)
+                    if isinstance(tool, TodoWriteTool):
+                        self.tools = [tool]
+                        return
+            tool = TodoWriteTool(workspace=workspace_dir, language=language, agent_id=agent_id)
+            agent.ability_manager.add_ability(tool.card, tool)
+            self.tools = [tool]
         except Exception as exc:
             logger.warning("TaskPlanningRail: failed to add tool, error: %s", exc)
 
@@ -150,7 +129,8 @@ class TaskPlanningRail(DeepAgentRail):
     # -- hook methods --
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Inject task planning system prompt and switch model if needed."""
+        """Inject task planning context and switch model if needed."""
+        await self._publish_todo_snapshot(ctx)
         if self.system_prompt_builder is None:
             return
 
@@ -186,12 +166,36 @@ class TaskPlanningRail(DeepAgentRail):
                 "TaskPlanningRail: switched to model_id=%s", selected_model_id
             )
 
+    async def _publish_todo_snapshot(self, ctx: AgentCallbackContext) -> None:
+        """Make the current todo state available without a model-facing read tool."""
+        manager = getattr(ctx.agent, "prompt_attachment_manager", None)
+        tool = self._find_todo_tool()
+        if manager is None or ctx.session is None or tool is None:
+            return
+        session_id = ctx.session.get_session_id()
+        try:
+            snapshot = await tool.load_snapshot(session_id)
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning("TaskPlanningRail: failed to read todo snapshot: %s", exc)
+            return
+        if snapshot is None:
+            await manager.clear_section(session_id=session_id, section="todo_snapshot")
+            return
+        await manager.add_section(
+            session_id=session_id,
+            section="todo_snapshot",
+            kind=PromptAttachmentKind.RUNTIME,
+            content=json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")),
+            priority=60,
+            source="task_planning",
+            content_kind="application/json",
+        )
+
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Add progress reminder prompt after tool call.
 
         Every N tool calls (configurable via tool_call_interval), pushes a
-        steering message prompting the model to review current task progress
-        using todo_list tool.
+        steering message about current task progress.
 
         Also refreshes todos cache when todo tools are called.
 
@@ -205,7 +209,7 @@ class TaskPlanningRail(DeepAgentRail):
         # Refresh todos cache when todo tools are called
         if ctx.session and isinstance(ctx.inputs, ToolCallInputs):
             tool_name = ctx.inputs.tool_name
-            if tool_name and tool_name.startswith("todo_"):
+            if tool_name == "todo_write":
                 session_id = ctx.session.get_session_id()
                 try:
                     todos = await tool.load_todos(session_id)
@@ -281,11 +285,6 @@ class TaskPlanningRail(DeepAgentRail):
         if session_id in self._tool_call_counts:
             del self._tool_call_counts[session_id]
 
-        # Clean up session resources via public interface
-        tool = self._find_todo_tool()
-        if tool:
-            tool.cleanup_session(session_id)
-
     async def after_task_iteration(self, ctx: AgentCallbackContext) -> None:
         """Sync todo list from task_plan after each iteration."""
         await self._sync_todos_from_plan(ctx)
@@ -339,46 +338,16 @@ class TaskPlanningRail(DeepAgentRail):
 
         session_id = ctx.session.get_session_id()
 
+        statuses = {task.id: task.status for task in plan.tasks}
         try:
-            todos = await tool.load_todos(session_id)
-        except Exception:
-            logger.debug("TaskPlanningRail: no todos to sync")
-            return
+            await tool.sync_statuses(session_id, statuses)
+            self._todos_cache.pop(session_id, None)
+        except (OSError, ValueError) as exc:
+            logger.warning("TaskPlanningRail: failed to sync todo statuses: %s", exc)
 
-        if not todos:
-            return
-
-        status_by_task_id = {
-            task.id: task.status
-            for task in plan.tasks
-        }
-        changed = False
-
-        for todo in todos:
-            desired = status_by_task_id.get(todo.id)
-            if desired is None:
-                continue
-            if todo.status != desired:
-                todo.status = desired
-                changed = True
-
-        if not changed:
-            return
-
-        await tool.save_todos(session_id, todos)
-        logger.info(
-            "TaskPlanningRail: synced %d todos from TaskPlan",
-            len(todos),
-        )
-
-    def _find_todo_tool(self) -> Optional[TodoTool]:
-        """Return the first TodoTool in self.tools."""
-        if not self.tools:
-            return None
-        for tool in self.tools:
-            if isinstance(tool, TodoTool):
-                return tool
-        return None
+    def _find_todo_tool(self) -> TodoWriteTool | None:
+        """Return the registered todo writer."""
+        return self.tools[0] if self.tools else None
 
     def _format_task_content(self, todos: List[TodoItem]):
         """Format todos into a readable task content string.
