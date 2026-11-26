@@ -362,6 +362,22 @@ class MessageDao:
 
         return await self._hydrate_rows_off_loop(rows)
 
+    async def _approval_mail_matches(
+        self, session: AsyncSession, team_name: str, member_name: str, leader: str, expected_ids: frozenset[str],
+    ) -> bool:
+        """Check the prevalidated direct-mail identities inside the claim transaction."""
+        model = _get_message_model()
+        rows = (await session.execute(select(model.message_id, model.from_member_name).where(
+            model.team_name == team_name, model.to_member_name == member_name,
+            model.broadcast.is_(False), model.is_read.is_(False),
+        ))).all()
+        return (
+            bool(expected_ids)
+            and {row.message_id for row in rows} == expected_ids
+            and all(row.from_member_name == leader for row in rows)
+            and not await self._broadcast_unread_recipients(session, team_name, only=[member_name])
+        )
+
     async def get_unread_group_members(self, team_name: str) -> List[str]:
         """Read unstarted or failed recipients of explicit group mentions."""
         message_model = _get_message_model()

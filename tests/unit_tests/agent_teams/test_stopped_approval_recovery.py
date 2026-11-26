@@ -284,7 +284,7 @@ async def test_failed_child_restore_keeps_approval_and_releases_restart(tmp_path
 async def test_teardown_releases_a_claim_committed_during_cancellation(tmp_path, monkeypatch, teardown):
     async with stopped_worker(tmp_path, monkeypatch) as (leader, backend, manager, _, _, tool):
         dao = backend.db.member
-        claim = dao.claim_member_restart
+        claim = backend.db._claim_approval_restart
         committed = asyncio.Event()
         finish_claim = asyncio.Event()
 
@@ -295,7 +295,7 @@ async def test_teardown_releases_a_claim_committed_during_cancellation(tmp_path,
             await finish_claim.wait()
             return result
 
-        monkeypatch.setattr(dao, "claim_member_restart", delayed_result)
+        monkeypatch.setattr(backend.db, "_claim_approval_restart", delayed_result)
         assert await backend.approve_tool("worker", "call-a", True)
         await poll_completion(leader)
         task, = manager.recovery_tasks
@@ -307,6 +307,9 @@ async def test_teardown_releases_a_claim_committed_during_cancellation(tmp_path,
                 while not task.cancelling():
                     await asyncio.sleep(0.01)
             assert not manager._approval_recovery_open
+            for _ in range(2):
+                task.cancel()
+                await asyncio.sleep(0)
         finally:
             finish_claim.set()
             await asyncio.wait_for(teardown_task, 2)
@@ -394,3 +397,141 @@ async def test_stop_rolls_back_ready_written_during_cancelled_startup(tmp_path, 
         assert (await backend.get_member("worker")).status == MemberStatus.STOPPED.value
         assert len(await backend.message_manager.get_messages(to_member_name="worker", unread_only=True)) == 1
         assert tool.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("memory_db", [False, True], ids=["file_db", "memory_db"])
+@pytest.mark.parametrize("arrival", ["broadcast", "direct", "approval", "group", "notification"])
+async def test_approval_claim_rechecks_mail_and_releases_only_ineligible_attempt(
+    tmp_path, monkeypatch, memory_db, arrival,
+):
+    async with stopped_worker(tmp_path, monkeypatch, memory_db=memory_db) as (
+        leader, backend, manager, _, original, tool
+    ):
+        claim = backend.db._claim_approval_restart
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def gated_claim(*args):
+            entered.set()
+            await release.wait()
+            return await claim(*args)
+
+        monkeypatch.setattr(backend.db, "_claim_approval_restart", gated_claim)
+        assert await backend.approve_tool("worker", "call-a", True)
+        await poll_completion(leader)
+        recovery, = manager.recovery_tasks
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            if arrival == "broadcast":
+                extra = await backend.message_manager.broadcast_message("new ordinary work")
+            elif arrival == "direct":
+                extra = await backend.message_manager.send_message("new ordinary work", "worker")
+            elif arrival in {"group", "notification"}:
+                extra = "late-group"
+                assert await backend.db.message.create_message(
+                    extra, backend.team_name, "leader", "group work", broadcast=True,
+                    meta={"type": "group_chat", "mentions": ["worker"] if arrival == "group" else []},
+                )
+                if arrival == "notification":
+                    assert await backend.db.message.create_group_notification(
+                        "late-notice", backend.team_name, "worker", extra,
+                    )
+            else:
+                assert await backend.approve_tool("worker", "call-b", True)
+                extra = None
+        finally:
+            release.set()
+        assert await asyncio.wait_for(asyncio.shield(recovery), 3) is False
+        await asyncio.sleep(0)
+        assert (await backend.get_member("worker")).status == MemberStatus.STOPPED.value
+        assert not manager.spawned_handles and "worker" not in manager._approval_recovery_attempts
+        assert tool.calls == 0
+        unread = await backend.message_manager.get_messages(to_member_name="worker", unread_only=True)
+        assert unread
+        if extra:
+            await backend.message_manager.mark_message_read(extra, "worker")
+        await poll_completion(leader)
+        retry, = manager.recovery_tasks
+        assert await asyncio.wait_for(asyncio.shield(retry), 5) is True
+
+        async def drained():
+            return not await backend.message_manager.get_messages(to_member_name="worker", unread_only=True)
+
+        await eventually(drained)
+        assert manager.spawned_handles["worker"] is not original
+        assert tool.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_postclaim_broadcast_before_ready_uses_normal_mailbox(tmp_path, monkeypatch):
+    async with stopped_worker(tmp_path, monkeypatch) as (leader, backend, manager, _, _, tool):
+        entered, release, delivered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        transition = backend.db.member.try_transition_member_status
+        deliver = TeamAgent.deliver_input
+        marker = "POSTCLAIM_BROADCAST"
+
+        async def gated_ready(member, team, old, new):
+            if member == "worker" and old == MemberStatus.RESTARTING and new == MemberStatus.READY:
+                entered.set()
+                await release.wait()
+            return await transition(member, team, old, new)
+
+        async def observe_input(self, *args, **kwargs):
+            if self.member_name == "worker" and marker in str((args, kwargs)):
+                delivered.set()
+            return await deliver(self, *args, **kwargs)
+
+        monkeypatch.setattr(backend.db.member, "try_transition_member_status", gated_ready)
+        monkeypatch.setattr(TeamAgent, "deliver_input", observe_input)
+        assert await backend.approve_tool("worker", "call-a", True)
+        await poll_completion(leader)
+        recovery, = manager.recovery_tasks
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            assert (await backend.get_member("worker")).status == MemberStatus.RESTARTING.value
+            assert await backend.message_manager.broadcast_message(marker)
+        finally:
+            release.set()
+        await asyncio.wait_for(asyncio.shield(recovery), 5)
+        await asyncio.wait_for(delivered.wait(), 3)
+
+
+@pytest.mark.asyncio
+async def test_unexpected_claim_failure_keeps_this_runs_attempt(tmp_path, monkeypatch):
+    async with stopped_worker(tmp_path, monkeypatch) as (leader, backend, manager, _, _, tool):
+        async def failed_claim(*args):
+            raise RuntimeError("unknown transaction result")
+
+        monkeypatch.setattr(backend.db, "_claim_approval_restart", failed_claim)
+        assert await backend.approve_tool("worker", "call-a", True)
+        await poll_completion(leader)
+        recovery, = manager.recovery_tasks
+        assert await recovery is True
+        await asyncio.sleep(0)
+        assert "worker" in manager._approval_recovery_attempts
+        await poll_completion(leader)
+        assert not manager.recovery_tasks and not manager.spawned_handles
+        assert (await backend.get_member("worker")).status == MemberStatus.STOPPED.value
+        assert tool.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("covered", [False, True], ids=["unmentioned", "covered_by_watermark"])
+async def test_approval_claim_reuses_group_addressing_and_watermark(tmp_path, monkeypatch, covered):
+    async with stopped_worker(tmp_path, monkeypatch) as (leader, backend, manager, _, _, tool):
+        assert await backend.approve_tool("worker", "call-a", True)
+        unread = await backend.message_manager.get_messages(to_member_name="worker", unread_only=True)
+        assert await backend.db.message.create_message(
+            "old-group", backend.team_name, "leader", "group input", broadcast=True,
+            meta={"type": "group_chat", "mentions": ["worker"] if covered else []},
+        )
+        if covered:
+            assert await backend.message_manager.mark_message_read("old-group", "worker")
+        assert await backend.db._claim_approval_restart(
+            backend.team_name, "worker", "leader", frozenset(row.message_id for row in unread),
+        )
+        assert (await backend.get_member("worker")).status == MemberStatus.RESTARTING.value
+        assert not manager.spawned_handles and tool.calls == 0
+        assert await backend.db.member.try_transition_member_status(
+            "worker", backend.team_name, MemberStatus.RESTARTING, MemberStatus.STOPPED,
+        )

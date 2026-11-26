@@ -16,6 +16,7 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from openjiuwen.agent_teams.context import get_session_id
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database.session_settings_dao import SessionSettingsDao
 from openjiuwen.agent_teams.tools.database.config import (
     DatabaseConfig as DatabaseConfig,
@@ -122,6 +123,22 @@ class TeamDatabase:
         self.member: Optional[MemberDao] = None
         self.task: Optional[TaskDao] = None
         self.message: Optional[MessageDao] = None
+
+    async def _claim_approval_restart(
+        self, team_name: str, member_name: str, leader: str, expected_ids: frozenset[str],
+    ) -> bool:
+        """Atomically claim a stopped teammate whose mail is still approval-only."""
+        async with self._sessions.write() as session:
+            claimed = await self.member._claim_restart_in_session(
+                session, member_name, team_name, MemberStatus.STOPPED, role="teammate",
+            )
+            if not claimed or not await self.message._approval_mail_matches(
+                session, team_name, member_name, leader, expected_ids,
+            ):
+                await session.rollback()
+                return False
+            await session.commit()
+            return True
 
     @staticmethod
     def get_current_time() -> int:

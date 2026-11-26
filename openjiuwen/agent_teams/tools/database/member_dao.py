@@ -757,22 +757,26 @@ class MemberDao:
             return False
 
         async with self._sessions.write() as session:
-            result = await session.execute(
-                update(TeamMember)
-                .where(
-                    TeamMember.member_name == member_name,
-                    TeamMember.team_name == team_name,
-                    TeamMember.status == expected_status.value,
-                )
-                .values(
-                    status=MemberStatus.RESTARTING.value,
-                    execution_status=ExecutionStatus.IDLE.value,
-                )
-            )
-            if result.rowcount != 1:
-                return False
-            await session.commit()
-            return True
+            claimed = await self._claim_restart_in_session(session, member_name, team_name, expected_status)
+            if claimed:
+                await session.commit()
+            return claimed
+
+    async def _claim_restart_in_session(
+        self, session, member_name: str, team_name: str, expected_status: MemberStatus, *, role: str | None = None,
+    ) -> bool:
+        """Occupy the member row without committing the caller's transaction."""
+        stmt = update(TeamMember).where(
+            TeamMember.member_name == member_name,
+            TeamMember.team_name == team_name,
+            TeamMember.status == expected_status.value,
+        )
+        if role is not None:
+            stmt = stmt.where(TeamMember.role == role)
+        result = await session.execute(stmt.values(
+            status=MemberStatus.RESTARTING.value, execution_status=ExecutionStatus.IDLE.value,
+        ))
+        return result.rowcount == 1
 
     async def update_member_worktree(
         self,

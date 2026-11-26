@@ -164,26 +164,39 @@ class RecoveryManager:
                     break
             else:
                 self._spawn_manager.schedule_approval_recovery(
-                    checkpoint, partial(self._recover_approval_member, backend, checkpoint)
+                    checkpoint, partial(
+                        self._recover_approval_member, backend, checkpoint, leader,
+                        frozenset(message.message_id for message in unread),
+                    )
                 )
 
     async def _recover_approval_member(
-        self, backend: TeamBackend, checkpoint: _MemberApprovalCheckpoint
-    ) -> None:
+        self, backend: TeamBackend, checkpoint: _MemberApprovalCheckpoint, leader: str, expected_ids: frozenset[str],
+    ) -> bool:
         member = checkpoint.member_name
         dao = backend.db.member
-        claim = asyncio.create_task(dao.claim_member_restart(member, backend.team_name, MemberStatus.STOPPED))
+        claim = asyncio.create_task(backend.db._claim_approval_restart(
+            backend.team_name, member, leader, expected_ids,
+        ))
         claimed = False
         restarted = False
         try:
+            cancelled = None
+            while not claim.done():
+                try:
+                    await asyncio.shield(claim)
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
+                except Exception:
+                    break
             try:
-                claimed = await asyncio.shield(claim)
-            except asyncio.CancelledError:
-                # SQLite may finish committing the claim after cancellation.
-                claimed = await claim
-                raise
-            if claimed:
-                restarted = await self._spawn_manager.restart_teammate(member, approval_checkpoint=checkpoint)
+                claimed = claim.result()
+            finally:
+                if cancelled is not None:
+                    raise cancelled
+            if not claimed:
+                return False
+            restarted = await self._spawn_manager.restart_teammate(member, approval_checkpoint=checkpoint)
         except Exception as exc:
             team_logger.warning("Failed to recover approval mailbox for {}: {}", member, exc)
         finally:
@@ -203,6 +216,8 @@ class RecoveryManager:
                     await dao.try_transition_member_status(
                         member, backend.team_name, owned_status, MemberStatus.STOPPED,
                     )
+
+        return True
 
     def persist_leader_config(self, session) -> None:
         from openjiuwen.agent_teams.runtime.metadata import (
