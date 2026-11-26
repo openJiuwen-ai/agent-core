@@ -71,10 +71,34 @@ class BuildTeamTool(TeamTool):
         # attempt 3x with backoff; past the threshold another attempt is
         # near-certain to fail and only burns ~12s per call.
         if self.team.build_circuit_open:
+            # 熔断期的快速拒绝同样代表"本轮没有可用团队"：置 round-end
+            # latch，与未知态出口同口径——否则熔断后每一轮的拒绝都静默，
+            # 用户看到"正常完成"而团队实际不可用（latch 收尾读取即清，
+            # 重复置位幂等）。
+            await self.team.notify_build_failed(self.team.last_build_error)
             return ToolOutput(
                 success=False,
                 error=self._t("build_team", "circuit_open", reason=self.team.last_build_error),
             )
+        # Unknown-state brake（与失败熔断分离）：判定读连续失败时状态不可确知，
+        # 不计数失败（避免假熔断），但也不能无限重试——每次重试都再打一次
+        # DB（create_team + 探针重试）。达阈值后快速拒绝（零 DB 访问），
+        # 引导降级单干。
+        if self.team.build_state_unknown_exhausted and not self.team.build_unknown_cooldown_elapsed:
+            # 快速拒绝也是"本轮没有可用团队"：同样置 round-end latch，
+            # 避免冷却期的装配轮次被当成干净轮次收尾（收尾读取后清空，
+            # 链内后续成功/半建成亦会清，不会误报）。
+            await self.team.notify_build_failed(self.team.last_unknown_error)
+            return ToolOutput(
+                success=False,
+                error=self._t(
+                    "build_team", "state_unknown_exhausted",
+                    reason=self.team.last_unknown_error,
+                    cooldown=int(self.team.build_unknown_cooldown_seconds),
+                ),
+            )
+        # 冷却到点后放行一次半开探测：确定结果清零（恢复），再失败则
+        # 重新计冷却——避免两次瞬时读失败把 build_team 会话级永久锁死。
         try:
             await self.team.build_team(
                 display_name=display_name,
@@ -100,21 +124,56 @@ class BuildTeamTool(TeamTool):
                 return ToolOutput(success=False, error=str(e))
             # 半建成区分：build_team 的失败面不止
             # "团队没建成"——create_team 落行后的步骤（成员注册等）也可能失败。
-            # 行已在 = 团队已建立：不计熔断、不 latch 告警（团队能力可用），
-            # 引导 leader 用 spawn_member 补齐成员。读不出（锁库等）按未建成
-            # 保守进熔断。
+            # 行已在 = 团队已建立：不计熔断（团队能力可用）；但初始化不完整
+            # 必须收尾可见——partial_built 文案要求"必要时单人兜底并如实
+            # 说明"，且 leader 侧没有任何 spawn 工具可补齐，不能静默。
+            #
+            # 读不出（判定读本身超时/锁失败）≠ 未建成：DB 压力下把
+            # "不知道"当"没建成"计数，会让两次瞬时读失败把团队永久熔断成
+            # 降级单干（高并发装配下 30s 超时的常见形态）。
+            # 未知态：不计熔断，但每次出口都置 round-end latch。
             try:
                 existing = await self.db.team.get_team(self.team.team_name)
-            except Exception:
-                existing = None
+            except Exception as probe_exc:
+                team_logger.warning(
+                    "[BuildTeamTool] build_team failure state unreadable for team %s (%s: %s); "
+                    "not counting the circuit breaker (unknown-state streak=%d)",
+                    self.team.team_name,
+                    type(probe_exc).__name__,
+                    probe_exc,
+                    self.team.consecutive_build_unknown + 1,
+                )
+                self.team.note_build_unknown(err_text)
+                # 与"确定未建成"分支对齐：任何未知态尝试都必须置 round-end
+                # latch——本次 build_team 确实失败过、本轮也确实没有可用团队，
+                # 若模型遵守"本轮不要重试"直接单人收尾，不 latch 会让用户看到
+                # 一个"正常完成"的轮次（单轮会话下再无补偿机会）。链内后续
+                # 构建成功（_mark_team_built）会清 latch；半建成则先清后以
+                # 当轮半建成原因重新置位，不会留下前轮误报。
+                await self.team.notify_build_failed(err_text)
+                exhausted = self.team.build_state_unknown_exhausted
+                key = "state_unknown_exhausted" if exhausted else "state_unknown"
+                return ToolOutput(
+                    success=False,
+                    error=self._t(
+                        "build_team", key, reason=err_text,
+                        cooldown=int(self.team.build_unknown_cooldown_seconds),
+                    ),
+                )
             if existing is not None:
-                # 半建成：清掉前轮"未建成"遗留的 latch（否则收尾仍推
-                # "团队不可用"告警，与本分支"团队已存在可继续"自相矛盾）。
+                # 半建成：状态已确定，清未知态streak。先 recovered 清掉前轮
+                # "未建成"遗留的 latch，再以**本轮**半建成原因重新置位：
+                # partial_built 文案已改为"初始化未完整、必要时单人兜底并
+                # 如实说明"，收尾若仍静默按正常完成呈现，与文案和其余
+                # 失败出口口径分叉。
+                self.team.reset_build_unknown()
                 await self.team.notify_build_recovered()
+                await self.team.notify_build_failed(err_text)
                 return ToolOutput(
                     success=False,
                     error=self._t("build_team", "partial_built", reason=err_text),
                 )
+            self.team.reset_build_unknown()  # 确定未建成：状态已可判定
             self.team.note_build_failure(err_text)
             await self.team.notify_build_failed(err_text)
             # Return (not raise) so the LLM-facing message is ours: the first

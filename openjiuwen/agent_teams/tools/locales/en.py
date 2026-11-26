@@ -50,11 +50,28 @@ STRINGS: dict[str, str] = {
         "creation, no member spawns, no team coordination. State clearly at the start of "
         "your reply: 'Team initialization failed; this task was completed solo by the leader.'"
     ),
+    "build_team.state_unknown": (
+        "The team build outcome cannot be determined right now: {reason}. "
+        "Do NOT retry build_team this round; continue with the user's task. "
+        "If team collaboration is still needed, you may try build_team once "
+        "more in a later round; if the team is genuinely unavailable, complete "
+        "the task alone as the leader and state in your answer that team "
+        "initialization failed."
+    ),
+    "build_team.state_unknown_exhausted": (
+        "The team build outcome could not be confirmed across consecutive "
+        "attempts ({reason}); build_team attempts are paused (one retry is "
+        "allowed after a ~{cooldown}s cooldown). Keep working on the user's "
+        "task as the leader for now; if the retry succeeds after the cooldown, "
+        "switch back to team collaboration, otherwise complete the task solo "
+        "and state in your answer that team initialization failed."
+    ),
     "build_team.partial_built": (
         "The team was created (team row persisted) but initialization did not finish: "
         "{reason}. Do NOT call build_team again — the team already exists and a retry "
-        "will only fail with 'already exists'; use list_members to inspect the roster "
-        "and spawn_member to bring up the missing members, then continue."
+        "will only fail with 'already exists'. Keep working on the user's task "
+        "directly; if missing members block progress, complete the task solo as the "
+        "leader and state in your answer that team initialization was incomplete."
     ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/en/clean_team.md
