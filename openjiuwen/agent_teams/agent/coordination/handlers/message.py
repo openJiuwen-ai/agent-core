@@ -38,6 +38,9 @@ from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.timefmt import format_time_context
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
+
+# 门控状态哨兵：``None`` 是合法值（成员行缺失），不能用 None 表示"未取"。
+_STATUS_UNSET = object()
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -131,7 +134,7 @@ class MessageHandler(BaseCoordinationHandler):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _harness_input_blocked(self, member_name: str) -> bool:
+    async def _harness_input_blocked(self, member_name: str, *, status: Any = _STATUS_UNSET) -> bool:
         """Whether this member's harness must not be fed — settling it if idle.
 
         Every path in this handler that feeds the local harness passes through
@@ -167,7 +170,10 @@ class MessageHandler(BaseCoordinationHandler):
         if backend is None:
             return False
 
-        status = await backend.get_member_status(member_name)
+        if status is _STATUS_UNSET:
+            # 邮箱批量探针（_load_mailbox_batch）已带回过状态时直接复用，
+            # 省掉每个 poll tick 的一次独立状态读。
+            status = await backend.get_member_status(member_name)
         if status == MemberStatus.SHUTDOWN.value:
             team_logger.debug("[{}] harness input dropped: member is already SHUTDOWN", member_name)
             return True
@@ -196,18 +202,51 @@ class MessageHandler(BaseCoordinationHandler):
             member_name: Current member ID.
             use_steer: When True, use steer instead of follow_up for running agent.
         """
-        if await self._harness_input_blocked(member_name):
+        backend = self._infra.team_backend
+        # 探针前提：库已初始化（DAO 已接线）。未初始化（测试/纯内存夹具、
+        # 无存储后端）时保持旧两读路径，不触发隐式初始化。
+        db = backend.db if backend is not None else None
+        probe_ready = db is not None and getattr(db, "member", None) is not None
+        status: Any = _STATUS_UNSET
+        is_human_agent = False
+        all_unread: list[Any] = []
+        if probe_ready:
+            try:
+                batch = await self._load_mailbox_batch(member_name)
+            except Exception as exc:
+                # 探针异常面（如会话动态表尚未建立/已被删除）：回退旧两读
+                # 路径，行为与改造前一致；WARNING 留痕，不吞没。
+                team_logger.warning(
+                    "[{}] mailbox probe failed ({}: {}); falling back to legacy reads",
+                    member_name,
+                    type(exc).__name__,
+                    exc,
+                )
+                probe_ready = False
+            else:
+                if batch is None:
+                    # 探针重试耗尽：本 tick 跳过——未读行原地保留、下 tick
+                    # 重试，绝不把"读失败"当成"无未读"吞掉投递。
+                    return
+                status, is_human_agent = batch[0], batch[1]
+                all_unread = self._merge_unread(batch[2], batch[3])
+        if await self._harness_input_blocked(member_name, status=status):
             return
         if self._infra.message_manager is None:
             return
 
         seen_ids: set[str] = set()
-        backend = self._infra.team_backend
-        is_human_agent = backend is not None and await backend.is_human_agent(member_name)
         is_bridge = self._blueprint.role == TeamRole.BRIDGE_AGENT and backend is not None
+        if not probe_ready:
+            # 退化形态（无可用 db 探针）：保持旧两读路径。角色查询同样
+            # 补回——is_human_agent 决定投递模板，human_agent 的
+            # for="controller" + hitt-silence 是承重约束（禁止头像自主
+            # send_message）；探针瞬时失败（读池看门狗/池抖动）不能让
+            # 头像退化成 teammate 的 reply-hint 模板。
+            is_human_agent = backend is not None and await backend.is_human_agent(member_name)
+            all_unread = await self._read_all_unread(member_name)
 
         while True:
-            all_unread = await self._read_all_unread(member_name)
             new_messages = [m for m in all_unread if m.message_id not in seen_ids]
 
             if not new_messages:
@@ -293,6 +332,24 @@ class MessageHandler(BaseCoordinationHandler):
                     await self._infra.message_manager.mark_messages_read(delivered, member_name)
             if interrupted:
                 return
+            # 下一轮取新未读（单连接探针；失败即收手——已投递的在 finally
+            # 已标读，未投递的原样留未读，下 tick 重试）。
+            if probe_ready:
+                try:
+                    refreshed = await self._load_mailbox_batch(member_name)
+                except Exception as exc:
+                    team_logger.warning(
+                        "[{}] mailbox probe refresh failed ({}: {}); stopping this drain",
+                        member_name,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    break
+                if refreshed is None:
+                    break
+                all_unread = self._merge_unread(refreshed[2], refreshed[3])
+            else:
+                all_unread = await self._read_all_unread(member_name)
 
     def _language(self) -> str:
         """Team language for delivery-time template rendering."""
@@ -538,6 +595,39 @@ class MessageHandler(BaseCoordinationHandler):
             payload.message_id,
             payload.from_member_name,
         )
+
+    @staticmethod
+    def _merge_unread(direct: list[Any], broadcasts: list[Any]) -> list[Any]:
+        """直信+广播合并按时间倒序（最新在前），与 ``_read_all_unread`` 同序。"""
+        merged = list(direct) + list(broadcasts)
+        merged.sort(key=lambda m: m.timestamp, reverse=True)
+        return merged
+
+    async def _load_mailbox_batch(
+            self,
+            member_name: str,
+    ) -> tuple[str | None, bool, list[Any], list[Any]] | None:
+        """单连接取 门控行（状态/角色）+ 未读直信/广播。
+
+        每个 poll tick 原来要 4 次独立 checkout（状态/角色/直信/广播）——
+        零未读也照发，是共享读池随成员数线性增长的稳态底噪。经
+        ``TeamDatabase.fetch_mailbox_probe`` 合并为 1 次；角色与状态同一
+        行读出，``is_human_agent`` 不再单独查一次。
+
+        仅当 db 已初始化（调用方以 ``probe_ready`` 门控）时调用。
+
+        Returns:
+            ``(status, is_human_agent, direct_unread, broadcast_unread)``；
+            探针重试耗尽返回 ``None``（调用方本 tick 跳过）。
+        """
+        backend = self._infra.team_backend
+        probe = await backend.db.fetch_mailbox_probe(backend.team_name, member_name)
+        if probe is None:
+            team_logger.warning(
+                "[{}] mailbox probe read failed after retries; skipping this drain tick",
+                member_name,
+            )
+        return probe
 
     async def _read_all_unread(self, member_name: str) -> list[Any]:
         """Read all unread messages (direct + broadcast).

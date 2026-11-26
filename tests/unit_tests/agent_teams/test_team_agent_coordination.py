@@ -313,9 +313,17 @@ async def test_wake_feeds_messages_to_agent():
     fake_msg.timestamp = 1000
     agent._configurator.message_manager = MagicMock()
     agent._configurator.message_manager.mark_message_read = AsyncMock(return_value=True)
-    agent._coordination.dispatcher.message._read_all_unread = AsyncMock(
+    message_handler = agent._coordination.dispatcher.message
+    message_handler._read_all_unread = AsyncMock(
         side_effect=[[fake_msg], []],
     )
+    # 本用例只验证 wake→投递，不依赖邮箱探针的实现路径：强制退化路径
+    # （探针不可用）并桩掉角色读，避免不同环境下 DB 探针可用性/动态表
+    # 状态的差异改变投递来源（探针成功且为空会让 deliver 永不发生）。
+    message_handler._load_mailbox_batch = AsyncMock(
+        side_effect=RuntimeError("probe unavailable"),
+    )
+    message_handler._infra.team_backend.is_human_agent = AsyncMock(return_value=False)
     agent._is_agent_running = lambda: False
     # The message handler feeds unread messages to the runtime via deliver_input.
     agent.deliver_input = AsyncMock()
@@ -331,7 +339,10 @@ async def test_wake_feeds_messages_to_agent():
         )
     )
     await agent.coordination_loop.enqueue(event)
-    await asyncio.sleep(0.1)
+    # 有界等待代替固定 0.1s：慢机上事件循环调度可能超过固定窗口。
+    deadline = time.monotonic() + 2.0
+    while not agent.deliver_input.called and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
 
     await agent._stop_coordination()
     agent.deliver_input.assert_called_once()
@@ -702,6 +713,149 @@ async def test_pending_interrupt_mailbox_approval_admitted_as_interactive_input(
     interactive_input = host.resume_interrupt.await_args.args[0]
     assert isinstance(interactive_input, InteractiveInput)
     assert interactive_input.user_inputs["call-1"]["approved"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_mailbox_drain_uses_single_probe_not_separate_reads():
+    """邮箱轮询四读合一：门控行（状态+角色）与未读直信/广播经一次
+    ``fetch_mailbox_probe`` 取回；不再逐项调 get_member_status /
+    is_human_agent / get_messages / get_broadcast_messages（四读/tick
+    是共享读池上随成员数线性增长的稳态底噪源）。"""
+    from openjiuwen.agent_teams.agent.coordination.handlers.message import (
+        MessageHandler,
+    )
+
+    backend = SimpleNamespace(
+        team_name="t-1",
+        db=SimpleNamespace(
+            # ``member`` 非 None = 库已初始化（探针前提）；真实 db 由
+            # TeamDatabase.initialize() 接线各 DAO。
+            member=SimpleNamespace(),
+            fetch_mailbox_probe=AsyncMock(return_value=("ready", False, [], [])),
+        ),
+        get_member_status=AsyncMock(
+            side_effect=AssertionError("status must be served by the probe"),
+        ),
+        is_human_agent=AsyncMock(
+            side_effect=AssertionError("role must be served by the probe"),
+        ),
+    )
+    message_manager = SimpleNamespace(
+        mark_message_read=AsyncMock(),
+        mark_messages_read=AsyncMock(),
+        get_messages=AsyncMock(
+            side_effect=AssertionError("legacy direct read must not run"),
+        ),
+        get_broadcast_messages=AsyncMock(
+            side_effect=AssertionError("legacy broadcast read must not run"),
+        ),
+    )
+    handler = MessageHandler(
+        SimpleNamespace(),
+        SimpleNamespace(member_name="dev-1", role=TeamRole.TEAMMATE, team_spec=None),
+        SimpleNamespace(message_manager=message_manager, team_backend=backend),
+        SimpleNamespace(),
+    )
+
+    await handler._process_unread_messages("dev-1")
+
+    backend.db.fetch_mailbox_probe.assert_awaited_once_with("t-1", "dev-1")
+    backend.get_member_status.assert_not_called()
+    backend.is_human_agent.assert_not_called()
+    message_manager.get_messages.assert_not_called()
+    message_manager.get_broadcast_messages.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_mailbox_drain_skips_tick_when_probe_unavailable():
+    """探针重试耗尽 → 本 tick 跳过（未读原地保留、下 tick 重试）；
+    不得走旧读路径、不得投递、不得标读。"""
+    from openjiuwen.agent_teams.agent.coordination.handlers.message import (
+        MessageHandler,
+    )
+
+    backend = SimpleNamespace(
+        team_name="t-1",
+        db=SimpleNamespace(
+            member=SimpleNamespace(),
+            fetch_mailbox_probe=AsyncMock(return_value=None),
+        ),
+        get_member_status=AsyncMock(),
+        is_human_agent=AsyncMock(),
+    )
+    message_manager = SimpleNamespace(
+        mark_message_read=AsyncMock(),
+        mark_messages_read=AsyncMock(),
+        get_messages=AsyncMock(),
+        get_broadcast_messages=AsyncMock(),
+    )
+    handler = MessageHandler(
+        SimpleNamespace(),
+        SimpleNamespace(member_name="dev-1", role=TeamRole.TEAMMATE, team_spec=None),
+        SimpleNamespace(message_manager=message_manager, team_backend=backend),
+        SimpleNamespace(),
+    )
+    handler._read_all_unread = AsyncMock()
+
+    await handler._process_unread_messages("dev-1")
+
+    handler._read_all_unread.assert_not_called()
+    message_manager.get_messages.assert_not_called()
+    message_manager.mark_messages_read.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_mailbox_probe_exception_fallback_keeps_role_read():
+    """探针异常回退旧两读路径时，角色查询也必须补回：否则 human_agent
+    头像被按 teammate 模板投递，丢失 for="controller" + hitt-silence
+    的承重约束（禁止头像自主 send_message）。"""
+    from openjiuwen.agent_teams.agent.coordination.handlers.message import (
+        MessageHandler,
+    )
+
+    msg = SimpleNamespace(message_id="m-1", from_member_name="leader")
+
+    backend = SimpleNamespace(
+        team_name="t-1",
+        db=SimpleNamespace(
+            member=SimpleNamespace(),
+            fetch_mailbox_probe=AsyncMock(
+                side_effect=TimeoutError("read watchdog"),
+            ),
+        ),
+        get_member_status=AsyncMock(return_value="ready"),
+        is_human_agent=AsyncMock(return_value=True),
+    )
+    message_manager = SimpleNamespace(
+        mark_message_read=AsyncMock(),
+        mark_messages_read=AsyncMock(),
+        get_messages=AsyncMock(),
+        get_broadcast_messages=AsyncMock(),
+    )
+    host = SimpleNamespace(
+        has_pending_interrupt=lambda: False,
+        deliver_input=AsyncMock(),
+    )
+    handler = MessageHandler(
+        host,
+        SimpleNamespace(member_name="human-1", role=TeamRole.TEAMMATE, team_spec=None),
+        SimpleNamespace(message_manager=message_manager, team_backend=backend),
+        SimpleNamespace(),
+    )
+    handler._read_all_unread = AsyncMock(side_effect=[[msg], []])
+    handler._expand = AsyncMock(return_value=None)
+    handler._format_message = MagicMock(return_value="formatted")
+
+    await handler._process_unread_messages("human-1")
+
+    # 回退分支恢复了改造前的角色读
+    backend.is_human_agent.assert_awaited_once_with("human-1")
+    # 投递模板按 human_agent 角色选择（hitt-silence 约束）
+    assert handler._format_message.call_args.kwargs["is_human_agent"] is True
+    host.deliver_input.assert_awaited_once_with("formatted", use_steer=True)
 
 
 @pytest.mark.asyncio
@@ -1194,14 +1348,22 @@ async def test_process_unread_delegates_raw_delivered_messages_to_manager():
 
     # Newest-first ordering (as _read_all_unread returns). Two directs and
     # three broadcasts — the handler forwards all five untouched.
-    agent._coordination.dispatcher.message._read_all_unread = AsyncMock(
+    message_handler = agent._coordination.dispatcher.message
+    message_handler._read_all_unread = AsyncMock(
         side_effect=[
             [_bc("b3", 3000), _dm("dm-2", 2500), _bc("b2", 2000), _dm("dm-1", 1500), _bc("b1", 1000)],
             [],
         ]
     )
+    # 本用例只关心"交付对象原样透传"，不依赖探针实现路径：强制退化路径
+    # 并桩掉角色读，避免环境差异（DB 已初始化/动态表存在）下探针成功但
+    # 返回空列表，导致 _read_all_unread 的桩数据不被消费。
+    message_handler._load_mailbox_batch = AsyncMock(
+        side_effect=RuntimeError("probe unavailable"),
+    )
+    message_handler._infra.team_backend.is_human_agent = AsyncMock(return_value=False)
 
-    await agent._coordination.dispatcher.message._process_unread_messages("leader-1")
+    await message_handler._process_unread_messages("leader-1")
 
     # Called once with the raw delivered message objects — every id present,
     # no dedup at the handler layer.
