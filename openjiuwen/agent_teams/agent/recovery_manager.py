@@ -135,7 +135,7 @@ class RecoveryManager:
         """Schedule native mailbox recovery only after the task and roster gates pass."""
         backend = self._configurator.team_backend
         candidates = self._spawn_manager.stopped_approval_checkpoints()
-        if backend is None or not candidates or await backend._settled_completion_snapshot() is None:
+        if backend is None or not candidates or await backend.settled_completion_snapshot() is None:
             return
         leader = await backend.resolve_leader_member_name()
         if not leader or leader != self._configurator.member_name:
@@ -184,8 +184,6 @@ class RecoveryManager:
                 raise
             if claimed:
                 restarted = await self._spawn_manager.restart_teammate(member, approval_checkpoint=checkpoint)
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:
             team_logger.warning("Failed to recover approval mailbox for {}: {}", member, exc)
         finally:
@@ -199,8 +197,12 @@ class RecoveryManager:
                 if owns_handle and not binding.startup.done():
                     await self._spawn_manager.cleanup_teammate(member)
                 if not owns_handle or not binding.startup.done():
-                    owned_status = MemberStatus.READY if owns_handle and binding.ready_written else MemberStatus.RESTARTING
-                    await dao.try_transition_member_status(member, backend.team_name, owned_status, MemberStatus.STOPPED)
+                    owned_status = MemberStatus.RESTARTING
+                    if owns_handle and binding.ready_written:
+                        owned_status = MemberStatus.READY
+                    await dao.try_transition_member_status(
+                        member, backend.team_name, owned_status, MemberStatus.STOPPED,
+                    )
 
     def persist_leader_config(self, session) -> None:
         from openjiuwen.agent_teams.runtime.metadata import (

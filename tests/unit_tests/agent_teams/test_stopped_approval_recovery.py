@@ -7,13 +7,17 @@ from uuid import uuid4
 
 import pytest
 
+from openjiuwen.agent_teams.agent import agent_configurator
 from openjiuwen.agent_teams.agent.coordination.event_bus import InnerEventMessage, InnerEventType
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.agent_teams.harness.team_harness import TeamHarness
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.rails.team_permission_rail import TeamPermissionRail
 from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, LeaderSpec, TeamAgentSpec
 from openjiuwen.agent_teams.schema.status import MemberStatus, TaskStatus
 from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
+from openjiuwen.agent_teams.spawn import shared_resources
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall
 from openjiuwen.core.foundation.llm.model import Model
@@ -36,9 +40,13 @@ async def eventually(probe):
 
 
 @asynccontextmanager
-async def stopped_worker(tmp_path, monkeypatch, *, pending=False):
+async def stopped_worker(
+    tmp_path, monkeypatch, *, pending=False, memory_db=False, checkpointer_type=InMemoryCheckpointer,
+):
+    # The process-wide SQLite pool belongs to the event loop that uses it.
+    monkeypatch.setattr(shared_resources, "_db_instances", {})
     original_checkpointer = CheckpointerFactory.get_checkpointer()
-    checkpointer = InMemoryCheckpointer()
+    checkpointer = checkpointer_type()
     CheckpointerFactory.set_default_checkpointer(checkpointer)
     name = "approval-recovery-" + uuid4().hex
     session = create_agent_team_session(session_id=uuid4().hex)
@@ -50,11 +58,14 @@ async def stopped_worker(tmp_path, monkeypatch, *, pending=False):
         evolution_enabled=False,
         leader=LeaderSpec(member_name="leader", display_name="Leader", desc="Leader"),
     )
+    database = DatabaseConfig(
+        connection_string=":memory:" if memory_db else str(tmp_path / "team.db"),
+    )
     ctx = TeamRuntimeContext(
         role=TeamRole.LEADER,
         member_name="leader",
         team_spec=TeamSpec(team_name=name, display_name=name, leader_member_name="leader"),
-        db_config=DatabaseConfig(db_type="memory"),
+        db_config=database,
         messager_config=MessagerTransportConfig(team_name=name, node_id="leader"),
     )
 
@@ -112,22 +123,24 @@ async def stopped_worker(tmp_path, monkeypatch, *, pending=False):
         handle = await manager.spawn_teammate(worker_context, initial_message="edit" if pending else None)
 
         async def worker_settled():
+            worker = handle.agent_ref
             member = await backend.get_member("worker")
-            return member.status == MemberStatus.READY.value and (
-                not pending or handle.agent_ref.has_pending_interrupt()
-            )
+            native = worker.resources.harness.get_deep_agent()
+            live_and_ready = worker._coordination.is_running and member.status == MemberStatus.READY.value
+            round_settled = native.state is HarnessState.IDLE and native.active_round is None
+            return live_and_ready and round_settled and worker.has_pending_interrupt() == pending
 
         await eventually(worker_settled)
         await manager.cleanup_teammate("worker")
         assert await backend.db.member.update_member_status("worker", name, MemberStatus.STOPPED.value)
         assert not handle.is_alive
-        assert manager.stopped_approval_checkpoints() == [handle.approval_checkpoint]
         assert await backend.db.task.create_task("terminal-task", name, "Done", "", TaskStatus.COMPLETED.value)
         yield leader, backend, manager, checkpointer, handle, tool
     finally:
         await leader.stop_coordination()
         await session.post_run()
         await Runner.stop()
+        await backend.db.close()
         CheckpointerFactory.set_default_checkpointer(original_checkpointer)
 
 
@@ -138,23 +151,26 @@ async def poll_completion(leader):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pending", [False, True])
-async def test_persistent_completion_recovers_stopped_approval_mail(tmp_path, monkeypatch, pending):
-    async with stopped_worker(tmp_path, monkeypatch, pending=pending) as (
+@pytest.mark.parametrize("memory_db", [False, True], ids=["file_db", "memory_db"])
+async def test_persistent_completion_recovers_stopped_approval_mail(tmp_path, monkeypatch, pending, memory_db):
+    async with stopped_worker(tmp_path, monkeypatch, pending=pending, memory_db=memory_db) as (
         leader, backend, manager, checkpointer, original_handle, tool
     ):
+        assert manager.stopped_approval_checkpoints() == [original_handle.approval_checkpoint]
         # The new default has no copy of the member's real checkpoint.
         CheckpointerFactory.set_default_checkpointer(InMemoryCheckpointer())
         assert await backend.approve_tool("worker", "call-a", True)
         assert await backend.is_team_completed() is None
-        assert await backend._settled_completion_snapshot() is not None
+        assert await backend.settled_completion_snapshot() is not None
         assert await backend.resolve_leader_member_name() == leader.member_name
         assert (await backend.get_member("worker")).status == MemberStatus.STOPPED.value
         assert not await backend.message_manager.get_broadcast_messages(member_name="worker", unread_only=True)
         assert not leader.has_in_flight_round() and not leader.is_agent_running()
         assert not leader.has_pending_interrupt()
         await poll_completion(leader)
-        assert manager.recovery_tasks
+        recovery, = manager.recovery_tasks
         await poll_completion(leader)
+        await asyncio.wait_for(asyncio.shield(recovery), timeout=5)
 
         async def mailbox_drained():
             return not await backend.message_manager.get_messages(to_member_name="worker", unread_only=True)
@@ -168,7 +184,17 @@ async def test_persistent_completion_recovers_stopped_approval_mail(tmp_path, mo
             await poll_completion(leader)
             return leader._coordination.dispatcher.team_completion._team_completed_emitted
 
-        await eventually(completed)
+        try:
+            await eventually(completed)
+        except TimeoutError:
+            members = await backend.db.member.get_team_members(backend.team_name)
+            unread = await backend.message_manager.members_with_unread([member.member_name for member in members])
+            pytest.fail(
+                f"Completion stalled with statuses {[(member.member_name, member.status) for member in members]}, "
+                f"unread={unread}, goal_open={leader.goal_holds_completion()}, "
+                f"leader_pending={leader.has_pending_interrupt()}, "
+                f"worker_pending={recovered.agent_ref.has_pending_interrupt()}"
+            )
         assert await backend.is_team_completed() is not None
         assert tool.calls == int(pending)
         queue = leader.stream_controller.stream_queue
@@ -200,6 +226,31 @@ async def test_stopped_approval_recovery_requires_provenance_and_approval_only(
         assert await backend.is_team_completed() is None
         unread = await backend.message_manager.get_messages(to_member_name="worker", unread_only=True)
         assert len(unread) == (2 if blocker == "ordinary" else 1)
+        assert tool.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("custom_provider", ["harness", "checkpointer"])
+async def test_stopped_approval_recovery_requires_builtin_providers(tmp_path, monkeypatch, custom_provider):
+    class CustomHarness(TeamHarness):
+        """An extension lacks the built-in harness's checkpoint guarantee."""
+
+    class CustomCheckpointer(InMemoryCheckpointer):
+        """An extension may use a different checkpoint ownership contract."""
+
+    checkpointer_type = InMemoryCheckpointer
+    if custom_provider == "harness":
+        monkeypatch.setattr(agent_configurator, "TeamHarness", CustomHarness)
+    else:
+        checkpointer_type = CustomCheckpointer
+    async with stopped_worker(tmp_path, monkeypatch, checkpointer_type=checkpointer_type) as (
+        leader, backend, manager, _, handle, tool
+    ):
+        assert handle.approval_checkpoint is None
+        assert await backend.approve_tool("worker", "call-a", True)
+        await poll_completion(leader)
+        assert not manager.recovery_tasks
+        assert len(await backend.message_manager.get_messages(to_member_name="worker", unread_only=True)) == 1
         assert tool.calls == 0
 
 

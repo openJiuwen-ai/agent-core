@@ -168,7 +168,7 @@ class InMemoryCheckpointer(Checkpointer):
                 session_logger.info(f"Succeed to clear all of current workflow's checkpoints on {reason}",
                                     **log_message)
 
-    def _agent_checkpoint_token(self, session_id: str, agent_id: str) -> object | None:
+    def agent_checkpoint_token(self, session_id: str, agent_id: str) -> object | None:
         """Identify the exact saved snapshot without reading or restoring its state."""
         storage = self._agent_stores.get(session_id)
         return storage.state_blobs.get(agent_id) if storage is not None else None
