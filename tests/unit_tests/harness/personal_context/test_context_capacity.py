@@ -102,7 +102,8 @@ def test_accounting_failure_preserves_read_and_next_read_records_usage(tmp_path,
     assert read_with_usage(tmp_path, "description.md", allowed=lambda: True)["markdown"] == (
         tmp_path / "workspace/context/description.md"
     ).read_bytes().decode("utf-8")
-    assert maintain_capacity(tmp_path, limit_bytes=1000)["removed_count"] == 1
+    result = maintain_capacity(tmp_path, limit_bytes=1000, commit_candidate=_commit_without_process_scheduling)
+    assert result["removed_count"] == 1, result
     assert not page.exists()
 
 
@@ -273,13 +274,14 @@ def test_post_eviction_fingerprint_failure_preserves_success_and_next_reclamatio
         return original_pages(path)
 
     monkeypatch.setattr(context_capacity, "_pages", scan)
-    result = maintain_capacity(tmp_path, limit_bytes=9000)
-    assert result["status"] == "succeeded" and result["removed_count"] == 1
+    result = maintain_capacity(tmp_path, limit_bytes=9000, commit_candidate=_commit_without_process_scheduling)
+    assert result["status"] == "succeeded" and result["removed_count"] == 1, result
     assert result["after_bytes"] <= 5400
     assert not (tmp_path / "workspace/context/old.md").exists()
     assert (tmp_path / "workspace/context/new.md").exists()
     assert not (tmp_path / "context_usage.suspended").exists()
-    assert maintain_capacity(tmp_path, limit_bytes=1000)["removed_count"] == 1
+    result = maintain_capacity(tmp_path, limit_bytes=1000, commit_candidate=_commit_without_process_scheduling)
+    assert result["removed_count"] == 1, result
     assert not (tmp_path / "workspace/context/new.md").exists()
 
 
@@ -378,8 +380,8 @@ def test_lru_deletes_oldest_unread_and_repairs_links_but_preserves_sources(tmp_p
     cursor.parent.mkdir(exist_ok=True)
     cursor.write_text('{"version": 1}', encoding="utf-8")
     read_with_usage(tmp_path, "old/old.md", allowed=lambda: True)
-    result = maintain_capacity(tmp_path, limit_bytes=13_000)
-    assert result["removed_count"] == 1
+    result = maintain_capacity(tmp_path, limit_bytes=13_000, commit_candidate=_commit_without_process_scheduling)
+    assert result["removed_count"] == 1, result
     assert result["after_bytes"] <= 7_800
     assert old.exists() and recent.exists() and not cold.exists()
     assert not (root / "cold").exists()
@@ -405,9 +407,9 @@ def test_capacity_waits_for_limit_even_when_above_reclaim_target(tmp_path, total
 def test_over_limit_reclaims_to_sixty_percent_then_waits_for_limit_again(tmp_path):
     for number in range(7):
         _page(tmp_path, f"page-{number}.md", f"# Page {number}\n" + "x" * 1700, 100 + number)
-    result = maintain_capacity(tmp_path, limit_bytes=10_000)
+    result = maintain_capacity(tmp_path, limit_bytes=10_000, commit_candidate=_commit_without_process_scheduling)
     assert result["before_bytes"] > 10_000
-    assert 4_000 < result["after_bytes"] <= 6_000
+    assert 4_000 < result["after_bytes"] <= 6_000, result
     assert result["removed_count"] == 4 and result["oversized_count"] == 0
     root = tmp_path / "workspace/context"
     assert all(not (root / f"page-{number}.md").exists() for number in range(4))
@@ -605,8 +607,8 @@ def test_capacity_batch_repairs_navigation_once_and_reports_actual_size(tmp_path
 
     monkeypatch.setattr(context_capacity, "_prepare_capacity_candidate", prepare)
     monkeypatch.setattr(context_capacity, "_markdown_sizes", sizes)
-    result = maintain_capacity(tmp_path, limit_bytes=125_000)
-    assert result["removed_count"] > 1
+    result = maintain_capacity(tmp_path, limit_bytes=125_000, commit_candidate=_commit_without_process_scheduling)
+    assert result["removed_count"] > 1, result
     assert len(render_calls) == 1 and len(size_calls) == 1
     assert result["after_bytes"] == sum(original_sizes(tmp_path / "workspace/context").values())
     assert not hasattr(context_capacity, "_single_page_size")
