@@ -34,13 +34,7 @@ def usage_lock(home: Path) -> FileLock:
     return FileLock(_state_path(home, "context_usage.lock"), timeout=0, thread_local=False)
 
 
-@asynccontextmanager
-async def context_update_lock(
-    home: Path, *, timeout: float = 0.5, cancelled: Callable[[], bool] | None = None,
-):
-    """Fence writers with a short, cancellable acquisition deadline."""
-    lock = FileLock(_state_path(home, "context_update.lock"), thread_local=False)
-    deadline = time.monotonic() + timeout
+async def _acquire_context_lock(lock: FileLock, deadline: float, cancelled: Callable[[], bool] | None) -> None:
     while True:
         if cancelled is not None and cancelled():
             raise asyncio.CancelledError
@@ -50,11 +44,65 @@ async def context_update_lock(
         except Timeout:
             if time.monotonic() >= deadline:
                 raise
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.01)
+
+
+@asynccontextmanager
+async def context_arrange_lock(home: Path, *, timeout: float = 0.5):
+    """Return whether the organizer may release its data lock during arrangement."""
     try:
-        yield
+        lock = FileLock(_state_path(home, "context_arrange.lock"), thread_local=False)
+        await _acquire_context_lock(lock, time.monotonic() + timeout, None)
+    except Timeout:
+        raise
+    except Exception as exc:
+        logger.warning("PersonalContext serialized arrangement fallback (%s)", type(exc).__name__)
+        yield False
+        return
+    try:
+        yield True
     finally:
-        lock.release()
+        try:
+            lock.release()
+        except OSError as exc:
+            logger.warning("PersonalContext arrange lock release deferred (%s)", type(exc).__name__)
+
+
+@asynccontextmanager
+async def context_update_lock(
+    home: Path, *, timeout: float = 0.5, cancelled: Callable[[], bool] | None = None,
+):
+    """Give snapshots and publication priority over disposable reclamation."""
+    deadline = time.monotonic() + timeout
+    lock = FileLock(_state_path(home, "context_update.lock"), thread_local=False)
+    priority = None
+    try:
+        priority = FileLock(_state_path(home, "context_priority.lock"), thread_local=False)
+        priority.acquire(timeout=0)
+    except Timeout:
+        pass  # Another publisher already signals the worker.
+    except Exception as exc:
+        logger.warning("PersonalContext cleanup priority signal unavailable (%s)", type(exc).__name__)
+    try:
+        # The file lock also signals foreign helpers; their watchdog terminates
+        # a blocked mutation without depending on the parent's event loop.
+        try:
+            from openjiuwen.harness.personal_context.context_capacity import _cancel_capacity_worker
+
+            _cancel_capacity_worker(home, only_busy=True)
+        except Exception as exc:
+            logger.warning("PersonalContext capacity yield failed (%s)", type(exc).__name__)
+        await _acquire_context_lock(lock, deadline, cancelled)
+        try:
+            yield
+        finally:
+            lock.release()
+    finally:
+        if priority is not None and priority.is_locked:
+            try:
+                priority.release()
+            except Exception as exc:
+                logger.warning("PersonalContext cleanup priority signal release failed (%s)", type(exc).__name__)
 
 
 def _load_usage(home: Path) -> dict:
