@@ -102,12 +102,15 @@ async def test_run_one_round_uses_single_round_path_for_interrupt_resume(
         reset_loop=False,
     )
     session = MagicMock()
+    session.commit = AsyncMock()
     coordinator = MagicMock()
     controller = MagicMock()
     controller.submit_round = AsyncMock()
     result = {"result_type": "answer", "output": "resumed"}
     react_agent = MagicMock()
     react_agent.invoke = AsyncMock(return_value=result)
+    save_contexts = AsyncMock()
+    react_agent.context_engine.save_contexts = save_contexts
     agent._react_agent = react_agent
     write_result = AsyncMock()
     build_next_work = AsyncMock(return_value=None)
@@ -131,7 +134,53 @@ async def test_run_one_round_uses_single_round_path_for_interrupt_resume(
     controller.submit_round.assert_not_awaited()
     build_next_work.assert_not_called()
     write_result.assert_awaited_once_with(result, session)
+    save_contexts.assert_awaited_once_with(session)
+    session.commit.assert_awaited_once()
     assert outcome.error_code is None
+
+
+@pytest.mark.parametrize("has_context_engine", [True, False])
+@pytest.mark.asyncio
+async def test_run_one_round_saves_context_for_non_assistant_result(
+    monkeypatch: pytest.MonkeyPatch,
+    has_context_engine: bool,
+) -> None:
+    """Round-end persistence also covers terminal tool results and test doubles."""
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    work = RoundWorkItem.user(
+        request_id="tool-result-1",
+        inputs={"query": "run"},
+        reset_loop=False,
+    )
+    session = MagicMock()
+    session.commit = AsyncMock()
+    controller = MagicMock()
+    controller.submit_round = AsyncMock()
+    controller.wait_round_completion = AsyncMock(return_value={"result_type": "tool", "output": "done"})
+    react_agent = MagicMock()
+    save_contexts = AsyncMock()
+    if has_context_engine:
+        react_agent.context_engine.save_contexts = save_contexts
+    else:
+        del react_agent.context_engine
+    agent._react_agent = react_agent
+
+    monkeypatch.setattr(
+        agent,
+        "prepare_interaction_task_loop",
+        AsyncMock(return_value=(MagicMock(), controller)),
+    )
+    monkeypatch.setattr(agent, "_build_interaction_next_work", AsyncMock(return_value=None))
+    monkeypatch.setattr(agent, "_write_round_result_to_stream", AsyncMock())
+    monkeypatch.setattr(agent, "save_state", MagicMock())
+    monkeypatch.setattr(agent, "clear_state", MagicMock())
+
+    outcome = await agent.run_one_round(work, "task-tool-result", session)
+
+    assert outcome.error_code is None
+    if has_context_engine:
+        save_contexts.assert_awaited_once_with(session)
+    session.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio

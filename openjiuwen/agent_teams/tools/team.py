@@ -9,6 +9,7 @@ This module implements Agent Team which manages team members, tasks, and message
 import asyncio
 import json
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -72,6 +73,21 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 # further build_team calls are refused fast (no DB hit) with an explicit
 # degrade-to-solo instruction instead of burning another retry cycle.
 _BUILD_CIRCUIT_THRESHOLD = 2
+# Unknown-state brake: a failed failure-state probe leaves "built or not"
+# undeterminable. Those attempts deliberately do NOT feed the circuit
+# (a transient DB stress must not poison into permanent degrade), but they
+# must not be unbounded either — every retry re-hits the already-stressed
+# DB (create_team attempt + probe retries). After this many consecutive
+# undeterminable attempts the tool wrapper refuses fast (no DB hit) and
+# directs degrade-to-solo. Any determinate outcome resets the streak.
+_BUILD_UNKNOWN_THRESHOLD = 2
+# Cooldown before a half-open probe after the unknown-state brake engaged.
+# Without it the fast-refuse gate at the tool boundary blocks every path
+# that could reset the streak (build_team / the state probe), turning two
+# transient read failures into a session-permanent build_team lockout.
+# After this cooldown one attempt is allowed again; a determinate outcome
+# clears the streak, another unknown re-arms the cooldown.
+_BUILD_UNKNOWN_COOLDOWN_SECONDS = 30.0
 
 
 @dataclass
@@ -104,33 +120,33 @@ class TeamBackend:
     """
 
     def __init__(
-        self,
-        team_name: str,
-        member_name: str,
-        is_leader: bool,
-        db: TeamDatabase,
-        messager: Messager,
-        teammate_mode: MemberMode = MemberMode.BUILD_MODE,
-        predefined_members: list[TeamMemberSpec] | None = None,
-        model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
-        leader_allocation: Optional["Allocation"] = None,
-        enable_hitt: bool = False,
-        enable_bridge: bool = False,
-        *,
-        dispatch_mode: str = "autonomous",
-        enable_task_verification: bool = False,
-        external_cli_agents: list[ExternalCliAgentSpec] | None = None,
-        on_before_team_cleaned: Callable[[], Awaitable[None]] | None = None,
-        on_team_cleaned: Callable[[], Awaitable[None]] | None = None,
-        on_team_built: Callable[[], Awaitable[None]] | None = None,
-        on_team_build_failed: Callable[[str], Awaitable[None]] | None = None,
-        on_team_build_recovered: Callable[[], Awaitable[None]] | None = None,
-        on_member_started: Callable[[str], Awaitable[None]] | None = None,
-        member_reviver: Callable[[str], Awaitable[None]] | None = None,
-        plan_storage_dir: str | None = None,
-        plan_id: str | None = None,
-        leader_member_name: str | None = None,
-        leader_prompt: str = "",
+            self,
+            team_name: str,
+            member_name: str,
+            is_leader: bool,
+            db: TeamDatabase,
+            messager: Messager,
+            teammate_mode: MemberMode = MemberMode.BUILD_MODE,
+            predefined_members: list[TeamMemberSpec] | None = None,
+            model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
+            leader_allocation: Optional["Allocation"] = None,
+            enable_hitt: bool = False,
+            enable_bridge: bool = False,
+            *,
+            dispatch_mode: str = "autonomous",
+            enable_task_verification: bool = False,
+            external_cli_agents: list[ExternalCliAgentSpec] | None = None,
+            on_before_team_cleaned: Callable[[], Awaitable[None]] | None = None,
+            on_team_cleaned: Callable[[], Awaitable[None]] | None = None,
+            on_team_built: Callable[[], Awaitable[None]] | None = None,
+            on_team_build_failed: Callable[[str], Awaitable[None]] | None = None,
+            on_team_build_recovered: Callable[[], Awaitable[None]] | None = None,
+            on_member_started: Callable[[str], Awaitable[None]] | None = None,
+            member_reviver: Callable[[str], Awaitable[None]] | None = None,
+            plan_storage_dir: str | None = None,
+            plan_id: str | None = None,
+            leader_member_name: str | None = None,
+            leader_prompt: str = "",
     ):
         """Initialize agent team manager.
 
@@ -268,6 +284,16 @@ class TeamBackend:
         # (see the ``build_circuit_open`` property below).
         self._consecutive_build_failures = 0
         self._last_build_error: str | None = None
+        # Separate streak for "outcome undeterminable" attempts (probe read
+        # failed) — see ``_BUILD_UNKNOWN_THRESHOLD``.
+        self._consecutive_build_unknown = 0
+        self._last_unknown_error: str | None = None
+        self._last_build_unknown_at: float | None = None
+        # Instance copies so tests (and future config) can shrink the
+        # threshold / cooldown without touching the module constants; both
+        # knobs of the same brake stay symmetric.
+        self._build_unknown_threshold = _BUILD_UNKNOWN_THRESHOLD
+        self._build_unknown_cooldown_s = _BUILD_UNKNOWN_COOLDOWN_SECONDS
         # Spawns one member's agent process. The single injection point for
         # every auto-start path that goes through ``autostart_unstarted``.
         self._on_member_started = on_member_started
@@ -372,21 +398,22 @@ class TeamBackend:
                 team_logger.error(f"Failed to remove path {target}: {e}")
 
     async def spawn_member(
-        self,
-        member_name: str,
-        display_name: str,
-        agent_card: AgentCard,
-        *,
-        desc: Optional[str] = None,
-        prompt: Optional[str] = None,
-        status: MemberStatus = MemberStatus.UNSTARTED,
-        execution_status: ExecutionStatus = ExecutionStatus.IDLE,
-        mode: MemberMode = MemberMode.BUILD_MODE,
-        allocation: Optional["Allocation"] = None,
-        role: TeamRole = TeamRole.TEAMMATE,
-        isolation: Optional[str] = None,
-        cli_agent: Optional[str] = None,
-        permissions_override: Optional[dict[str, str]] = None,
+            self,
+            member_name: str,
+            display_name: str,
+            agent_card: AgentCard,
+            *,
+            desc: Optional[str] = None,
+            prompt: Optional[str] = None,
+            status: MemberStatus = MemberStatus.UNSTARTED,
+            execution_status: ExecutionStatus = ExecutionStatus.IDLE,
+            mode: MemberMode = MemberMode.BUILD_MODE,
+            allocation: Optional["Allocation"] = None,
+            role: TeamRole = TeamRole.TEAMMATE,
+            isolation: Optional[str] = None,
+            cli_agent: Optional[str] = None,
+            permissions_override: Optional[dict[str, str]] = None,
+            skip_team_exists: bool = False,
     ) -> MemberOpResult:
         """Create a team member record in the database.
 
@@ -418,6 +445,17 @@ class TeamBackend:
                 from ``spawn_teammate.permissions``.  Only tightening
                 rules are valid (see ``narrow_permissions``).  Persisted
                 as JSON on the member row so it survives process restarts.
+            skip_team_exists: Set only by ``build_team``: the team row was
+                created moments earlier in the same call stack, so the
+                existence probe is guaranteed True and each one costs a
+                shared read-pool checkout — on the concurrent-assembly
+                burst (4 teams × N+1 members) those checkouts queue behind
+                every other reader and help push the 30s session watchdog
+                over the line. The FK on ``team_member.team_name`` still
+                rejects a member insert against a missing team
+                (``create_member`` returns False), so skipping the probe
+                only changes the failure text in a pathological
+                deleted-mid-build race.
 
         Returns:
             ``MemberOpResult`` describing the outcome. ``__bool__`` falls
@@ -430,7 +468,7 @@ class TeamBackend:
         if isolation is not None and isolation != "worktree":
             return MemberOpResult.fail("Invalid isolation: expected 'worktree' or None")
 
-        if not await self.db.team.team_exists(self.team_name):
+        if not skip_team_exists and not await self.db.team.team_exists(self.team_name):
             return MemberOpResult.fail(
                 f"Team {self.team_name} does not exist; call build_team first"
             )
@@ -464,9 +502,9 @@ class TeamBackend:
         return MemberOpResult.success()
 
     async def _spawn_and_publish(
-        self,
-        member_name: str,
-        on_created: Callable[[str], Awaitable[None]],
+            self,
+            member_name: str,
+            on_created: Callable[[str], Awaitable[None]],
     ) -> None:
         """Spawn a member agent and publish MemberSpawnedEvent.
 
@@ -492,9 +530,11 @@ class TeamBackend:
         team_logger.info("Member {} started", member_name)
 
     async def set_member_status(
-        self,
-        member_name: str,
-        new_status: MemberStatus,
+            self,
+            member_name: str,
+            new_status: MemberStatus,
+            *,
+            allowed_from: Optional[set[str]] = None,
     ) -> bool:
         """Persist a member status change AND publish MemberStatusChangedEvent.
 
@@ -505,15 +545,35 @@ class TeamBackend:
         used to write the DAO directly, so no status_changed event was emitted and
         frontends only learned about ERROR/PAUSED at the next snapshot poll.
         Event publish failure is logged but does not affect the write result.
+
+        Args:
+            member_name: Member whose status changes.
+            new_status: Target status.
+            allowed_from: Optional CAS guard: when given, the write applies
+                only while the row's current status is one of these values
+                (single conditional UPDATE). Pass it from writers that do
+                not own the row — e.g. the unhealthy-recovery normalization,
+                which runs on its own task and must not overwrite a
+                PAUSED/STOPPED the leader just wrote.
         """
         old = await self.db.member.get_member_status(self.team_name, member_name)
         if old is None:
             return False
         if old == new_status.value:
             return True
-        success = await self.db.member.update_member_status(
-            member_name, self.team_name, new_status.value
-        )
+        if allowed_from is None:
+            success = await self.db.member.update_member_status(
+                member_name, self.team_name, new_status.value
+            )
+        else:
+            # old 只用于日志/事件；并发防护在 WHERE status IN (...) 里——
+            # 读后若权威方改了状态，条件 UPDATE 落空而不是覆盖。
+            success = await self.db.member.update_member_status_if_in(
+                member_name,
+                self.team_name,
+                tuple(allowed_from),
+                new_status.value,
+            )
         if not success:
             return False
         try:
@@ -536,8 +596,8 @@ class TeamBackend:
         return True
 
     async def startup(
-        self,
-        on_created: Callable[[str], Awaitable[None]],
+            self,
+            on_created: Callable[[str], Awaitable[None]],
     ) -> list[str]:
         """Start all unstarted members.
 
@@ -608,9 +668,13 @@ class TeamBackend:
         specific member, so only that member needs to exist — starting
         the whole roster would spawn teammates the leader never
         addressed. An assigned-but-never-started member is otherwise a
-        structural dead end: the assignment event has no subscriber, the
-        member-side stale self-check requires a running kernel, and the
-        leader-side stale-pending sweep only scans unassigned tasks.
+        structural dead end: the assignment event has no subscriber and
+        the member-side stale self-check requires a running kernel. The
+        leader-side stale-pending sweep does cover it as its
+        "assigned-but-never-started" slice, but only as a delayed,
+        leader-driven prompt (``send_message`` retry or ``update_task``) —
+        starting the member here is what turns that reminder into action
+        at assignment time.
 
         Same guards as ``autostart_unstarted`` (leader-only,
         callback-gated); the UNSTARTED→STARTING CAS in ``startup_member``
@@ -629,9 +693,9 @@ class TeamBackend:
         return await self.startup_member(member_name, self._on_member_started)
 
     async def startup_member(
-        self,
-        member_name: str,
-        on_created: Callable[[str], Awaitable[None]],
+            self,
+            member_name: str,
+            on_created: Callable[[str], Awaitable[None]],
     ) -> bool:
         """Start a single UNSTARTED member.
 
@@ -666,10 +730,10 @@ class TeamBackend:
         return True
 
     async def approve_plan(
-        self,
-        plan_id: str,
-        approved: bool = True,
-        feedback: Optional[str] = None,
+            self,
+            plan_id: str,
+            approved: bool = True,
+            feedback: Optional[str] = None,
     ) -> bool:
         """Approve or reject a member's submitted task plan.
 
@@ -732,12 +796,12 @@ class TeamBackend:
         return True
 
     async def approve_tool(
-        self,
-        member_name: str,
-        tool_call_id: str,
-        approved: bool,
-        feedback: Optional[str] = None,
-        auto_confirm: bool = False,
+            self,
+            member_name: str,
+            tool_call_id: str,
+            approved: bool,
+            feedback: Optional[str] = None,
+            auto_confirm: bool = False,
     ) -> bool:
         """Approve or reject one interrupted teammate tool call."""
         member_data = await self.db.member.get_member(member_name, self.team_name)
@@ -1286,8 +1350,8 @@ class TeamBackend:
         return True
 
     async def cancel_all_tasks(
-        self,
-        skip_assignees: Optional[set[str]] = None,
+            self,
+            skip_assignees: Optional[set[str]] = None,
     ) -> int:
         """Cancel all tasks in team atomically
 
@@ -1388,6 +1452,55 @@ class TeamBackend:
         self._last_build_error = error
 
     @property
+    def build_state_unknown_exhausted(self) -> bool:
+        """True once the failure-state probe failed ``_BUILD_UNKNOWN_THRESHOLD``
+        times in a row. NOT a failure count — the circuit breaker stays closed
+        for these (state undeterminable ≠ confirmed-not-built).
+        """
+        return self._consecutive_build_unknown >= self._build_unknown_threshold
+
+    def note_build_unknown(self, error: str) -> None:
+        """Record one attempt whose build state could not be determined."""
+        self._consecutive_build_unknown += 1
+        self._last_unknown_error = error
+        self._last_build_unknown_at = time.monotonic()
+
+    def reset_build_unknown(self) -> None:
+        """Clear the unknown-state streak after any determinate outcome
+        (success / confirmed-not-built / partial-built).
+        """
+        self._consecutive_build_unknown = 0
+        self._last_unknown_error = None
+        self._last_build_unknown_at = None
+
+    @property
+    def build_unknown_cooldown_elapsed(self) -> bool:
+        """True when the unknown-state brake's cooldown has run out — the
+        tool wrapper then allows one half-open attempt (see
+        ``_BUILD_UNKNOWN_COOLDOWN_SECONDS``).
+        """
+        if self._last_build_unknown_at is None:
+            return True
+        return (
+                time.monotonic() - self._last_build_unknown_at
+                >= self._build_unknown_cooldown_s
+        )
+
+    @property
+    def build_unknown_cooldown_seconds(self) -> float:
+        """Cooldown length handed to the degrade copy (seconds)."""
+        return self._build_unknown_cooldown_s
+
+    @property
+    def consecutive_build_unknown(self) -> int:
+        return self._consecutive_build_unknown
+
+    @property
+    def last_unknown_error(self) -> str:
+        """The most recent undeterminable-attempt text (for exhausted messages)."""
+        return self._last_unknown_error or "unknown"
+
+    @property
     def consecutive_build_failures(self) -> int:
         return self._consecutive_build_failures
 
@@ -1397,12 +1510,12 @@ class TeamBackend:
         return self._last_build_error or "unknown"
 
     async def build_team(
-        self,
-        display_name: str,
-        desc: str,
-        leader_display_name: str,
-        leader_desc: str,
-        overrides: Optional[CapabilityOverrides] = None,
+            self,
+            display_name: str,
+            desc: str,
+            leader_display_name: str,
+            leader_desc: str,
+            overrides: Optional[CapabilityOverrides] = None,
     ):
         """Create a team and register the leader as a member.
 
@@ -1482,6 +1595,35 @@ class TeamBackend:
         if not success:
             raise RuntimeError(f"Failed to create team {team_name}")
 
+        # 成员注册失败统一累积、尾段（_on_team_built / TeamCreatedEvent /
+        # 熔断复位）照跑，最后一次性上抛：循环内立即 raise 会中断其余成员
+        # 注册，并把团队行留着——工具层会按"半建成"告知模型团队可用，
+        # 而 scheduled 团队的调度器装载与 created 事件都被跳过，二者
+        # 自相矛盾。累积后上抛，缺失成员名称随异常文案进入 partial_built
+        # 提示，模型可如实告知用户花名册不完整。
+        registration_failures: list[str] = []
+
+        async def _record_registration(
+                label: str,
+                registration: Awaitable[MemberOpResult],
+        ) -> None:
+            """登记单个成员的注册结果：not ok 与异常一律累积，不中断整批。
+
+            spawn_member 内部有裸读（get_member）与仅吞 IntegrityError 的
+            写（create_member），读池超时/锁异常会直接抛出——逃出循环即
+            "剩余成员不注册 + 尾段跳过 + 工具层仍按 partial_built 宣告团队
+            可用"的矛盾态在异常路径上复发。
+            """
+            try:
+                result = await registration
+            except Exception as exc:
+                registration_failures.append(
+                    f"{label}: {type(exc).__name__}: {exc}"
+                )
+                return
+            if not result.ok:
+                registration_failures.append(f"{label}: {result.reason}")
+
         # Register leader as a member — starts busy/running immediately
         leader_card_id = f"{team_name}_{leader_member_name}"
         leader_card = AgentCard(
@@ -1489,16 +1631,20 @@ class TeamBackend:
             name=leader_display_name,
             description=leader_desc,
         )
-        await self.spawn_member(
-            member_name=leader_member_name,
-            display_name=leader_display_name,
-            agent_card=leader_card,
-            desc=leader_desc,
-            prompt=self._leader_prompt,
-            status=MemberStatus.BUSY,
-            execution_status=ExecutionStatus.RUNNING,
-            mode=MemberMode.BUILD_MODE,
-            allocation=self.leader_allocation,
+        await _record_registration(
+            f"leader {leader_member_name}",
+            self.spawn_member(
+                member_name=leader_member_name,
+                display_name=leader_display_name,
+                agent_card=leader_card,
+                desc=leader_desc,
+                prompt=self._leader_prompt,
+                status=MemberStatus.BUSY,
+                execution_status=ExecutionStatus.RUNNING,
+                mode=MemberMode.BUILD_MODE,
+                allocation=self.leader_allocation,
+                skip_team_exists=True,
+            ),
         )
 
         # Register predefined teammates (UNSTARTED, launched later via broadcast).
@@ -1524,17 +1670,23 @@ class TeamBackend:
                 description=member_spec.desc,
             )
             allocation = self._allocate_model_config(member_spec.model_name) if self._allocate_model_config else None
-            await self.spawn_member(
-                member_name=member_spec.member_name,
-                display_name=member_spec.display_name,
-                agent_card=member_card,
-                desc=member_spec.desc,
-                prompt=member_spec.prompt,
-                status=MemberStatus.UNSTARTED,
-                execution_status=ExecutionStatus.IDLE,
-                mode=self.teammate_mode,
-                allocation=allocation,
-                role=member_spec.role_type,
+            # 不在循环内 raise：注册异常/失败都累积，其余成员继续注册，
+            # 汇总到结尾统一上抛。
+            await _record_registration(
+                f"predefined member {member_spec.member_name}",
+                self.spawn_member(
+                    member_name=member_spec.member_name,
+                    display_name=member_spec.display_name,
+                    agent_card=member_card,
+                    desc=member_spec.desc,
+                    prompt=member_spec.prompt,
+                    status=MemberStatus.UNSTARTED,
+                    execution_status=ExecutionStatus.IDLE,
+                    mode=self.teammate_mode,
+                    allocation=allocation,
+                    role=member_spec.role_type,
+                    skip_team_exists=True,
+                ),
             )
         if skipped_bridge_specs:
             team_logger.warning(
@@ -1552,11 +1704,15 @@ class TeamBackend:
         human_specs = [m for m in self.predefined_members if m.role_type == TeamRole.HUMAN_AGENT]
         if effective_enable_hitt:
             for human_spec in human_specs:
-                await self.spawn_human_agent(
-                    member_name=human_spec.member_name,
-                    display_name=human_spec.display_name,
-                    desc=human_spec.desc,
-                    prompt=human_spec.prompt,
+                await _record_registration(
+                    f"human agent {human_spec.member_name}",
+                    self.spawn_human_agent(
+                        member_name=human_spec.member_name,
+                        display_name=human_spec.display_name,
+                        desc=human_spec.desc,
+                        prompt=human_spec.prompt,
+                        skip_team_exists=True,
+                    ),
                 )
         elif human_specs:
             team_logger.warning(
@@ -1573,9 +1729,11 @@ class TeamBackend:
                 team_logger.error(f"on_team_built callback failed for team {team_name}: {e}")
 
         # Build succeeded — re-arm the circuit breaker (a recovered build
-        # proves the failure was transient).
+        # proves the failure was transient) and clear the unknown streak
+        # (the state is now determinate).
         self._consecutive_build_failures = 0
         self._last_build_error = None
+        self.reset_build_unknown()
 
         # Publish team created event
         session_id = get_session_id()
@@ -1595,15 +1753,30 @@ class TeamBackend:
         except Exception as e:
             team_logger.error(f"Failed to publish team created event for {team_name}: {e}")
 
+        # 尾段已完成（调度器装载/事件发布/熔断复位），此时再统一上抛：
+        # 团队行与可用的部分花名册都在，工具层按"半建成"收口，文案携带
+        # 逐成员失败原因；不能在此前 raise，否则收尾被跳过的状态冲突即
+        # 五轮检视指认的回归。
+        if registration_failures:
+            summary = "; ".join(registration_failures)
+            team_logger.error(
+                "[TeamBackend] Team %s created but %d member registration(s) failed: %s",
+                team_name,
+                len(registration_failures),
+                summary,
+            )
+            raise RuntimeError(f"Failed to register team members: {summary}")
+
         team_logger.info(f"Team {team_name} created successfully")
 
     async def spawn_human_agent(
-        self,
-        *,
-        member_name: str,
-        display_name: Optional[str] = None,
-        desc: Optional[str] = None,
-        prompt: Optional[str] = None,
+            self,
+            *,
+            member_name: str,
+            display_name: Optional[str] = None,
+            desc: Optional[str] = None,
+            prompt: Optional[str] = None,
+            skip_team_exists: bool = False,
     ) -> MemberOpResult:
         """Register a human-agent member as an UNSTARTED team member.
 
@@ -1629,6 +1802,12 @@ class TeamBackend:
             desc: Optional member description; falls back to the
                 framework default.
             prompt: Optional startup hint forwarded to the avatar.
+            skip_team_exists: Forwarded to ``spawn_member``. Set only by
+                ``build_team`` (the team row was created moments earlier
+                in the same call stack) to skip the redundant
+                ``team_exists`` read-pool checkout; the FK on
+                ``team_member.team_name`` still rejects inserts for a
+                missing team.
 
         Returns:
             ``MemberOpResult``. Returns failure when HITT is disabled
@@ -1658,6 +1837,7 @@ class TeamBackend:
             execution_status=ExecutionStatus.IDLE,
             mode=MemberMode.BUILD_MODE,
             role=TeamRole.HUMAN_AGENT,
+            skip_team_exists=skip_team_exists,
         )
         if not result.ok:
             team_logger.warning(
@@ -1725,9 +1905,9 @@ class TeamBackend:
         return await member_dao.get_member_status(self.team_name, member_name)
 
     async def register_human_agent_inbound(
-        self,
-        member_name: str,
-        callback: Optional[Any],
+            self,
+            member_name: str,
+            callback: Optional[Any],
     ) -> None:
         """Register / clear a team→user notification callback for a human agent.
 
@@ -1844,9 +2024,9 @@ class TeamBackend:
         return self._bridge_member_specs.get(member_name)
 
     def set_bridge_adapter(
-        self,
-        member_name: str,
-        adapter: Optional[BridgeProtocolAdapter],
+            self,
+            member_name: str,
+            adapter: Optional[BridgeProtocolAdapter],
     ) -> None:
         """Register / clear the protocol adapter for a bridge member.
 
@@ -1871,16 +2051,16 @@ class TeamBackend:
         return self._bridge_adapters.get(member_name)
 
     async def spawn_bridge_agent(
-        self,
-        *,
-        member_name: str,
-        display_name: str,
-        desc: str = "",
-        prompt: str,
-        model_name: Optional[str] = None,
-        mailbox_inject_mode: BridgeMailboxInjectMode = BridgeMailboxInjectMode.PASSTHROUGH,
-        protocol: str = "",
-        adapter_config: Optional[dict[str, Any]] = None,
+            self,
+            *,
+            member_name: str,
+            display_name: str,
+            desc: str = "",
+            prompt: str,
+            model_name: Optional[str] = None,
+            mailbox_inject_mode: BridgeMailboxInjectMode = BridgeMailboxInjectMode.PASSTHROUGH,
+            protocol: str = "",
+            adapter_config: Optional[dict[str, Any]] = None,
     ) -> MemberOpResult:
         """Register a bridge-agent member dynamically.
 
@@ -2003,14 +2183,14 @@ class TeamBackend:
         return frozenset(self._external_cli_configs)
 
     async def spawn_external_cli_agent(
-        self,
-        *,
-        member_name: str,
-        display_name: str,
-        cli_agent: str,
-        desc: str = "",
-        prompt: str,
-        model_name: Optional[str] = None,
+            self,
+            *,
+            member_name: str,
+            display_name: str,
+            cli_agent: str,
+            desc: str = "",
+            prompt: str,
+            model_name: Optional[str] = None,
     ) -> MemberOpResult:
         """Register an external-CLI teammate dynamically.
 

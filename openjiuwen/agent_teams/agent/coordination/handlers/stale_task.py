@@ -145,6 +145,28 @@ class StaleTaskHandler(BaseCoordinationHandler):
         # 随 leader 运行时回收，无跨团队泄漏。
         self._witness_cache: tuple[float, dict[str, tuple[int, int]]] | None = None
 
+    def _budget_exhausted(self) -> bool:
+        """Whether the shared round budget is exhausted.
+
+        After exhaustion the leader's wrap-up sequence ends member rounds
+        and repools their tasks; nudging again only restarts rounds on a
+        closed ledger. Fail-open: a host without the capability (older
+        versions, test doubles) reports False.
+        """
+        probe = getattr(self._round, "is_round_budget_exhausted", None)
+        if probe is None:
+            return False
+        try:
+            # 严格取真值：一律按“未耗尽”放过，避免把自愈扫描整体静默关掉。
+            return probe() is True
+        except Exception:  # noqa: BLE001 - probe must not break the sweep
+            team_logger.warning(
+                "[{}] round budget probe failed in stale sweep",
+                self._blueprint.member_name or "?",
+                exc_info=True,
+            )
+            return False
+
     async def on_poll_task(self, event: InnerEventMessage) -> None:
         """Periodic task-board sweep: flag stale CLAIMED + leader stale PENDING."""
         member_name = self._blueprint.member_name
@@ -217,6 +239,8 @@ class StaleTaskHandler(BaseCoordinationHandler):
         the stall to the leader itself. A per-task throttle prevents
         re-nudging inside one stale window.
         """
+        if self._budget_exhausted():
+            return
         task_manager = self._infra.task_manager
         if task_manager is None:
             return
@@ -352,6 +376,8 @@ class StaleTaskHandler(BaseCoordinationHandler):
         prevents follow-up polls from re-prompting inside one stale window.
         """
         if self._blueprint.role != TeamRole.LEADER:
+            return
+        if self._budget_exhausted():
             return
         task_manager = self._infra.task_manager
         team_backend = self._infra.team_backend
@@ -550,6 +576,8 @@ class StaleTaskHandler(BaseCoordinationHandler):
         clock.
         """
         if self._blueprint.role != TeamRole.LEADER:
+            return
+        if self._budget_exhausted():
             return
         task_manager = self._infra.task_manager
         if task_manager is None:

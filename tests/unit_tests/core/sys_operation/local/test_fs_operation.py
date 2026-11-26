@@ -1117,6 +1117,12 @@ finally:
     assert result.stdout.strip() == "timeout"
 
 
+def expire_lock_database(lock_file):
+    """Make the test database due independently of Windows timestamp precision."""
+    expired_at = time.time() - 60.0
+    os.utime(lock_file, (expired_at, expired_at))
+
+
 @pytest.mark.asyncio
 async def test_idle_lock_cleanup_deletes_database(work_dir, monkeypatch):
     """Idle cleanup deletes a closed database after acquiring it exclusively."""
@@ -1131,6 +1137,7 @@ async def test_idle_lock_cleanup_deletes_database(work_dir, monkeypatch):
     assert lock_file not in ReadWriteLockManager._locks
     assert lock._closed
 
+    expire_lock_database(lock_file)
     await ReadWriteLockManager.cleanup_expired_locks()
 
     assert not lock_file.exists()
@@ -1172,6 +1179,7 @@ async def test_due_lock_databases_are_processed_in_deadline_order(rw_lock_dir, m
 
     for lock_file in (newest, oldest, middle):
         lock_file.touch()
+        expire_lock_database(lock_file)
 
     async def record_delete(_cls, lock_file):
         processed.append(lock_file)
@@ -1238,6 +1246,8 @@ async def test_idle_lock_cleanup_evicts_multiple_cached_locks(work_dir, monkeypa
     assert not ReadWriteLockManager._locks
     assert all(lock._closed for lock in locks)
 
+    for lock_file in lock_files:
+        expire_lock_database(lock_file)
     await ReadWriteLockManager.cleanup_expired_locks()
 
     assert all(not lock_file.exists() for lock_file in lock_files)
@@ -1254,6 +1264,7 @@ async def test_cleanup_skips_active_local_lock(work_dir, monkeypatch):
         await ReadWriteLockManager.cleanup_expired_locks()
         assert lock_file.exists()
 
+    expire_lock_database(lock_file)
     await ReadWriteLockManager.cleanup_expired_locks()
     assert not lock_file.exists()
 
@@ -1291,6 +1302,7 @@ lock.close()
         while (line := await asyncio.to_thread(process.stdout.readline)) != "acquired\n":
             if not line:
                 pytest.fail(f"Reader subprocess exited before acquiring the lock, returncode={process.poll()}")
+        expire_lock_database(lock_file)
         await ReadWriteLockManager.cleanup_expired_locks()
         assert lock_file.exists()
 
@@ -1299,6 +1311,7 @@ lock.close()
         process.stdin.flush()
         assert await asyncio.to_thread(process.wait, 1.0) == 0
 
+        expire_lock_database(lock_file)
         await ReadWriteLockManager.cleanup_expired_locks()
         assert not lock_file.exists()
     finally:
@@ -1320,6 +1333,7 @@ async def test_stopping_cleanup_processes_final_due_locks(work_dir, monkeypatch)
         pass
 
     assert lock_file.exists()
+    expire_lock_database(lock_file)
     await ReadWriteLockManager.stop()
 
     assert not lock_file.exists()

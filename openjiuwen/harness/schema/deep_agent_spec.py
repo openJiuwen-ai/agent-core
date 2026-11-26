@@ -496,6 +496,10 @@ class DeepAgentSpec(BaseModel):
     enable_security_rail: bool = True
     enable_tool_resilience_rail: bool = True
     max_iterations: int = 15
+    """Inner ReAct iteration cap (shadowed to sys.maxsize when task loop on)."""
+    task_loop_iteration_budget: Optional[int] = None
+    """Inner-iteration budget per task-loop invoke (every model call counts
+    once); None = uncapped (legacy behavior)."""
     workspace: Optional[WorkspaceSpec] = None
     cwd: Optional[str] = None
     """Shell working directory / relative-path base. Defaults to the workspace root."""
@@ -647,6 +651,7 @@ class DeepAgentSpec(BaseModel):
             enable_security_rail=self.enable_security_rail,
             enable_tool_resilience_rail=self.enable_tool_resilience_rail,
             max_iterations=self.max_iterations,
+            task_loop_iteration_budget=self.task_loop_iteration_budget,
             workspace=workspace,
             cwd=self.cwd,
             project_root=self.project_root,

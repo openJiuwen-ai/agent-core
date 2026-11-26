@@ -251,6 +251,56 @@ async def test_start_stop_coordination():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_dispose_coordination_also_closes_tiny_agents():
+    """成员任务被杀路径的 dispose 也要 aclose 团队级 tiny agents。"""
+    agent = _make_leader()
+    agent._coordination.dispose = AsyncMock()
+    tiny = SimpleNamespace(aclose=AsyncMock())
+    agent.infra.tiny_agents["summ"] = tiny
+
+    await agent.dispose_coordination()
+
+    agent._coordination.dispose.assert_awaited_once_with()
+    tiny.aclose.assert_awaited_once_with()
+    assert agent.infra.tiny_agents == {}
+
+
+@pytest.mark.asyncio
+async def test_stop_coordination_closes_tiny_agents_when_stop_cancelled():
+    """kernel.stop 延迟取消补抛时，同构的 stop 路径也要回收 tiny agents。"""
+    agent = _make_leader()
+    agent._stop_coordination = AsyncMock(
+        side_effect=asyncio.CancelledError()
+    )
+    tiny = SimpleNamespace(aclose=AsyncMock())
+    agent.infra.tiny_agents["summ"] = tiny
+
+    with pytest.raises(asyncio.CancelledError):
+        await agent.stop_coordination()
+
+    tiny.aclose.assert_awaited_once_with()
+    assert agent.infra.tiny_agents == {}
+
+
+@pytest.mark.asyncio
+async def test_dispose_coordination_closes_tiny_agents_when_dispose_cancelled():
+    """内核 dispose 重抛 CancelledError 时 tiny agents 仍要在 finally 里回收。"""
+    agent = _make_leader()
+    agent._coordination.dispose = AsyncMock(
+        side_effect=asyncio.CancelledError()
+    )
+    tiny = SimpleNamespace(aclose=AsyncMock())
+    agent.infra.tiny_agents["summ"] = tiny
+
+    with pytest.raises(asyncio.CancelledError):
+        await agent.dispose_coordination()
+
+    tiny.aclose.assert_awaited_once_with()
+    assert agent.infra.tiny_agents == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_wake_feeds_messages_to_agent():
     """When loop wakes, unread messages are fed
     to the DeepAgent via follow_up or Runner."""

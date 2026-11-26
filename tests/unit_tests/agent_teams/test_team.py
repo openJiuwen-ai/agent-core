@@ -10,6 +10,7 @@ from unittest.mock import (
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.team import (
@@ -165,6 +166,62 @@ class TestSpawnMember:
         assert member.team_name == "test_team"
         assert member.status == MemberStatus.UNSTARTED.value
         assert member.execution_status == ExecutionStatus.IDLE.value
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_spawn_member_skip_team_exists_bypasses_probe(
+            self, db, message_bus, sample_agent_card, monkeypatch):
+        """skip_team_exists=True 时不再读 team_info 存在性——探针打桩成必抛
+        也不会被调用；团队行缺失时只剩 create_member 的 FK 兜底拒绝。
+        默认路径仍保留探针（下一用例钉住）。"""
+
+        async def _must_not_be_called(*args, **kwargs):  # pragma: no cover
+            raise AssertionError("team_exists probe must be skipped")
+
+        monkeypatch.setattr(db.team, "team_exists", _must_not_be_called)
+
+        # 本用例的结果断言依赖 FK 兜底：在用例内显式钉住外键已启用，
+        # 不把结论押在 SQLite 默认值上（PRAGMA foreign_keys 默认 OFF）。
+        async with db.engine.connect() as conn:
+            fk_enabled = (await conn.execute(text("PRAGMA foreign_keys"))).scalar()
+        assert fk_enabled == 1
+
+        team = TeamBackend(
+            team_name="ghost_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+        )
+        result = await team.spawn_member(
+            member_name="member1",
+            display_name="Member One",
+            agent_card=sample_agent_card,
+            skip_team_exists=True,
+        )
+        assert not result.ok
+        assert result.reason
+        # 探针被跳过后不应出现探针的引导文案
+        assert "does not exist; call build_team first" not in (result.reason or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_spawn_member_default_probes_team_exists(self, db, message_bus, sample_agent_card):
+        """默认路径（工具侧单独 spawn）保留 team_exists 探针与引导文案。"""
+        team = TeamBackend(
+            team_name="ghost_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+        )
+        result = await team.spawn_member(
+            member_name="member1",
+            display_name="Member One",
+            agent_card=sample_agent_card,
+        )
+        assert not result.ok
+        assert "does not exist; call build_team first" in (result.reason or "")
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -1034,6 +1091,31 @@ async def test_is_team_completed_all_conditions_met(agent_team, db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
+async def test_is_team_completed_unstarted_member_is_settled(agent_team, db):
+    """懒拉起成员从未启动=无活跃工作，不得阻塞团队完成。"""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.UNSTARTED.value)
+    await _drain_one_task(agent_team)
+
+    snapshot = await agent_team.is_team_completed()
+
+    assert snapshot is not None
+    assert snapshot.member_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_is_team_completed_starting_member_returns_none(agent_team, db):
+    """spawn 在飞（STARTING）仍算活跃，必须阻塞完成判定。"""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.STARTING.value)
+    await _drain_one_task(agent_team)
+
+    assert await agent_team.is_team_completed() is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.level1
 async def test_is_team_completed_member_busy_returns_none(agent_team, db):
     """A non-leader member still BUSY blocks completion."""
@@ -1610,6 +1692,217 @@ async def test_create_task_tool_starts_only_assignees(db, message_bus):
     m2 = await db.member.get_member("dev-2", team_id)
     assert m1.status == MemberStatus.STARTING.value
     assert m2.status == MemberStatus.UNSTARTED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_create_task_tool_skips_blocked_assignees(db, message_bus):
+    """BLOCKED 任务的 assignee 不被 create_task 拉起（依赖门），
+    可执行任务的 assignee 照常拉起。"""
+    from openjiuwen.agent_teams.tools.locales import make_translator
+    from openjiuwen.agent_teams.tools.tool_task import TaskCreateTool
+
+    team_id = "create_task_blocked_assignee_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="CT Blocked Assignee Team",
+        leader_member_name="leader1",
+    )
+    on_started = AsyncMock()
+    backend = TeamBackend(
+        team_name=team_id, member_name="leader1", db=db,
+        messager=message_bus, is_leader=True, on_member_started=on_started,
+    )
+    for name in ("dev-1", "dev-2"):
+        await backend.spawn_member(
+            member_name=name, display_name=name,
+            agent_card=AgentCard(name=name, description="d", version="1.0.0"),
+        )
+
+    tool = TaskCreateTool(backend, make_translator("cn"))
+    result = await tool.invoke(
+        {"tasks": [
+            {"task_id": "up", "title": "up", "content": "c", "assignee": "dev-2"},
+            {
+                "task_id": "down",
+                "title": "down",
+                "content": "c",
+                "assignee": "dev-1",
+                "depends_on": ["up"],
+            },
+        ]}
+    )
+
+    assert result.success
+    assert [call.args[0] for call in on_started.await_args_list] == ["dev-2"]
+    m1 = await db.member.get_member("dev-1", team_id)
+    m2 = await db.member.get_member("dev-2", team_id)
+    assert m1.status == MemberStatus.UNSTARTED.value
+    assert m2.status == MemberStatus.STARTING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_create_task_tool_starts_member_with_mixed_blocked_and_startable(db, message_bus):
+    """同一成员既有 blocked 任务又有可执行任务时，仍按可执行任务拉起一次。"""
+    from openjiuwen.agent_teams.tools.locales import make_translator
+    from openjiuwen.agent_teams.tools.tool_task import TaskCreateTool
+
+    team_id = "create_task_mixed_batch_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="CT Mixed Batch Team",
+        leader_member_name="leader1",
+    )
+    on_started = AsyncMock()
+    backend = TeamBackend(
+        team_name=team_id, member_name="leader1", db=db,
+        messager=message_bus, is_leader=True, on_member_started=on_started,
+    )
+    await backend.spawn_member(
+        member_name="dev-1", display_name="Dev 1",
+        agent_card=AgentCard(name="Dev 1", description="d", version="1.0.0"),
+    )
+
+    tool = TaskCreateTool(backend, make_translator("cn"))
+    result = await tool.invoke(
+        {"tasks": [
+            {"task_id": "s1", "title": "s1", "content": "c", "assignee": "dev-1"},
+            {
+                "task_id": "b1",
+                "title": "b1",
+                "content": "c",
+                "assignee": "dev-1",
+                "depends_on": ["s1"],
+            },
+        ]}
+    )
+
+    assert result.success
+    on_started.assert_awaited_once_with("dev-1")
+    member = await db.member.get_member("dev-1", team_id)
+    assert member.status == MemberStatus.STARTING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_create_task_log_skips_only_actually_skipped_blocked_assignees(db, message_bus):
+    """混合批次日志不得误报：同一成员有可执行任务时不应出现在 Skipped 清单；
+    只有真正保持 UNSTARTED 的 blocked assignee 才记录。"""
+    from openjiuwen.agent_teams.tools.locales import make_translator
+    from openjiuwen.agent_teams.tools.tool_task import TaskCreateTool
+
+    team_id = "create_task_skip_log_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="CT Skip Log Team",
+        leader_member_name="leader1",
+    )
+    on_started = AsyncMock()
+    backend = TeamBackend(
+        team_name=team_id, member_name="leader1", db=db,
+        messager=message_bus, is_leader=True, on_member_started=on_started,
+    )
+    for name in ("dev-1", "dev-2", "dev-3"):
+        await backend.spawn_member(
+            member_name=name, display_name=name,
+            agent_card=AgentCard(name=name, description="d", version="1.0.0"),
+        )
+
+    tool = TaskCreateTool(backend, make_translator("cn"))
+    with patch("openjiuwen.agent_teams.tools.tool_task.team_logger") as logger:
+        result = await tool.invoke(
+            {"tasks": [
+                # dev-1：可执行 s1 + blocked b1 → 已被拉起，不应进 Skipped
+                {"task_id": "s1", "title": "s1", "content": "c", "assignee": "dev-1"},
+                {
+                    "task_id": "b1", "title": "b1", "content": "c",
+                    "assignee": "dev-1", "depends_on": ["s1"],
+                },
+                # dev-3：只有 blocked b2 → 真正保持 UNSTARTED
+                {
+                    "task_id": "b2", "title": "b2", "content": "c",
+                    "assignee": "dev-3", "depends_on": ["s2"],
+                },
+                {"task_id": "s2", "title": "s2", "content": "c", "assignee": "dev-2"},
+            ]}
+        )
+
+    assert result.success
+    started = {call.args[0] for call in on_started.await_args_list}
+    assert started == {"dev-1", "dev-2"}
+    skip_logs = [
+        str(call.args[0])
+        for call in logger.info.call_args_list
+        if "Skipped blocked-task assignees" in str(call.args[0])
+    ]
+    assert len(skip_logs) == 1
+    assert "'dev-3'" in skip_logs[0]
+    assert "'dev-1'" not in skip_logs[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_create_task_unblock_path_reaches_claimable_pending(db, message_bus):
+    """依赖解除链路：blocked 任务在依赖完成后转 PENDING(assignee)，
+    满足 leader stale-pending「已指派未启动」扫描面谓词，且 owner 可 claim。"""
+    from openjiuwen.agent_teams.tools.locales import make_translator
+    from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
+    from openjiuwen.agent_teams.tools.tool_task import TaskCreateTool
+
+    team_id = "create_task_unblock_chain_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="CT Unblock Chain Team",
+        leader_member_name="leader1",
+    )
+    on_started = AsyncMock()
+    backend = TeamBackend(
+        team_name=team_id, member_name="leader1", db=db,
+        messager=message_bus, is_leader=True, on_member_started=on_started,
+    )
+    for name in ("dev-1", "dev-2"):
+        await backend.spawn_member(
+            member_name=name, display_name=name,
+            agent_card=AgentCard(name=name, description="d", version="1.0.0"),
+        )
+
+    tool = TaskCreateTool(backend, make_translator("cn"))
+    result = await tool.invoke(
+        {"tasks": [
+            {"task_id": "up", "title": "up", "content": "c", "assignee": "dev-2"},
+            {
+                "task_id": "down", "title": "down", "content": "c",
+                "assignee": "dev-1", "depends_on": ["up"],
+            },
+        ]}
+    )
+    assert result.success
+    # create 之后：down 是 BLOCKED(dev-1)，dev-1 保持 UNSTARTED。
+    down = await backend.task_manager.get("down")
+    assert down.status == TaskStatus.BLOCKED.value
+    assert down.assignee == "dev-1"
+    assert (await db.member.get_member("dev-1", team_id)).status == MemberStatus.UNSTARTED.value
+
+    # 依赖完成：dev-2 认领并完成 up → down 转 PENDING(dev-1)。
+    dev2 = TeamTaskManager(
+        team_name=team_id, member_name="dev-2", db=db, messager=message_bus,
+    )
+    assert (await dev2.claim("up")).ok
+    assert (await dev2.complete("up")).ok
+    down = await backend.task_manager.get("down")
+    assert down.status == TaskStatus.PENDING.value
+    assert down.assignee == "dev-1"
+    # 该行现在满足 stale-pending「已指派未启动」谓词（PENDING + owner UNSTARTED）。
+    assert (await db.member.get_member("dev-1", team_id)).status == MemberStatus.UNSTARTED.value
+
+    # owner 一旦被拉起（leader send_message/update_task 或自催后的动作），
+    # claim 走 PENDING-self 自启动分支成功——补拉起链路的数据端闭环。
+    dev1 = TeamTaskManager(
+        team_name=team_id, member_name="dev-1", db=db, messager=message_bus,
+    )
+    assert (await dev1.claim("down")).ok
+    assert (await backend.task_manager.get("down")).status == TaskStatus.IN_PROGRESS.value
 
 
 @pytest.mark.asyncio

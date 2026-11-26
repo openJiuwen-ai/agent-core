@@ -16,6 +16,12 @@ class ContextCompressionMetric(BaseModel):
     messages: int = Field(default=0)
     tokens: int = Field(default=0)
     context_percent: int | None = Field(default=None)
+    # How ``tokens`` was obtained.  ``usage+tail`` uses the model-reported
+    # cumulative usage baseline plus a cheap tail estimate (provider scale);
+    # ``tokenizer`` is the full local token count; ``tokenizer-calibrated``
+    # scales a tokenizer-only metric by the provider/tokenizer ratio observed
+    # on the before metric, so before/after stay on one scale.
+    token_source: str = Field(default="tokenizer")
 
 
 class ContextCompressionSaved(BaseModel):
@@ -51,6 +57,9 @@ class ContextCompressionState(BaseModel):
     compression_usage: ContextCompressionUsage | None = Field(default=None)
     duration_ms: int | None = Field(default=None)
     context_max: int | None = Field(default=None)
+    # Provider-usage / raw-tokenizer ratio frozen at operation start.  Present
+    # for usage+tail and tokenizer-calibrated events; absent for raw tokenizer.
+    scale_factor: float | None = Field(default=None)
     summary: str = Field(default="")
     compact_summary: str = Field(default="")
     error: str | None = Field(default=None)

@@ -65,6 +65,11 @@ class MessageSummaryOffloaderConfig(BaseModel):
 
 
 class MessageSummaryOffloader(ContextProcessor):
+    # Rule-based offload (no LLM summary, no compact_boundary): keep the state
+    # in logs/recorder history but do not push it to client streams as a
+    # user-visible "compression" indicator.
+    suppress_stream_state_events = True
+
     def __init__(self, config: MessageSummaryOffloaderConfig):
         super().__init__(config)
         self._rule_pipeline = RuleCompressionPipeline(

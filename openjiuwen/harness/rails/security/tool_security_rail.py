@@ -572,8 +572,11 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
     @staticmethod
     def normalize_confirmation_scope(payload, subject):
-        """Share the existing scope defaults with authenticated runtime resources."""
+        """Keep one-time approvals exact across tool and runtime resources."""
         scope = payload.authorization_scope
+        if (not payload.auto_confirm and payload.authorization_mode in (None, "allow", "allow_with_scope")
+                and scope in (None, "exact", "parent", "domain", "subcommands")):
+            return replace(payload, authorization_mode="allow", authorization_scope="exact")
         if scope is None:
             scope = "exact" if payload.authorization_mode == "allow" else next(
                 (option["value"] for option in scope_options(subject) if option["value"] != "exact"), "exact",
@@ -601,7 +604,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     result.reason or "Policy changed while awaiting approval"
                 ), result
             if self._requires_one_time_approval(result) and payload.auto_confirm:
-                payload = replace(payload, auto_confirm=False, persist_allow=None)
+                payload = replace(
+                    payload, auto_confirm=False, persist_allow=None,
+                    authorization_mode="allow", authorization_scope="exact",
+                )
         except (TypeError, ValueError) as exc:
             return payload, "[PERMISSION_DENIED] " + str(exc), None
         return payload, None, result
@@ -1323,8 +1329,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     def _build_always_allow_hint(self, tool_call: Optional[ToolCall]) -> str:
         if tool_call is None:
             return ""
-        return ('\n\n> 默认按可用范围授权：文件为上一级目录，URL 为域名，命令为可独立或组合复用的子命令；'
-                '无可用范围时仅授权当前对象。会话内记住仅对本会话有效，永久记住写入配置。')
+        return ('\n\n> 本次允许仅授权当前对象和操作。选择记住后可按可用范围授权。'
+                '文件可按上一级目录记住，URL 可按域名记住，Shell 命令可按子命令记住。'
+                '会话内记住仅对本会话有效，永久记住写入配置。')
 
 
 __all__ = [

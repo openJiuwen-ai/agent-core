@@ -36,6 +36,29 @@ if TYPE_CHECKING:
     from openjiuwen.core.session.stream.base import OutputSchema
 
 
+def _task_cancelling_count() -> int:
+    """Return the current task's cumulative cancellation-request count.
+
+    A ``CancelledError`` observed inside the cleanup chain is ambiguous: it
+    may come from the member task / health-check task being awaited (the
+    caller already decided to tear that chain down, so swallowing is
+    correct), or from the cleanup caller itself being cancelled (teardown
+    must still finish, but the cancellation has to be re-raised — asyncio
+    delivers it only once, so swallowing would keep a ``wait_for`` timeout
+    waiting until the task ends naturally).
+
+    ``Task.cancelling()`` alone is not enough: the count is cumulative and
+    stays > 0 after an earlier cancellation was already handled (even on
+    purpose), so a *successful* cleanup running later in the same task would
+    be misreported as cancelled. Callers therefore snapshot the count on
+    entry and only treat a *new* request (count grew during the cleanup) as
+    a caller cancellation; an inner-task cancellation never touches this
+    task's counter.
+    """
+    task = asyncio.current_task()
+    return task.cancelling() if task is not None else 0
+
+
 class SpawnManager:
     """Manages teammate process lifecycle and health monitoring.
 
@@ -47,11 +70,11 @@ class SpawnManager:
     """
 
     def __init__(
-        self,
-        *,
-        state: "TeamAgentState",
-        configurator: AgentConfigurator,
-        team_agent_getter: Callable[[], Any],
+            self,
+            *,
+            state: "TeamAgentState",
+            configurator: AgentConfigurator,
+            team_agent_getter: Callable[[], Any],
     ):
         self._state = state
         self._configurator = configurator
@@ -69,13 +92,13 @@ class SpawnManager:
         self.worktree_lifecycle = TeammateWorktreeLifecycle(configurator)
 
     async def spawn_teammate(
-        self,
-        ctx: TeamRuntimeContext,
-        *,
-        initial_message: Optional[str] = None,
-        session: Optional[Any] = None,
-        spawn_config: Optional[SpawnConfig] = None,
-        resume_external_backend: bool = False,
+            self,
+            ctx: TeamRuntimeContext,
+            *,
+            initial_message: Optional[str] = None,
+            session: Optional[Any] = None,
+            spawn_config: Optional[SpawnConfig] = None,
+            resume_external_backend: bool = False,
     ) -> Optional[SpawnedProcessHandle]:
         member_name = ctx.member_name
         # Idempotency: skip a duplicate spawn of an already-spawned or
@@ -111,13 +134,13 @@ class SpawnManager:
             self._spawning.discard(member_name)
 
     async def _spawn_teammate_inner(
-        self,
-        ctx: TeamRuntimeContext,
-        *,
-        initial_message: Optional[str] = None,
-        session: Optional[Any] = None,
-        spawn_config: Optional[SpawnConfig] = None,
-        resume_external_backend: bool = False,
+            self,
+            ctx: TeamRuntimeContext,
+            *,
+            initial_message: Optional[str] = None,
+            session: Optional[Any] = None,
+            spawn_config: Optional[SpawnConfig] = None,
+            resume_external_backend: bool = False,
     ) -> SpawnedProcessHandle:
         member_name = ctx.member_name
         team_logger.info("[{}] spawning teammate: {}", self._configurator.member_name or "?", member_name)
@@ -227,6 +250,32 @@ class SpawnManager:
         """
         return self.spawned_handles.get(member_name) is not None
 
+    @staticmethod
+    def _log_cleanup_cancellation(
+            member_name: str,
+            phase: str,
+            cancelling_before: int,
+    ) -> None:
+        """Log a cancellation observed inside one cleanup phase and continue.
+
+        A ``CancelledError`` raised by an awaited member/heartbeat task says
+        nothing about the caller: teardown must continue. Whether the caller
+        *itself* was cancelled is judged by the ``Task.cancelling()`` delta
+        since cleanup started, and restored once every phase has run.
+
+        Args:
+            member_name: Member whose cleanup observed the cancellation.
+            phase: ``health check`` / ``force_kill`` / ``dispose coordination``.
+            cancelling_before: Counter snapshot taken when cleanup started.
+        """
+        team_logger.warning(
+            "[SpawnManager] [{}] cleanup {} observed cancellation "
+            "(caller cancelled during cleanup: {}); continuing teardown",
+            member_name,
+            phase,
+            _task_cancelling_count() > cancelling_before,
+        )
+
     async def cleanup_teammate(self, member_name: str) -> None:
         handle = self.spawned_handles.pop(member_name, None)
         if handle is None:
@@ -240,62 +289,251 @@ class SpawnManager:
             with contextlib.suppress(Exception):
                 agent_ref.stream_controller.remove_chunk_observer(forward)
             handle.chunk_forward = None
+        # 取消判据取「本次清理期间的增量」而非存量计数：调用方可能在进入
+        # 本函数前就已被取消过一次并被上层有意消化（Task.cancelling() 计数
+        # 不清零），那种情况下本次清理即使全部成功也不得误报为被取消。
+        cancelling_before = _task_cancelling_count()
+        # 两个阶段各自隔离：心跳停等被取消/失败不代表成员已停，必须继续走
+        # force_kill——跳过它会把成员任务连同其 EventBus 留在进程里。
         try:
             await handle.stop_health_check()
+        except asyncio.CancelledError:
+            self._log_cleanup_cancellation(member_name, "health check", cancelling_before)
+        except Exception as e:
+            team_logger.error(
+                "[SpawnManager] [{}] cleanup health check failed: {}",
+                member_name,
+                e,
+            )
+        try:
             if handle.is_alive:
                 await handle.force_kill()
+        except asyncio.CancelledError:
+            self._log_cleanup_cancellation(member_name, "force_kill", cancelling_before)
         except Exception as e:
-            team_logger.error("Error cleaning up teammate {}: {}", member_name, e)
+            team_logger.error(
+                "[SpawnManager] [{}] cleanup force_kill failed: {}",
+                member_name,
+                e,
+            )
+        finally:
+            # 成员事件平面不随 asyncio 任务取消而回收（EventBus 的 run loop
+            # 与两个 poll task 是独立任务）：pause/stop/restart 每次都要显式
+            # dispose，否则留下每 30s 空转 + 邮箱/任务板 DB 读的僵尸轮询。
+            # 放在 finally：handle 已在上面 pop，这是唯一一次清理机会——
+            # force_kill 的 await 在成员任务带异常收尾时会重抛，
+            # stop_health_check 对子进程句柄也可能抛 I/O 错，都不能跳过拆除。
+            dispose = getattr(agent_ref, "dispose_coordination", None)
+            if dispose is not None:
+                try:
+                    await dispose()
+                except asyncio.CancelledError:
+                    # 内核 dispose 在延迟取消路径上会重抛 CancelledError
+                    # （各步已跑完、仅未 latch）。来源仍按增量判断：调用方
+                    # 本次清理期间被取消→末尾补回抛；否则（成员侧取消）吞掉。
+                    self._log_cleanup_cancellation(
+                        member_name, "dispose coordination", cancelling_before
+                    )
+                except Exception as e:
+                    team_logger.error(
+                        "[SpawnManager] [{}] dispose coordination failed: {}",
+                        member_name,
+                        e,
+                    )
+        if _task_cancelling_count() > cancelling_before:
+            # 拆完再把本次清理期间新到的调用方取消补回抛：CancelledError
+            # 只投递一次，吞掉会让 wait_for 超时/进程 shutdown 的取消一直
+            # 等到 leader 自然结束。内层取消（成员任务/心跳）不改本任务
+            # 计数，不在此列；清理前已存在的存量取消也不在此列。
+            raise asyncio.CancelledError()
 
     async def restart_teammate(self, member_name: str, max_retries: int = 3) -> bool:
-        await self.cleanup_teammate(member_name)
-
-        ctx = await self.build_context_from_db(member_name)
-        if ctx is None:
-            team_logger.error("Cannot recover spawn config for {}", member_name)
-            return False
+        try:
+            await self.cleanup_teammate(member_name)
+        except asyncio.CancelledError:
+            # 调用方被取消：recover/unhealthy 调用方在进来前已置 RESTARTING，
+            # 取消展开必须把它归一到可恢复状态，否则成员永卡 RESTARTING。
+            await self.mark_restart_aborted(member_name)
+            raise
 
         team_backend = self._configurator.team_backend
-        if team_backend is None:
-            return False
+        try:
+            # ``build_context_from_db`` 会 await DB（含成员/worktree 查询）：
+            # 取消落在这里与落在 spawn/退避处同样会把成员留在 RESTARTING，
+            # 因此上下文构建与整个重试循环同在一层取消归一之内。
+            ctx = await self.build_context_from_db(member_name)
+            if ctx is None:
+                team_logger.error("Cannot recover spawn config for {}", member_name)
+                return False
 
-        # Restart / recover must not replay the member's first-start
-        # instruction: ``initial_message`` stays None so no harness.send is
-        # triggered. The member re-subscribes and recovers via its mailbox;
-        # only real pending messages drive a round. The member's existence is
-        # already validated by ``build_context_from_db`` above.
-        initial_message = None
-        spawn_config = SpawnConfig(health_check_timeout=30, health_check_interval=50)
+            if team_backend is None:
+                return False
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                team_logger.info("Restarting teammate {} (attempt {}/{})", member_name, attempt, max_retries)
-                await self.spawn_teammate(
-                    ctx,
-                    initial_message=initial_message,
-                    session=get_session_id() or None,
-                    spawn_config=spawn_config,
-                    resume_external_backend=True,
-                )
-                await self.publish_restart_event(member_name, attempt)
-                team_logger.info("Teammate {} restarted successfully", member_name)
-                return True
-            except Exception as e:
-                team_logger.exception("Restart attempt {} for {} failed: {}", attempt, member_name, e)
-                if attempt < max_retries:
-                    await asyncio.sleep(2**attempt)
+            # Restart / recover must not replay the member's first-start
+            # instruction: ``initial_message`` stays None so no harness.send is
+            # triggered. The member re-subscribes and recovers via its mailbox;
+            # only real pending messages drive a round. The member's existence
+            # is already validated by ``build_context_from_db`` above.
+            initial_message = None
+            spawn_config = SpawnConfig(health_check_timeout=30, health_check_interval=50)
 
-        if team_backend:
+            for attempt in range(1, max_retries + 1):
+                try:
+                    team_logger.info("Restarting teammate {} (attempt {}/{})", member_name, attempt, max_retries)
+                    await self.spawn_teammate(
+                        ctx,
+                        initial_message=initial_message,
+                        session=get_session_id() or None,
+                        spawn_config=spawn_config,
+                        resume_external_backend=True,
+                    )
+                    await self.publish_restart_event(member_name, attempt)
+                    team_logger.info("Teammate {} restarted successfully", member_name)
+                    return True
+                except Exception as e:
+                    team_logger.exception("Restart attempt {} for {} failed: {}", attempt, member_name, e)
+                    if attempt < max_retries:
+                        await asyncio.sleep(2 ** attempt)
+
             team_name = self._configurator.team_name
             if team_name:
                 # set_member_status：DAO 直写补发 MemberStatusChangedEvent，
-                # 前端不再只能等快照轮询才发现成员失败
-                await team_backend.set_member_status(member_name, MemberStatus.ERROR)
-        return False
+                # 前端不再只能等快照轮询才发现成员失败。与取消归一同样走
+                # 条件写——本路径跑在 recovery 任务上，leader 可能并发写入
+                # PAUSED/STOPPED，那是权威结论，不得被 ERROR 覆盖。
+                normalized = await team_backend.set_member_status(
+                    member_name,
+                    MemberStatus.ERROR,
+                    allowed_from=self._RESTART_ABORT_OVERWRITABLE,
+                )
+                if not normalized:
+                    # 并发权威写（leader pause/stop）优先：PAUSED/STOPPED 是
+                    # “为什么运行时不在”的结论，不再归档成 ERROR；显式记一笔
+                    # 便于区分「真失败」与被并发状态覆盖。
+                    team_logger.info(
+                        "[SpawnManager] [{}] restart retries exhausted; "
+                        "status changed concurrently or is no longer a "
+                        "runtime state; left untouched",
+                        member_name,
+                    )
+            return False
+        except asyncio.CancelledError:
+            # 上下文构建 / 退避 sleep / spawn await / 失败归一处被取消：
+            # 同样不得留在 RESTARTING。
+            await self.mark_restart_aborted(member_name)
+            raise
+
+    # 这些状态代表本运行时的成员；restart 被取消时应归一到 ERROR。
+    # PAUSED/STOPPED/SHUTDOWN 是 leader pause/stop 或成员退场的权威结论，
+    # 不得被取消展开覆盖（否则 leader 刚写的 PAUSED 会被改回 ERROR）。
+    _RESTART_ABORT_OVERWRITABLE = frozenset(
+        {
+            MemberStatus.STARTING.value,
+            MemberStatus.READY.value,
+            MemberStatus.BUSY.value,
+            MemberStatus.RESTARTING.value,
+        }
+    )
+
+    async def mark_restart_aborted(self, member_name: str) -> None:
+        """Normalize the persisted status after a cancelled restart.
+
+        ``recover_team`` / ``on_teammate_unhealthy`` set ``RESTARTING``
+        before calling :meth:`restart_teammate`. If cancellation unwinds the
+        restart, the member has no live handle and no restart in flight; left
+        as ``RESTARTING`` it would look endless to the UI and to any status
+        consumer. ``ERROR`` is the closest state that ``MEMBER_TRANSITIONS``
+        allows back into ``RESTARTING`` on the next recovery.
+
+        Only "this runtime's member" states are overwritten: a concurrent
+        leader pause/stop may have just written ``PAUSED``/``STOPPED`` (the
+        authority on *why* the runtime went away), and a terminal
+        ``SHUTDOWN`` must stay terminal. Anything else is left untouched.
+
+        A live spawn handle means the restart actually produced a running
+        member before the cancellation landed (e.g. cancelled while
+        publishing the restart event): rewriting ``ERROR`` would mark a
+        healthy member as failed. Its own boot path owns the status from
+        there, so leave everything alone.
+
+        Best-effort: a failing write must not mask the original cancellation.
+        """
+        if self.has_live_handle(member_name):
+            team_logger.info(
+                "[SpawnManager] [{}] restart already produced a live handle; "
+                "cancellation leaves its status untouched",
+                member_name,
+            )
+            return
+        team_backend = self._configurator.team_backend
+        team_name = self._configurator.team_name
+        if team_backend is None or team_name is None:
+            return
+        try:
+            current = await team_backend.db.member.get_member_status(
+                team_name, member_name,
+            )
+        except asyncio.CancelledError:
+            team_logger.warning(
+                "[SpawnManager] [{}] status read after aborted restart "
+                "cancelled again; leaving status unchanged",
+                member_name,
+            )
+            return
+        except Exception as e:
+            team_logger.warning(
+                "[SpawnManager] [{}] failed to read status after aborted "
+                "restart: {}", member_name, e,
+            )
+            return
+        if current not in self._RESTART_ABORT_OVERWRITABLE:
+            team_logger.info(
+                "[SpawnManager] [{}] restart aborted; keeping status {}",
+                member_name,
+                current or "unknown",
+            )
+            return
+        try:
+            # 条件写（CAS）而非直接 set：本归一可能在 recovery_tasks 的独立
+            # 任务上执行（on_teammate_unhealthy），与 leader 的 pause/stop
+            # 标记并发——上面读到的状态在写之前可能已被改掉，只有仍落在
+            # 本运行时状态集合内才允许写 ERROR。
+            normalized = await team_backend.set_member_status(
+                member_name,
+                MemberStatus.ERROR,
+                allowed_from=self._RESTART_ABORT_OVERWRITABLE,
+            )
+        except asyncio.CancelledError:
+            team_logger.warning(
+                "[SpawnManager] [{}] status normalization after aborted "
+                "restart cancelled again; leaving status unchanged",
+                member_name,
+            )
+            return
+        except Exception as e:
+            team_logger.warning(
+                "[SpawnManager] [{}] failed to normalize status after "
+                "aborted restart: {}",
+                member_name,
+                e,
+            )
+            return
+        if not normalized:
+            team_logger.info(
+                "[SpawnManager] [{}] restart aborted; status changed "
+                "concurrently or is no longer a runtime state; left untouched",
+                member_name,
+            )
 
     async def on_teammate_unhealthy(self, member_name: str) -> None:
         team_logger.warning("Teammate {} detected as unhealthy, initiating restart", member_name)
-        await self.cleanup_teammate(member_name)
+        try:
+            await self.cleanup_teammate(member_name)
+        except asyncio.CancelledError:
+            # cleanup 的取消回抛约定：取消展开时句柄已 pop，状态若仍是
+            # READY/BUSY/RESTARTING 必须归一，否则持久态指向不存在的运行时。
+            await self.mark_restart_aborted(member_name)
+            raise
         team_backend = self._configurator.team_backend
         team_name = self._configurator.team_name
         if team_backend and team_name:
@@ -408,12 +646,27 @@ class SpawnManager:
         # Route through cleanup_teammate so chunk forwarders are
         # detached the same way as the single-member teardown path —
         # otherwise inprocess observers would leak across team shutdowns.
+        cancelling = False
         for member_name in list(self.spawned_handles.keys()):
             try:
                 await self.cleanup_teammate(member_name)
+            except asyncio.CancelledError:
+                # cleanup_teammate 只在调用方任务自身被取消时回抛。记下并
+                # 继续拆剩余成员（handle 已在 cleanup 入口 pop），全部拆完
+                # 再统一回抛，既不丢取消也不留半拆的僵尸 bus。
+                cancelling = True
+                team_logger.warning(
+                    "[SpawnManager] [{}] teardown cancelled; "
+                    "continuing remaining members",
+                    member_name,
+                )
             except Exception as e:
-                team_logger.error("Error shutting down teammate {}: {}", member_name, e)
+                team_logger.error(
+                    "[SpawnManager] [{}] shutdown failed: {}", member_name, e
+                )
         self.spawned_handles.clear()
+        if cancelling:
+            raise asyncio.CancelledError()
 
     async def cancel_recovery_tasks(self) -> None:
         if self.recovery_tasks:

@@ -34,13 +34,13 @@ class LoopCoordinator:
     """
 
     def __init__(
-        self,
-        evaluators: Optional[
-            List[StopConditionEvaluator]
-        ] = None,
+            self,
+            evaluators: Optional[
+                List[StopConditionEvaluator]
+            ] = None,
     ) -> None:
         self._evaluators: List[StopConditionEvaluator] = (
-            evaluators or []
+                evaluators or []
         )
         self._iteration: int = 0
         self._token_usage: int = 0
@@ -68,6 +68,18 @@ class LoopCoordinator:
 
     # -- mutation --
 
+    def set_evaluators(
+            self,
+            evaluators: Optional[List[StopConditionEvaluator]],
+    ) -> None:
+        """Replace the evaluator chain (lazy wiring refresh).
+
+        Team rails receive their budget hooks (``budget_tick`` / wrap-up)
+        after the harness and coordinator are built, so the evaluator
+        chain must be rebuilt once the wiring lands.
+        """
+        self._evaluators = list(evaluators or [])
+
     def reset(self) -> None:
         """Reset for a new invoke cycle."""
         self._iteration = 0
@@ -93,7 +105,7 @@ class LoopCoordinator:
             self._token_usage += tokens
 
     def set_last_result(
-        self, result: Dict[str, Any],
+            self, result: Dict[str, Any],
     ) -> None:
         """Store the most recent round result.
 
@@ -140,7 +152,7 @@ class LoopCoordinator:
     # -- completion promise helper --
 
     def get_completion_promise_evaluator(
-        self,
+            self,
     ) -> Optional[CompletionPromiseEvaluator]:
         """Return the first CompletionPromiseEvaluator if any."""
         for ev in self._evaluators:
@@ -170,8 +182,8 @@ class LoopCoordinator:
         }
 
     def load_state(
-        self,
-        data: Optional[Dict[str, Any]],
+            self,
+            data: Optional[Dict[str, Any]],
     ) -> None:
         """Restore state from a persisted snapshot.
 

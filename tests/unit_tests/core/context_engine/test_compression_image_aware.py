@@ -46,15 +46,41 @@ def _read_file_image_block() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_len4_pure_text_unchanged():
-    """A pure-text message keeps the original len(sanitize)//4 estimate."""
+def test_len4_pure_text_uses_cjk_aware_rough_estimate():
+    """Pure text follows the CJK-aware rough estimator, not blanket len // 4."""
 
     from openjiuwen.core.context_engine.content_sanitize import (
         sanitize_content_for_text,
     )
+    from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
+        estimate_text_tokens_rough,
+    )
 
     msg = UserMessage(content="hello world " * 10)
-    assert _len4(msg) == len(sanitize_content_for_text(msg.content)) // 4
+    assert _len4(msg) == estimate_text_tokens_rough(
+        sanitize_content_for_text(msg.content)
+    )
+
+
+def test_estimate_text_tokens_rough_weights_cjk_and_ascii():
+    """CJK ~1.8 chars/token; non-CJK stays ~4 chars/token."""
+
+    from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
+        estimate_text_tokens_rough,
+    )
+
+    assert estimate_text_tokens_rough("") == 0
+    # 4 CJK chars -> ceil(4 / 1.8) = 3 (old len // 4 gave 1)
+    assert estimate_text_tokens_rough("你好世界") == 3
+    # "hello" (5 ASCII) + 4 CJK -> 2 + 3
+    assert estimate_text_tokens_rough("hello你好世界") == 5
+
+
+def test_len4_cjk_only_text_uses_cjk_weight():
+    """A pure-CJK message no longer collapses to len // 4."""
+
+    msg = UserMessage(content="你好世界")
+    assert _len4(msg) == 3
 
 
 def test_len4_image_block_adds_dimension_tokens():
