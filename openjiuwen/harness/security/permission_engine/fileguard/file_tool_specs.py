@@ -41,6 +41,8 @@ def _bootstrap_builtin_specs() -> None:
         FileToolSpec("read_file", "path", "read"),
         FileToolSpec("write_file", "file_path", "write"),
         FileToolSpec("write_file", "path", "write"),
+        FileToolSpec("aigc_mark_file", "file_path", "write"),
+        FileToolSpec("aigc_verify_file", "file_path", "read"),
         FileToolSpec("edit_file", "file_path", "write"),
         FileToolSpec("read_text_file", "file_path", "read"),
         FileToolSpec("write_text_file", "file_path", "write"),

@@ -12,6 +12,7 @@ from openjiuwen.harness.tools.agent_mode_tools import (
     get_or_create_plan_slug,
     resolve_plan_file_path,
 )
+from openjiuwen.harness.tools.aigc_marker import MarkerProvenance, create_aigc_marker_tools
 from openjiuwen.harness.tools.ask_user import AskUserTool
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.code import CodeTool
@@ -91,6 +92,8 @@ __all__ = [
     "GlobTool",
     "GrepTool",
     "create_cron_tools",
+    "MarkerProvenance",
+    "create_aigc_marker_tools",
     "SearchToolsTool",
     "LoadToolsTool",
     "ImageOCRTool",
