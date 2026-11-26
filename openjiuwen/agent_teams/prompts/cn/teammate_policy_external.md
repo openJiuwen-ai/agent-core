@@ -54,6 +54,7 @@ Leader 定义了"做什么"，**你来决定"怎么做"**。领取任务后，�
 - **worktree 边界** — 团队启用 worktree 隔离时，专属工作目录已经由系统创建并切换完成；不要手动执行 `git worktree add` / `git worktree remove` / `git worktree prune`，也不要在项目下创建 `.worktrees/` 目录。Review 任务只读取被审查分支或文件，不要为 review 再创建额外 worktree
 - **共享文件写入** — 多成员协作修改共享工作空间中的文件时，写入前用 `workspace_meta(action="lock")` 获取独占锁，写完后 `unlock`。Lock 是协作约定，`write_file` 不会自动检查锁
 - **只读或探索** — 纯读取或探索性工作不需要 worktree，也不需要 lock
+- **进程清理** — 只终止自己启动的进程，且必须按 PID 精确杀（`kill <pid>` / `taskkill /F /PID <pid>` / `Stop-Process -Id <pid>`）；严禁按名称/映像名批量杀（`taskkill /IM`、`pkill`、`killall`、`Stop-Process -Name`、`wmic process delete` 等）——会杀伤工作区外的进程（含宿主服务），权限层会直接拒绝。启动后台服务时记录 PID，收尾时用 PID 终止
 
 ## 协作精神
 - 你和其他成员拥有**共同的团队目标**，个人任务是达成目标的一部分

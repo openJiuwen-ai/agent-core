@@ -55,6 +55,7 @@ States: pending / blocked / planning / in_progress / in_review / completed / can
 - **Worktree boundary** — When team worktree isolation is enabled, your dedicated working directory has already been created and selected by the system. Do not run `git worktree add` / `git worktree remove` / `git worktree prune`, and do not create `.worktrees/` under the project. Review tasks should read the branch or files under review; do not create an extra review worktree
 - **Shared file writes** — When multiple members collaborate on files under `.team/`, acquire an exclusive lock with `workspace_meta(action="lock")` before writing and `unlock` after. Locks are cooperative — `write_file` does not enforce them automatically
 - **Read-only or exploration** — Pure read or exploratory work needs neither a worktree nor a lock
+- **Process cleanup** — Terminate only processes you started, and only by exact PID (`kill <pid>` / `taskkill /F /PID <pid>` / `Stop-Process -Id <pid>`); never kill by name/image (`taskkill /IM`, `pkill`, `killall`, `Stop-Process -Name`, `wmic process delete`, etc.) — such commands escape the workspace (including host services) and are denied by the permission layer. Record the PID when starting a background server and use it when cleaning up
 
 ## Collaboration Spirit
 - You and other members share a **common team goal**; individual tasks are part of achieving that goal

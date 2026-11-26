@@ -104,6 +104,30 @@ rules:
     severity: CRITICAL
     action: deny
 
+  - id: shell_taskkill_by_image_or_wmic_process_delete
+    description: "Windows 按映像名批量终止进程（taskkill /IM）或 wmic 按查询批量删除/终止进程——会杀伤会话作用域外的进程（如宿主服务），请改用 /PID 精确终止"
+    tools: [shell]
+    match_type: command
+    pattern: 're:(?i)(?:^|[;&|(\n]\s*)["'']?(?:[^\s"'';&|()]*[\\/])?taskkill(?:\.exe)?["'']?(?=\s|$)(?=[^;&|\r\n]*[/\\]{1,2}im\b)|(?:^|[;&|(\n]\s*)wmic\b[^;&|\r\n]*(?:\bprocess\b|win32_process\b)[^;&|\r\n]*(?:\bdelete\b|\bcall\s+terminate\b)'
+    severity: CRITICAL
+    action: deny
+
+  - id: shell_posix_kill_by_name
+    description: "按进程名/模式批量终止进程（killall、pkill、kill $(pgrep/pidof/ps …)、ps 管道 xargs kill）——会杀伤会话作用域外的进程，请改用精确 PID"
+    tools: [shell]
+    match_type: command
+    pattern: 're:(?i)(?:^|[;&|(\n]\s*)["'']?(?:[^\s"'';&|()]*[\\/])?(?:killall|pkill)(?:\.exe)?["'']?(?=\s|$)|\bkill\b[^;&|\r\n]*\$\(?\s*(?:pgrep|pidof|ps)\b|(?:^|[;&|(\n]\s*)xargs\b(?:\s+-\S+)*\s+(?:kill|pkill)\b'
+    severity: CRITICAL
+    action: deny
+
+  - id: shell_powershell_kill_by_name
+    description: "PowerShell 按进程名或查询结果批量终止（Stop-Process -Name、Get-Process 管道终止、Get-CimInstance/Get-WmiObject 批量 Stop-Process/.Kill()）——会杀伤会话作用域外的进程，请改用 -Id 精确 PID"
+    tools: [shell]
+    match_type: command
+    pattern: 're:(?i)(?:^|[;&|(\n]\s*)(?:(?:Stop-Process|kill)\b[^;&|\r\n]*-(?:Name|ProcessName)\b|(?:Get-Process|ps|gps)\b(?![^|\r\n]*-Id\b)[^;&|\r\n]*\|\s*(?:Stop-Process|kill)\b|(?:Get-CimInstance|Get-WmiObject|gcim|gwmi)\b[^;\r\n]*?(?:\bStop-Process\b|\.Kill\(\))|(?:Get-Process|ps|gps)\b(?![^|\r\n]*-Id\b)[^;\r\n]*?\.Kill\(\))'
+    severity: CRITICAL
+    action: deny
+
   - id: shell_system_shutdown_or_reboot
     description: "关机、重启或切换到关机/重启运行级别，属于明显破坏系统可用性的行为"
     tools: [shell]
