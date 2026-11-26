@@ -83,6 +83,7 @@ from openjiuwen.agent_teams.tools.models import (
 )
 from openjiuwen.agent_teams.tools.models import (
     _get_message_model,
+    _get_message_read_status_model,
     _get_task_model,
 )
 from openjiuwen.core.common.logging import team_logger
@@ -408,6 +409,140 @@ class TeamDatabase:
             _op,
             on_locked_result=None,
             label=f"get_team_activity_probe {team_name}",
+            passthrough=_team_storage_gone,
+        )
+
+    async def fetch_mailbox_probe(
+            self,
+            team_name: str,
+            member_name: str,
+    ) -> tuple[str | None, bool, list[TeamMessageBase], list[TeamMessageBase]] | None:
+        """邮箱轮询探针：单连接取 成员门控行 + 未读直信 + 未读广播。
+
+        每个成员每 30s 一轮的邮箱轮询（``MessageHandler.on_poll_mailbox``）
+        原来要 4 次独立 checkout：``get_member_status`` / ``is_human_agent``
+        / ``get_messages`` / ``get_broadcast_messages``——即使零未读也照发，
+        是共享 8 槽读池上随成员数线性增长的稳态底噪。合并后一次 checkout
+        覆盖全部，语义逐字对齐既有 DAO：
+
+        - 门控行：``(status, is_human_agent)``，成员行缺失时 ``(None, False)``；
+        - 直信：``to_member_name=member ∧ broadcast=False ∧ is_read=False``，
+          按 ``timestamp`` 升序（既有 ``get_messages(unread_only=True)`` 同款）；
+        - 广播：团内 ``broadcast=True ∧ from != member``，按 ``timestamp``
+          升序，未读按 ``MessageReadStatus`` 水位过滤（无记录=全未读；水位
+          语义与 ``get_broadcast_messages(unread_only=True)`` 逐字一致）。
+
+        瞬时失败（锁库/读池 checkout 超时）经 ``retry_on_locked`` 退避；
+        预算耗尽返回 ``None``——调用方本 tick 跳过、下 tick 重试（读失败
+        绝不误当作"无未读"丢弃后的错误状态：未读行原地保留，只是推迟）。
+        "no such table"（团队存储已删除）经 ``passthrough`` 直接上抛，
+        与探针族口径一致。
+
+        Args:
+            team_name: 团队标识。
+            member_name: 收件成员。
+
+        Returns:
+            ``(status, is_human_agent, direct_unread, broadcast_unread)``；
+            重试耗尽返回 ``None``。
+        """
+        await self._ensure_initialized()
+        message_model = _get_message_model()
+        read_status_model = _get_message_read_status_model()
+
+        async def _op() -> tuple[str | None, bool, list[TeamMessageBase], list[TeamMessageBase]]:
+            async with self._sessions.read() as session:
+                member_row = (await session.execute(
+                    select(TeamMember.status, TeamMember.role).where(
+                        TeamMember.team_name == team_name,
+                        TeamMember.member_name == member_name,
+                    )
+                )).one_or_none()
+                status = member_row[0] if member_row is not None else None
+                # 不 import TeamRole（models.py 同款循环依赖规避），字面量须与
+                # TeamRole.HUMAN_AGENT.value 保持同步。
+                is_human_agent = member_row is not None and member_row[1] == "human_agent"
+                direct_unread = list((await session.execute(
+                    select(message_model)
+                    .where(
+                        message_model.team_name == team_name,
+                        message_model.to_member_name == member_name,
+                        message_model.broadcast.is_(False),
+                        message_model.is_read.is_(False),
+                    )
+                    .order_by(message_model.timestamp)
+                )).scalars().all())
+                broadcast_rows = list((await session.execute(
+                    select(message_model)
+                    .where(
+                        message_model.team_name == team_name,
+                        message_model.broadcast.is_(True),
+                        message_model.from_member_name != member_name,
+                    )
+                    .order_by(message_model.timestamp)
+                )).scalars().all())
+                read_status = (await session.execute(
+                    select(read_status_model).where(
+                        read_status_model.member_name == member_name,
+                        read_status_model.team_name == team_name,
+                    )
+                )).scalar_one_or_none()
+            broadcast_unread = [
+                row for row in broadcast_rows
+                if read_status is None or row.timestamp > read_status.read_at
+            ]
+            return status, is_human_agent, direct_unread, broadcast_unread
+
+        return await _retry_on_locked(
+            _op,
+            on_locked_result=None,
+            label=f"fetch_mailbox_probe {team_name}",
+            passthrough=_team_storage_gone,
+        )
+
+    async def fetch_team_snapshot_probe(
+            self,
+            team_name: str,
+    ) -> tuple[Optional[Team], list[TeamMember], list[TeamTaskBase]] | None:
+        """团队快照三读合一：team_info 行 + 全量成员 + 全量任务，单连接。
+
+        客户端快照（``TeamMonitor.get_snapshot`` → jiuwenswarm
+        ``TeamMonitorHandler.get_team_snapshot``）原来串行 3 次 checkout
+        （``get_team`` / ``get_team_members`` / ``get_team_tasks``），调用方
+        包括 ws 刷新端点、卡死看门狗每 45s/团与流末补发——合并后 1 次
+        checkout，且三个视图天然一致（同一读事务快照），消除"三读来自
+        不同瞬间"的错位。过滤语义对齐既有 DAO：成员/任务为该团全量、无
+        status 过滤、无排序（与 ``get_team_members``/``get_team_tasks`` 一致）。
+
+        瞬时失败经 ``retry_on_locked`` 退避；耗尽返回 ``None``——调用方
+        按"快照不可得"处理（与既有"任一读异常→整体 None"契约一致）。
+
+        Args:
+            team_name: 团队标识。
+
+        Returns:
+            ``(team_row_or_None, members, tasks)``；重试耗尽返回 ``None``。
+        """
+        await self._ensure_initialized()
+        team_task_model = _get_task_model()
+
+        async def _op() -> tuple[Optional[Team], list[TeamMember], list[TeamTaskBase]]:
+            async with self._sessions.read() as session:
+                team = (await session.execute(
+                    select(Team).where(Team.team_name == team_name)
+                )).scalar_one_or_none()
+                members = list((await session.execute(
+                    select(TeamMember).where(TeamMember.team_name == team_name)
+                )).scalars().all())
+                tasks = list((await session.execute(
+                    select(team_task_model).where(team_task_model.team_name == team_name)
+                )).scalars().all())
+            return team, members, tasks
+
+        return await _retry_on_locked(
+            _op,
+            on_locked_result=None,
+            label=f"fetch_team_snapshot_probe {team_name}",
             passthrough=_team_storage_gone,
         )
 
