@@ -345,12 +345,13 @@ class StreamController:
             and "Error code: 400" in text
             and text == self._last_failed_text
         )
-        if (
+        can_retry = (
             harness is not None
             and code in _RETRYABLE_ERROR_CODES
             and self._retry_attempt < _MAX_RETRY_ATTEMPTS
             and not identical_deterministic_400
-        ):
+        )
+        if can_retry:
             self._last_failed_text = text
             self._retry_attempt += 1
             team_logger.warning(

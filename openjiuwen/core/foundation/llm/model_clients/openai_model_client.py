@@ -680,7 +680,9 @@ class OpenAIModelClient(BaseModelClient):
             timeout: Optional[float] = None,
     ) -> AsyncIterator[AssistantMessageChunk]:
         request_params = self._apply_disabled_thinking_cache(params)
+        request_params = self._apply_sampling_cache(request_params)
         emitted_chunk = False
+        recovered_sampling = False
         try:
             async for chunk in self._iter_affinity_gateway_stream(request_params, timeout=timeout):
                 emitted_chunk = True
@@ -692,20 +694,36 @@ class OpenAIModelClient(BaseModelClient):
                 raise
             retry_params = self._retry_params_without_disabled_thinking(request_params, exc)
             if retry_params is None:
+                retry_params = self._retry_params_without_sampling(request_params, exc)
+                recovered_sampling = retry_params is not None
+            if retry_params is None:
                 raise
 
         async for chunk in self._iter_affinity_gateway_stream(retry_params, timeout=timeout):
             yield chunk
 
-        model_key = self._disabled_thinking_model_key(request_params)
-        if model_key:
-            self._models_rejecting_disabled_thinking.add(model_key)
-        llm_logger.warning(
-            "OpenAI-compatible model rejected disabled thinking; request recovered with model defaults.",
-            model_name=model_key,
-            model_provider=self.model_client_config.client_provider,
-            is_stream=True,
-        )
+        if recovered_sampling:
+            cache_key = self._sampling_cache_key(request_params)
+            if cache_key:
+                self._MODELS_REJECTING_SAMPLING.add(cache_key)
+            llm_logger.warning(
+                "OpenAI-compatible model rejected sampling params; "
+                "request recovered without temperature/top_p.",
+                model_name=cache_key[1] if cache_key else None,
+                model_provider=self.model_client_config.client_provider,
+                is_stream=True,
+            )
+        else:
+            model_key = self._disabled_thinking_model_key(request_params)
+            if model_key:
+                self._models_rejecting_disabled_thinking.add(model_key)
+            llm_logger.warning(
+                "OpenAI-compatible model rejected disabled thinking; "
+                "request recovered with model defaults.",
+                model_name=model_key,
+                model_provider=self.model_client_config.client_provider,
+                is_stream=True,
+            )
 
     def supports_kv_cache_release(self) -> bool:
         return self._kv_cache_mode() == "release"

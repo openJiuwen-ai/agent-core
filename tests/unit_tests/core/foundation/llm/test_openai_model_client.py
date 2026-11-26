@@ -15,6 +15,7 @@ from openjiuwen.core.foundation.llm import (
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
     ModelParamRule,
     OpenAIModelClient,
+    _AffinityGatewayHTTPError,
     _finish_reason_normalize_enabled,
     _normalize_missing_finish_reason,
 )
@@ -929,6 +930,81 @@ class TestSamplingParamCompatibility:
         assert thinking_retry is not None
         # Temperature rejection helpers must not claim a thinking-only 400.
         assert client._is_sampling_param_rejection(error) is False
+
+    @staticmethod
+    def _affinity_invalid_temperature_error() -> _AffinityGatewayHTTPError:
+        return _AffinityGatewayHTTPError(
+            400,
+            '{"error":{"message":"invalid temperature: only 1 is allowed for this model"}}',
+        )
+
+    @pytest.mark.asyncio
+    async def test_affinity_stream_retries_without_temperature_before_output(self):
+        client = _make_client()
+        calls = []
+
+        async def _fake_stream(params, *, timeout=None):
+            calls.append(params)
+            if len(calls) == 1:
+                raise self._affinity_invalid_temperature_error()
+            yield AssistantMessageChunk(content="fallback")
+
+        with patch.object(client, "_iter_affinity_gateway_stream", new=_fake_stream):
+            chunks = [
+                chunk.content
+                async for chunk in client._iter_affinity_gateway_stream_with_disabled_thinking_fallback(
+                    {"model": "MiniMax-M3", "temperature": 0.95},
+                )
+            ]
+
+        assert chunks == ["fallback"]
+        assert len(calls) == 2
+        assert calls[0]["temperature"] == 0.95
+        assert "temperature" not in calls[1]
+        assert "top_p" not in calls[1]
+        assert self._expected_cache_key(client) in OpenAIModelClient._MODELS_REJECTING_SAMPLING
+
+    @pytest.mark.asyncio
+    async def test_affinity_stream_cache_hit_skips_temperature_on_first_call(self):
+        client = _make_client()
+        OpenAIModelClient._MODELS_REJECTING_SAMPLING.add(self._expected_cache_key(client))
+        calls = []
+
+        async def _fake_stream(params, *, timeout=None):
+            calls.append(params)
+            yield AssistantMessageChunk(content="cached")
+
+        with patch.object(client, "_iter_affinity_gateway_stream", new=_fake_stream):
+            chunks = [
+                chunk.content
+                async for chunk in client._iter_affinity_gateway_stream_with_disabled_thinking_fallback(
+                    {"model": "MiniMax-M3", "temperature": 0.95, "top_p": 0.9},
+                )
+            ]
+
+        assert chunks == ["cached"]
+        assert len(calls) == 1
+        assert "temperature" not in calls[0]
+        assert "top_p" not in calls[0]
+
+    @pytest.mark.asyncio
+    async def test_affinity_stream_does_not_retry_temperature_after_emitting_output(self):
+        client = _make_client()
+
+        async def _partial_stream(params, *, timeout=None):
+            yield AssistantMessageChunk(content="partial")
+            raise self._affinity_invalid_temperature_error()
+
+        with patch.object(client, "_iter_affinity_gateway_stream", new=_partial_stream):
+            with pytest.raises(_AffinityGatewayHTTPError):
+                _ = [
+                    chunk
+                    async for chunk in client._iter_affinity_gateway_stream_with_disabled_thinking_fallback(
+                        {"model": "MiniMax-M3", "temperature": 0.95},
+                    )
+                ]
+
+        assert OpenAIModelClient._MODELS_REJECTING_SAMPLING == set()
 
 
 def test_deepseek_endpoint_profile_adds_reasoning_content_to_assistant_messages():
