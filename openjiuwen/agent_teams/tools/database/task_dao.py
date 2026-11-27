@@ -1464,11 +1464,24 @@ class TaskDao:
         ``False`` without touching the row. ``is_valid_transition`` is a
         pure function over the status enum, so it is safe to run on the
         read-back status before the CAS.
+
+        The initial SELECT is taken with ``FOR UPDATE`` so a concurrent
+        ``update_task`` / ``update_task_status`` reading the same row
+        serialises on the row lock rather than both reading the stale
+        status and both paying the transition check (one then loses the
+        CAS race and returns False — correct, but a spurious failure that
+        the row lock avoids). Mirrors ``update_task``'s locked SELECT.
+        On SQLite the dialect strips ``FOR UPDATE`` (the process-level
+        write lock is the serialiser).
         """
         team_task_model = _get_task_model()
         task_dependency_model = _get_task_dependency_model()
         async with self._sessions.write() as session:
-            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+            result = await session.execute(
+                select(team_task_model)
+                .where(team_task_model.task_id == task_id)
+                .with_for_update()
+            )
             task = result.scalar_one_or_none()
             if not task:
                 team_logger.error("Task %s not found", task_id)
@@ -1880,24 +1893,26 @@ class TaskDao:
         row yields ``rowcount == 0`` and we return ``False`` instead of
         re-reading a stale row and re-issuing a delete.
 
-        Before the DELETE, the target task row is locked with
-        ``SELECT ... FOR UPDATE`` (scalar projection, bypassing the identity
-        map) so a concurrent ``mutate_dependency_graph`` /
-        ``_apply_new_edges`` — which also takes the upstream task row lock
-        before inserting a new edge — sees the row either pre-delete (then
-        waits for our FOR UPDATE) or post-delete (then its existence check
-        fails and the edge is rejected). Without this lock, on PG/MySQL
+        Before the DELETE, the ``team_info`` row is locked with
+        ``SELECT ... FOR UPDATE`` so a concurrent ``mutate_dependency_graph``
+        / ``_apply_new_edges`` — which also takes the team_info row lock
+        before inserting a new edge — cannot slip a new edge in between our
+        downstream SELECT and our DELETE. Without this lock, on PG/MySQL
         (where ``DbSessions.write()`` skips the process-level write lock)
-        a downstream-capturing plain SELECT + DELETE could interleave with
-        an ``add_edges`` that inserts a new edge to the about-to-be-deleted
-        task: ``add_edges`` reads the upstream as PENDING under its FOR UPDATE
-        and inserts the edge, then our DELETE cascades that edge away, and
-        the new downstream is stranded in ``BLOCKED`` with no edge to
-        refresh against. The FOR UPDATE closes that window by serialising
-        the delete against edge insertion in the same lock ordering as
-        ``_apply_new_edges`` (upstream task -> dep rows -> downstream task).
-        On SQLite the process-wide write lock already serialises the two,
-        so the row lock is stripped by the dialect there.
+        ``add_edges`` could read the upstream as PENDING, insert a new edge,
+        then our DELETE cascades that edge away, and the new downstream is
+        stranded in ``BLOCKED`` with no edge to refresh against. The
+        team_info lock is chosen over a FOR UPDATE on the target task row
+        because the latter would break the unified ascending-id lock
+        ordering that ``_refresh_status_in_session`` uses (``order_by
+        task_id``): locking an arbitrary-id target before locking the
+        ordered downstream set can deadlock with a concurrent
+        ``_refresh_status_in_session`` whose downstream set spans both.
+        team_info is a single short-lived lock that
+        ``_terminate_task_in_session`` never touches, so it adds no conflict
+        with the task-row lock ordering. On SQLite the process-wide write
+        lock already serialises the two, so the row lock is stripped by the
+        dialect there.
 
         The dependency-edge table carries ``ondelete=CASCADE`` FKs on both
         ``task_id`` and ``depends_on_task_id``, so deleting the row removes
@@ -1913,25 +1928,28 @@ class TaskDao:
         team_task_model = _get_task_model()
         task_dependency_model = _get_task_dependency_model()
         async with self._sessions.write() as session:
-            # Lock the target task row before reading its downstream edges,
-            # so a concurrent _apply_new_edges (which FOR UPDATEs the
-            # upstream task before inserting an edge) cannot slip a new edge
-            # in between our downstream SELECT and our DELETE. Scalar
-            # projection (task_id only) bypasses the identity map and reads
-            # the live committed state under the lock, mirroring
-            # _apply_new_edges' upstream read. order_by is unnecessary here:
-            # a single PK row is locked.
-            lock_result = await session.execute(
-                select(team_task_model.task_id)
-                .where(team_task_model.task_id == task_id)
-                .with_for_update()
+            # Read team_name (plain SELECT, no lock) to locate the
+            # team_info row. The team_info FOR UPDATE that follows
+            # serialises with add_edges; the plain read is safe because
+            # the DELETE's rowcount check catches a concurrent delete
+            # that removed the task between this read and the lock.
+            probe = await session.execute(
+                select(team_task_model.team_name).where(team_task_model.task_id == task_id)
             )
-            if lock_result.scalar_one_or_none() is None:
+            team_name = probe.scalar_one_or_none()
+            if team_name is None:
                 team_logger.debug("Task %s not found for deletion", task_id)
                 return False
 
+            # Serialise with mutate_dependency_graph / _apply_new_edges,
+            # which also FOR UPDATE team_info before inserting a new edge.
+            await session.execute(
+                select(Team).where(Team.team_name == team_name).with_for_update()
+            )
+
             # Capture downstream ids before the FK cascade removes the
             # outgoing edges — after the delete we can no longer read them.
+            # Safe because add_edges is blocked on the team_info lock.
             downstream_result = await session.execute(
                 select(task_dependency_model.task_id)
                 .where(task_dependency_model.depends_on_task_id == task_id)
