@@ -698,3 +698,73 @@ COLUMN`），同款 TOCTOU 命中后第二个进程会撞 `duplicate column`。�
 - SQLite 上 `_drop_column_idempotent` 的 SAVEPOINT 行为可直接验证;MySQL/PG 的
   savepoint-skip + inspect 复查分支用 fake-conn 单测覆盖(同 `_add_column_idempotent`
   的 fake-conn 测试模式)。真实 PG/MySQL 跨进程并发场景需 swarm 侧端到端复测。
+
+### 第十五轮检视:`router` 策略冷恢复漂移 + 广播水位 CAS NULL 比较 + 多行 FOR UPDATE 锁序
+
+第十五轮检视点出 3 个新建议(上一轮的两条已修复):
+
+1. **`team_agent.py:2200` — `router` 策略冷恢复重新物化 `member_model` 时丢失模型名 hint**:
+   上一轮(commit `581382a50`)的 `effective_model_pool()` 修复让 `router` / `intelli_router`
+   团队第一次进入冷恢复重新物化分支(之前它们的 blueprint `model_pool` 为空,跳过整个分支)。
+   但现有代码只处理 `intelli_router`(`allocation_name = "*"`)和 `by_model_name`(用
+   `checkpoint_name` 作 hint),`router` 落到 `else: allocator.allocate(None)`,而
+   `RouterAllocator.allocate(None)` 返回 **pool[0]**(首个声明的 model_name),丢弃了
+   checkpoint 的 model_name hint。一个 `model_router(model_names=["a","b"])` 且
+   checkpoint leader model 为 `"b"` 的团队冷恢复后,`context.member_model` 被重新物化为
+   `"a"` 的 client,而 `spec.leader.model_name` 仍是 `"b"` —— 运行期 leader 走 `"a"`、
+   持久化 spec 声明 `"b"`,与 router 按名路由的契约不一致。**这是上一轮
+   `effective_model_pool()` 修复新引入的回归。**
+
+   **修法**:把 `router` 与 `by_model_name` 同等处理(两者都是按名路由):
+   - 第一块分支从 `elif current_strategy == "by_model_name"` 扩展为
+     `elif current_strategy in ("by_model_name", "router")` —— 用 `checkpoint_name` 作
+     `resolve_member_model` 的 hint、回写 `spec.leader.model_name`、设 `resolved_model`。
+   - 第二块分配分支新增 `elif current_strategy == "router":`,调
+     `allocator.allocate(allocation_name)`(传 hint)而非 `allocator.allocate(None)`(返回
+     pool[0])。`RouterAllocator.allocate(name)` 返回该 name 的 entry 或 `None`(name 不在
+     池中),与 `by_model_name` 的 `ByModelNameAllocator.allocate(None)` 返回 `None` 异曲同工
+     ——后者靠 `resolved_model` 兜底,前者靠 `allocation` 或 `resolved_model` 兜底。
+
+2. **`message_dao.py:700` — 广播已读水位的 CAS UPDATE 可能静默更新 0 行却仍返回 True**:
+   CAS UPDATE 的 WHERE 子句 `read_at == current_read_at` 在 `current_read_at` 为 `None`
+   时生成 SQL `read_at = NULL`,而 `NULL = NULL` 在 SQL 中结果是 `NULL`(不是 `True`),
+   所以 WHERE 子句匹配 0 行、UPDATE 不生效,但函数仍返回 `True`。`read_at` 列是
+   `nullable=True` + `default=None`,所以一条由未设 `read_at` 的路径插入的 read_status 行
+   (或 legacy 行)命中此分支时,水位静默不前进。
+
+   **修法**:
+   - `current_read_at` 为 `None` 时用 `read_at.is_(None)`(SQL `IS NULL`)替代
+     `read_at == None`(SQL `= NULL`)。
+   - CAS UPDATE 后检查 `result.rowcount`,0 行时记 warning 并返回 `False`(水位未由本调用
+     前进,调用方不应计入已标记)。
+
+3. **`task_dao.py:169` — 多行 FOR UPDATE 的加锁顺序来自 set,可能引入新的死锁**:
+   `_refresh_status_in_session` 和 `_apply_new_edges` 的多行 `SELECT ... WHERE task_id IN
+   (...) FOR UPDATE` 没有 `ORDER BY`,PG/MySQL 按查询计划(scan order)加锁,两个并发调用
+   传重叠但顺序不同的 task_ids 时锁序可能相反 → 死锁。`unique_ids` / `upstream_ids` 来自
+   set 去重,迭代顺序不确定,进一步加剧问题。
+
+   **修法**:两个多行 FOR UPDATE SELECT 都加 `.order_by(team_task_model.task_id)`,
+   强制按 `task_id` 升序加锁,两个并发调用无论传入顺序如何都以同一顺序加锁,不会死锁。
+
+**契约同步**:
+- `team_agent.py:2200` 注释扩展说明 `router` 与 `by_model_name` 同等处理的根因
+  (round-14 `effective_model_pool()` 让 `router` 第一次进入此分支,旧代码的
+  `allocate(None)` 返回 pool[0] 丢弃 hint)。
+- `message_dao.py:700` 注释扩展说明 `IS NULL` vs `= NULL` 的 SQL 语义差异与 `rowcount` 检查。
+- `task_dao.py:169` / `task_dao.py:559` 注释扩展说明 `order_by(task_id)` 的死锁预防理由。
+
+**验证**:
+- `test_runner_team_runtime.py::test_team_agent_recover_from_session_router_strategy_preserves_checkpoint_model_name`:
+  构造 `model_router(model_names=["a","b"])` 且 checkpoint leader model 为 `"b"` 的场景,
+  断言冷恢复后 `context.member_model.model_name == "b"`(不是 pool[0] 的 `"a"`)。
+- `test_message_manager.py::test_mark_broadcast_message_read_advances_null_read_at`:
+  预插一条 `read_at = NULL` 的 read_status 行,标记广播已读后断言水位从 NULL 前进到真实时间戳。
+- `test_database_concurrency.py::test_refresh_status_in_session_for_update_carries_order_by`:
+  编译多行 FOR UPDATE 查询,断言 `ORDER BY` 存在(SQLite 上 FOR UPDATE 被剥离,但 ORDER BY
+  保留在编译输出里)。
+- 广域回归:`test_runner_team_runtime` + `test_message_manager` + `test_database` +
+  `test_database_concurrency` + `test_task_manager` + `test_allocator` +
+  `organization/test_org_db` + `test_team_agent_coordination`:610 passed, 19 skipped,
+  1 pre-existing failure(`test_postgresql_initialize_uses_asyncpg_engine` 的测试隔离问题,
+  stash 我的改动后同样失败,非本次引入)。

@@ -166,9 +166,16 @@ async def _refresh_status_in_session(
 
     # Scalar projection: bypass the identity map so the FOR UPDATE lock
     # sees the live committed status, not a cached object's stale attribute.
+    # ``order_by(task_id)`` enforces a deterministic lock-acquisition order
+    # across concurrent callers so two ``_refresh_status_in_session``
+    # invocations with overlapping but differently-ordered task_ids cannot
+    # deadlock (issue #115 review round 15). Without it, PG/MySQL acquire
+    # row locks in the scan order, which depends on the query plan (index
+    # scan vs. seq scan) and may differ across callers.
     tasks_result = await session.execute(
         select(team_task_model.task_id, team_task_model.status)
         .where(team_task_model.task_id.in_(unique_ids))
+        .order_by(team_task_model.task_id)
         .with_for_update()
     )
     candidate_ids: List[str] = []
@@ -553,12 +560,15 @@ async def _apply_new_edges(
     # Current-read the upstream endpoints' status under a row lock, as a
     # scalar projection so the identity map does not hand back the stale
     # validation snapshot. See the docstring for the race.
+    # ``order_by(task_id)`` enforces a deterministic lock-acquisition order
+    # (same fix as ``_refresh_status_in_session``, issue #115 review round 15).
     upstream_ids = {dep_id for _, dep_id in new_edge_set}
     upstream_status: Dict[str, str] = {}
     if upstream_ids:
         upstream_result = await session.execute(
             select(team_task_model.task_id, team_task_model.status)
             .where(team_task_model.task_id.in_(list(upstream_ids)))
+            .order_by(team_task_model.task_id)
             .with_for_update()
         )
         upstream_status = {row[0]: row[1] for row in upstream_result.all()}

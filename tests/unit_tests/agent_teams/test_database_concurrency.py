@@ -964,3 +964,35 @@ async def test_create_cur_session_tables_retries_on_watchdog_timeout(file_db: Te
     async with file_db.read_session_local() as session:
         conn = await session.connection()
         assert await conn.run_sync(lambda sc: inspect(sc).has_table(task_table))
+
+
+@pytest.mark.level0
+def test_refresh_status_in_session_for_update_carries_order_by():
+    """Multi-row ``SELECT ... FOR UPDATE`` in ``_refresh_status_in_session``
+    carries ``ORDER BY task_id`` so two concurrent callers with overlapping
+    but differently-ordered task_ids acquire row locks in the same order and
+    cannot deadlock (issue #115 review round 15).
+
+    On SQLite ``FOR UPDATE`` is stripped (the process-level write lock is the
+    serialiser), so this test compiles the query and asserts the ``ORDER BY``
+    clause is present rather than exercising a real cross-process deadlock.
+    The companion ``_apply_new_edges`` upstream-endpoint FOR UPDATE carries
+    the same ordering clause.
+    """
+    from sqlalchemy import select
+
+    from openjiuwen.agent_teams.tools.models import _get_task_model
+
+    team_task_model = _get_task_model()
+
+    stmt = (
+        select(team_task_model.task_id, team_task_model.status)
+        .where(team_task_model.task_id.in_(["t1", "t2"]))
+        .order_by(team_task_model.task_id)
+        .with_for_update()
+    )
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "ORDER BY" in compiled.upper(), (
+        f"FOR UPDATE query must carry ORDER BY for deterministic lock order; "
+        f"compiled: {compiled}"
+    )

@@ -2223,6 +2223,20 @@ class TeamAgent(BaseAgent):
             # instead of retaining the checkpoint's old client.  Name-routed
             # strategies need an explicit logical name; IntelliRouter always
             # uses its single wildcard entry.
+            #
+            # ``router`` is name-routed just like ``by_model_name``: a
+            # ``RouterAllocator`` honours the ``model_name`` hint (returns the
+            # entry for that name, or ``None`` when absent), so the
+            # checkpoint's ``model_name`` is the right allocation hint. The
+            # round-14 ``effective_model_pool()`` change made this branch
+            # reachable for ``router`` teams for the first time — before that
+            # the unexpanded ``runtime_spec.model_pool`` was empty for them,
+            # so recovery skipped re-materialization entirely and let the
+            # checkpoint's stale client survive. Treating ``router`` like
+            # ``by_model_name`` here preserves the checkpoint's model choice
+            # instead of silently drifting to ``pool[0]``
+            # (``RouterAllocator.allocate(None)`` would return ``pool[0]``,
+            # issue #115 review round 15).
             checkpoint_name = None
             checkpoint_model = context.member_model
             if checkpoint_model is not None and checkpoint_model.model_request_config is not None:
@@ -2233,7 +2247,7 @@ class TeamAgent(BaseAgent):
             if current_strategy == "intelli_router":
                 allocation_name = "*"
                 spec.leader.model_name = "*"
-            elif current_strategy == "by_model_name" and current_pool:
+            elif current_strategy in ("by_model_name", "router") and current_pool:
                 from openjiuwen.agent_teams.models.allocator import resolve_member_model
 
                 allocation = (
@@ -2261,6 +2275,15 @@ class TeamAgent(BaseAgent):
                 )
 
             if current_strategy == "intelli_router":
+                from openjiuwen.agent_teams.models.allocator import build_model_allocator
+
+                allocator = build_model_allocator(spec, context.team_spec)
+                allocation = allocator.allocate(allocation_name) if allocator is not None else None
+            elif current_strategy == "router":
+                # Pass the resolved ``allocation_name`` (checkpoint hint or
+                # the pool[0] fallback) so ``RouterAllocator`` returns the
+                # entry for that name. ``allocate(None)`` would return
+                # ``pool[0]`` and silently drop the checkpoint hint.
                 from openjiuwen.agent_teams.models.allocator import build_model_allocator
 
                 allocator = build_model_allocator(spec, context.team_spec)

@@ -413,6 +413,56 @@ class TestMarkMessageRead:
         assert broadcasts[0].is_read is False
         assert broadcasts[0].broadcast is True
 
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_mark_broadcast_message_read_advances_null_read_at(self, team_messaging, db):
+        """A read_status row seeded with NULL read_at is advanced correctly.
+
+        The CAS UPDATE in ``_mark_read_in_session`` guards on
+        ``read_at == current_read_at``. When ``current_read_at`` is ``None``
+        (the row was seeded with NULL, or a legacy row), a plain ``== None``
+        comparison generates SQL ``read_at = NULL`` which is always NULL
+        (not True), so the UPDATE matches 0 rows and the watermark silently
+        does not advance while ``_mark_read_in_session`` still returns True
+        (issue #115 review round 15).
+
+        The fix uses ``read_at IS NULL`` when ``current_read_at`` is None.
+        This test seeds a read_status row with NULL ``read_at``, then marks
+        a broadcast as read and asserts the watermark actually advances.
+        """
+        from openjiuwen.agent_teams.tools.models import _get_message_read_status_model
+
+        # Seed a read_status row with NULL read_at.
+        read_status_model = _get_message_read_status_model()
+        async with db.sessions.write() as session:
+            from sqlalchemy import insert
+            await session.execute(
+                insert(read_status_model).values(
+                    member_name="member2",
+                    team_name=team_messaging.team_name,
+                    read_at=None,
+                )
+            )
+            await session.commit()
+
+        # Broadcast a message and mark it read.
+        message_id = await team_messaging.broadcast_message("late broadcast")
+        result = await team_messaging.mark_message_read(message_id=message_id, member_name="member2")
+        assert result is True
+
+        # The watermark must have advanced from NULL to the broadcast timestamp.
+        async with db.sessions.read() as session:
+            from sqlalchemy import select
+            rs_result = await session.execute(
+                select(read_status_model.read_at).where(
+                    read_status_model.member_name == "member2",
+                    read_status_model.team_name == team_messaging.team_name,
+                )
+            )
+            read_at = rs_result.scalar_one_or_none()
+            assert read_at is not None, "read_at must have advanced from NULL to a real timestamp"
+            assert read_at > 0
+
 
 # ==================== Test. mark_messages_read (batch) ====================
 

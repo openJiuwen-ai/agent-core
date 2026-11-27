@@ -702,15 +702,54 @@ class MessageDao:
                 # Scalar UPDATE guarded on the read_at we just read under the
                 # lock — a forward-only CAS so a stale read can never rewind
                 # the watermark.
-                await session.execute(
+                #
+                # Use ``IS NULL`` when ``current_read_at`` is ``None``: SQL
+                # ``read_at = NULL`` is always NULL (not True), so a plain
+                # ``== None`` guard would match 0 rows and the watermark would
+                # silently not advance while we still returned True
+                # (issue #115 review round 15). ``read_at`` is ``nullable=True``
+                # with ``default=None``, so a row seeded by a path that did
+                # not set ``read_at`` (or a legacy row) hits this branch.
+                read_at_guard = (
+                    read_status_model.read_at.is_(None)
+                    if current_read_at is None
+                    else read_status_model.read_at == current_read_at
+                )
+                cas_result = await session.execute(
                     update(read_status_model)
                     .where(
                         read_status_model.member_name == member_name,
                         read_status_model.team_name == message.team_name,
-                        read_status_model.read_at == current_read_at,
+                        read_at_guard,
                     )
                     .values(read_at=message.timestamp)
                 )
+                if (cas_result.rowcount or 0) == 0:
+                    # 0 rows matched: the row's read_at changed between our
+                    # SELECT FOR UPDATE and our UPDATE (concurrent transaction
+                    # advanced the watermark under us — should not happen under
+                    # the lock but defensive), or the row was deleted, or the
+                    # upsert did not materialise a row. The watermark was not
+                    # advanced by us; return False so the caller does not
+                    # count this message as marked.
+                    team_logger.warning(
+                        "broadcast read-status CAS for %s/%s did not apply (rowcount=0): "
+                        "current_read_at=%s, message.timestamp=%s",
+                        member_name,
+                        message.team_name,
+                        current_read_at,
+                        message.timestamp,
+                    )
+                    return False
+            # When the watermark already covers this broadcast
+            # (``current_read_at >= message.timestamp``) there is nothing to
+            # write — the read-status row already marks every broadcast up to
+            # ``current_read_at`` as read, which includes this message. Unlike
+            # direct messages, broadcast ``is_read`` is NOT a persisted column
+            # (it is derived from the watermark), so we do NOT set
+            # ``message.is_read = True`` here — that would write the ORM
+            # object's ``is_read`` column to the DB and corrupt the broadcast's
+            # per-message read flag.
         else:
             message.is_read = True
 
