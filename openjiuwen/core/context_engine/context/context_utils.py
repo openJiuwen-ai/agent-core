@@ -167,14 +167,14 @@ MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {
     "qwen-turbo": 8192,
     "qwen-long": 1000000,
     "qwen3-coder-480b-a35b-instruct": 262144,
-    "qwen3-30b-a3b": 128000,
+    "qwen3-30b-a3b": 131072,  # YaRN-extended serving window; native 32768, matches OpenRouter metadata
     "qwen3-30b-a3b-128k": 128000,
     "qwen3-30b-a3b-32k": 32000,
-    "qwen3-235b-a22b": 128000,
+    "qwen3-235b-a22b": 131072,  # YaRN-extended serving window; native 32768, matches OpenRouter metadata
     "qwen3-235b-a22b-thinking-2507": 262144,
     "qwen3-235b-a22b-64k": 64000,
     "qwen3-235b-a22b-32k": 32000,
-    "qwen3-32b": 128000,
+    "qwen3-32b": 131072,  # YaRN-extended serving window; native 32768, matches OpenRouter metadata
     "qwen3-32b-64k": 64000,
     "qwen3-32b-32k": 32000,
     "qwen3-14b-32k": 32000,
