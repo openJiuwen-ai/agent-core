@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+import weakref
 from typing import Optional
 
 from openjiuwen.core.common.constants.constant import LOOP_ID, INDEX
@@ -46,6 +47,12 @@ def _execution_id(session) -> Optional[str]:
     return _read_session_value(session, ("get_execution_id", "execution_id"))
 
 
+# Per-session route key cache (review follow-up): _execution_scope runs on
+# every workflow event, including each stream chunk. Weak references keep the
+# cache bounded by the lifetime of the session object.
+_EXECUTION_SCOPE_CACHE: "weakref.WeakKeyDictionary[object, str]" = weakref.WeakKeyDictionary()
+
+
 def _execution_scope(session) -> str:
     """OTel workflow handler 的执行隔离路由键（issue #2430）。
 
@@ -54,7 +61,23 @@ def _execution_scope(session) -> str:
     不写入 metadata / Span 属性，不改变内置 trace_schema 的
     executionId == traceId 语义。
     """
-    return _execution_id(session) or _read_session_value(session, ("session_id", "get_session_id")) or ""
+    try:
+        cached = _EXECUTION_SCOPE_CACHE.get(session)
+    except TypeError:  # non-weakrefable session object
+        cached = None
+    if cached is not None:
+        return cached
+
+    scope = (
+        _execution_id(session)
+        or _read_session_value(session, ("session_id", "get_session_id"))
+        or ""
+    )
+    try:
+        _EXECUTION_SCOPE_CACHE[session] = scope
+    except TypeError:
+        pass
+    return scope
 
 
 class TracerWorkflowUtils:

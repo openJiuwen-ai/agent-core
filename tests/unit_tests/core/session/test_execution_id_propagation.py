@@ -10,6 +10,8 @@ from openjiuwen.core.session.config.base import Config
 from openjiuwen.core.session.internal.agent import AgentSession
 from openjiuwen.core.session.internal.workflow import NodeSession
 from openjiuwen.core.session.workflow import Session as WorkflowSession
+from openjiuwen.core.workflow import _workflow as workflow_module
+from openjiuwen.core.workflow._workflow import _session_execution_id, execute_single_component
 
 pytestmark = pytest.mark.asyncio
 
@@ -65,3 +67,64 @@ async def test_missing_execution_id_stays_none():
 
     assert session.get_execution_id() is None
     assert session.create_workflow_session().get_execution_id() is None
+
+
+class _SessionWithExecutionId:
+    def get_session_id(self):
+        return "sess-single"
+
+    def get_env_scope(self):
+        return {}
+
+    def get_execution_id(self):
+        return "exec-single"
+
+
+class _SessionWithExecutionIdAlias:
+    def get_session_id(self):
+        return "sess-single"
+
+    def get_env_scope(self):
+        return {}
+
+    def execution_id(self):
+        return "exec-alias"
+
+
+async def test_session_execution_id_supports_both_names():
+    assert _session_execution_id(_SessionWithExecutionId()) == "exec-single"
+    assert _session_execution_id(_SessionWithExecutionIdAlias()) == "exec-alias"
+    assert _session_execution_id(object()) is None
+
+
+async def test_execute_single_component_forwards_execution_id(monkeypatch):
+    captured = {}
+
+    class _FakeWorkflowSession:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            raise RuntimeError("stop after construction")
+
+    monkeypatch.setattr(workflow_module, "WorkflowSession", _FakeWorkflowSession)
+
+    with pytest.raises(RuntimeError):
+        await execute_single_component("comp", _SessionWithExecutionId(), None, {})
+
+    assert captured["execution_id"] == "exec-single"
+    assert captured["session_id"] == "sess-single"
+
+
+async def test_execute_single_component_forwards_execution_id_alias(monkeypatch):
+    captured = {}
+
+    class _FakeWorkflowSession:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            raise RuntimeError("stop after construction")
+
+    monkeypatch.setattr(workflow_module, "WorkflowSession", _FakeWorkflowSession)
+
+    with pytest.raises(RuntimeError):
+        await execute_single_component("comp", _SessionWithExecutionIdAlias(), None, {})
+
+    assert captured["execution_id"] == "exec-alias"

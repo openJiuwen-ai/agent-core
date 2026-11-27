@@ -212,3 +212,22 @@ async def test_execution_scope_priority_and_fallback():
     assert _execution_scope(_StubSession(None, execution_id=None)) == "sess-1"
     assert _execution_scope(_ThrowingExecutionGetter()) == "sess-x"
     assert _execution_scope(object()) == ""
+
+
+class _CountingSession:
+    def __init__(self):
+        self.calls = 0
+        self._session_id = "sess-cache"
+
+    def get_execution_id(self):
+        self.calls += 1
+        return "exec-cache"
+
+
+async def test_execution_scope_is_cached_per_session():
+    """Streaming events reuse the per-session scope instead of re-probing."""
+    session = _CountingSession()
+
+    assert _execution_scope(session) == "exec-cache"
+    assert _execution_scope(session) == "exec-cache"
+    assert session.calls == 1
