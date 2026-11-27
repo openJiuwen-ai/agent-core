@@ -322,6 +322,19 @@ def _unwrap_llm_payload(value: Any) -> Any:
     return normalized
 
 
+def _llm_payload_is_empty(response: Any) -> bool:
+    """Whether an unwrapped end payload carries no output at all.
+
+    The cancellation compensation sends ``{"outputs": None}``: a non-None
+    container whose payload is None, which survives unwrapping and must not
+    land as an output-messages attribute.
+    """
+    if not isinstance(response, dict) or len(response) != 1:
+        return False
+    key, value = next(iter(response.items()))
+    return key in ("messages", "outputs", "inputs") and value is None
+
+
 def _set_llm_response_attrs(otel_span: trace.Span, outputs: Any) -> None:
     """Set GenAI response / usage / cost / latency attributes on the span.
 
@@ -706,8 +719,17 @@ class OtelAgentHandler(TraceExtAgentHandler):
                     # Unwrap the {"outputs": AssistantMessage} container OtelRail
                     # sends and normalize message objects to plain dicts, so the
                     # completion payload carries real content as standard JSON.
-                    payload = _serialize(_unwrap_llm_payload(outputs))
-                    state.span.set_attribute(GEN_AI_OUTPUT_MESSAGES, redact(payload, self._config, field="completions"))
+                    response = _unwrap_llm_payload(outputs)
+                    # An unwrapped payload that is just an empty single-key
+                    # container ({"outputs": None}) carries no output — the
+                    # cancellation compensation form. Per GenAI convention,
+                    # no output means no output-messages key.
+                    if not _llm_payload_is_empty(response):
+                        payload = _serialize(response)
+                        state.span.set_attribute(
+                            GEN_AI_OUTPUT_MESSAGES,
+                            redact(payload, self._config, field="completions"),
+                        )
                     _set_llm_response_attrs(state.span, outputs)
                 end_time = self._set_end_attrs(state.span, span)
             self._end_and_pop(span.invoke_id, end_time)
