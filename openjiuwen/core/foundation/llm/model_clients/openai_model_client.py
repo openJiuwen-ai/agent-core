@@ -449,6 +449,10 @@ class OpenAIModelClient(BaseModelClient):
     # build/close). Shared across subclasses (OpenRouter/DashScope/DeepSeek) on
     # purpose: one cache per process.
     _client_cache: Dict[Tuple, "openai.AsyncOpenAI"] = {}
+    # Process-wide: fixed-temperature OpenAI-compatible models reject sampling
+    # params. Team rebuilds Model clients per request, so instance caches miss.
+    # Key: (api_base.lower(), model).
+    _MODELS_REJECTING_SAMPLING: set[Tuple[str, str]] = set()
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
@@ -676,7 +680,9 @@ class OpenAIModelClient(BaseModelClient):
             timeout: Optional[float] = None,
     ) -> AsyncIterator[AssistantMessageChunk]:
         request_params = self._apply_disabled_thinking_cache(params)
+        request_params = self._apply_sampling_cache(request_params)
         emitted_chunk = False
+        recovered_sampling = False
         try:
             async for chunk in self._iter_affinity_gateway_stream(request_params, timeout=timeout):
                 emitted_chunk = True
@@ -688,20 +694,36 @@ class OpenAIModelClient(BaseModelClient):
                 raise
             retry_params = self._retry_params_without_disabled_thinking(request_params, exc)
             if retry_params is None:
+                retry_params = self._retry_params_without_sampling(request_params, exc)
+                recovered_sampling = retry_params is not None
+            if retry_params is None:
                 raise
 
         async for chunk in self._iter_affinity_gateway_stream(retry_params, timeout=timeout):
             yield chunk
 
-        model_key = self._disabled_thinking_model_key(request_params)
-        if model_key:
-            self._models_rejecting_disabled_thinking.add(model_key)
-        llm_logger.warning(
-            "OpenAI-compatible model rejected disabled thinking; request recovered with model defaults.",
-            model_name=model_key,
-            model_provider=self.model_client_config.client_provider,
-            is_stream=True,
-        )
+        if recovered_sampling:
+            cache_key = self._sampling_cache_key(request_params)
+            if cache_key:
+                self._MODELS_REJECTING_SAMPLING.add(cache_key)
+            llm_logger.warning(
+                "OpenAI-compatible model rejected sampling params; "
+                "request recovered without temperature/top_p.",
+                model_name=cache_key[1] if cache_key else None,
+                model_provider=self.model_client_config.client_provider,
+                is_stream=True,
+            )
+        else:
+            model_key = self._disabled_thinking_model_key(request_params)
+            if model_key:
+                self._models_rejecting_disabled_thinking.add(model_key)
+            llm_logger.warning(
+                "OpenAI-compatible model rejected disabled thinking; "
+                "request recovered with model defaults.",
+                model_name=model_key,
+                model_provider=self.model_client_config.client_provider,
+                is_stream=True,
+            )
 
     def supports_kv_cache_release(self) -> bool:
         return self._kv_cache_mode() == "release"
@@ -1480,6 +1502,50 @@ class OpenAIModelClient(BaseModelClient):
             return None
         return self._without_disabled_thinking_params(params)
 
+    @staticmethod
+    def _has_sampling_params(params: Mapping[str, Any]) -> bool:
+        return "temperature" in params or "top_p" in params
+
+    @classmethod
+    def _without_sampling_params(cls, params: Mapping[str, Any]) -> dict[str, Any]:
+        cleaned = dict(params)
+        cleaned.pop("temperature", None)
+        cleaned.pop("top_p", None)
+        return cleaned
+
+    def _sampling_cache_key(self, params: Mapping[str, Any]) -> Optional[Tuple[str, str]]:
+        model_key = self._disabled_thinking_model_key(params)
+        if not model_key:
+            return None
+        api_base = (self.model_client_config.api_base or "").strip().lower()
+        return (api_base, model_key)
+
+    def _apply_sampling_cache(self, params: dict[str, Any]) -> dict[str, Any]:
+        cache_key = self._sampling_cache_key(params)
+        if cache_key is None or cache_key not in self._MODELS_REJECTING_SAMPLING:
+            return params
+        if not self._has_sampling_params(params):
+            return params
+        return self._without_sampling_params(params)
+
+    @classmethod
+    def _is_sampling_param_rejection(cls, exc: BaseException) -> bool:
+        if cls._exception_status_code(exc) != 400:
+            return False
+        error_text = cls._exception_text(exc).lower()
+        return "temperature" in error_text or "top_p" in error_text or "top p" in error_text
+
+    def _retry_params_without_sampling(
+            self,
+            params: dict[str, Any],
+            exc: BaseException,
+    ) -> Optional[dict[str, Any]]:
+        if not self._has_sampling_params(params):
+            return None
+        if not self._is_sampling_param_rejection(exc):
+            return None
+        return self._without_sampling_params(params)
+
     async def _create_chat_completion_with_disabled_thinking_fallback(
             self,
             async_client: "openai.AsyncOpenAI",
@@ -1487,24 +1553,47 @@ class OpenAIModelClient(BaseModelClient):
             *,
             is_stream: bool,
     ) -> Any:
+        """Create a chat completion, recovering from known OpenAI-compat rejections.
+
+        Handles both disabled-thinking rejection and sampling-param rejection
+        (temperature / top_p). At most one recovery retry per call.
+        """
         request_params = self._apply_disabled_thinking_cache(params)
+        request_params = self._apply_sampling_cache(request_params)
         try:
             return await async_client.chat.completions.create(**request_params)
         except Exception as exc:
             retry_params = self._retry_params_without_disabled_thinking(request_params, exc)
+            recovered_sampling = False
+            if retry_params is None:
+                retry_params = self._retry_params_without_sampling(request_params, exc)
+                recovered_sampling = retry_params is not None
             if retry_params is None:
                 raise
 
             response = await async_client.chat.completions.create(**retry_params)
-            model_key = self._disabled_thinking_model_key(request_params)
-            if model_key:
-                self._models_rejecting_disabled_thinking.add(model_key)
-            llm_logger.warning(
-                "OpenAI-compatible model rejected disabled thinking; request recovered with model defaults.",
-                model_name=model_key,
-                model_provider=self.model_client_config.client_provider,
-                is_stream=is_stream,
-            )
+            if recovered_sampling:
+                cache_key = self._sampling_cache_key(request_params)
+                if cache_key:
+                    self._MODELS_REJECTING_SAMPLING.add(cache_key)
+                llm_logger.warning(
+                    "OpenAI-compatible model rejected sampling params; "
+                    "request recovered without temperature/top_p.",
+                    model_name=cache_key[1] if cache_key else None,
+                    model_provider=self.model_client_config.client_provider,
+                    is_stream=is_stream,
+                )
+            else:
+                model_key = self._disabled_thinking_model_key(request_params)
+                if model_key:
+                    self._models_rejecting_disabled_thinking.add(model_key)
+                llm_logger.warning(
+                    "OpenAI-compatible model rejected disabled thinking; "
+                    "request recovered with model defaults.",
+                    model_name=model_key,
+                    model_provider=self.model_client_config.client_provider,
+                    is_stream=is_stream,
+                )
             return response
 
     def _create_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
