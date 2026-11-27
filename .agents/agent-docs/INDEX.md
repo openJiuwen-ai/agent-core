@@ -35,6 +35,7 @@ generated: true
 | [core/single_agent](#module-core-single_agent) |
 | [core/sys_operation](#module-core-sys_operation) |
 | [core/workflow](#module-core-workflow) |
+| [extensions](#module-extensions) |
 | [extensions.tracer_otel](#module-extensions-tracer_otel) |
 | [extensions/a2a](#module-extensions-a2a) |
 | [extensions/observability](#module-extensions-observability) |
@@ -477,6 +478,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261116_2246_subworkflow-stream-batch-mode](bugfix/core_runtime/B_20261116_2246_subworkflow-stream-batch-mode.md) | B | 子工作流默认批式配置被流式边调用时 _sub_stream 必崩的缩进缺陷 | CharlesWang2030 | 无独立 D：常规缺陷修复，未归档独立设计；修复方案在 CORE-02 问题分析归档中确认（缩进修正 + 批式回退），沿用 _sub_invoke 既有批式返回契约，无新增公开 API。 |
+
+<a id="module-extensions"></a>
+
+## extensions
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261126_2165_jiuwenbox-windows-killpg](bugfix/openjiuwen/B_20261126_2165_jiuwenbox-windows-killpg.md) | B | jiuwenbox 本地超时清理在 Windows 上因 AttributeError 失效留下孤儿进程 | linghb | 无独立 D：单点异常类型修正,不改变任何契约,无需独立设计。 |
 
 <a id="module-extensions-tracer_otel"></a>
 
