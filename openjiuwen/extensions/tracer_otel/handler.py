@@ -1142,18 +1142,16 @@ def _execution_scoped(method):
     @functools.wraps(method)
     async def wrapper(self, *args, **kwargs):
         try:
-            target = self._route_for_event(
-                kwargs.get("execution_id"),
-                trace_id=kwargs.get("trace_id"),
-                session_id=kwargs.get("session_id"),
-            )
+            target = self.resolve_event_handler(method.__name__, **kwargs)
         except Exception as exc:  # noqa: BLE001 - tracing must not break business flow
             session_logger.warning(
                 "otel workflow handler: route %s failed: %s", method.__name__, exc
             )
             target = self
         if target is not self:
-            return await method(target, *args, **kwargs)
+            # Dispatch through the child's class so downstream event
+            # overrides (studio's on_call_done) keep working.
+            return await getattr(target, method.__name__)(*args, **kwargs)
         return await method(self, *args, **kwargs)
 
     return wrapper
@@ -1227,6 +1225,18 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
 
     # --- helper: execution-scoped routing ---
 
+    def bind_parent_handler(self, parent: "OtelWorkflowHandler") -> None:
+        """Attach this handler as an execution-scoped child of ``parent``."""
+        self._parent_handler = parent
+
+    def get_trace_id(self) -> str:
+        """Return the trace id bound to this handler (public accessor)."""
+        return self._trace_id
+
+    def get_session_id(self) -> str | None:
+        """Return the session id bound to this handler (public accessor)."""
+        return self._session_id
+
     def _new_execution_handler(self, trace_id: str | None) -> "OtelWorkflowHandler":
         # Preserve downstream subclasses (e.g. studio's business_error handler)
         # so their overrides run on the execution-scoped instance too. A
@@ -1274,15 +1284,15 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             # Refresh LRU order (dict preserves insertion order).
             self._exec_handlers.pop(key, None)
             self._exec_handlers[key] = target
-            if trace_id and trace_id != target._trace_id:
+            if trace_id and trace_id != target.get_trace_id():
                 target.set_trace_id(trace_id)
-            if session_id is not None and session_id != target._session_id:
+            if session_id is not None and session_id != target.get_session_id():
                 target.set_session_id(session_id)
             return target
 
         self._evict_idle_execution_handlers()
         target = self._new_execution_handler(trace_id)
-        target._parent_handler = self
+        target.bind_parent_handler(self)
         # Only bind the session observed on this event: inheriting the
         # root's _session_id would leak another request's binding.
         if session_id is not None:
@@ -1305,11 +1315,21 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             if len(self._exec_handlers) < limit:
                 return
             child = self._exec_handlers[key]
-            if not child._is_idle():
+            if not child.evict_if_idle():
                 continue
-            child._discard_execution_state()
             self._exec_handlers.pop(key, None)
             session_logger.debug("otel: evicted idle execution handler: %s", key)
+
+    def evict_if_idle(self) -> bool:
+        """Release retained state when this execution handler is idle.
+
+        Public wrapper for the root's eviction loop; the root must not touch
+        a child's protected members (G.CLS.11).
+        """
+        if not self._is_idle():
+            return False
+        self._discard_execution_state()
+        return True
 
     def _is_idle(self) -> bool:
         """Whether this execution handler retains no in-flight or buffered state."""
