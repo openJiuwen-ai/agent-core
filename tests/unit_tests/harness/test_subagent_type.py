@@ -21,7 +21,7 @@ from openjiuwen.harness.subagent_type import (
     registered_subagent_name,
     resolve_subagent_type_name,
 )
-from openjiuwen.harness.tools.subagent.session_tools import SessionToolkit, SessionsSpawnTool
+from openjiuwen.harness.tools.subagent.session_tools import SessionsSpawnTool, SessionToolkit
 from openjiuwen.harness.tools.subagent.subagent_tools import SubagentSpawnTool
 from openjiuwen.harness.tools.subagent.task_tool import TaskTool
 
