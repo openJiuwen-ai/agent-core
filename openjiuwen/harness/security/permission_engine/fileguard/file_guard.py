@@ -25,6 +25,7 @@ from typing import Any, Literal
 from openjiuwen.core.sys_operation.cwd import get_cwd
 from openjiuwen.harness.security.permission_engine.fileguard.glob_patterns import validated_glob_patterns
 from openjiuwen.harness.security.permission_engine.models import PermissionLevel, PermissionResult
+from openjiuwen.harness.security.permission_engine.match_trace import record_match, record_target
 from openjiuwen.harness.security.permission_engine.policy_sources import SOURCE_USER
 from openjiuwen.harness.security.permission_engine.toolguard.pattern_matchers import contains_path
 from openjiuwen.harness.security.permission_engine.toolguard.tool_categories import (
@@ -738,6 +739,7 @@ class FileGuardChecker:
         matched_bits: list[str] = []
         for p, action in accesses:
             level, rule_id = self._resolve_one(p, action)
+            record_target("file", p, level, action)
             overall = tiered_strictest(overall, level)
             if level != PermissionLevel.ALLOW:
                 hit_external.append(p.as_posix())
@@ -859,6 +861,7 @@ class FileGuardChecker:
             if rule.match == "glob":
                 if _match_glob(rule.path.replace("\\", "/"), path_posix):
                     glob_hits.append(_level_for_action(rule, action))
+                    record_match("file", path, _level_for_action(rule, action), rule.path, rule.source, action)
                 continue
             # prefix
             prefix = os.path.normcase(rule.path).replace("\\", "/").rstrip("/")
@@ -873,6 +876,7 @@ class FileGuardChecker:
         rule_id: str | None = None
         if best_prefix is not None:
             candidates.append(_level_for_action(best_prefix[1], action))
+            record_match("file", path, candidates[-1], best_prefix[1].path, best_prefix[1].source, action)
             rule_id = f"file_guard:prefix:{best_prefix[1].path}"
         candidates.extend(glob_hits)
         if glob_hits and rule_id is None:
@@ -885,6 +889,7 @@ class FileGuardChecker:
 
         # 未命中 paths → defaults
         defaults = self._effective.defaults
+        record_match("file", path, getattr(defaults, action), "file_guard:defaults", operation=action, is_default=True)
         if action == "write":
             return defaults.write, "file_guard:defaults"
         if action == "exec":
@@ -912,6 +917,7 @@ class FileGuardChecker:
         for source in self._effective.source_order:
             for _length, level, rule in hits[source]:
                 if level == PermissionLevel.DENY:
+                    record_match("file", path, level, rule.path, source, action)
                     return level, f"file_guard:source:{source}:{rule.match}:{rule.path}"
         for source in self._effective.source_order:
             if not hits[source]:
@@ -920,8 +926,11 @@ class FileGuardChecker:
             globs = [hit for hit in hits[source] if hit[2].match == "glob"]
             candidates = ([max(prefixes, key=lambda hit: hit[0])] if prefixes else []) + globs
             chosen = min(candidates, key=lambda hit: _LEVEL_ORDER[hit[1]])
+            for _length, level, rule in candidates:
+                record_match("file", path, level, rule.path, source, action)
             return chosen[1], f"file_guard:source:{source}:{chosen[2].match}:{chosen[2].path}"
         defaults = self._effective.defaults
+        record_match("file", path, getattr(defaults, action), "file_guard:defaults", operation=action, is_default=True)
         return getattr(defaults, action), "file_guard:defaults"
 
 

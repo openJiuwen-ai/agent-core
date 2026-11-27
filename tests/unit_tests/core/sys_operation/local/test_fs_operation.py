@@ -72,6 +72,47 @@ async def sys_op_fixture(work_dir):
 
 
 @pytest.mark.asyncio
+async def test_operation_observer_denies_write_before_parent_creation(sys_op, work_dir):
+    from openjiuwen.core.sys_operation.local.operation_observer import bind_operation_observer
+
+    target = Path(work_dir) / "not-created" / "blocked.txt"
+    observed = []
+
+    async def deny(name, arguments):
+        observed.append((name, arguments))
+        return False
+
+    with bind_operation_observer(deny):
+        result = await sys_op.fs().write_file(path=str(target), content="must not be written")
+    assert result.code != StatusCode.SUCCESS.code
+    assert observed == [("file_write", str(target))]
+    assert not target.parent.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["upload_file", "download_file", "upload_file_stream", "download_file_stream"])
+async def test_operation_observer_blocks_transfer_without_creating_destination(sys_op, work_dir, method):
+    from openjiuwen.core.sys_operation.local.operation_observer import bind_operation_observer
+
+    source, target = Path(work_dir) / "source.txt", Path(work_dir) / "new" / "target.txt"
+    source.write_text("retained", encoding="utf-8")
+    observed = []
+
+    async def observe(name, arguments):
+        observed.append((name, arguments))
+        return name == "file_read"
+
+    arguments = {"local_path": str(source), "target_path": str(target)} if method.startswith("upload") else {
+        "source_path": str(source), "local_path": str(target)}
+    with bind_operation_observer(observe):
+        operation = getattr(sys_op.fs(), method)(**arguments)
+        results = [part async for part in operation] if method.endswith("stream") else [await operation]
+    assert all(result.code != StatusCode.SUCCESS.code for result in results)
+    assert observed == [("file_read", str(source)), ("file_write", str(target))]
+    assert source.read_text(encoding="utf-8") == "retained" and not target.parent.exists()
+
+
+@pytest.mark.asyncio
 async def test_fs_read_write(sys_op, work_dir):
     """Test combined read and write operations."""
     # 1. Basic Write & Read
@@ -1076,6 +1117,12 @@ finally:
     assert result.stdout.strip() == "timeout"
 
 
+def expire_lock_database(lock_file):
+    """Make the test database due independently of Windows timestamp precision."""
+    expired_at = time.time() - 60.0
+    os.utime(lock_file, (expired_at, expired_at))
+
+
 @pytest.mark.asyncio
 async def test_idle_lock_cleanup_deletes_database(work_dir, monkeypatch):
     """Idle cleanup deletes a closed database after acquiring it exclusively."""
@@ -1090,6 +1137,7 @@ async def test_idle_lock_cleanup_deletes_database(work_dir, monkeypatch):
     assert lock_file not in ReadWriteLockManager._locks
     assert lock._closed
 
+    expire_lock_database(lock_file)
     await ReadWriteLockManager.cleanup_expired_locks()
 
     assert not lock_file.exists()
@@ -1131,6 +1179,7 @@ async def test_due_lock_databases_are_processed_in_deadline_order(rw_lock_dir, m
 
     for lock_file in (newest, oldest, middle):
         lock_file.touch()
+        expire_lock_database(lock_file)
 
     async def record_delete(_cls, lock_file):
         processed.append(lock_file)
@@ -1197,6 +1246,8 @@ async def test_idle_lock_cleanup_evicts_multiple_cached_locks(work_dir, monkeypa
     assert not ReadWriteLockManager._locks
     assert all(lock._closed for lock in locks)
 
+    for lock_file in lock_files:
+        expire_lock_database(lock_file)
     await ReadWriteLockManager.cleanup_expired_locks()
 
     assert all(not lock_file.exists() for lock_file in lock_files)
@@ -1213,6 +1264,7 @@ async def test_cleanup_skips_active_local_lock(work_dir, monkeypatch):
         await ReadWriteLockManager.cleanup_expired_locks()
         assert lock_file.exists()
 
+    expire_lock_database(lock_file)
     await ReadWriteLockManager.cleanup_expired_locks()
     assert not lock_file.exists()
 
@@ -1250,6 +1302,7 @@ lock.close()
         while (line := await asyncio.to_thread(process.stdout.readline)) != "acquired\n":
             if not line:
                 pytest.fail(f"Reader subprocess exited before acquiring the lock, returncode={process.poll()}")
+        expire_lock_database(lock_file)
         await ReadWriteLockManager.cleanup_expired_locks()
         assert lock_file.exists()
 
@@ -1258,6 +1311,7 @@ lock.close()
         process.stdin.flush()
         assert await asyncio.to_thread(process.wait, 1.0) == 0
 
+        expire_lock_database(lock_file)
         await ReadWriteLockManager.cleanup_expired_locks()
         assert not lock_file.exists()
     finally:
@@ -1279,6 +1333,7 @@ async def test_stopping_cleanup_processes_final_due_locks(work_dir, monkeypatch)
         pass
 
     assert lock_file.exists()
+    expire_lock_database(lock_file)
     await ReadWriteLockManager.stop()
 
     assert not lock_file.exists()

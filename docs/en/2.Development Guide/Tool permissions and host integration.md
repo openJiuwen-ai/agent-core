@@ -309,6 +309,33 @@ URL-size denial. These tests do not establish the cause of a separate full-suite
 
 ## 7. Source index
 
+### Permission provenance and operation observation
+
+`PermissionResult.matches` is a tuple of `PermissionMatch` records: category, target,
+permission, rule ID, source, optional operation and `is_default`. These records describe
+actual matcher results; they do not replace `PermissionResult.permission`. A default
+ALLOW must not be reported as a user-authored rule. A source is present only when the
+effective composed policy identifies it. Each public evaluation isolates its trace with
+ContextVars, including concurrent tools.
+
+`PermissionEvaluationRequest.engine` exposes the same effective engine to the trusted
+host observer. `engine.inspect_tool_resources(name, arguments)` returns concrete structured
+API targets and their match records for reporting. Its overall permission is deliberately
+UNDETERMINED: the host must still enforce the original whole-tool decision. CLI targets
+are empty; this reporting API does not parse shell text or grant permission to run it.
+
+Hosts can bind `bind_operation_observer(async_callback)` from
+`core.sys_operation.local.operation_observer` around an actual tool invocation. The
+callback receives an operation name and arguments, returns a boolean, and completes
+before SDK local file I/O or HTTP dispatch. File authorization runs before file locks and
+destination directory creation. Returning false fails that operation without repeating
+the tool. Reporting traffic from inside the observer is protected against reentry.
+
+Synchronous HTTP tools should run via `asyncio.to_thread`. `before_operation_sync` carries
+the callback to the owning loop; it refuses to block that same loop. Hosts own cloud I/O,
+prompting, cancellation, process injection, reporting queues and protocol serialization.
+Without a bound observer, existing SDK I/O behavior remains unchanged.
+
 The prototype retains package allow entries for `localhost` and `127.0.0.1` when NetGuard and package rules
 are enabled. Explicit host/URL ASK or DENY rules can tighten them; no additional IPv6 or loopback-range
 allow is added. The metadata hosts `169.254.169.254` and `metadata.google.internal` remain denied.

@@ -34,6 +34,7 @@ from openjiuwen.harness.security.permission_engine.models import (
     ApprovalOverrideEntry,
     PermissionConfirmResponse,
     PermissionLevel,
+    PermissionMatch,
     PermissionResult,
     PermissionsSection,
 )
@@ -75,6 +76,7 @@ __all__ = [
     "PermissionEngine",
     "ApprovalOverrideEntry",
     "PermissionLevel",
+    "PermissionMatch",
     "PermissionResult",
     "PermissionsSection",
     "ToolPermissionHost",

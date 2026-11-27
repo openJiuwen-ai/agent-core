@@ -33,6 +33,7 @@ from openjiuwen.core.sys_operation.result import (
 )
 from openjiuwen.core.sys_operation.result.base_result import build_operation_error_result
 from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
+from openjiuwen.core.sys_operation.local.operation_observer import before_operation
 
 
 class _ListItemsSpec(BaseModel):
@@ -467,6 +468,8 @@ class FsOperation(BaseFsOperation):
             method_params=method_params
         ))
         try:
+            file_path = self._resolve_path(path)
+            await before_operation("file_write", str(file_path))
             file_path = self._resolve_path(path, create_parent=True)
             if file_path.is_dir():
                 return self._create_error_result("write_file", f"Target path is a directory:"
@@ -568,7 +571,7 @@ class FsOperation(BaseFsOperation):
         ))
         try:
             src = pathlib.Path(local_path).expanduser().resolve()
-            dst = self._resolve_path(target_path, create_parent=create_parent_dirs)
+            dst = self._resolve_path(target_path, create_parent=False)
             if not src.is_file():
                 return self._create_error_result("upload_file", f"Source not found: {src}", UploadFileResult,
                                                  _ErrorLogParams(method_name, method_params, start_time))
@@ -576,6 +579,10 @@ class FsOperation(BaseFsOperation):
                 return self._create_error_result("upload_file", f"Target exists: {dst}", UploadFileResult,
                                                  _ErrorLogParams(method_name, method_params, start_time))
 
+            await before_operation("file_read", str(src))
+            await before_operation("file_write", str(dst))
+            if create_parent_dirs:
+                dst.parent.mkdir(parents=True, exist_ok=True)
             timeout = self._get_lock_timeout(options)
 
             async with self._ordered_file_locks((src, "read"), (dst, "write"), timeout=timeout):
@@ -639,7 +646,7 @@ class FsOperation(BaseFsOperation):
 
         try:
             src = pathlib.Path(local_path).expanduser().resolve()
-            dst = self._resolve_path(target_path, create_parent=create_parent_dirs)
+            dst = self._resolve_path(target_path, create_parent=False)
             if not src.is_file():
                 yield self._create_error_result("upload_file_stream", f"Source not found: {src}",
                                                 UploadFileStreamResult,
@@ -650,6 +657,10 @@ class FsOperation(BaseFsOperation):
                                                 _ErrorLogParams(method_name, method_params, start_time))
                 return
 
+            await before_operation("file_read", str(src))
+            await before_operation("file_write", str(dst))
+            if create_parent_dirs:
+                dst.parent.mkdir(parents=True, exist_ok=True)
             timeout = self._get_lock_timeout(options)
 
             async with self._ordered_file_locks((src, "read"), (dst, "write"), timeout=timeout):
@@ -734,6 +745,8 @@ class FsOperation(BaseFsOperation):
                 return self._create_error_result("download_file", f"Destination exists: {dst}",
                                                  DownloadFileResult,
                                                  _ErrorLogParams(method_name, method_params, start_time))
+            await before_operation("file_read", str(src))
+            await before_operation("file_write", str(dst))
             if create_parent_dirs:
                 dst.parent.mkdir(parents=True, exist_ok=True)
 
@@ -811,6 +824,8 @@ class FsOperation(BaseFsOperation):
                                                 DownloadFileStreamResult,
                                                 _ErrorLogParams(method_name, method_params, start_time))
                 return
+            await before_operation("file_read", str(src))
+            await before_operation("file_write", str(dst))
             if create_parent_dirs:
                 dst.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1328,6 +1343,7 @@ class FsOperation(BaseFsOperation):
 
         # Resolve path
         file_path = self._resolve_path(read_params.path)
+        await before_operation("file_read", str(file_path))
         if not file_path.is_file():
             raise build_error(
                 status=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
