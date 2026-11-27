@@ -836,7 +836,9 @@ class TeamScheduler:
         tr = make_translator(language, ws_cache=cache)
 
         verify_tool = VerifyTaskTool(reviewer_tm, tr, desc_key="verify_task_scheduled")
-        view_tool = ViewTaskToolV2(reviewer_tm, tr, desc_key="view_task_reviewer")
+        view_tool = ViewTaskToolV2(
+            reviewer_tm, tr, desc_key="view_task_reviewer", language=language
+        )
 
         member_name = reviewer
         harness = None

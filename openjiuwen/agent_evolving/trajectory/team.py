@@ -15,9 +15,10 @@ from typing import Any, Iterator
 
 from openjiuwen.extensions.observability import semconv
 
+from openjiuwen.agent_evolving.trajectory.serialization import to_json_compatible
 from openjiuwen.agent_evolving.trajectory.spans import (
     Span,
-    iter_spans,
+    iter_compact_spans,
     span_attributes,
     span_identity,
     span_sort_key,
@@ -44,7 +45,13 @@ def span_category(span: Mapping[str, Any]) -> str | None:
     """Classify a canonical span by its stable name/semantic attributes."""
 
     name = str(span.get("name") or "").strip().lower()
-    attrs = span_attributes(span)
+    attrs = span_attributes(span, keys=(
+        semconv.OJ_TRAJECTORY_RECORD_KIND,
+        semconv.GEN_AI_OPERATION_NAME,
+        semconv.AT_EVENT_TYPE,
+        semconv.AT_TASK_ID,
+        semconv.AT_MEMBER_NAME,
+    ))
     record_kind = str(attrs.get(semconv.OJ_TRAJECTORY_RECORD_KIND) or "")
     if record_kind == "reasoning" or name == "llm.reasoning" or name.startswith("llm.reasoning."):
         return None
@@ -109,18 +116,23 @@ def select_team_spans(
     """
 
     wanted = _normalise_categories(categories)
-    all_spans = list(iter_spans(value))
+    all_spans = list(iter_compact_spans(value))
     # Team/member context is intentionally not duplicated onto every LLM/tool
     # span.  A team selector therefore routes by a matching context span's
     # native trace ID, then applies the declared category filter to that tree.
     if trace_id is not None:
         routed_trace_ids = {str(trace_id)}
     elif team_id is not None:
-        routed_trace_ids = {
-            str(span.get("traceId") or "")
-            for span in all_spans
-            if str(span_attributes(span).get(semconv.AT_TEAM_ID) or "") == str(team_id) and span.get("traceId")
-        }
+        routed_trace_ids = set()
+        team_key = semconv.AT_TEAM_ID
+        requested_team_id = str(team_id)
+        for span in all_spans:
+            span_trace_id = span.get("traceId")
+            if not span_trace_id:
+                continue
+            span_team_id = span_attributes(span, keys=(team_key,)).get(team_key)
+            if str(span_team_id or "") == requested_team_id:
+                routed_trace_ids.add(str(span_trace_id))
     else:
         routed_trace_ids = None
     if team_id is not None and not routed_trace_ids:
@@ -132,7 +144,7 @@ def select_team_spans(
             continue
         if routed_trace_ids is not None and str(span.get("traceId") or "") not in routed_trace_ids:
             continue
-        result.append(span)
+        result.append(to_json_compatible(span))
     result.sort(key=span_sort_key)
     return result
 

@@ -346,6 +346,41 @@ async def test_parent_resumes_with_resume_handoff_after_subtasks(db, bus):
     assert (DEV_1, "scheduler_task_resume", "parent") in _handoffs(mm)
 
 
+def _published(bus, event_type: str) -> list[dict]:
+    """Payloads of every event of ``event_type`` published on the bus, in order."""
+    return [
+        call.kwargs["message"].payload
+        for call in bus.publish.await_args_list
+        if getattr(call.kwargs.get("message"), "event_type", None) == event_type
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_split_and_resume_events_mark_the_suspension_for_trajectories(db, bus):
+    """Subtask creation names the suspended parent; the parent's restart says it resumed.
+
+    Suspension publishes no event of its own, so trajectory consumers derive the
+    parent's waiting interval from these two fields.
+    """
+    scheduler, _host, _mm, _tm = _scheduler(db, bus)
+    await _start_parent(db, bus, scheduler)
+    assert (await _create_tool(db, bus).invoke({"tasks": [_subtask("s1", DEV_2)]})).success
+
+    created = {payload["task_id"]: payload for payload in _published(bus, TeamEvent.TASK_CREATED)}
+    assert created["parent"].get("parent_task_id") is None
+    assert created["s1"]["parent_task_id"] == "parent"
+
+    await _scan(scheduler)
+    assert (await _member_mgr(db, bus, DEV_2).complete("s1", summary="done")).ok
+    await _scan(scheduler)
+
+    parent_starts = [p["resumed"] for p in _published(bus, TeamEvent.TASK_STARTED) if p["task_id"] == "parent"]
+    assert parent_starts == [False, True]
+    subtask_starts = [p["resumed"] for p in _published(bus, TeamEvent.TASK_STARTED) if p["task_id"] == "s1"]
+    assert subtask_starts == [False]
+
+
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_cancelled_subtask_still_lets_the_parent_resume(db, bus):

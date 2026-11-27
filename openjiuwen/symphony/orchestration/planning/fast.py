@@ -9,11 +9,13 @@ from typing import Any, Sequence
 
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.symphony.orchestration.artifacts import GraphArtifacts
+from openjiuwen.symphony.orchestration.contracts import PlanningInput
 from openjiuwen.symphony.orchestration.language import (
     default_fast_no_plan_title,
     planner_language_instruction,
 )
 from openjiuwen.symphony.orchestration.model import ModelResponseObserver, invoke_json, model_usage_context
+from openjiuwen.symphony.orchestration.planning.input_matching import artifact_matches, supplied_input_keys
 from openjiuwen.symphony.orchestration.planning.plan_builder import edge_plan_item
 from openjiuwen.symphony.orchestration.planning.runtime import RuntimeEdgeResolver, edge_weight
 from openjiuwen.symphony.orchestration.planning.utils import (
@@ -29,6 +31,7 @@ necessary. Do not perform or output step-by-step analysis or chain-of-thought.
 
 You receive:
 - The user's query.
+- Optional named task data in inputs. File entries refer to the host workspace.
 - Candidate Skills with id, name, and description only.
 - Candidate can_feed relationships between those Skills.
 
@@ -45,18 +48,20 @@ Task:
 - missing_inputs does not describe a Skill I/O schema. Use it only for information the
   user must provide when that need can be determined from the query and Skill
   descriptions.
+- Use the supplied inputs as reference data when deciding what is already available.
 - Do not invent Skills, inputs, or outputs.
 - Prefer the shortest path that satisfies the user's intent.
 - When runtime_weight and planner_weight are present, use them only as tie-breakers
   between otherwise relevant relationships. planner_weight already combines static and
   scoped runtime evidence.
-- If required information is missing, set status to "needs_input" and list it.
+- Return a ready plan whenever the steps can be determined. List outstanding inputs
+  in missing_inputs with the affected skill_id so the host can decide how to obtain them.
 - If no useful plan exists from the candidates, set status to "no_plan".
 
 Schema:
 {
   "title": "short plan title",
-  "status": "ready | needs_input | no_plan",
+  "status": "ready | no_plan",
   "reason": "why this plan is best",
   "steps": [
     {"skill_id": "skill-a", "reason": "why this step is used"}
@@ -69,6 +74,15 @@ Schema:
   ]
 }
 """
+
+EXPERT_FAST_PLANNER_SYSTEM_PROMPT = FAST_PLANNER_SYSTEM_PROMPT.replace("Skill", "expert").replace(
+    "- Prefer provided can_feed edges. Infer a missing relationship only when needed to form\n"
+    "  the plan.\n"
+    "- Give a short reason when explicitly including an inferred edge in can_feed_edges.\n"
+    "- When can_feed_edges is omitted, Symphony infers adjacent step edges during validation.",
+    "- Use only the supplied can_feed edges. Return no_plan when the required handoff is missing.\n"
+    "- The existing JSON keys skills and skill_id refer to experts in this request.",
+)
 
 
 class FastOneShotPlanner:
@@ -86,6 +100,8 @@ class FastOneShotPlanner:
         language: str = "cn",
         dynamic_overlay: dict[str, Any] | None = None,
         task_cluster_id: str | None = None,
+        layer: str = "skill",
+        inputs: Sequence[PlanningInput] = (),
     ) -> None:
         self.artifacts = artifacts
         self.model = model
@@ -95,6 +111,9 @@ class FastOneShotPlanner:
         self.language = language
         self.dynamic_overlay = dynamic_overlay if isinstance(dynamic_overlay, dict) else {}
         self.task_cluster_id = task_cluster_id
+        self.layer = layer
+        self.inputs = [item.model_dump(exclude_none=True) for item in inputs]
+        self.supplied_input_keys = supplied_input_keys(inputs)
         self._runtime_summary: dict[str, Any] = {
             "available": bool(self._overlay_edges()),
             "applied_edges": 0,
@@ -112,10 +131,13 @@ class FastOneShotPlanner:
             "skills": subgraph["skills"],
             "can_feed_edges": subgraph["edges"],
         }
+        if self.inputs:
+            prompt_payload["inputs"] = self.inputs
+        system_prompt = EXPERT_FAST_PLANNER_SYSTEM_PROMPT if self.layer == "expert" else FAST_PLANNER_SYSTEM_PROMPT
         with model_usage_context("orchestration", "one_shot_fast_planning"):
             raw = await invoke_json(
                 self.model,
-                system_prompt=(f"{FAST_PLANNER_SYSTEM_PROMPT}\n{planner_language_instruction(self.language)}"),
+                system_prompt=f"{system_prompt}\n{planner_language_instruction(self.language)}",
                 user_content=json.dumps(prompt_payload, ensure_ascii=False),
                 error_context="Symphony one-shot fast planning",
                 request_overrides={
@@ -166,6 +188,10 @@ class FastOneShotPlanner:
             "status": plan.get("status", "no_plan") if plan else "no_plan",
             "reason": plan.get("reason", "") if plan else "",
         }
+
+    def candidate_ids_for_query(self, query: str) -> tuple[str, ...]:
+        """Collect the candidate subgraph without asking the model for a plan."""
+        return tuple(self._candidate_subgraph(query)["skill_ids"])
 
     def _candidate_subgraph(self, query: str) -> dict[str, Any]:
         if self.candidate_skill_ids:
@@ -476,11 +502,9 @@ class FastOneShotPlanner:
         candidate_edges: dict[tuple[str, str], dict[str, Any]],
     ) -> dict[str, Any]:
         status = str(selection.get("status") or "ready").strip().lower()
-        if status not in {"ready", "needs_input", "no_plan"}:
-            status = "ready"
         raw_steps = selection.get("steps") or selection.get("skill_order") or []
         step_ids = self._normalize_step_ids(raw_steps)
-        if status == "no_plan" or not step_ids:
+        if not step_ids or (status == "no_plan" and not selection.get("missing_inputs")):
             return {
                 "valid": True,
                 "detail": "",
@@ -539,11 +563,20 @@ class FastOneShotPlanner:
                 "valid": False,
                 "detail": (f"Fast planner selected edges that violate step order: {backward_edges}"),
             }
+        if self.layer == "expert" and any(edge not in candidate_edges for edge in selected_edges):
+            return {
+                "valid": True,
+                "plan": {"status": "no_plan", "steps": [], "reason": "No published expert handoff supports this plan."},
+            }
 
-        missing_inputs = self._normalize_missing_inputs(
+        reported_missing = self._normalize_missing_inputs(
             selection.get("missing_inputs") or [],
             set(step_ids),
         )
+        missing_inputs = [
+            item for item in reported_missing
+            if not artifact_matches((item["name"], item["type"]), self.supplied_input_keys)
+        ]
         missing_by_skill: dict[str, list[dict[str, Any]]] = {}
         for item in missing_inputs:
             missing_by_skill.setdefault(str(item.get("skill_id") or ""), []).append(item)
@@ -592,21 +625,19 @@ class FastOneShotPlanner:
                     selected_edges_result["reasons"].get(edge, ""),
                 )
             )
-        if missing_inputs:
-            status = "needs_input"
         return {
             "valid": True,
             "detail": "",
             "plan": {
                 "title": str(selection.get("title") or "Symphony fast plan").strip(),
-                "status": status,
+                "status": "ready",
                 "steps": steps,
                 "stages": [{"stage": index, "skills": [step]} for index, step in enumerate(steps, start=1)],
                 "produced_artifacts": produced_artifacts,
                 "missing_inputs": missing_inputs,
                 "can_feed_edges": edge_items,
                 "reason": str(selection.get("reason") or "").strip(),
-                "plan_classification": ("executable" if status == "ready" else "structurally_valid_but_incomplete"),
+                "plan_classification": "structurally_valid_but_incomplete" if missing_inputs else "executable",
                 "connectivity_trace": (
                     ["can_feed", "fast_llm_inferred"] if has_inferred_edges else (["can_feed"] if edge_items else [])
                 ),

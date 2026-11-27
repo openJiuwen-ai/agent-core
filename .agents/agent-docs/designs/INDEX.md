@@ -52,6 +52,7 @@ generated: true
 
 | ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
 |---|---|---|---|---|---|
+| [D-20261121-0832-group-member-notification](proposals/D-20261121-0832-group-member-notification/design.md) | 群聊成员通知入口设计方案 | draft | weichenhao | messaging | 2026-11-23 |
 | [SDD-0015](proposals/SDD-0015-agent-team-scheduled-dispatch/design.md) | AgentTeam 调度模式：任务图驱动的低通信协同与验证闭环 | draft | @alan_cheng | scheduler | 2026-08-20 |
 | [SDD-0019](proposals/SDD-0019-team-model-group/design.md) | Team 模式模型组接入与成员模型分配 | draft | @<huanghao> | core | 2026-09-14 |
 | [SDD-0022](proposals/SDD-0022-trajectory-observability-framework/design.md) | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | draft | @alan_cheng | observability | 2026-09-15 |
@@ -64,6 +65,8 @@ generated: true
 |---|---|---|---|---|---|
 | [D-20261110-1839-leader-external-harness](active/D-20261110-1839-leader-external-harness/design.md) | Leader 三方 Harness 插拔设计方案 | in-development | alan_cheng | harness | 2026-11-10 |
 | [D-20261110-1903-team-goal-mode](active/D-20261110-1903-team-goal-mode/design.md) | Team Leader 与成员 Goal 模式设计方案 | in-development | alan_cheng | harness | 2026-11-10 |
+| [D-20261125-1414-team-stopped-approval-recovery](active/D-20261125-1414-team-stopped-approval-recovery/design.md) | 恢复阻塞持久化团队完成的审批邮箱 | in-development | MaxMadMax | protocol | 2026-11-27 |
+| [D-20261126-1704-team-lifecycle-boundaries](active/D-20261126-1704-team-lifecycle-boundaries/design.md) | 收敛通知关闭与审批恢复接管边界 | in-development | MaxMadMax | protocol | 2026-11-26 |
 
 ### 开发后 (archive)
 

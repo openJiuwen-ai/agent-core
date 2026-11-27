@@ -27,7 +27,7 @@ class DeepAgentRail(AgentRail): ...
 | `MemoryRail` | 记忆护栏，管理工作区内的记忆读写和日常记忆归档 |
 | `JiuwenMemoryRail` | 对接宿主提供的外部记忆 provider，将中断前的请求与交互回答合并后沉淀 |
 | `SubagentRail` | 子智能体护栏，通过 `enable_async_subagent` 参数区分同步/异步模式；同步模式注册 `TaskTool`，异步模式注册 `session` 工具|
-| `SkillUseRail` | 技能使用护栏，在模型调用前注入可用技能列表到提示词；不生成、不审批、不持久化演进记录 |
+| `SkillUseRail` | 技能使用护栏，支持 `auto_list` 懒加载与 `all` 模式；可挂载到直接配置的 ReActAgent，[用法与示例](../../../高阶用法/Agent%20Skills.md#在直接配置的-reactagent-中懒加载-skills) |
 | `SkillEvolutionRail` | 普通技能演进护栏，从轨迹或用户请求中生成已有普通 skill 的经验记录，并可在审批后通过 `EvolutionStore` 持久化；主动 review 通过 Rail 自有的 `evolve_review_task` 运行 |
 | `AskUserRail` | 用户交互护栏，拦截 `ask_user` 工具调用并生成 HITL 中断 |
 | `ConfirmInterruptRail` | 确认中断护栏，在危险操作前请求用户确认 |

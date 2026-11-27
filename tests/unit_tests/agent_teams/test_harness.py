@@ -56,10 +56,12 @@ class _FakeNative:
         agent_spec: Any,
         build_context: Any = None,
         extra_rails: Any = None,
+        is_team_agent: bool = False,
     ) -> None:
         self.agent_spec = agent_spec
         self.build_context = build_context
         self.extra_rails = list(extra_rails) if extra_rails else []
+        self.is_team_agent = is_team_agent
         self.deep_config: Any = None
         self._prepare_config()
 
@@ -415,6 +417,33 @@ def test_is_pending_interrupt_resume_valid_accepts_answers_by_interrupt_id() -> 
     stale.answer("intr_1", {"approved": True})
     stale.answer("intr_gone", {"approved": True})
     assert harness.is_pending_interrupt_resume_valid(stale) is False
+
+
+def test_is_pending_interrupt_resume_valid_rejects_a_stale_single_permission_card() -> None:
+    call = ToolCall(id="call-coal", type="function", name="bash", arguments="{}")
+    state = ToolInterruptionState(
+        ai_message=AssistantMessage(content="", tool_calls=[call]),
+        iteration=0,
+        interrupted_tools={
+            call.id: ToolInterruptEntry(
+                tool_call=call,
+                interrupt_requests={
+                    call.id: InterruptRequest(interrupt_id="intr-new", interrupt_kind="permission"),
+                },
+            ),
+        },
+    )
+    session = MagicMock(name="LoopSession")
+    session.get_state.return_value = state
+    harness = _make_harness(_stub_native(loop_session=session))
+
+    stale = InteractiveInput()
+    stale.answer("intr-old", {"approved": True, "auto_confirm": True})
+    assert harness.is_pending_interrupt_resume_valid(stale) is False
+    assert stale.interrupt_answers == {"intr-old": {"approved": True, "auto_confirm": True}}
+    current = InteractiveInput()
+    current.answer("intr-new", {"approved": True})
+    assert harness.is_pending_interrupt_resume_valid(current) is True
 
 
 def test_init_cwd_for_round_no_op_without_workspace() -> None:

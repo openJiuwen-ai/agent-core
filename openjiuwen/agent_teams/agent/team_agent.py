@@ -38,8 +38,9 @@ from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
 from openjiuwen.agent_teams.agent.state import TeamAgentState
 from openjiuwen.agent_teams.agent.stream_controller import StreamController
 from openjiuwen.agent_teams.fork import ForkContext
+from openjiuwen.agent_teams.harness import TeamHarness
 from openjiuwen.agent_teams.i18n import t
-from openjiuwen.agent_teams.interaction.payload import GodViewMessage
+from openjiuwen.agent_teams.interaction.payload import DeliverResult, GodViewMessage
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
@@ -55,7 +56,7 @@ from openjiuwen.agent_teams.schema.team import (
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import raise_error
+from openjiuwen.core.common.exception.errors import BaseError, raise_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.runner.spawn.agent_config import SpawnAgentConfig
@@ -69,7 +70,7 @@ from openjiuwen.harness.execution_subject import (
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.member_runtime import MemberRuntime
-    from openjiuwen.agent_teams.interaction.payload import DeliverResult, InteractPayload
+    from openjiuwen.agent_teams.interaction.payload import InteractPayload
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
     from openjiuwen.agent_teams.models.pool import ModelPoolEntry
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
@@ -171,6 +172,30 @@ def team_reviewer_execution_subject(
 
 
 # pylint: disable=too-many-public-methods
+
+
+def _interrupt_runtime_unavailable(exc: BaseError) -> bool:
+    """Return whether a resume failed because the runtime cannot accept it yet."""
+    params = getattr(exc, "params", None)
+    error_msg = str(params.get("error_msg") or "") if isinstance(params, dict) else ""
+    if exc.status == StatusCode.AGENT_TEAM_EXECUTION_ERROR and "before start" in error_msg:
+        return True
+    return exc.status == StatusCode.DEEPAGENT_RUNTIME_ERROR and (
+        "already stopped" in error_msg or "not started" in error_msg
+    )
+
+
+def _interrupt_admission_failure_reason(exc: BaseError, admission_reasons: set[str]) -> str | None:
+    """Return the reason when a resume error is a recognized admission rejection."""
+    details = exc.details
+    if exc.status != StatusCode.DEEPAGENT_RUNTIME_ERROR or not isinstance(details, dict):
+        return None
+    if details.get("operation") != "interrupt_admission":
+        return None
+    reason = details.get("reason")
+    if not isinstance(reason, str) or reason not in admission_reasons:
+        return None
+    return reason
 
 
 class TeamAgent(BaseAgent):
@@ -658,6 +683,14 @@ class TeamAgent(BaseAgent):
     def has_pending_interrupt(self) -> bool:
         return self._stream_controller.has_pending_interrupt()
 
+    def owns_pending_interrupt_answer(self, user_input: Any) -> bool:
+        """Return whether this member's pending interrupt fully matches the answer.
+
+        The check only chooses which existing ``resume_interrupt`` to call.
+        Admission is still decided by that call's ``DeliverResult``.
+        """
+        return self._stream_controller.is_valid_interrupt_resume(user_input)
+
     async def start_agent(self, content: str) -> None:
         await self._start_agent(content)
 
@@ -743,18 +776,45 @@ class TeamAgent(BaseAgent):
         user_input: Any,
         *,
         run_context: RunContext | None = None,
-    ) -> None:
-        if not self._stream_controller.is_valid_interrupt_resume(user_input):
-            team_logger.info("[{}] dropping stale interrupt resume input", self._member_name() or "?")
-            return
-        # The supervisor serialises the resume: send() either starts the resume
-        # round (idle) or steers it into the active one — no pending queue.
+    ) -> DeliverResult:
+        """Report actual answer admission, not completion of the resumed tool."""
         harness = self.harness
-        if harness is not None:
+        if harness is None:
+            return DeliverResult.failure("interrupt_resume_unavailable")
+        if isinstance(harness, TeamHarness):
+            try:
+                await harness.resume_interrupt(user_input, run_context=run_context)
+            except BaseError as exc:
+                admission_reasons = {
+                    "interrupt_resume_busy",
+                    "interrupt_resume_unavailable",
+                    "interrupt_already_resolved",
+                    "unsupported_interactive_input",
+                }
+                reason = _interrupt_admission_failure_reason(exc, admission_reasons)
+                if reason is not None:
+                    return DeliverResult.failure(reason)
+                if _interrupt_runtime_unavailable(exc):
+                    return DeliverResult.failure("interrupt_resume_unavailable")
+                raise
+        else:
+            # External providers retain their own matching and running-input semantics.
+            if not self._stream_controller.is_valid_interrupt_resume(user_input):
+                return DeliverResult.failure("unsupported_interactive_input")
             if run_context is None:
                 await harness.send(user_input)
             else:
                 await harness.send(user_input, run_context=run_context)
+        return DeliverResult.success()
+
+    async def resume_plan_interrupt(self, user_input: Any) -> None:
+        """Preserve plan-event delivery, which has no durable approval-mail retry."""
+        if not self._stream_controller.is_valid_interrupt_resume(user_input):
+            team_logger.info("[{}] dropping stale interrupt resume input", self._member_name() or "?")
+            return
+        harness = self.harness
+        if harness is not None:
+            await harness.send(user_input)
 
     # ------------------------------------------------------------------
     # BaseAgent abstract method: configure
@@ -816,6 +876,16 @@ class TeamAgent(BaseAgent):
             ctx,
             member_runtime=member_runtime,
         )
+        if self.task_manager is not None:
+            from openjiuwen.agent_teams.memory.jiuwen import record_jiuwen_task_delivery, submit_jiuwen_task_acceptance
+
+            async def on_task_accepted(event) -> None:
+                await submit_jiuwen_task_acceptance(self.harness, event)
+
+            def on_task_delivered(task_id: str, version: str) -> None:
+                record_jiuwen_task_delivery(self.harness, task_id, version)
+
+            self.task_manager.set_task_acceptance_listener(on_task_accepted, on_delivery=on_task_delivered)
         if ctx.role == TeamRole.LEADER and ctx.cli_agent:
             # The leader's third-party harness was built by the configurator;
             # its team tools and context tracker need this agent's backend.
@@ -1211,16 +1281,23 @@ class TeamAgent(BaseAgent):
             return
         await self._spawn_manager.worktree_lifecycle.finalize_all_member_worktrees_for_team_clean()
 
-    async def conclude_completed_round(self, member_count: int, task_count: int) -> None:
-        """Emit a team-completed marker chunk, then close the leader stream.
+    async def conclude_completed_round(self, member_count: int, task_count: int) -> bool:
+        """Close the completed leader stream unless a local interrupt is pending.
 
         Drives the auto-pause path for a completed persistent team: closing
         the stream makes the Runner's stream loop break on the None sentinel
         and call ``manager.finalize``, which pauses the team. The marker
         chunk lets the SDK consumer distinguish a completion-driven end from
         an error/cancel end. Best-effort and idempotent -- the completion
-        handler's rising-edge guard ensures one call per completion.
+        handler's rising-edge guard ensures one call per completion. The
+        pending check and stream close do not yield to another member.
         """
+        if self.has_pending_interrupt():
+            return False
+        for handle in self._spawn_manager.spawned_handles.values():
+            member = getattr(handle, "agent_ref", None)
+            if member is not None and member.has_pending_interrupt():
+                return False
         team_logger.info(
             "[{}] concluding completed round: {} member(s), {} task(s)",
             self._member_name() or "?",
@@ -1228,6 +1305,7 @@ class TeamAgent(BaseAgent):
             task_count,
         )
         self._stream_controller.emit_completion_and_close(member_count, task_count)
+        return True
 
     async def _start_agent(self, initial_message: Any) -> None:
         harness = self.harness
@@ -2101,6 +2179,9 @@ class TeamAgent(BaseAgent):
         """
         await self._stop_coordination()
         await self._session_manager.recover_for_existing_session(session)
+
+    async def recover_stopped_approval_members(self) -> None:
+        await self._recovery_manager.recover_stopped_approval_members()
 
     async def recover_team(self) -> list[str]:
         return await self._recovery_manager.recover_team()

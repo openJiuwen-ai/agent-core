@@ -20,7 +20,7 @@ author_email: chengshuo5@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/coordination/` |
-| 最近一次修订日期 | 2026-11-10 |
+| 最近一次修订日期 | 2026-11-27 |
 | 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md`、`F_14_human-agent-team-event-rendering.md`、`F_65_runtime-idle-clock-stall-nudge.md`、`F_74_leader-member-activity-and-team-idle.md`、`F_81_disband-requires-explicit-intent.md`、`F_120_autonomous-completion-summary-and-note.md`、`F_121_autonomous-leader-quiet-board-events.md`、`F_129_task-revision-and-staleness.md`（调度模式 `TASK_UPDATED` 不再 steer、自主模式只触发任务修改告知；投递与指派通知记下执行者已看到的任务版本） |
 
 ## 范围 / 边界
@@ -278,6 +278,14 @@ class BaseCoordinationHandler:
 | `StaleTaskHandler` | `InnerEventType.POLL_TASK` | `_last_stale_nudge` / `_last_pending_nudge: dict[str, float]` + `_stale_claim_streak: dict[str, int]` + `_escalated_claims: set[str]`（均私有） | `on_poll_task` → `_check_stale_claimed_tasks` + `_check_stale_pending_tasks`；两者的停滞时长都取自 `self._round.idle_seconds()`（不变量 20，**非** `task.updated_at`），阈值取自 spec 的 `stale_claim_idle_timeout` / `stale_pending_idle_timeout`（各默认 600s）。stale claim（**self-only**）：本成员 idle 超阈值且 `_own_stalled_tasks` 非空 → `_self_nudge_idle_claim` → `deliver_input(use_steer=False)`，body 只带 task_id + title + **任务当前处境** + idle 分钟（处境入 body 使一条文案同时覆盖"未开工待认领"与"已开工待推进"，handler 内不为此分支）。`_own_stalled_tasks` = 持有的 `{PLANNING, IN_PROGRESS}` 任务（**排除 `IN_REVIEW`**——author 等 reviewer 裁决是正常 idle），**无任何活跃任务时**回落到名下最早的一个 `PENDING(assignee=self)`（F_69，见不变量 9）；连续 `_STALE_CLAIM_ESCALATE_STREAK`(3) 个窗口自催无效 → `_escalate_stale_claim` 由该成员 `send_message` 上报 leader（每任务只报一次，记账随任务离开 owned-active 集 GC）。stale pending（仅 leader）：leader 自己 idle 超阈值 **且** 存在**无 assignee** 的 PENDING **且** roster 中至少一个非 leader 成员 READY（全员忙 = 正常排队，不催）→ 自喂 minimal prompt（id+title、非 steer）、由 LLM 决定如何分派。见 F_53 / F_65 |
 | `TeamCompletionHandler` | `InnerEventType.POLL_TASK` / `TeamEvent.TASK_LIST_DRAINED` / `TeamEvent.TEAM_COMPLETED` | `_team_completed_emitted: bool` + `_completion_callbacks: list`（私有） | `on_poll_task`：leader 且 idle 时评估 `TeamBackend.is_team_completed()`（任务全终态 + 成员全 settled + 尚未 `SHUTDOWN` 成员无任何未读消息，含广播），按上升沿发 `TEAM_COMPLETED`、下降沿重新武装；**persistent 团队额外调 `self._lifecycle.conclude_completed_round(...)` 结束 leader 流触发 auto-pause（temporary 不调，靠 clean_team 收尾）**。`rearm()`：清上升沿幂等标志，`kernel.start`（冷启动 / resume / recover）每次调一次，使每个 run cycle 独立判定完成。`on_task_list_drained`：记日志 + fire `_completion_callbacks`（`TeamAgent` 在 deepagent 建好后经 `register_completion_callback` 把 `TeamSkillRail.notify_team_completed` 注册进来，注册表非空即 gate）。`on_team_completed`：消费记日志。`POLL_TASK` 与 `StaleTaskHandler` 共享 event_key，注册靠后 → fan-out 在其之后 |
 | `CheckpointHandler` | `TeamEvent.CHECKPOINT_CREATED` | 无 | `on_checkpoint_created`（leader-only）：把成员打的命名 checkpoint 渲染成 `<team-event kind="checkpoint">` + `<team-note kind="announcement-only">`（`i18n.checkpoint.created_note` 明示"不需要回复"），`deliver_input(use_steer=False)` 追加进 leader 上下文——**事件而非 send_message** 是刻意选择：成员消息带 reply-hint 会诱导 leader 回复、污染上下文；框架事件是公告、不提示回复。非 leader 直接 no-op。`CHECKPOINT_CREATED` 是专属 event_key，无 fan-out 重叠，注册位置不敏感 |
+
+### 持久化 Team 的停止成员审批恢复
+
+- leader 空闲、任务板非空且任务均为终态、成员均处于 settled 状态时，若未读阻塞完成，可定向恢复无活跃或启动中 runtime 的 `STOPPED` 同进程 Native 成员。该成员的未读必须全是当前 leader 的合法直达审批。
+- 仅使用原成员无在途回合时保存的精确 InMemory 快照，核对原 checkpointer 实例、Team、成员、child session 与 checkpoint agent ID，并确认原成员已退出。leader 会话换绑或释放后，旧凭据失效。
+- 恢复资格与 `STOPPED → RESTARTING` 在同一 write/session 事务中确认：先占用成员行，再核对未读直达邮件仍为已验证的 leader 审批集合，并沿用广播水位、群提及和群通知的未读规则；资格变化则回滚，不创建 runtime。事务提交结果在重复取消下仍须确定后再处理状态归属。
+- 每个成员每轮至多实际接管一次。资格失效且未接管时，仅释放本 task 仍持有的调度预约；成功接管或启动失败保留本轮尝试记录。接管成功后、READY 前到达的普通输入，继续按正常恢复收件语义处理。装载快照并完成订阅后，以 `RESTARTING → READY` 接管，再开放邮箱。暂停或停止时先关闭入口，取消并等待恢复任务退出，再回收实例。启动失败或取消只撤销本次尝试写入的状态。 READY 写入的结果确认同样抵抗重复取消：先记录实际结果再传播取消，不继续发布 READY 状态或开放邮箱；等待写入结果可使停止等待超过外层超时预算，仅保证该结果确认窗口。
+- 收件人按原 `tool_call_id` 处理回执。确认无匹配时才消费旧回执。状态不可读、归属不明或仍有在途回合时保留未读。完成门禁和关流前审批复查继续生效。
 
 ### CoordinationKernel
 

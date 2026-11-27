@@ -59,9 +59,18 @@ from openjiuwen.agent_teams.workflow.engine.backends.base import AgentResult
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError, WorkflowAborted
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UserMessage
+from openjiuwen.core.foundation.llm.schema.message import (
+    AssistantMessage,
+    OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
+    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
+    UserMessage,
+)
 from openjiuwen.core.kv_cache.kv_cache_types import KVCacheRuntimeProtocol
 from openjiuwen.core.session.vcs.codec import encode_message
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PROMPT_ATTACHMENT_HISTORY_METADATA_KEY,
+)
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -1611,17 +1620,86 @@ def _output_text(result: Any) -> str:
     return str(result or "")
 
 
+#: ``source`` values ``_admit_user_message`` stamps for input that opens a new
+#: round. It admits every consumed input under the same ``external_user``
+#: origin, so the origin alone does not separate a ``send()`` from a steering
+#: message injected mid-round or a workflow-interrupt resume continuing the
+#: round already open. ``None`` covers a marked message that carries no
+#: ``source_kind`` (an older persisted context).
+_ROUND_OPENING_SOURCE_KINDS = frozenset({None, "query"})
+
+
+def _message_metadata(m: Any) -> dict:
+    """Read a message's metadata defensively (persisted messages may carry none)."""
+    metadata = getattr(m, "metadata", None)
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _is_round_opening_message(m: Any, *, markers_present: bool) -> bool:
+    """Return whether ``m`` opens a conversation round (one ``send()``).
+
+    Only a ``UserMessage`` can open a round, but not every ``UserMessage`` is one:
+    the harness writes framework state into the conversation in the same shape.
+    The runtime prompt-attachment snapshot/delta lands *before* the round's real
+    query, and ``react_agent`` injects retry / iteration-limit notices mid-round,
+    so counting bare ``UserMessage`` instances shifted every fork boundary.
+
+    ``markers_present`` selects the reading:
+
+    - ``True`` — some turn carries the ``external_user`` origin that
+      ``_admit_user_message`` stamps on consumed input. That origin is necessary
+      but not sufficient: the same call stamps it on steering batches and on a
+      workflow-interrupt resume, neither of which opens a round (a steering
+      message lands *inside* the round already running). So the ``source_kind``
+      must also name a round-opening input — otherwise the boundary would cut
+      mid-round, handing the child a query whose reply and closing ToolMessages
+      were left behind.
+    - ``False`` — nothing is marked (an engine-level MockBackend context, or a
+      compacted one whose compressors rebuilt summaries as bare messages). Fall
+      back to the plain reading, minus the injections we can still name. Reading
+      "no markers" as "no rounds" would degrade every fork to a silent
+      full-context copy — a worse failure than an off-by-one, because it looks
+      like success.
+    """
+    if not isinstance(m, UserMessage):
+        return False
+    metadata = _message_metadata(m)
+    if metadata.get(PROMPT_ATTACHMENT_HISTORY_METADATA_KEY):
+        return False  # runtime attachment snapshot/delta, never a round
+    if markers_present:
+        if metadata.get(OPENJIUWEN_MESSAGE_ORIGIN_METADATA) != OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER:
+            return False
+        return metadata.get(OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA) in _ROUND_OPENING_SOURCE_KINDS
+    # Unmarked context: a message carrying only a source_kind is a framework
+    # injection (empty_response / iteration_limit), not a round.
+    return not metadata.get(OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA)
+
+
+def _has_round_markers(msgs: Sequence[Any]) -> bool:
+    """Return whether any message is a marked round-opening input.
+
+    Deliberately the same test :func:`_is_round_opening_message` applies in its
+    marked branch, not just the origin: a context whose only marked messages are
+    steering injections carries no round signal, and treating it as marked would
+    count zero rounds and degrade every fork to a silent full-context copy.
+    """
+    return any(_is_round_opening_message(m, markers_present=True) for m in msgs)
+
+
 def _round_boundary_index(msgs: Sequence[Any], keep_rounds: int | None, keep_after: bool) -> int | None:
     """Map a round-based split to a message index, or ``None`` when out of range.
 
     ``keep_after=False`` (the "before" family): the boundary is the index just
-    past the ``keep_rounds``-th ``UserMessage`` (its assistant reply and any
+    past the ``keep_rounds``-th round-opening message (its assistant reply and any
     closing ToolMessage travel with it, so the kept head is not cut mid-call).
 
     ``keep_after=True`` (the "after" family): the boundary is the index of the
-    ``keep_rounds``-th ``UserMessage`` itself (the tail from that round on is
+    ``keep_rounds``-th round-opening message itself (the tail from that round on is
     kept, and ``ForkContext``'s ``_trim_leading_orphan_tool_messages`` drops any
     leading orphan ToolMessages whose assistant is not inherited).
+
+    A round is one ``send()``; see :func:`_is_round_opening_message` for why that
+    is not the same as "a ``UserMessage``".
 
     A ``None`` ``keep_rounds`` or a value larger than the actual round count
     returns ``None`` — the caller silently falls back to a full-context fork
@@ -1629,16 +1707,17 @@ def _round_boundary_index(msgs: Sequence[Any], keep_rounds: int | None, keep_aft
     """
     if keep_rounds is None:
         return None
+    markers_present = _has_round_markers(msgs)
     count = 0
     for i, m in enumerate(msgs):
-        if not isinstance(m, UserMessage):
+        if not _is_round_opening_message(m, markers_present=markers_present):
             continue
         count += 1
         if count == keep_rounds:
             if keep_after:
                 return i
             for j in range(i + 1, len(msgs)):
-                if isinstance(msgs[j], UserMessage):
+                if _is_round_opening_message(msgs[j], markers_present=markers_present):
                     return j
             return len(msgs)
     return None

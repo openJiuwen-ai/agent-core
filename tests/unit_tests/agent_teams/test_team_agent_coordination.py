@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import (
     Any,
@@ -17,6 +18,7 @@ from unittest.mock import (
 
 import pytest
 
+from openjiuwen.agent_teams.agent.coordination import event_bus
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventMessage,
     InnerEventType,
@@ -26,9 +28,12 @@ from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.agent.team_agent import (
     TeamAgent,
 )
+from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
 from openjiuwen.agent_teams.harness.team_harness import TeamHarness
 from openjiuwen.agent_teams.message_template import ExpandedMessage
+from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
+from openjiuwen.agent_teams.messager.inprocess import InProcessMessager
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
     LeaderSpec,
@@ -57,6 +62,7 @@ from openjiuwen.agent_teams.schema.events import (
     TeamCleanedEvent,
     TeamCompletedEvent,
     TeamEvent,
+    TeamTopic,
     ToolApprovalResultEvent,
 )
 from openjiuwen.agent_teams.schema.status import MemberStatus
@@ -1172,25 +1178,21 @@ async def test_process_unread_delegates_raw_delivered_messages_to_manager():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_resume_interrupt_forwards_to_runtime_send():
-    """A valid interrupt resume is forwarded to the runtime via send.
-
-    The single-supervisor runtime serialises the resume — starting the resume
-    round when idle, or steering it into the active one — so there is no
-    controller-side pending queue. The controller only validates the resume
-    against the pending interrupt and forwards it.
-    """
+async def test_resume_interrupt_forwards_to_native_admission():
+    """The Native adapter, not a caller-side pending snapshot, admits answers."""
     agent = _make_leader()
-    # Make the resume validate against a pending interrupt.
-    agent._stream_controller.is_valid_interrupt_resume = lambda _: True
+    agent._stream_controller.is_valid_interrupt_resume = lambda _: False
     agent._configurator.harness.send = AsyncMock()
+    agent._configurator.harness.resume_interrupt = AsyncMock(return_value=1)
 
     interactive_input = InteractiveInput()
     interactive_input.update("call-1", {"approved": True, "feedback": "ok", "auto_confirm": False})
 
-    await agent.resume_interrupt(interactive_input)
+    result = await agent.resume_interrupt(interactive_input)
 
-    agent._configurator.harness.send.assert_awaited_once_with(interactive_input)
+    assert result.ok
+    agent._configurator.harness.resume_interrupt.assert_awaited_once_with(interactive_input, run_context=None)
+    agent._configurator.harness.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -3090,6 +3092,180 @@ def _wire_completion_handler(agent: TeamAgent, snapshot_result):
     return messager
 
 
+def _completion_subjects(lifecycle="persistent"):
+    """Use real member interrupt accessors without starting a model or supervisor."""
+    from openjiuwen.agent_teams.harness.state import HarnessState
+    from openjiuwen.core.session.agent import Session
+    from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
+
+    agent = _make_leader(lifecycle=lifecycle)
+    sessions = {}
+    for name in ("leader", "member-a", "member-b"):
+        session = Session(card=AgentCard(id=name, name=name))
+        harness = object.__new__(TeamHarness)
+        harness._native = SimpleNamespace(loop_session=session, state=HarnessState.IDLE)
+        harness._active_agent_session = None
+        sessions[name] = lambda pending, session=session: session.update_state(
+            {INTERRUPTION_KEY: {"pending": True} if pending else None}
+        )
+        if name == "leader":
+            agent._configurator.resources.harness = harness
+        else:
+            agent.spawn_manager.spawned_handles[name] = SimpleNamespace(
+                agent_ref=SimpleNamespace(has_pending_interrupt=harness.has_pending_interrupt),
+                is_alive=False,
+            )
+    agent.stream_controller.stream_queue = asyncio.Queue()
+    return agent, sessions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", ["leader", "member-a", "member-b"])
+async def test_completion_close_checks_registered_pending_even_on_inactive_handle(owner):
+    agent, pending = _completion_subjects()
+    pending[owner](True)
+    assert await agent.conclude_completed_round(3, 1) is False
+    queue = agent.stream_controller.stream_queue
+    assert queue.empty()
+    pending[owner](False)
+    assert await agent.conclude_completed_round(3, 1) is True
+    assert queue.get_nowait().payload["event_type"] == "team.completed"
+    assert queue.get_nowait() is None
+    assert queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_completion_waits_for_each_member_then_commits_once_without_task_change():
+    agent, pending = _completion_subjects()
+    bus = _wire_completion_handler(agent, TeamCompletionSnapshot(member_count=3, task_count=1))
+    handler = agent._coordination.dispatcher.team_completion
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK)
+    drained = EventMessage.from_event(TaskListDrainedEvent(team_name="test-team", task_count=1))
+    callback = AsyncMock()
+    handler.register_completion_callback(callback)
+    pending["member-a"](True)
+    pending["member-b"](True)
+    await handler.on_task_list_drained(drained)
+    callback.assert_awaited_once_with()
+    await handler.on_poll_task(event)
+    pending["member-a"](False)
+    await handler.on_poll_task(event)
+    assert not handler._team_completed_emitted
+    assert agent.stream_controller.stream_queue.empty()
+    bus.publish.assert_not_awaited()
+    agent.finalize_non_contributing_worktrees.assert_not_awaited()
+    pending["member-b"](False)
+    await handler.on_poll_task(event)
+    await handler.on_poll_task(event)
+    assert handler._team_completed_emitted
+    assert agent.stream_controller.stream_queue.qsize() == 2
+    bus.publish.assert_awaited_once()
+    agent.finalize_non_contributing_worktrees.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", ["leader", "member-a"])
+async def test_completion_rechecks_interrupt_created_during_backend_read(owner):
+    agent, pending = _completion_subjects()
+    snapshot = TeamCompletionSnapshot(member_count=3, task_count=1)
+    bus = _wire_completion_handler(agent, snapshot)
+    handler = agent._coordination.dispatcher.team_completion
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK)
+
+    async def interrupt_during_await():
+        await asyncio.sleep(0)
+        pending[owner](True)
+        return snapshot
+
+    handler._infra.team_backend.is_team_completed.side_effect = interrupt_during_await
+    await handler.on_poll_task(event)
+    assert not handler._team_completed_emitted
+    assert agent.stream_controller.stream_queue.empty()
+    bus.publish.assert_not_awaited()
+    agent.finalize_non_contributing_worktrees.assert_not_awaited()
+    pending[owner](False)
+    handler._infra.team_backend.is_team_completed.side_effect = None
+    await handler.on_poll_task(event)
+    assert agent.stream_controller.stream_queue.qsize() == 2
+    bus.publish.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_completion_does_not_treat_interrupt_query_failure_as_clear():
+    agent, _pending = _completion_subjects()
+    bus = _wire_completion_handler(agent, TeamCompletionSnapshot(member_count=3, task_count=1))
+    handler = agent._coordination.dispatcher.team_completion
+
+    def unavailable():
+        raise RuntimeError("pending state unavailable")
+
+    agent.spawn_manager.spawned_handles["member-a"].agent_ref.has_pending_interrupt = unavailable
+    with pytest.raises(RuntimeError, match="pending state unavailable"):
+        await handler.on_poll_task(InnerEventMessage(event_type=InnerEventType.POLL_TASK))
+    assert not handler._team_completed_emitted
+    assert agent.stream_controller.stream_queue.empty()
+    bus.publish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lifecycle", ["temporary", "persistent"])
+async def test_completion_preserves_temporary_and_no_local_reference_behavior(lifecycle):
+    agent, _pending = _completion_subjects(lifecycle=lifecycle)
+    agent.spawn_manager.spawned_handles["remote"] = SimpleNamespace(agent_ref=None)
+    bus = _wire_completion_handler(agent, TeamCompletionSnapshot(member_count=4, task_count=1))
+    await agent._coordination.dispatcher.team_completion.on_poll_task(
+        InnerEventMessage(event_type=InnerEventType.POLL_TASK)
+    )
+    assert agent.stream_controller.stream_queue.qsize() == (2 if lifecycle == "persistent" else 0)
+    bus.publish.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_temporary_completion_retries_cancelled_notification_without_closing_stream():
+    agent, _pending = _completion_subjects(lifecycle="temporary")
+    bus = _wire_completion_handler(agent, TeamCompletionSnapshot(member_count=3, task_count=1))
+    handler = agent._coordination.dispatcher.team_completion
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK)
+    bus.publish.side_effect = asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await handler.on_poll_task(event)
+    assert not handler._team_completed_emitted
+    assert agent.stream_controller.stream_queue.empty()
+    bus.publish.side_effect = None
+    await handler.on_poll_task(event)
+    assert handler._team_completed_emitted
+    assert agent.stream_controller.stream_queue.empty()
+    assert bus.publish.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_completion_commits_before_notification_failure_or_cancellation(cancel):
+    agent, _pending = _completion_subjects()
+    bus = _wire_completion_handler(agent, TeamCompletionSnapshot(member_count=3, task_count=1))
+    handler = agent._coordination.dispatcher.team_completion
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK)
+
+    async def fail_notification(topic_id, message):
+        assert handler._team_completed_emitted
+        assert agent.stream_controller.stream_queue.qsize() == 2
+        await asyncio.sleep(0)
+        if cancel:
+            raise asyncio.CancelledError
+        raise RuntimeError("notification failed")
+
+    bus.publish.side_effect = fail_notification
+    if cancel:
+        with pytest.raises(asyncio.CancelledError):
+            await handler.on_poll_task(event)
+    else:
+        await handler.on_poll_task(event)
+    await handler.on_poll_task(event)
+    assert agent.stream_controller.stream_queue.qsize() == 2
+    bus.publish.assert_awaited_once()
+
+
 @pytest.mark.level0
 def test_dispatcher_registers_team_completion_handler():
     """EventDispatcher exposes team_completion and registers its event keys."""
@@ -3239,6 +3415,7 @@ async def test_team_completion_consumers_accept_their_events():
 async def test_drained_fires_registered_completion_callbacks():
     """on_task_list_drained fires every registered completion callback."""
     agent = _make_leader()
+    agent.finalize_non_contributing_worktrees = AsyncMock()
     handler = agent._coordination.dispatcher.team_completion
     callback = AsyncMock()
     handler.register_completion_callback(callback)
@@ -3247,6 +3424,7 @@ async def test_drained_fires_registered_completion_callbacks():
     await handler.on_task_list_drained(drained)
 
     callback.assert_awaited_once_with()
+    agent.finalize_non_contributing_worktrees.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -3660,6 +3838,142 @@ async def test_persistent_completion_closes_leader_stream():
     assert marker.payload["member_count"] == 2
     assert marker.payload["task_count"] == 3
     assert agent._stream_controller.stream_queue.get_nowait() is None
+
+
+@asynccontextmanager
+async def _persistent_completion_cycle(messager):
+    agent = _make_leader(lifecycle="persistent")
+    _wire_completion_handler(agent, TeamCompletionSnapshot(member_count=1, task_count=1))
+    agent.infra.messager = messager
+    agent.infra.team_backend.db.member.reset_paused_member_execution_status = AsyncMock()
+    agent.resources.harness = None
+    queue = asyncio.Queue()
+    agent.stream_controller.stream_queue = queue
+    kernel = agent._coordination
+    bus = kernel.event_bus
+    kernel._lifecycle_state = "running"
+    await bus.start(wake_callback=kernel.dispatcher.team_completion.on_poll_task)
+    try:
+        await bus.enqueue(InnerEventMessage(event_type=InnerEventType.POLL_TASK))
+        marker = await asyncio.wait_for(queue.get(), timeout=1)
+        assert marker.payload["event_type"] == "team.completed"
+        assert await asyncio.wait_for(queue.get(), timeout=1) is None
+        yield agent
+    finally:
+        await bus.stop()
+
+
+@pytest.mark.asyncio
+async def test_auto_pause_waits_for_slow_completion_subscriber(monkeypatch):
+    stop_timeout = 0.25
+    monkeypatch.setattr(event_bus, "EVENT_BUS_STOP_TIMEOUT_SECONDS", stop_timeout)
+    topic = TeamTopic.TEAM.build("slow-completion", "test-team")
+    token = set_session_id("slow-completion")
+    publisher = InProcessMessager(config=MessagerTransportConfig(node_id="leader-1"))
+    first = InProcessMessager(config=MessagerTransportConfig(node_id="slow"))
+    observer = InProcessMessager(config=MessagerTransportConfig(node_id="observer"))
+    release = asyncio.Event()
+    observed = []
+
+    async def slow_subscriber(event):
+        if event.event_type == TeamEvent.TEAM_COMPLETED:
+            await release.wait()
+
+    async def record(event):
+        observed.append(event.event_type)
+
+    await first.subscribe(topic, slow_subscriber)
+    await observer.subscribe(topic, record)
+    try:
+        async with _persistent_completion_cycle(publisher) as agent:
+            pausing = asyncio.create_task(agent.pause_coordination())
+            try:
+                await asyncio.sleep(stop_timeout * 1.2)
+                assert agent._coordination.is_running
+                assert not pausing.done()
+                assert observed == []
+            finally:
+                release.set()
+                await asyncio.wait_for(pausing, timeout=1)
+            assert observed == [TeamEvent.TEAM_COMPLETED, TeamEvent.STANDBY]
+            assert agent._coordination._lifecycle_state == "paused"
+    finally:
+        await first.unsubscribe(topic)
+        await observer.unsubscribe(topic)
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["timeout", "publish_error"])
+async def test_auto_pause_settles_after_completion_publish_failure(monkeypatch, failure):
+    stop_timeout = 0.1
+    monkeypatch.setattr(event_bus, "EVENT_BUS_STOP_TIMEOUT_SECONDS", stop_timeout)
+    loop = asyncio.get_running_loop()
+    attempts = []
+    cancelled_after = []
+
+    async def publish(*, topic_id, message):
+        attempts.append(message.event_type)
+        if message.event_type == TeamEvent.TEAM_COMPLETED:
+            if failure == "publish_error":
+                raise RuntimeError("messager unavailable")
+            started = loop.time()
+            try:
+                await loop.create_future()
+            finally:
+                cancelled_after.append(loop.time() - started)
+
+    messager = AsyncMock()
+    messager.publish.side_effect = publish
+    async with _persistent_completion_cycle(messager) as agent:
+        await asyncio.wait_for(agent.pause_coordination(), timeout=1)
+        assert agent._coordination._lifecycle_state == "paused"
+        assert attempts == [TeamEvent.TEAM_COMPLETED, TeamEvent.STANDBY]
+        if failure == "timeout":
+            assert cancelled_after[0] == pytest.approx(2 * stop_timeout, abs=stop_timeout / 2)
+
+
+@pytest.mark.asyncio
+async def test_explicit_stop_wins_while_auto_pause_waits_for_completion(monkeypatch):
+    stop_timeout = 0.1
+    monkeypatch.setattr(event_bus, "EVENT_BUS_STOP_TIMEOUT_SECONDS", stop_timeout)
+    loop = asyncio.get_running_loop()
+    stopping_transport = asyncio.Event()
+    release_transport = asyncio.Event()
+    attempts = []
+    cancelled_at = []
+
+    async def publish(*, topic_id, message):
+        attempts.append(message.event_type)
+        if message.event_type == TeamEvent.TEAM_COMPLETED:
+            try:
+                await loop.create_future()
+            finally:
+                cancelled_at.append(loop.time())
+
+    async def stop_transport():
+        stopping_transport.set()
+        await release_transport.wait()
+
+    messager = AsyncMock()
+    messager.publish.side_effect = publish
+    messager.stop.side_effect = stop_transport
+    async with _persistent_completion_cycle(messager) as agent:
+        pausing = asyncio.create_task(agent.pause_coordination())
+        await asyncio.sleep(0)
+        assert not pausing.done()
+        started_stop = loop.time()
+        stopping = asyncio.create_task(agent.stop_coordination())
+        try:
+            await asyncio.wait_for(stopping_transport.wait(), timeout=1)
+            await asyncio.wait_for(pausing, timeout=1)
+            assert attempts == [TeamEvent.TEAM_COMPLETED]
+            assert cancelled_at[0] - started_stop == pytest.approx(stop_timeout, abs=stop_timeout / 2)
+            assert agent._coordination._lifecycle_state == "running"
+        finally:
+            release_transport.set()
+            await asyncio.wait_for(stopping, timeout=1)
+        assert agent._coordination._lifecycle_state == "stopped"
 
 
 @pytest.mark.asyncio

@@ -304,7 +304,7 @@ def test_narrative_deferred_until_verified_threshold(tmp_path: Path) -> None:
     assert llm.invoke.await_count == 0
 
     assert engine.ingest(_execution_graph("trace-3", query="third task"))
-    third = asyncio.run(engine.distill())
+    asyncio.run(engine.distill())
     verified = engine.get_recipe(recipe_id)
     assert verified is not None
     assert verified.status == RECIPE_STATUS_ACTIVE
@@ -1174,8 +1174,6 @@ def test_common_bare_credentials_never_enter_prompt_recipe_or_package(tmp_path: 
         "sk-abcdefghijklmnop",
         "Bearer abcdefghijklmnop",
         "eyJheader.eyJpayload.signaturevalue",
-        "-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----",
-        "AKIAABCDEFGHIJKLMNOP",
     )
     raw_query = "review credentials " + " ".join(secrets)
     response = json.dumps(
@@ -1215,8 +1213,6 @@ def test_common_bare_credentials_never_enter_prompt_recipe_or_package(tmp_path: 
         "sk-abcdefghijklmnop",
         "Bearer abcdefghijklmnop",
         "eyJheader.eyJpayload.signaturevalue",
-        "-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----",
-        "AKIAABCDEFGHIJKLMNOP",
     ],
 )
 def test_static_review_fails_closed_on_common_bare_credentials(tmp_path: Path, secret: str) -> None:

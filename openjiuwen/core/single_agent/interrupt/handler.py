@@ -21,6 +21,7 @@ from openjiuwen.core.single_agent.interrupt.answers import APPROVED_ANSWER_KINDS
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.interrupt.response import (
     CLIENT_TOOL_INTERRUPT_OWNER,
+    InterruptKind,
     InterruptRequest,
     ToolCallInterruptRequest,
     interrupt_kind_of,
@@ -40,7 +41,12 @@ from openjiuwen.core.single_agent.interrupt.state import (
     match_answers,
     pending_interrupts,
 )
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    AgentTerminationReason,
+    InvokeInputs,
+    record_termination_reason,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
@@ -281,6 +287,8 @@ class ToolInterruptHandler:
             "result_type": "interrupt",
             "state": state_outputs,
             "interrupt_ids": interrupt_ids,
+            # The HITL interrupt dict carries the termination reason.
+            "termination_reason": AgentTerminationReason.TOOL_INTERRUPT.value,
         }
 
     async def commit_interrupt(
@@ -292,6 +300,8 @@ class ToolInterruptHandler:
             sub_agent_outputs: list = None,
     ) -> Dict[str, object]:
         """Persist tool interruption state and return interrupt dict."""
+        # Record the reason at the commit point.
+        record_termination_reason(AgentTerminationReason.TOOL_INTERRUPT)
         await self._agent.context_engine.save_contexts(session)
         self.save(state, session)
         result = self.build_interrupt_result(sub_agent_outputs)
@@ -342,11 +352,18 @@ class ToolInterruptHandler:
         # Client tool calls nobody answered stay paused as they are: replaying
         # them would run the rails and build_request again while the client
         # may still be working on the request it already has.
-        held = {
-            outer_id: entry
-            for outer_id, entry in state.interrupted_tools.items()
-            if self._is_waiting_for_client(entry, fresh_answers)
-        }
+        auto_confirm = {}
+        if session is not None:
+            stored = session.get_state(INTERRUPT_AUTO_CONFIRM_KEY)
+            if isinstance(stored, dict):
+                auto_confirm = stored
+        held = {}
+        for outer_id, entry in state.interrupted_tools.items():
+            if self._is_waiting_for_client(entry, fresh_answers):
+                held[outer_id] = entry
+                continue
+            if self._permission_call_stays_paused(entry, fresh_answers, auto_confirm):
+                held[outer_id] = entry
 
         resume_user_input_keys = self._resume_user_input_keys_for_state(state)
         ctx.extra.update({key: user_input for key in resume_user_input_keys})
@@ -391,6 +408,31 @@ class ToolInterruptHandler:
 
         ctx.extra[RESUME_START_ITERATION_KEY] = resume_iteration + 1
         return None
+
+    @staticmethod
+    def _permission_call_stays_paused(
+            entry: ToolInterruptEntry,
+            fresh_answers: Dict[str, InterruptAnswer],
+            auto_confirm: Dict[str, Any],
+    ) -> bool:
+        """Keep an unanswered permission call on its current card.
+
+        Replaying it would ask again and replace the interrupt the host is
+        showing. A session remember that already covers its ``auto_confirm_key``
+        is the exception: that call should run, the same way a remembered
+        ``fetch_webpage`` covers the other calls in the batch.
+        """
+        if entry.is_sub_agent:
+            return False
+        requests = list(entry.interrupt_requests.values())
+        if not requests or any(request.interrupt_id in fresh_answers for request in requests):
+            return False
+        if not all(interrupt_kind_of(request) == InterruptKind.PERMISSION for request in requests):
+            return False
+        return not any(
+            request.auto_confirm_key and auto_confirm.get(request.auto_confirm_key)
+            for request in requests
+        )
 
     @staticmethod
     def _is_waiting_for_client(entry: ToolInterruptEntry, fresh_answers: Dict[str, InterruptAnswer]) -> bool:

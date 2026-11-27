@@ -18,8 +18,8 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/__init__.py`、`openjiuwen/harness/factory.py`、`openjiuwen/harness/schema/config.py`、`openjiuwen/harness/extension_binder.py` |
-| 最近一次修订日期 | 2026-08-23 |
-| 关联 feature | N/A |
+| 最近一次修订日期 | 2026-11-11 |
+| 关联 feature | [F_27 tool.register 启动登记](../features/F_27_tool-registration-event-bridge.md) |
 
 ## 范围 / 边界
 
@@ -67,7 +67,9 @@ author_email: yangzequ1@huawei.com
 
 5. `DeepAgentConfig`（`schema/config.py`）是 `@dataclass`，持有**plain-data / 已构造依赖**两
    类字段：`model` / `card` / `tools` / `mcps` / `rails` / `workspace` / `sys_operation` 是
-   运行时对象；`model_selection` / `permissions` 等是数据描述。
+   运行时对象；`model_selection` / `permissions` 等是数据描述。`tool_registration_mode` 和
+   `subagent_registration_mode` 是 plain-data 开关，默认 `legacy`，可显式选择启动工具或
+   SubAgentConfig 的事件登记路径。
 6. `DeepAgent.configure(config)` 是**单向**的：消费 config、装配 agent；不修改传入的
    `DeepAgentConfig` 实例字段值。`configure` 返回 `"DeepAgent"`（链式）。
 7. `configure()` 区分首配 / 热重配：首配走 `_initial_configure`，后续走 `_hot_reconfigure`
@@ -112,10 +114,14 @@ def create_deep_agent(
     *,
     card: Optional[AgentCard] = None,
     tool_owner_id: Optional[str] = None,
+    tool_registration_mode: Literal["legacy", "event"] = "legacy",
+    subagent_registration_mode: Literal["legacy", "event"] = "legacy",
+    event_tool_instances: Optional[List[Tool]] = None,
     system_prompt: Optional[str] = None,
     tools: Optional[List[Tool | ToolCard]] = None,
     mcps: Optional[List[McpServerConfig]] = None,
     subagents: Optional[List[SubAgentConfig | DeepAgent]] = None,
+    event_subagent_configs: Optional[List[SubAgentConfig]] = None,
     rails: Optional[List[AgentRail]] = None,
     enable_task_loop: bool = False,
     enable_async_subagent: bool = False,
@@ -147,6 +153,14 @@ def create_deep_agent(
 - `enable_task_loop` / `enable_async_subagent` / `enable_subagent_runtime` /
   `enable_task_planning` / `enable_security_rail` / `enable_model_anomaly_detection_rail`
   都是开关 boolean；默认值如上。
+- `tool_registration_mode="legacy"` 保持既有直接登记行为；`"event"` 只改变具体启动
+  `Tool` 的登记入口，改为通过 `tool.register`，并要求传入 live `extension_bus`。低层
+  factory 可用 `event_tool_instances` 指定子集；`None` 表示所有 concrete `Tool`，用于
+  由宿主明确划分事件/legacy 边界的 `DeepAgentSpec`。
+- `subagent_registration_mode="legacy"` 保持静态 `deep_config.subagents` 登记；`"event"`
+  将 `event_subagent_configs` 放入 FIFO，并在父 Rail 初始化完成后通过 `agent.register` 登记。
+  event 模式要求 live `extension_bus`；启动阶段通过 `AgentRegisterTriggerContext` 解析 live
+  `DeepAgent`，不伪造用户 `SessionContext`。
 - 环境注入：`_append_env_online_training_rail` 按环境变量追加在线训练 rail，
   不暴露给宿主——宿主只需设环境变量。
 
@@ -160,6 +174,9 @@ def create_deep_agent(
 | `tools` / `mcps` | 构造时 | 热重配时替换 | `_hot_reload_tools` 按 card 身份做增删校验 |
 | `rails` | 构造时 | 热重配时替换 | `_hot_reload_rails` 按类型替换；`register_rail` 追加 |
 | `system_prompt` | 构造时 | 热重配时替换 | `_hot_reload_system_prompt` 重建 builder |
+| `tool_registration_mode` | 构造时 | 不清 | `legacy` 直接登记；`event` 将具体启动 Tool 放入 FIFO 队列，异步初始化时通过事件登记 |
+| `DeepAgentSpec.event_tool_types` / `DeepAgentParts.event_tool_instances` | 构造时 | 热重配时替换 | Spec 用 provider type allowlist 选中 concrete Tool；factory 用 live instance 子集表达同一边界 |
+| `subagent_registration_mode` / `event_subagent_configs` | 构造时 | 不清 | `legacy` 直接挂载；`event` 在父 Rail 初始化后通过 `agent.register` FIFO 登记完整配置 |
 | `enable_task_loop` | 构造时 | 不清 | `_setup_task_loop` 读它建 loop |
 | `max_iterations` | 构造时 | 不清 | 传给 `LoopCoordinator` 做轮次上限 |
 | `vision_model_config` / `audio_model_config` | 构造时（用户或 `from_env`） | 不清 | `is_vision_model_config_complete` 判定是否装配 vision 工具 |
@@ -189,9 +206,11 @@ def create_deep_agent(
 
 1. 规范化 `workspace`（`str` → `Workspace`，默认 `auto_create_workspace=True`）。
 2. 构造 `DeepAgent`（`card` 必填或默认）。
-3. `configure(config)`：首配走 `_initial_configure`，`_queue_pending_rails` 排队 rails。
+3. `configure(config)`：首配走 `_initial_configure`，`_queue_pending_rails` 排队 rails；
+   event 模式的具体启动 Tool 同步进入待登记队列。
 4. 首次 `invoke()` 的 `_ensure_initialized` 完成：`_register_pending_mcps`、
-   `_register_pending_rails`（`register_rail` → `init_rail`）、`init_workspace`。
+   `tool.register` FIFO 队列、`_register_pending_rails`（`register_rail` → `init_rail`）、
+   `init_workspace`。每个 rail 初始化后立即 flush 其新增工具，以保持与 legacy rail 顺序一致。
 
 ## 与其它 spec 的关系
 

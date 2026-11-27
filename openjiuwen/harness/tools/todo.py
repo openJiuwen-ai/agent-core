@@ -129,12 +129,8 @@ class TodoTool(Tool):
         async with self._lock_manager.operation(session_id):
             file_path = self._get_file_path(session_id)
             abs_path = os.path.abspath(file_path)
-            if not os.path.isfile(abs_path):
-                raise build_error(
-                    StatusCode.TOOL_TODOS_LOAD_FAILED,
-                    reason=f"Todo file not found: {abs_path}"
-                )
-
+            # 存在性交给 sys_operation。宿主机 isfile 看不到只写在沙箱里的 todo.json，
+            # 本地模式的 read_file 仍读同一条宿主机路径。
             read_res = await self.fs.read_file(abs_path, mode="text")
             if read_res.code != 0:
                 raise build_error(

@@ -1,9 +1,9 @@
-﻿# ExtensionEventBus 事件机制详细架构设计
+# ExtensionEventBus 事件机制详细架构设计
 
 | 项 | 内容 |
 | --- | --- |
 | 文档类型 | 已实现架构；EV-01～EV-04 已落地，M-01 / M-02 与真实业务接入尚未验证 |
-| 最近一次修订日期 | 2026-10-21 |
+| 最近一次修订日期 | 2026-11-24 |
 | 维护责任 | Events 模块维护者；Ops、扩展运行时及宿主维护者共同确认跨模块约定，具体负责人待认领 |
 | 所属模块 | `agent-core/openjiuwen/core/events/` |
 | 配套文档 | [设计概览](events-overview.md)、[Events 维护规范](../../AGENTS.md)、[Core 公共规范](../../../AGENTS.md) |
@@ -287,6 +287,8 @@ flowchart TB
 业务方可传入 Session、SessionContext 或 None。入口规范化一次会话上下文，并由本次调用保留；传入 None 时保持为空。普通事件不再触发 ops.build。执行器进入每个实际 Handler 前，从 Bus 保存的 Builder 调用 `build(package_metadata, session_context)`，得到绑定当前 Handler 包信息与本次上下文的独立 Ops。同链各 Handler 使用同一份会话投影，但 Ops 和包绑定相互独立。会话来源见第 4.4 节，Build 步骤见第 5.2 节。
 
 Handler 通过 next/to 控制当前链，也可直接返回而短路；继续或跳层只为实际进入的 Handler 构建 Ops，不重新准备本次会话上下文。动词方法携带当前上下文进入同一 Bus 的新 trigger，新入口重新规范化会话参数；它不能替代当前 next。结果仍沿各自已进入的调用栈返回。
+
+扩展模块登记的 `package.*` 管理事件复用同一事件 / CORE Handler 机制。其中 `package.install_finish` / `package.install_failed` 只把宿主加载结果交给该 Bus 注册的 outcome 回调，`HostPackageInstallRequest` 也由 CORE handler 直接转交宿主 install 回调；这两类调用不生成业务 Ops，也不改变普通事件的匹配和执行顺序。
 
 ### 3.2 代码归属与依赖方向
 

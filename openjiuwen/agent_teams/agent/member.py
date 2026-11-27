@@ -125,7 +125,11 @@ class TeamMember:
             f"Member {self.member_name} status: {old_status.value} -> {new_status.value}"
         )
 
-        # Publish member status changed event
+        await self.publish_status_changed(old_status, new_status)
+        return True
+
+    async def publish_status_changed(self, old_status: MemberStatus, new_status: MemberStatus) -> None:
+        """Notify the team after a member status transition has committed."""
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
@@ -141,7 +145,6 @@ class TeamMember:
         except Exception as e:
             team_logger.error(f"Failed to publish member status changed event for {self.member_name}: {e}")
 
-        return True
 
     async def update_execution_status(self, new_status: ExecutionStatus) -> bool:
         """Update execution status with validation

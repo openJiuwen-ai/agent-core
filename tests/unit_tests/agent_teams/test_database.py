@@ -5,12 +5,16 @@
 
 import asyncio
 import json
+import re
 import warnings
+from unittest.mock import MagicMock, patch
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import create_engine, inspect
-from sqlalchemy.exc import SAWarning
+from sqlalchemy.dialects import mysql as mysql_dialects
+from sqlalchemy.dialects import sqlite as sqlite_dialects
+from sqlalchemy.exc import OperationalError, SAWarning
 
 from openjiuwen.agent_teams.context import (
     reset_session_id,
@@ -29,8 +33,12 @@ from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
 )
 from openjiuwen.agent_teams.tools.database.engine import (
+    _create_index_if_absent,
+    _drop_index_if_present,
     _ensure_dynamic_table_indexes,
     _ensure_team_member_options_column,
+    _quote_ident,
+    _widen_text_columns,
 )
 from openjiuwen.agent_teams.tools.member_options import (
     build_member_options,
@@ -38,8 +46,12 @@ from openjiuwen.agent_teams.tools.member_options import (
     load_member_options,
 )
 from openjiuwen.agent_teams.tools.models import (
+    Team,
+    TeamMember,
+    TeamSessionSettings,
     _get_message_model,
     _get_message_read_status_model,
+    _get_review_vote_model,
     _get_task_dependency_model,
     _get_task_model,
     _sanitize_session_id_for_table,
@@ -319,6 +331,187 @@ class TestTeamDatabaseInit:
             engine.dispose()
 
     @pytest.mark.level1
+    def test_task_and_message_long_fields_compile_to_longtext_on_mysql(self):
+        """Bare str Fields used to become VARCHAR(255) on MySQL; long bodies must not."""
+        from sqlalchemy.dialects.mysql import dialect as mysql_dialect
+
+        from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+
+        token = set_session_id("longtext_compile_session")
+        try:
+            task_table = _get_task_model().__table__
+            message_table = _get_message_model().__table__
+            vote_table = _get_review_vote_model().__table__
+        finally:
+            reset_session_id(token)
+
+        dialect = mysql_dialect()
+        for table, columns in (
+            (task_table, ("content", "reviewer", "summary", "note", "change_notes")),
+            (message_table, ("content", "meta")),
+            (vote_table, ("feedback",)),
+            (Team.__table__, ("desc", "prompt")),
+            (TeamMember.__table__, ("desc", "agent_card", "prompt", "options")),
+            (TeamSessionSettings.__table__, ("settings_json",)),
+        ):
+            for name in columns:
+                rendered = str(table.c[name].type.compile(dialect=dialect)).upper()
+                assert "LONGTEXT" in rendered, f"{table.name}.{name} -> {rendered}"
+
+    @pytest.mark.level0
+    def test_widen_text_columns_mysql_issues_modify_longtext(self):
+        """VARCHAR-bounded columns get ALTER ... MODIFY ... LONGTEXT on MySQL."""
+        from sqlalchemy import String
+
+        sync_conn = MagicMock()
+        sync_conn.dialect = mysql_dialects.dialect()
+        columns = {
+            "note": {"name": "note", "type": String(255)},
+            "content": {"name": "content", "type": String(255)},
+            # TEXT / unbounded — already wide; must not MODIFY.
+            "summary": {"name": "summary", "type": String()},
+        }
+        _widen_text_columns(
+            sync_conn,
+            "team_task_widen01",
+            columns,
+            (
+                ("content", False),
+                ("summary", True),
+                ("note", True),
+            ),
+        )
+        sqls = [call.args[0] for call in sync_conn.exec_driver_sql.call_args_list]
+        assert any(
+            s == "ALTER TABLE `team_task_widen01` MODIFY `note` LONGTEXT NULL" for s in sqls
+        ), sqls
+        assert any(
+            s == "ALTER TABLE `team_task_widen01` MODIFY `content` LONGTEXT NOT NULL"
+            for s in sqls
+        ), sqls
+        assert not any("`summary`" in s for s in sqls)
+        assert all("MODIFY" in s and "LONGTEXT" in s for s in sqls)
+
+    @pytest.mark.level1
+    def test_team_static_long_text_ensure_is_idempotent_on_sqlite(self):
+        """Ensure widen is a no-op on SQLite and safe to call twice."""
+        from openjiuwen.agent_teams.tools.database.engine import (
+            _ensure_team_static_long_text_columns,
+        )
+
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_info (
+                        team_name TEXT PRIMARY KEY,
+                        display_name TEXT NOT NULL,
+                        leader_member_name TEXT NOT NULL,
+                        "desc" TEXT,
+                        prompt TEXT,
+                        dispatch_mode TEXT NOT NULL DEFAULT 'autonomous',
+                        enable_task_verification INTEGER NOT NULL DEFAULT 0,
+                        created BIGINT NOT NULL,
+                        updated_at BIGINT
+                    )
+                    """
+                )
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_member (
+                        member_name TEXT NOT NULL,
+                        team_name TEXT NOT NULL,
+                        display_name TEXT NOT NULL,
+                        "desc" TEXT,
+                        agent_card TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        execution_status TEXT,
+                        mode TEXT NOT NULL,
+                        role TEXT NOT NULL DEFAULT 'teammate',
+                        prompt TEXT,
+                        options TEXT,
+                        updated_at BIGINT,
+                        PRIMARY KEY (member_name, team_name)
+                    )
+                    """
+                )
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_session_settings (
+                        session_id TEXT PRIMARY KEY,
+                        settings_json TEXT NOT NULL DEFAULT '{}',
+                        version INTEGER NOT NULL DEFAULT 0
+                    )
+                    """
+                )
+                _ensure_team_static_long_text_columns(conn)
+                _ensure_team_static_long_text_columns(conn)
+                long_desc = "x" * 300
+                long_card = "y" * 300
+                long_settings = "{" + ("a" * 300) + "}"
+                conn.exec_driver_sql(
+                    "INSERT INTO team_info "
+                    "(team_name, display_name, leader_member_name, \"desc\", created) "
+                    f"VALUES ('t1', 'Team', 'leader', '{long_desc}', 1)"
+                )
+                conn.exec_driver_sql(
+                    "INSERT INTO team_member "
+                    "(member_name, team_name, display_name, agent_card, status, mode) "
+                    f"VALUES ('m1', 't1', 'Member', '{long_card}', 'unstarted', 'build_mode')"
+                )
+                conn.exec_driver_sql(
+                    "INSERT INTO team_session_settings (session_id, settings_json, version) "
+                    f"VALUES ('s1', '{long_settings}', 1)"
+                )
+                row = conn.exec_driver_sql(
+                    "SELECT \"desc\" FROM team_info WHERE team_name='t1'"
+                ).one()
+                settings_row = conn.exec_driver_sql(
+                    "SELECT settings_json FROM team_session_settings WHERE session_id='s1'"
+                ).one()
+                assert row[0] == long_desc
+                assert settings_row[0] == long_settings
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level1
+    def test_review_vote_long_text_ensure_is_idempotent_on_sqlite(self):
+        """Review-vote feedback widen is a no-op on SQLite and safe to call twice."""
+        table = "team_review_vote_widen01"
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    f"""
+                    CREATE TABLE {table} (
+                        id INTEGER PRIMARY KEY,
+                        team_name TEXT NOT NULL,
+                        task_id TEXT NOT NULL,
+                        review_round INTEGER NOT NULL,
+                        reviewer TEXT NOT NULL,
+                        decision TEXT NOT NULL,
+                        feedback TEXT,
+                        created_at BIGINT NOT NULL
+                    )
+                    """
+                )
+                long_feedback = "f" * 300
+                conn.exec_driver_sql(
+                    f"INSERT INTO {table} "
+                    "(team_name, task_id, review_round, reviewer, decision, feedback, created_at) "
+                    f"VALUES ('t1', 'task1', 0, 'r1', 'pass', '{long_feedback}', 1)"
+                )
+                _ensure_dynamic_table_indexes(conn, [table], {table})
+                _ensure_dynamic_table_indexes(conn, [table], {table})
+                row = conn.exec_driver_sql(
+                    f"SELECT feedback FROM {table} WHERE task_id='task1'"
+                ).one()
+                assert row[0] == long_feedback
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level1
     def test_task_migration_adds_subtask_columns_idempotently(self):
         """A pre-F_128 task table gains ``parent_task_id`` / ``created_by``; old rows read as top-level."""
         engine = create_engine("sqlite:///:memory:")
@@ -456,6 +649,388 @@ class TestTeamDatabaseInit:
             assert row["content"] == "hello"
         finally:
             reset_session_id(token)
+            engine.dispose()
+
+    @pytest.mark.level0
+    def test_quote_ident_uses_mysql_backticks(self):
+        """MySQL dialect quotes identifiers with backticks, not double quotes."""
+        sync_conn = MagicMock()
+        sync_conn.dialect = mysql_dialects.dialect()
+        assert _quote_ident(sync_conn, "team_task_mysql01") == "`team_task_mysql01`"
+
+    @pytest.mark.level0
+    def test_drop_index_if_present_uses_on_table_for_mariadb(self):
+        """MariaDB shares MySQL's DROP INDEX ... ON table form (not IF EXISTS)."""
+        try:
+            from sqlalchemy.dialects import mariadb as mariadb_dialects
+        except ImportError:
+            pytest.skip("sqlalchemy.dialects.mariadb unavailable")
+
+        table = "team_task_maria01"
+        index_name = f"ix_{table}_team_name"
+        sync_conn = MagicMock()
+        sync_conn.dialect = mariadb_dialects.dialect()
+        assert _drop_index_if_present(sync_conn, table, index_name, {index_name})
+        sqls = [call.args[0] for call in sync_conn.exec_driver_sql.call_args_list]
+        assert sqls == [f"DROP INDEX `{index_name}` ON `{table}`"]
+        assert all("IF EXISTS" not in s for s in sqls)
+
+    @pytest.mark.level0
+    def test_drop_index_if_present_treats_mysql_1091_as_success(self):
+        """A peer that already dropped the index (errno 1091) does not fail the bind."""
+        table = "team_task_mysql01"
+        index_name = f"ix_{table}_team_name"
+        sync_conn = MagicMock()
+        sync_conn.dialect = mysql_dialects.dialect()
+        sync_conn.exec_driver_sql.side_effect = OperationalError(
+            "DROP INDEX",
+            {},
+            Exception(1091, "Can't DROP 'ix'; check that column/key exists"),
+        )
+
+        assert _drop_index_if_present(sync_conn, table, index_name, {index_name})
+
+        sql = sync_conn.exec_driver_sql.call_args.args[0]
+        assert sql == f"DROP INDEX `{index_name}` ON `{table}`"
+        assert "IF EXISTS" not in sql
+
+    @pytest.mark.level0
+    def test_drop_index_if_present_retains_mysql_1553_for_fk(self):
+        """InnoDB errno 1553 keeps the index; bind succeeds and reports not dropped."""
+        table = "team_task_mysql01"
+        index_name = f"ix_{table}_team_name"
+        sync_conn = MagicMock()
+        sync_conn.dialect = mysql_dialects.dialect()
+        sync_conn.exec_driver_sql.side_effect = OperationalError(
+            "DROP INDEX",
+            {},
+            Exception(
+                1553,
+                "Cannot drop index 'ix_team_task_mysql01_team_name': "
+                "needed in a foreign key constraint",
+            ),
+        )
+
+        assert _drop_index_if_present(sync_conn, table, index_name, {index_name}) is False
+
+        sql = sync_conn.exec_driver_sql.call_args.args[0]
+        assert sql == f"DROP INDEX `{index_name}` ON `{table}`"
+
+    @pytest.mark.level0
+    def test_drop_index_if_present_retains_mysql_fk_text_without_errno(self):
+        """Without errno, FK-needed DROP text retains the index (returns False)."""
+        table = "team_task_mysql01"
+        index_name = f"ix_{table}_team_name"
+        sync_conn = MagicMock()
+        sync_conn.dialect = mysql_dialects.dialect()
+        sync_conn.exec_driver_sql.side_effect = OperationalError(
+            "DROP INDEX",
+            {},
+            Exception(
+                "Cannot drop index 'ix': needed in a foreign key constraint"
+            ),
+        )
+
+        assert _drop_index_if_present(sync_conn, table, index_name, {index_name}) is False
+
+    @pytest.mark.level0
+    def test_create_index_if_absent_treats_mysql_1061_as_success(self):
+        """A peer that already created the index (errno 1061) does not fail the bind."""
+        table = "team_task_mysql01"
+        index_name = f"ix_{table}_assignee_status"
+        sync_conn = MagicMock()
+        sync_conn.dialect = mysql_dialects.dialect()
+        sync_conn.exec_driver_sql.side_effect = OperationalError(
+            "CREATE INDEX",
+            {},
+            Exception(1061, "Duplicate key name 'ix_team_task_mysql01_assignee_status'"),
+        )
+
+        assert _create_index_if_absent(
+            sync_conn, table, index_name, "assignee, status", set()
+        )
+
+        sql = sync_conn.exec_driver_sql.call_args.args[0]
+        assert sql == f"CREATE INDEX `{index_name}` ON `{table}` (assignee, status)"
+        assert "IF NOT EXISTS" not in sql
+
+    @pytest.mark.level0
+    @pytest.mark.parametrize("errno", [1050, 1146, 1062])
+    def test_mysql_index_ddl_reraises_unrelated_errno(self, errno):
+        """Table-exists, unknown-table, and duplicate-row errors stay fatal."""
+        table = "team_task_mysql01"
+        index_name = f"ix_{table}_team_name"
+        messages = {
+            1050: "Table 'team_task_mysql01' already exists",
+            1146: "Table 'team_task_mysql01' doesn't exist",
+            1062: "Duplicate entry '1' for key 'PRIMARY'",
+        }
+
+        drop_conn = MagicMock()
+        drop_conn.dialect = mysql_dialects.dialect()
+        drop_conn.exec_driver_sql.side_effect = OperationalError(
+            "DROP INDEX", {}, Exception(errno, messages[errno])
+        )
+        with pytest.raises(OperationalError):
+            _drop_index_if_present(drop_conn, table, index_name, {index_name})
+
+        create_conn = MagicMock()
+        create_conn.dialect = mysql_dialects.dialect()
+        create_conn.exec_driver_sql.side_effect = OperationalError(
+            "CREATE INDEX", {}, Exception(errno, messages[errno])
+        )
+        with pytest.raises(OperationalError):
+            _create_index_if_absent(create_conn, table, index_name, "team_name", set())
+
+    @pytest.mark.level0
+    def test_mysql_index_text_fallback_when_errno_missing(self):
+        """Without an errno, only the matching server phrase is treated as success."""
+        table = "team_task_mysql01"
+        index_name = f"ix_{table}_team_name"
+
+        drop_ok = MagicMock()
+        drop_ok.dialect = mysql_dialects.dialect()
+        drop_ok.exec_driver_sql.side_effect = OperationalError(
+            "DROP INDEX",
+            {},
+            Exception("Can't DROP 'ix'; check that it exists"),
+        )
+        assert _drop_index_if_present(drop_ok, table, index_name, {index_name})
+
+        create_ok = MagicMock()
+        create_ok.dialect = mysql_dialects.dialect()
+        create_ok.exec_driver_sql.side_effect = OperationalError(
+            "CREATE INDEX",
+            {},
+            Exception("Duplicate key name 'ix_team_task_mysql01_team_name'"),
+        )
+        assert _create_index_if_absent(create_ok, table, index_name, "team_name", set())
+
+        drop_bad = MagicMock()
+        drop_bad.dialect = mysql_dialects.dialect()
+        drop_bad.exec_driver_sql.side_effect = OperationalError(
+            "DROP INDEX", {}, Exception("disk I/O error")
+        )
+        with pytest.raises(OperationalError):
+            _drop_index_if_present(drop_bad, table, index_name, {index_name})
+
+        create_bad = MagicMock()
+        create_bad.dialect = mysql_dialects.dialect()
+        create_bad.exec_driver_sql.side_effect = OperationalError(
+            "CREATE INDEX", {}, Exception("disk I/O error")
+        )
+        with pytest.raises(OperationalError):
+            _create_index_if_absent(create_bad, table, index_name, "team_name", set())
+
+    @pytest.mark.level0
+    def test_create_index_if_absent_uses_if_not_exists_off_mysql(self):
+        """SQLite / PostgreSQL keep statement-level IF NOT EXISTS."""
+        table = "team_task_sqlite01"
+        index_name = f"ix_{table}_assignee_status"
+        sync_conn = MagicMock()
+        sync_conn.dialect = sqlite_dialects.dialect()
+
+        assert _create_index_if_absent(
+            sync_conn, table, index_name, "assignee, status", set()
+        )
+
+        sql = sync_conn.exec_driver_sql.call_args.args[0]
+        assert "IF NOT EXISTS" in sql
+        assert f'"{index_name}"' in sql
+        assert f'"{table}"' in sql
+
+    @pytest.mark.level0
+    def test_dynamic_index_migration_mysql_sql_uses_backticks_without_if_exists(self):
+        """MySQL index DDL uses backticks + ``ON table``, never ``IF [NOT] EXISTS``."""
+        table = "team_task_mysql01"
+        team_name_index = f"ix_{table}_team_name"
+        assignee_index = f"ix_{table}_assignee"
+        updated_at_index = f"ix_{table}_updated_at"
+        assignee_status_index = f"ix_{table}_assignee_status"
+
+        sync_conn = MagicMock()
+        sync_conn.dialect = mysql_dialects.dialect()
+        update_result = MagicMock()
+        update_result.rowcount = 0
+        sync_conn.exec_driver_sql.return_value = update_result
+
+        mock_inspector = MagicMock()
+        mock_inspector.get_indexes.return_value = [
+            {"name": team_name_index},
+            {"name": assignee_index},
+            {"name": updated_at_index},
+        ]
+        # Full current column set so only index + unconditional status UPDATE run.
+        mock_inspector.get_columns.return_value = [
+            {"name": name}
+            for name in (
+                "task_id",
+                "team_name",
+                "title",
+                "content",
+                "status",
+                "assignee",
+                "updated_at",
+                "reviewer",
+                "review_round",
+                "max_review_rounds",
+                "note",
+                "summary",
+                "parent_task_id",
+                "created_by",
+                "resume_pending",
+                "revision",
+                "observed_revision",
+                "parent_revision",
+                "change_notes",
+            )
+        ]
+
+        with patch(
+            "openjiuwen.agent_teams.tools.database.engine.inspect",
+            return_value=mock_inspector,
+        ):
+            _ensure_dynamic_table_indexes(sync_conn, [table], {table})
+
+        sqls = [call.args[0] for call in sync_conn.exec_driver_sql.call_args_list]
+        assert sqls, "expected migration to issue SQL"
+
+        drop_sqls = [s for s in sqls if s.startswith("DROP INDEX")]
+        create_sqls = [s for s in sqls if s.startswith("CREATE INDEX")]
+        update_sqls = [s for s in sqls if s.startswith("UPDATE")]
+
+        assert drop_sqls
+        for sql in drop_sqls:
+            assert f"`{team_name_index}`" in sql or f"`{assignee_index}`" in sql or f"`{updated_at_index}`" in sql
+            assert f" ON `{table}`" in sql
+            assert "IF EXISTS" not in sql
+            assert '"' not in sql
+
+        assert any(assignee_status_index in s for s in create_sqls)
+        for sql in create_sqls:
+            assert f"`{assignee_status_index}`" in sql
+            assert f" ON `{table}`" in sql
+            assert "IF NOT EXISTS" not in sql
+            assert '"' not in sql
+
+        assert update_sqls
+        assert all(f"UPDATE `{table}`" in s for s in update_sqls)
+        assert all("IF EXISTS" not in s and "IF NOT EXISTS" not in s for s in sqls if "INDEX" in s)
+
+    @pytest.mark.level0
+    def test_dynamic_index_migration_mysql_message_indexes(self):
+        """Message-table MySQL rebuild drops legacy indexes with ON table + backticks."""
+        table = "team_message_mysql01"
+        legacy = (
+            f"ix_{table}_to_member_name",
+            f"ix_{table}_timestamp",
+            f"ix_{table}_broadcast",
+            f"ix_{table}_is_read",
+        )
+        inbox_index = f"ix_{table}_inbox"
+        bcast_index = f"ix_{table}_bcast_ts"
+
+        sync_conn = MagicMock()
+        sync_conn.dialect = mysql_dialects.dialect()
+
+        mock_inspector = MagicMock()
+        mock_inspector.get_indexes.return_value = [{"name": name} for name in legacy]
+
+        with patch(
+            "openjiuwen.agent_teams.tools.database.engine.inspect",
+            return_value=mock_inspector,
+        ):
+            _ensure_dynamic_table_indexes(sync_conn, [table], {table})
+
+        sqls = [call.args[0] for call in sync_conn.exec_driver_sql.call_args_list]
+        for name in legacy:
+            assert any(f"DROP INDEX `{name}` ON `{table}`" == s for s in sqls), sqls
+        assert any(f"CREATE INDEX `{inbox_index}` ON `{table}`" in s for s in sqls), sqls
+        assert any(f"CREATE INDEX `{bcast_index}` ON `{table}`" in s for s in sqls), sqls
+        assert not any(re.search(r"IF\s+(NOT\s+)?EXISTS", s, re.I) for s in sqls)
+
+    @pytest.mark.level0
+    def test_existing_before_create_task_migration_runs_update_and_indexes(self):
+        """Tables listed in ``existing_before_create`` finish status UPDATE + index rebuild."""
+        engine = create_engine("sqlite:///:memory:")
+        table = "team_task_exist01"
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    f"""
+                    CREATE TABLE {table} (
+                        task_id TEXT PRIMARY KEY,
+                        team_name TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        assignee TEXT,
+                        updated_at BIGINT
+                    )
+                    """
+                )
+                for col in ("team_name", "status", "assignee", "updated_at"):
+                    conn.exec_driver_sql(f"CREATE INDEX ix_{table}_{col} ON {table} ({col})")
+                conn.exec_driver_sql(
+                    f"INSERT INTO {table} (task_id, team_name, title, content, status, assignee) "
+                    "VALUES ('t1', 'team', 't', 'c', 'claimed', 'm1')"
+                )
+
+                # In existing_before_create → migration must run (not skip).
+                _ensure_dynamic_table_indexes(conn, [table], {table})
+
+                columns = {col["name"] for col in inspect(conn).get_columns(table)}
+                status = conn.exec_driver_sql(
+                    f"SELECT status FROM {table} WHERE task_id = 't1'"
+                ).scalar_one()
+                index_names = {idx["name"] for idx in inspect(conn).get_indexes(table)}
+
+            assert status == "in_progress"
+            assert "reviewer" in columns
+            assert f"ix_{table}_assignee_status" in index_names
+            assert f"ix_{table}_team_name" not in index_names
+            assert f"ix_{table}_assignee" not in index_names
+            assert f"ix_{table}_updated_at" not in index_names
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level0
+    def test_not_in_existing_before_create_skips_migration(self):
+        """Fresh tables (absent from ``existing_before_create``) are left untouched."""
+        engine = create_engine("sqlite:///:memory:")
+        table = "team_task_fresh01"
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    f"""
+                    CREATE TABLE {table} (
+                        task_id TEXT PRIMARY KEY,
+                        team_name TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        status TEXT NOT NULL
+                    )
+                    """
+                )
+                conn.exec_driver_sql(
+                    f"INSERT INTO {table} (task_id, team_name, title, content, status) "
+                    "VALUES ('t1', 'team', 't', 'c', 'claimed')"
+                )
+                conn.exec_driver_sql(f"CREATE INDEX ix_{table}_team_name ON {table} (team_name)")
+
+                _ensure_dynamic_table_indexes(conn, [table], set())
+
+                status = conn.exec_driver_sql(
+                    f"SELECT status FROM {table} WHERE task_id = 't1'"
+                ).scalar_one()
+                columns = {col["name"] for col in inspect(conn).get_columns(table)}
+                index_names = {idx["name"] for idx in inspect(conn).get_indexes(table)}
+
+            # Skipped: legacy status and missing columns stay as-is.
+            assert status == "claimed"
+            assert "reviewer" not in columns
+            assert f"ix_{table}_team_name" in index_names
+        finally:
             engine.dispose()
 
     @pytest.mark.asyncio

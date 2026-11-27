@@ -9,6 +9,7 @@ This module implements Agent Team which manages team members, tasks, and message
 import asyncio
 import json
 import shutil
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -105,6 +106,9 @@ class CapabilityOverrides:
     enable_task_verification: bool | None = None
 
 
+_MAX_RECENT_HOST_DELIVERIES = 1024
+
+
 class TeamBackend:
     """Agent Team Manager
 
@@ -150,6 +154,7 @@ class TeamBackend:
         on_member_started: Callable[[str], Awaitable[None]] | None = None,
         on_member_restarted: Callable[[str], Awaitable[bool]] | None = None,
         on_member_stopped: Callable[[str], Awaitable[None]] | None = None,
+        on_explicit_member_change: Callable[[str, dict, bool], Awaitable[None]] | None = None,
         validate_worktree_isolation: Callable[[str], Awaitable[None]] | None = None,
         plan_storage_dir: str | None = None,
         plan_id: str | None = None,
@@ -350,6 +355,7 @@ class TeamBackend:
         self._on_member_started = on_member_started
         self._on_member_restarted = on_member_restarted
         self._on_member_stopped = on_member_stopped
+        self.on_explicit_member_change = on_explicit_member_change
         self._validate_worktree_isolation = validate_worktree_isolation
 
         self.task_manager = TeamTaskManager(
@@ -372,6 +378,9 @@ class TeamBackend:
         # Holds raw callables (not wrapped) so the dispatcher can decide
         # async vs sync invocation at call time.
         self._human_agent_inbound_callbacks: dict[str, Any] = {}
+        self._host_managed_inbound_callbacks: dict[str, Any] = {}
+        self._host_deliveries_in_flight: set[tuple[str, str, str]] = set()
+        self._recent_host_deliveries: dict[tuple[str, str, str], None] = {}
         # Bridge-agent registry. ``_bridge_member_specs`` indexes the
         # ``BridgeMemberSpec`` rows by member_name so the coordination
         # message handler can read ``mailbox_inject_mode`` /
@@ -602,6 +611,63 @@ class TeamBackend:
             mentions=mentions,
             attachments=attachments,
         )
+
+    async def notify_group_member(self, member_name: str, message_id: str, *, notification_id: str):
+        """Ask a member to respond to a persisted public group message.
+
+        The message and its mentions are left untouched. The notification is
+        stored with its own consumption state, then the message's broadcast
+        event is published again so the leader starts the member and the
+        member reads the message as group input.
+
+        Args:
+            member_name: An agent member of this group; humans and
+                host-managed identities cannot be notified.
+            message_id: A persisted public group message not sent by the member.
+            notification_id: Stable host-provided identity; repeats are no-ops.
+
+        Returns:
+            GroupNotificationResult. Stored does not mean read or answered.
+
+        Raises:
+            ValueError: The runtime is not a group chat, or the member, the
+                message or the identity is not acceptable.
+        """
+        from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+        from openjiuwen.agent_teams.group_chat.handler import group_metadata
+        from openjiuwen.agent_teams.schema.conversation import GroupNotificationResult
+        from openjiuwen.agent_teams.schema.status import MEMBER_DEPARTED_STATUSES
+
+        if self.conversation_mode != "group_chat":
+            raise ValueError("Group notifications require a group chat runtime")
+        for label, value in (("member_name", member_name), ("message_id", message_id),
+                             ("notification_id", notification_id)):
+            if not isinstance(value, str) or not value.strip() or len(value) > 255:
+                raise ValueError(f"{label} must be a nonempty string of at most 255 characters")
+        conversation = await self.group_conversation()
+        token = set_session_id(conversation.session_id)
+        try:
+            await self.db.initialize()
+            member = await self.db.member.get_member(member_name, self.team_name)
+            if member is None or member.status in MEMBER_DEPARTED_STATUSES:
+                raise ValueError(f"Unknown or departed group member: {member_name}")
+            if member.role in ("passive_human", TeamRole.HOST_MANAGED.value):
+                raise ValueError(f"Member cannot be notified: {member_name}")
+            message = await self.db.message.get_message(message_id)
+            if message is None or not message.broadcast:
+                raise ValueError("Not a public group message")
+            if message.team_name != self.team_name or not group_metadata(message):
+                raise ValueError("Not a public group message")
+            if message.from_member_name == member_name:
+                raise ValueError("A member cannot be notified of its own message")
+            created = await self.db.message.create_group_notification(
+                notification_id, self.team_name, member_name, message_id,
+            )
+            # A repeat publishes again so a lost event can be retried; consumed rows stay consumed.
+            await self.message_manager.publish_broadcast(message_id, message.from_member_name)
+            return GroupNotificationResult(created=created, duplicate=not created)
+        finally:
+            reset_session_id(token)
 
     def set_snapshot_length(self, fn) -> None:
         """Register the callback that returns this member's message count."""
@@ -1385,6 +1451,36 @@ class TeamBackend:
         )
         return True
 
+    async def notify_explicit_member_change(self, member_name: str, *, added: bool, force: bool = False) -> None:
+        """Notify the host of a deliberate roster change after the backend operation."""
+        callback = self.on_explicit_member_change
+        if callback is None:
+            return
+        from openjiuwen.agent_teams.tools.member_options import get_member_agent_template
+
+        try:
+            member = await self.db.member.get_member(member_name, self.team_name)
+            if member is None:
+                return
+            if not added and member.status != MemberStatus.SHUTDOWN.value:
+                lifetime = await self.get_member_lifetime(member_name)
+                if retire_target(lifetime, force=force) is MemberStatus.DORMANT:
+                    return
+            template = get_member_agent_template(member)
+            ref = template.ref if template is not None else {}
+            if ref and not added:
+                for other in await self.db.member.get_team_members(self.team_name):
+                    if (other.member_name == member_name or other.status in (
+                        MemberStatus.SHUTDOWN.value, MemberStatus.SHUTDOWN_REQUESTED.value,
+                    )):
+                        continue
+                    survivor = get_member_agent_template(other)
+                    if survivor is not None and survivor.ref == ref:
+                        return
+            await callback(member_name, dict(ref), added)
+        except Exception as exc:
+            team_logger.warning("Host member change callback failed for {}: {}", member_name, type(exc).__name__)
+
     async def shutdown_member(self, member_name: str, force: bool = False) -> MemberOpResult:
         """Shutdown a member.
 
@@ -1478,7 +1574,7 @@ class TeamBackend:
         # still publish the shutdown event so rosters and observers refresh.
         # No shutdown notice message: the member is removed from the
         # reachable set the moment the status flips.
-        if await self.is_passive_human(member_name):
+        if member_data.role == TeamRole.HOST_MANAGED.value or await self.is_passive_human(member_name):
             from openjiuwen.agent_teams.schema.status import (
                 MEMBER_TRANSITIONS,
                 is_valid_transition,
@@ -1494,6 +1590,7 @@ class TeamBackend:
             if not success:
                 return MemberOpResult.fail(f"Database rejected status update for member {member_name}")
 
+            self._host_managed_inbound_callbacks.pop(member_name, None)
             await self._publish_member_shutdown(member_name, force, MemberStatus.SHUTDOWN)
             team_logger.info(f"Passive human member {member_name} shut down directly (no runtime to notify)")
             return MemberOpResult.success()
@@ -1969,6 +2066,13 @@ class TeamBackend:
             A ``TeamCompletionSnapshot`` when the team is complete,
             otherwise ``None``.
         """
+        snapshot = await self.settled_completion_snapshot()
+        if snapshot is None or await self.message_manager.has_unread_messages(include_broadcast=True):
+            return None
+        return snapshot
+
+    async def settled_completion_snapshot(self) -> TeamCompletionSnapshot | None:
+        """Report settled tasks and members before checking pending mail."""
         tasks = await self.task_manager.list_tasks()
         if not tasks:
             return None
@@ -1979,9 +2083,6 @@ class TeamBackend:
         if not members:
             return None
         if any(member.status not in MEMBER_SETTLED_STATUSES for member in members):
-            return None
-
-        if await self.message_manager.has_unread_messages(include_broadcast=True):
             return None
 
         return TeamCompletionSnapshot(member_count=len(members), task_count=len(tasks))
@@ -2375,6 +2476,15 @@ class TeamBackend:
         # the effective verification flag is persisted alongside.
         team_name = self.team_name
         leader_member_name = self.member_name
+        host_members = [member for member in self.predefined_members if member.role_type == TeamRole.HOST_MANAGED]
+        if host_members:
+            name_counts = Counter(member.member_name for member in self.predefined_members)
+            for member in host_members:
+                error = self._host_managed_identity_error(member.member_name, member.display_name)
+                if error:
+                    raise ValueError(error)
+                if member.member_name == leader_member_name or name_counts[member.member_name] > 1:
+                    raise ValueError(f"Duplicate predefined member name: {member.member_name}")
         success = await self.db.team.create_team(
             team_name=team_name,
             display_name=display_name,
@@ -2386,6 +2496,20 @@ class TeamBackend:
 
         if not success:
             raise RuntimeError(f"Failed to create team {team_name}")
+
+        # Register hosts before writing the leader or publishing any member events.
+        try:
+            for member in host_members:
+                result = await self._register_host_managed_member(member.member_name, member.display_name, member.desc)
+                if not result.ok:
+                    raise ValueError(result.reason)
+        except (Exception, asyncio.CancelledError):
+            try:
+                await self.db.team.delete_team(team_name)
+            except Exception:
+                team_logger.error("Failed to roll back team %s after host registration failed",
+                                  team_name, exc_info=True)
+            raise
 
         # Write the team-level identity files (team_card.md, team_prompt.md)
         # now that the team row exists — their values come from this row's
@@ -2421,10 +2545,9 @@ class TeamBackend:
         for member_spec in self.predefined_members:
             if member_spec.role_type == TeamRole.HUMAN_AGENT:
                 continue
-            # Passive humans register as READY below (no runtime to start);
-            # the generic UNSTARTED path would feed them to the startup
-            # sweep, which must never spawn a runtime for them.
-            if member_spec.role_type == TeamRole.PASSIVE_HUMAN:
+            # Host-managed and passive human members register as READY
+            # through their own paths and have no runtime to start.
+            if member_spec.role_type in (TeamRole.HOST_MANAGED, TeamRole.PASSIVE_HUMAN):
                 continue
             if isinstance(member_spec, BridgeMemberSpec) and not effective_enable_bridge:
                 skipped_bridge_specs.append(member_spec)
@@ -2516,6 +2639,9 @@ class TeamBackend:
             except Exception as e:
                 team_logger.error(f"on_team_built callback failed for team {team_name}: {e}")
 
+        for member in host_members:
+            await self._publish_host_managed_registration(member.member_name)
+
         # Publish team created event
         session_id = get_session_id()
         try:
@@ -2606,6 +2732,96 @@ class TeamBackend:
                 result.reason,
             )
         return result
+
+    async def spawn_host_managed_member(
+        self, *, member_name: str, display_name: str, desc: str = "",
+    ) -> MemberOpResult:
+        """Register an externally executed AI member without creating a runtime."""
+        error = self._host_managed_identity_error(member_name, display_name)
+        if error:
+            return MemberOpResult.fail(error)
+        result = await self._register_host_managed_member(member_name, display_name, desc)
+        if result.ok:
+            await self._publish_host_managed_registration(member_name)
+        return result
+
+    def _host_managed_identity_error(self, member_name: str, display_name: str) -> str | None:
+        from openjiuwen.agent_teams.tools.tool_permissions import _MEMBER_NAME_PATTERN
+        from openjiuwen.agent_teams.constants import RESERVED_MEMBER_NAMES
+
+        if not isinstance(member_name, str) or not _MEMBER_NAME_PATTERN.fullmatch(member_name):
+            return "Invalid host-managed member name"
+        if member_name in RESERVED_MEMBER_NAMES or member_name == self.leader_member_name:
+            return "Reserved host-managed member name"
+        if not isinstance(display_name, str) or not display_name.strip():
+            return "A host-managed member needs a display name"
+        return None
+
+    async def _register_host_managed_member(
+        self, member_name: str, display_name: str, desc: str,
+    ) -> MemberOpResult:
+        return await self.spawn_member(
+            member_name=member_name, display_name=display_name,
+            agent_card=AgentCard(id=f"{self.team_name}_{member_name}", name=display_name, description=desc),
+            desc=desc, status=MemberStatus.READY, execution_status=ExecutionStatus.IDLE,
+            mode=MemberMode.BUILD_MODE, role=TeamRole.HOST_MANAGED,
+        )
+
+    async def _publish_host_managed_registration(self, member_name: str) -> None:
+        try:
+            await self.messager.publish(
+                topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
+                message=EventMessage.from_event(MemberSpawnedEvent(
+                    team_name=self.team_name, member_name=member_name,
+                )),
+            )
+        except Exception:
+            team_logger.error("Failed to publish host-managed registration", exc_info=True)
+
+    async def register_host_managed_inbound(self, member_name: str, callback: Any) -> None:
+        """Attach or clear the host receiver for one registered AI identity."""
+        member = await self.db.member.get_member(member_name, self.team_name)
+        if member is None or member.role != TeamRole.HOST_MANAGED.value:
+            raise KeyError(f"Not a host-managed member: {member_name}")
+        if callback is None:
+            self._host_managed_inbound_callbacks.pop(member_name, None)
+        elif callable(callback):
+            self._host_managed_inbound_callbacks[member_name] = callback
+        else:
+            raise TypeError("The host receiver must be callable")
+
+    async def notify_host_managed_inbound(self, message: Any) -> None:
+        """Notify mentioned hosts of a persisted public message; hosts own durable acceptance."""
+        import inspect
+
+        session_id = getattr(message, "session_id", None) or get_session_id()
+        message_id = getattr(message, "message_id", None)
+        for name in message.mentions:
+            callback = self._host_managed_inbound_callbacks.get(name)
+            if callback is None or name == message.sender:
+                continue
+            key = (session_id, message_id, name) if message_id else None
+            if key is not None:
+                if key in self._host_deliveries_in_flight or key in self._recent_host_deliveries:
+                    continue
+                self._host_deliveries_in_flight.add(key)
+            try:
+                if inspect.iscoroutinefunction(callback):
+                    await callback(message)
+                else:
+                    result = await asyncio.to_thread(callback, message)
+                    if inspect.isawaitable(result):
+                        await result
+            except Exception:
+                team_logger.error("Host-managed delivery failed; host must retry", exc_info=True)
+            else:
+                if key is not None:
+                    self._recent_host_deliveries[key] = None
+                    if len(self._recent_host_deliveries) > _MAX_RECENT_HOST_DELIVERIES:
+                        self._recent_host_deliveries.pop(next(iter(self._recent_host_deliveries)))
+            finally:
+                if key is not None:
+                    self._host_deliveries_in_flight.discard(key)
 
     async def spawn_passive_human(
         self,

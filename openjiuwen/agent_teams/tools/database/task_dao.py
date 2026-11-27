@@ -1081,7 +1081,7 @@ class TaskDao:
         *,
         summary: str | None = None,
         note: str | None = None,
-    ) -> bool:
+    ) -> TeamTaskBase | None:
         """Atomically move an IN_PROGRESS task to IN_REVIEW via a CAS UPDATE.
 
         The verify-gate entry: the author declared the work done and the task
@@ -1095,8 +1095,7 @@ class TaskDao:
         ``note`` overwrite the stored completion text only when given (F_119).
 
         Returns:
-            True iff the row moved to IN_REVIEW (``rowcount == 1``); False when
-            the task is missing or not IN_PROGRESS.
+            The committed task row, or None if it was missing or not IN_PROGRESS.
         """
         team_task_model = _get_task_model()
         now = get_current_time()
@@ -1115,16 +1114,17 @@ class TaskDao:
                     **({"note": note} if note is not None else {}),
                 )
             )
-            await session.commit()
-            submitted = result.rowcount == 1
-            if submitted:
-                team_logger.info("Task %s submitted for review", task_id)
-            else:
+            if result.rowcount != 1:
                 team_logger.debug(
                     "CAS submit-for-review for task %s did not apply (rowcount=%s): missing / not in_progress",
                     task_id,
                     result.rowcount,
                 )
+                return None
+            row = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+            submitted = row.scalar_one()
+            await session.commit()
+            team_logger.info("Task %s submitted for review", task_id)
             return submitted
 
     async def revise_task(self, task_id: str) -> bool:

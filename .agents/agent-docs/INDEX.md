@@ -18,26 +18,39 @@ generated: true
 | [agent_evolving/trajectory](#module-agent_evolving-trajectory) |
 | [agent_evolving/ttse](#module-agent_evolving-ttse) |
 | [agent_teams](#module-agent_teams) |
+| [agent_teams/harness](#module-agent_teams-harness) |
+| [agent_teams/memory](#module-agent_teams-memory) |
+| [agent_teams/observability](#module-agent_teams-observability) |
 | [agent_teams/workflow](#module-agent_teams-workflow) |
+| [core.extension](#module-core-extension) |
 | [core.runner.resources_manager](#module-core-runner-resources_manager) |
 | [core.session.tracer](#module-core-session-tracer) |
 | [core/context_engine](#module-core-context_engine) |
 | [core/controller](#module-core-controller) |
 | [core/foundation/llm](#module-core-foundation-llm) |
+| [core/foundation/llm/model_clients](#module-core-foundation-llm-model_clients) |
 | [core/runner/drunner/dmessage_queue](#module-core-runner-drunner-dmessage_queue) |
 | [core/session](#module-core-session) |
+| [core/session/tracer](#module-core-session-tracer) |
+| [core/single_agent](#module-core-single_agent) |
 | [core/sys_operation](#module-core-sys_operation) |
+| [core/workflow](#module-core-workflow) |
 | [extensions.tracer_otel](#module-extensions-tracer_otel) |
 | [extensions/a2a](#module-extensions-a2a) |
 | [extensions/observability](#module-extensions-observability) |
 | [extensions/tracer_otel](#module-extensions-tracer_otel) |
 | [harness](#module-harness) |
+| [harness/moa](#module-harness-moa) |
+| [harness/observability](#module-harness-observability) |
 | [harness/rails](#module-harness-rails) |
+| [harness/rails/evolution](#module-harness-rails-evolution) |
 | [harness/subagents](#module-harness-subagents) |
 | [harness/tools/browser_move](#module-harness-tools-browser_move) |
 | [harness/tools/browser_move/decision](#module-harness-tools-browser_move-decision) |
 | [harness/tools/subagent](#module-harness-tools-subagent) |
 | [harness_providers](#module-harness_providers) |
+| [symphony/shared/fingerprint](#module-symphony-shared-fingerprint) |
+| [tests/unit_tests/agent/react_agent](#module-tests-unit_tests-agent-react_agent) |
 | [未分类](#module-unclassified) |
 
 <a id="module-agent_evolving"></a>
@@ -56,6 +69,7 @@ generated: true
 |---|---|---|---|---|
 | [D-20261112-1120-goal-assessment-isolation](designs/active/D-20261112-1120-goal-assessment-isolation/design.md) | D | Goal 独立评估的轨迹与执行上下文隔离 | alan_cheng | — |
 | [F_20261112_1120_goal-assessment-isolation](features/F_20261112_1120_goal-assessment-isolation.md) | F | Goal 评估调用的观测隔离实施 | alan_cheng | [D-20261112-1120-goal-assessment-isolation](designs/active/D-20261112-1120-goal-assessment-isolation/design.md) |
+| [F_20261123_1139_trajectory-sequence-store](features/F_20261123_1139_trajectory-sequence-store.md) | F | 演进轨迹消息序列共享 | zhangzhongteng | 无独立 D：依据用户在本次任务中提供并要求执行的方案，无独立 D 文件。 |
 
 <a id="module-agent_evolving-ttse"></a>
 
@@ -75,6 +89,9 @@ generated: true
 |---|---|---|---|---|
 | [D-20261110-1839-leader-external-harness](designs/active/D-20261110-1839-leader-external-harness/design.md) | D | Leader 三方 Harness 插拔设计方案 | alan_cheng | — |
 | [D-20261110-1903-team-goal-mode](designs/active/D-20261110-1903-team-goal-mode/design.md) | D | Team Leader 与成员 Goal 模式设计方案 | alan_cheng | — |
+| [D-20261121-0832-group-member-notification](designs/proposals/D-20261121-0832-group-member-notification/design.md) | D | 群聊成员通知入口设计方案 | weichenhao | — |
+| [D-20261125-1414-team-stopped-approval-recovery](designs/active/D-20261125-1414-team-stopped-approval-recovery/design.md) | D | 恢复阻塞持久化团队完成的审批邮箱 | MaxMadMax | — |
+| [D-20261126-1704-team-lifecycle-boundaries](designs/active/D-20261126-1704-team-lifecycle-boundaries/design.md) | D | 收敛通知关闭与审批恢复接管边界 | MaxMadMax | — |
 | [SDD-0011](designs/archive/SDD-0011-evolvable-team-workspace/design.md) | D | 可演进 Team 工作区 | @xiajing | — |
 | [SDD-0015](designs/proposals/SDD-0015-agent-team-scheduled-dispatch/design.md) | D | AgentTeam 调度模式：任务图驱动的低通信协同与验证闭环 | @alan_cheng | — |
 | [SDD-0016](designs/archive/SDD-0016-third-party-agent-reliability/design.md) | D | 三方 Agent 可靠性设计 | @zhanglongmin | — |
@@ -97,7 +114,7 @@ generated: true
 | [F_09_team-stream-logging](features/agent_teams/F_09_team-stream-logging.md) | F | Team Stream Logging | alan_cheng | 待核实 |
 | [F_100_harness-system-prompt-modes](features/agent_teams/F_100_harness-system-prompt-modes.md) | F | Codex / DSH 系统提示词保留与替换模式 | alan_cheng | 待核实 |
 | [F_100_swarmflow-verify-fork-progress-events](features/agent_teams/F_100_swarmflow-verify-fork-progress-events.md) | F | Swarmflow verify/fork 结构化进度事件（VERIFY_STARTED/COMPLETED + fork 父标识） | hwxiajing | 待核实 |
-| [F_100_team-extension-wiring](features/agent_teams/F_100_team-extension-wiring.md) | F | Team 扩展机制接入（契约层 + 成员侧接线） | zhanglongmin | 待核实 |
+| [F_100_team-extension-wiring](features/agent_teams/F_100_team-extension-wiring.md) | F | Team 扩展机制接入（契约层 + 成员侧接线） | zhanglongmin | 无独立 D：本仓未维护独立设计文档；方案与取舍记录在本文档正文中（含历次设计缩减） |
 | [F_101_portable-skills-for-external-harnesses](features/agent_teams/F_101_portable-skills-for-external-harnesses.md) | F | 三方 Harness 的 Portable Skills | alan_cheng | 待核实 |
 | [F_109_send-message-recipient-parameter-split](features/agent_teams/F_109_send-message-recipient-parameter-split.md) | F | `send_message` 收件参数分离 | alan_cheng | 待核实 |
 | [F_10_temporary-leader-clean-team-stream-end](features/agent_teams/F_10_temporary-leader-clean-team-stream-end.md) | F | 临时团队 leader clean_team 后确定性结束自身 stream | alan_cheng | 待核实 |
@@ -146,6 +163,9 @@ generated: true
 | [F_20261110_1851_leader-external-harness](features/F_20261110_1851_leader-external-harness.md) | F | Leader 三方 Harness 插拔实施与决策归档 | alan_cheng | [D-20261110-1839-leader-external-harness](designs/active/D-20261110-1839-leader-external-harness/design.md) |
 | [F_20261110_1912_view-task-names-the-assignee-and-its-status](features/F_20261110_1912_view-task-names-the-assignee-and-its-status.md) | F | view_task 点名负责人及其成员状态 | alan_cheng | 无独立 D：小范围渲染与读取增强，方案在会话中与需求方确认，未单独立 D 文档 |
 | [F_20261110_1922_team-goal-mode](features/F_20261110_1922_team-goal-mode.md) | F | Team Leader 与成员 Goal 模式实施与决策归档 | alan_cheng | [D-20261110-1903-team-goal-mode](designs/active/D-20261110-1903-team-goal-mode/design.md) |
+| [F_20261117_1752_host-managed-group-member](features/F_20261117_1752_host-managed-group-member.md) | F | 宿主管理群成员角色 | weichenhao | jiuwenclaw/D-20261116-1201-colleague-swarmchat-membership（非本仓或待定位） |
+| [F_20261121_0906_group-member-notification](features/F_20261121_0906_group-member-notification.md) | F | 群聊成员通知入口实施记录 | weichenhao | [D-20261121-0832-group-member-notification](designs/proposals/D-20261121-0832-group-member-notification/design.md) |
+| [F_20261123_1059_external-member-execution-environment](features/F_20261123_1059_external-member-execution-environment.md) | F | 三方 harness 成员的执行环境注入 | alan_cheng | 无独立 D：无独立 D；把 F_20261104_1720 的成员执行环境扩展到三方 harness 成员，沿用既有 BuildContext 扩展点与 HarnessContext.env 协议字段。 |
 | [F_20_human-agent-mailbox-unread-flip](features/agent_teams/F_20_human-agent-mailbox-unread-flip.md) | F | Human-Agent Mailbox: Flip Auto-Read Off | alan_cheng | 待核实 |
 | [F_21_external-agent-access](features/agent_teams/F_21_external-agent-access.md) | F | External Agent Access: skill+cli / mcp Wrappers | alan_cheng | 待核实 |
 | [F_21_team-completion-auto-pause](features/agent_teams/F_21_team-completion-auto-pause.md) | F | Team Completion Auto-Pause | alan_cheng | 待核实 |
@@ -257,6 +277,10 @@ generated: true
 | [B_20261104_2030_cancellation-cause-lifecycle](bugfix/core_runtime/B_20261104_2030_cancellation-cause-lifecycle.md) | B | 压缩取消一律误报 failed 及标记生命周期残留窗口缺陷 | CharlesWang2030 | 无独立 D：c4e52b7c 引入 cancellation cause 注册表属于常规缺陷修复，未归档独立设计；本次为对该提交检视发现的标记生命周期缺陷的后续修复，沿用注册表现有契约（TTL、非消费式 resolve、前缀继承）。 |
 | [B_20261104_2054_recovered-context-seed-and-execution-environment](bugfix/agent_teams/B_20261104_2054_recovered-context-seed-and-execution-environment.md) | B | 冷恢复后成员策略 seed 与执行环境传递修复 | alan_cheng | 无独立 D：无独立 D；修复 F_20261104_1720_tool-execution-environment / F_20261104_1721_session-execution-settings 在冷恢复与远程调用路径上的遗漏。 |
 | [B_20261105_0911_swarmflow-thirdparty-trajectory](bugfix/agent_teams/B_20261105_0911_swarmflow-thirdparty-trajectory.md) | B | Swarmflow 三方 Agent 轨迹未绑定成员身份 | wangcan103 | 无独立 D：小范围补齐既有 HarnessTrajectoryRecorder 的 Swarmflow 接线，不新增协议或公开 API。 |
+| [B_20261117_1240_swarmflow-fork-round-boundary-attachment](bugfix/agent_teams/B_20261117_1240_swarmflow-fork-round-boundary-attachment.md) | B | Swarmflow fork 轮数边界被运行时附件消息整体前移一轮 | chenchunzhou | [SDD-0014](designs/active/SDD-0014-swarmflow-session-fork/design.md) |
+| [B_20261117_1626_directed-assignment-notice-dropped](bugfix/agent_teams/B_20261117_1626_directed-assignment-notice-dropped.md) | B | 定向指派/改派的通知被接收端 pending 判据丢弃，新 owner 永不唤醒 | xiajing | 无独立 D：缺陷修复只改消费端投递判据，不新增契约与机制；依据见 S_03（TASK_CLAIMED 定向投递）与 jiuwenswarm 问题 |
+| [B_20261118_1142_shared-templates-name-leader-only-tools](bugfix/agent_teams/B_20261118_1142_shared-templates-name-leader-only-tools.md) | B | 全员共享提示词模板点名 leader 专属工具误导 teammate | zhanglongmin | 无独立 D：日常文案修复，无独立设计文档；行为依据 F_76（提示词分层与渐进式披露）、F_122（framework 建队的 <team-policy> 投递）与 prompts/AGENTS.md 编辑规则 2。 |
+| [B_20261125_1733_team_stopped_approval_mail](bugfix/agent_teams/B_20261125_1733_team_stopped_approval_mail.md) | B | 停止成员的审批回执阻塞持久化 Team 完成 | MaxMadMax | [D-20261125-1414-team-stopped-approval-recovery](designs/active/D-20261125-1414-team-stopped-approval-recovery/design.md)<br>[D-20261126-1704-team-lifecycle-boundaries](designs/active/D-20261126-1704-team-lifecycle-boundaries/design.md) |
 | [S_01_public-api-and-spec-flow](specs/agent_teams/S_01_public-api-and-spec-flow.md) | S | S_01 公开 API 表面与 Spec 流 | alan_cheng | — |
 | [S_02_team-agent-architecture](specs/agent_teams/S_02_team-agent-architecture.md) | S | TeamAgent 架构规约 | alan_cheng | — |
 | [S_03_coordination-protocol](specs/agent_teams/S_03_coordination-protocol.md) | S | Coordination Protocol | alan_cheng | — |
@@ -288,7 +312,30 @@ generated: true
 | [S_27_external-harness-member-runtime](specs/agent_teams/S_27_external-harness-member-runtime.md) | S | S_27 External Harness Member Runtime | alan_cheng | — |
 | [S_28_group-conversation-and-delegation](specs/agent_teams/S_28_group-conversation-and-delegation.md) | S | S_28 群聊输入与文件归档 | openJiuwen-bot | — |
 | [S_29_team-organization](specs/agent_teams/S_29_team-organization.md) | S | Team Organization | ZezeChang | — |
-| [B_20261117_1626_directed-assignment-notice-dropped](bugfix/agent_teams/B_20261117_1626_directed-assignment-notice-dropped.md) | B | 定向指派/改派的通知被接收端 pending 判据丢弃，新 owner 永不唤醒 | xiajing | openjiuwen/agent_teams | openjiuwen/agent_teams/agent/coordination/handlers/task_board.py, tests/unit_tests/agent_teams/agent/test_directed_assignment_notice.py | 无独立 D：只改消费端投递判据，沿用 S_03 的 TASK_CLAIMED 定向投递契约 |
+
+<a id="module-agent_teams-harness"></a>
+
+## agent_teams/harness
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F-20261118-1150-team-document-memory](features/F_20261118_1150_team-document-memory.md) | F | Team 接入 Jiuwen 文档记忆 | Wang Tao | 无独立 D：依据 D-20261113-2017-jiuwen-memory-team-upgrade 及已确认的跨仓 Team 方案。 |
+
+<a id="module-agent_teams-memory"></a>
+
+## agent_teams/memory
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F-20261118-1150-team-document-memory](features/F_20261118_1150_team-document-memory.md) | F | Team 接入 Jiuwen 文档记忆 | Wang Tao | 无独立 D：依据 D-20261113-2017-jiuwen-memory-team-upgrade 及已确认的跨仓 Team 方案。 |
+
+<a id="module-agent_teams-observability"></a>
+
+## agent_teams/observability
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261123_1804_observability-export-gate](features/F_20261123_1804_observability-export-gate.md) | F | 采集需求与导出需求拆分：observability 导出闸门 | hh0205 | 无独立 D：落实 GitCode jiuwenswarm issue 4327 第 3 条（trajectory_ui 不能影响 observability 功能）的 Core 侧能力，无独立 D 文档。 |
 
 <a id="module-agent_teams-workflow"></a>
 
@@ -314,6 +361,14 @@ generated: true
 | [SDD-0031](designs/proposals/SDD-0031-teammate-swarmflow-orchestration/design.md) | D | 集群模式teammate支持swarmflow工具 | @xiajing | — |
 | [B_20261102_1120_avatar-child-session-trace-root](bugfix/agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
 
+<a id="module-core-extension"></a>
+
+## core.extension
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261125_1733_team_stopped_approval_mail](bugfix/agent_teams/B_20261125_1733_team_stopped_approval_mail.md) | B | 停止成员的审批回执阻塞持久化 Team 完成 | MaxMadMax | [D-20261125-1414-team-stopped-approval-recovery](designs/active/D-20261125-1414-team-stopped-approval-recovery/design.md)<br>[D-20261126-1704-team-lifecycle-boundaries](designs/active/D-20261126-1704-team-lifecycle-boundaries/design.md) |
+
 <a id="module-core-runner-resources_manager"></a>
 
 ## core.runner.resources_manager
@@ -338,6 +393,7 @@ generated: true
 |---|---|---|---|---|
 | [B_20261103_1050_grandocean-review-feedback](bugfix/core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
 | [B_20261104_2030_cancellation-cause-lifecycle](bugfix/core_runtime/B_20261104_2030_cancellation-cause-lifecycle.md) | B | 压缩取消一律误报 failed 及标记生命周期残留窗口缺陷 | CharlesWang2030 | 无独立 D：c4e52b7c 引入 cancellation cause 注册表属于常规缺陷修复，未归档独立设计；本次为对该提交检视发现的标记生命周期缺陷的后续修复，沿用注册表现有契约（TTL、非消费式 resolve、前缀继承）。 |
+| [B_20261111_2314_clear-messages-window-truncation](bugfix/core_runtime/B_20261111_2314_clear-messages-window-truncation.md) | B | clear_messages 因窗口截断无法清空底层缓冲导致旧消息重回模型上下文 | CharlesWang2030 | 无独立 D：契约违背的常规缺陷修复，未归档独立设计；清空语义以 context_engine/base.py 抽象方法 docstring 为唯一契约依据，修复方向为使实现回归既有契约，无新增契约或方案取舍。 |
 | [S_01_runtime-data-compatibility](specs/core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | — |
 
 <a id="module-core-controller"></a>
@@ -359,6 +415,17 @@ generated: true
 | [F_20261103_0928_model-group-routed-model](features/F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | 无独立 D：issue |
 | [F_20261112_1120_goal-assessment-isolation](features/F_20261112_1120_goal-assessment-isolation.md) | F | Goal 评估调用的观测隔离实施 | alan_cheng | [D-20261112-1120-goal-assessment-isolation](designs/active/D-20261112-1120-goal-assessment-isolation/design.md) |
 | [B_20261105_1628_llm-usage-model-name-response-first](bugfix/core_runtime/B_20261105_1628_llm-usage-model-name-response-first.md) | B | LLM usage.model_name 改为响应体 model 优先 | yidaaichixia | 无独立 D：语义纠错类修复；依据 GenAI 语义约定对 gen_ai.response.model 的定义（生成响应的模型名）与同文件 response_model 既有响应体优先取法，无独立方案取舍需要设计文档。 |
+| [B_20261110_2112_anthropic-disabled-thinking-fallback](bugfix/core_runtime/B_20261110_2112_anthropic-disabled-thinking-fallback.md) | B | Anthropic Messages 支持图谱关闭思考失败后的回退 | lin-xiaoyu | 无独立 D：补齐已有请求级关闭思考回退在 Anthropic 非流式调用中的接入。 |
+| [B_20261116_1636_glm53-flash-reasoning-levels](bugfix/core_runtime/B_20261116_1636_glm53-flash-reasoning-levels.md) | B | GLM-5.3-Flash 推理强度与禁用编码修复 | lizhiyuan | 无独立 D：用户已确认继续采用端点/模型族静态能力表；本次仅补齐既有 Zhipu 配置的一个模型族，无独立设计。 |
+| [B_20261116_1708_symphony-temperature-fallback](bugfix/core_runtime/B_20261116_1708_symphony-temperature-fallback.md) | B | Symphony 构图在模型拒绝温度参数后恢复 | lin-xiaoyu | 无独立 D：按已确认的发布线补丁方案扩展已有请求参数回退。 |
+
+<a id="module-core-foundation-llm-model_clients"></a>
+
+## core/foundation/llm/model_clients
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261117_1727_anthropic-output-limit-errors](bugfix/openjiuwen/core/B_20261117_1727_anthropic-output-limit-errors.md) | B | 模型输出上限截断可见错误修复 | lizhiyuan | 无独立 D：用户在本轮会话确认的 Anthropic 输出上限错误处理范围，未形成独立设计文档。 |
 
 <a id="module-core-runner-drunner-dmessage_queue"></a>
 
@@ -378,6 +445,22 @@ generated: true
 | [B_20261103_1050_grandocean-review-feedback](bugfix/core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
 | [S_01_runtime-data-compatibility](specs/core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | — |
 
+<a id="module-core-session-tracer"></a>
+
+## core/session/tracer
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261108_2028_llm-span-model-display-name](bugfix/core_runtime/B_20261108_2028_llm-span-model-display-name.md) | B | llm span 的 gen_ai.request.model 与 span 名显示网关服务 ID 而非模型名缺陷 | yidaaichixia | 无独立 D：常规缺陷修复（遥测展示层纯增量可选字段），无方案取舍与公开契约变更，未归档独立设计。 |
+
+<a id="module-core-single_agent"></a>
+
+## core/single_agent
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261117_1727_anthropic-output-limit-errors](bugfix/openjiuwen/core/B_20261117_1727_anthropic-output-limit-errors.md) | B | 模型输出上限截断可见错误修复 | lizhiyuan | 无独立 D：用户在本轮会话确认的 Anthropic 输出上限错误处理范围，未形成独立设计文档。 |
+
 <a id="module-core-sys_operation"></a>
 
 ## core/sys_operation
@@ -386,6 +469,14 @@ generated: true
 |---|---|---|---|---|
 | [F_20261104_1720_tool-execution-environment](features/F_20261104_1720_tool-execution-environment.md) | F | 工具执行环境作用域 | alan_cheng | 无独立 D：无独立 D；在现有 harness 工具调用与 team 会话存储契约上的小范围扩展。 |
 | [B_20261104_2054_recovered-context-seed-and-execution-environment](bugfix/agent_teams/B_20261104_2054_recovered-context-seed-and-execution-environment.md) | B | 冷恢复后成员策略 seed 与执行环境传递修复 | alan_cheng | 无独立 D：无独立 D；修复 F_20261104_1720_tool-execution-environment / F_20261104_1721_session-execution-settings 在冷恢复与远程调用路径上的遗漏。 |
+
+<a id="module-core-workflow"></a>
+
+## core/workflow
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261116_2246_subworkflow-stream-batch-mode](bugfix/core_runtime/B_20261116_2246_subworkflow-stream-batch-mode.md) | B | 子工作流默认批式配置被流式边调用时 _sub_stream 必崩的缩进缺陷 | CharlesWang2030 | 无独立 D：常规缺陷修复，未归档独立设计；修复方案在 CORE-02 问题分析归档中确认（缩进修正 + 批式回退），沿用 _sub_invoke 既有批式返回契约，无新增公开 API。 |
 
 <a id="module-extensions-tracer_otel"></a>
 
@@ -416,6 +507,8 @@ generated: true
 | [F_20261103_0928_model-group-routed-model](features/F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | 无独立 D：issue |
 | [F_20261104_1638_drop-llm-span-cost-attrs](features/F_20261104_1638_drop-llm-span-cost-attrs.md) | F | LLM span 去掉 usage cost 属性（openjiuwen.gen_ai.usage.*_cost） | weixin_39960157 | 无独立 D：纯删减类变更（去掉一处已定属性的发射），无方案级取舍需要独立设计；键的引入背景与命名迁移见 |
 | [F_20261112_1120_goal-assessment-isolation](features/F_20261112_1120_goal-assessment-isolation.md) | F | Goal 评估调用的观测隔离实施 | alan_cheng | [D-20261112-1120-goal-assessment-isolation](designs/active/D-20261112-1120-goal-assessment-isolation/design.md) |
+| [F_20261123_1139_trajectory-sequence-store](features/F_20261123_1139_trajectory-sequence-store.md) | F | 演进轨迹消息序列共享 | zhangzhongteng | 无独立 D：依据用户在本次任务中提供并要求执行的方案，无独立 D 文件。 |
+| [F_20261123_1804_observability-export-gate](features/F_20261123_1804_observability-export-gate.md) | F | 采集需求与导出需求拆分：observability 导出闸门 | hh0205 | 无独立 D：落实 GitCode jiuwenswarm issue 4327 第 3 条（trajectory_ui 不能影响 observability 功能）的 Core 侧能力，无独立 D 文档。 |
 | [B_20261102_1120_avatar-child-session-trace-root](bugfix/agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
 
 <a id="module-extensions-tracer_otel"></a>
@@ -426,6 +519,7 @@ generated: true
 |---|---|---|---|---|
 | [F_20261104_1638_drop-llm-span-cost-attrs](features/F_20261104_1638_drop-llm-span-cost-attrs.md) | F | LLM span 去掉 usage cost 属性（openjiuwen.gen_ai.usage.*_cost） | weixin_39960157 | 无独立 D：纯删减类变更（去掉一处已定属性的发射），无方案级取舍需要独立设计；键的引入背景与命名迁移见 |
 | [F_20261104_2034_converge-tpot-attr-key](features/F_20261104_2034_converge-tpot-attr-key.md) | F | TPOT 属性键收敛（inter_token_latency_ms → tpot_ms） | weixin_39960157 | 无独立 D：键名纠错类变更；"one fact, one key / no reader fallback chain" 的规范依据为 observability/semconv.py 成文评注（b0134c30d 引入、544ea2838 重申），无独立方案取舍需要设计文档。 |
+| [B_20261108_2028_llm-span-model-display-name](bugfix/core_runtime/B_20261108_2028_llm-span-model-display-name.md) | B | llm span 的 gen_ai.request.model 与 span 名显示网关服务 ID 而非模型名缺陷 | yidaaichixia | 无独立 D：常规缺陷修复（遥测展示层纯增量可选字段），无方案取舍与公开契约变更，未归档独立设计。 |
 
 <a id="module-harness"></a>
 
@@ -485,11 +579,15 @@ generated: true
 | [F_26_browser-fact-handoff-and-stream-diagnostics](features/harness/F_26_browser-fact-handoff-and-stream-diagnostics.md) | F | Browser fact handoff and stream diagnostics | ShowHsiang | 待核实 |
 | [F_26_prompt-attachment-event-agent-loop](features/harness/F_26_prompt-attachment-event-agent-loop.md) | F | Prompt Attachment Agent Loop 事件接入 | yangzequ | 待核实 |
 | [F_27_browser-local-intent-and-reader-decisions](features/harness/F_27_browser-local-intent-and-reader-decisions.md) | F | Browser local intent continuity and reader decisions | ShowHsiang | 待核实 |
+| [F_27_tool-registration-event-bridge](features/harness/F_27_tool-registration-event-bridge.md) | F | tool.register 启动工具登记桥接 | 待确认 | 待核实 |
 | [F_28_browser-source-and-local-continuity](features/harness/F_28_browser-source-and-local-continuity.md) | F | Browser source retention and local continuity after develop integration | ShowHsiang | 待核实 |
+| [F_28_subagent-registration-event-bridge](features/harness/F_28_subagent-registration-event-bridge.md) | F | agent.register 启动 SubAgent 登记桥接 | 待确认 | 待核实 |
 | [F_29_browser-shared-state-and-source-delivery](features/harness/F_29_browser-shared-state-and-source-delivery.md) | F | Browser shared-state lifecycle and complete retained-source delivery | ShowHsiang | 待核实 |
 | [F_30_browser-output-and-dispatch-contracts](features/F_30_browser-output-and-dispatch-contracts.md) | F | Browser output limits and local dispatch contracts | ShowHsiang | 无独立 D：Implements the approved multiversion analysis section 19 using existing browser contracts. |
 | [B_20261104_2030_cancellation-cause-lifecycle](bugfix/core_runtime/B_20261104_2030_cancellation-cause-lifecycle.md) | B | 压缩取消一律误报 failed 及标记生命周期残留窗口缺陷 | CharlesWang2030 | 无独立 D：c4e52b7c 引入 cancellation cause 注册表属于常规缺陷修复，未归档独立设计；本次为对该提交检视发现的标记生命周期缺陷的后续修复，沿用注册表现有契约（TTL、非消费式 resolve、前缀继承）。 |
+| [B_20261111_2006_sandbox-shell-output](bugfix/harness/B_20261111_2006_sandbox-shell-output.md) | B | 本地沙箱内回读 Shell 超长输出 | 羿寒 王 | 无独立 D：按已确认的沙箱内存储方案修复现有工具结果回读契约。 |
 | [B_20261114_1107_interactive-memory-turn](bugfix/harness/B_20261114_1107_interactive-memory-turn.md) | B | 交互式中断恢复后记忆丢失修复 | robin1217 | 无独立 D：本次按对话中确认的 D3 收敛方案修复，未建立独立 D 文档；外部 F08 的 D3 是决策编号，不是设计资产标识。 |
+| [B_20261126_2055_lsp-client-crash-reporting](bugfix/harness/B_20261126_2055_lsp-client-crash-reporting.md) | B | LSP 客户端 EOF 崩溃不上报、超时请求条目泄漏与 Windows 文件 URI 未编码 | linghb | 无独立 D：对 LSP 客户端通信层的三处确定性缺陷修复，不改变对外契约，无需独立设计。 |
 | [S_01_public-api-and-construction](specs/harness/S_01_public-api-and-construction.md) | S | S_01 公开 API 表面与构造流 | yangzequ | — |
 | [S_02_deep-agent-architecture](specs/harness/S_02_deep-agent-architecture.md) | S | S_02 DeepAgent 架构 | yangzequ | — |
 | [S_03_task-loop](specs/harness/S_03_task-loop.md) | S | S_03 TaskLoop 事件体系 | yangzequ | — |
@@ -510,6 +608,22 @@ generated: true
 | [S_18_subagents-and-lifecycle](specs/harness/S_18_subagents-and-lifecycle.md) | S | S_18 SubAgent 预设与生命周期 | yangzequ | — |
 | [S_19_harness-providers](specs/harness/S_19_harness-providers.md) | S | S_19 Harness Providers（协议实现、IO Adapter 与 Manifest 工厂） | alan_cheng | — |
 
+<a id="module-harness-moa"></a>
+
+## harness/moa
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261117_1727_anthropic-output-limit-errors](bugfix/openjiuwen/core/B_20261117_1727_anthropic-output-limit-errors.md) | B | 模型输出上限截断可见错误修复 | lizhiyuan | 无独立 D：用户在本轮会话确认的 Anthropic 输出上限错误处理范围，未形成独立设计文档。 |
+
+<a id="module-harness-observability"></a>
+
+## harness/observability
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261123_1804_observability-export-gate](features/F_20261123_1804_observability-export-gate.md) | F | 采集需求与导出需求拆分：observability 导出闸门 | hh0205 | 无独立 D：落实 GitCode jiuwenswarm issue 4327 第 3 条（trajectory_ui 不能影响 observability 功能）的 Core 侧能力，无独立 D 文档。 |
+
 <a id="module-harness-rails"></a>
 
 ## harness/rails
@@ -517,6 +631,15 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [F-20261107-1700-coding-document-memory](features/F_20261107_1700_coding-document-memory.md) | F | Coding 文档记忆 Rail | Wang Tao | 无独立 D：依据本会话已确认的跨仓 Coding 文档记忆方案及后续交互轮次复用决定；AutoMemory 保留宿主原有开关。 |
+| [F-20261118-1150-team-document-memory](features/F_20261118_1150_team-document-memory.md) | F | Team 接入 Jiuwen 文档记忆 | Wang Tao | 无独立 D：依据 D-20261113-2017-jiuwen-memory-team-upgrade 及已确认的跨仓 Team 方案。 |
+
+<a id="module-harness-rails-evolution"></a>
+
+## harness/rails/evolution
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261123_1139_trajectory-sequence-store](features/F_20261123_1139_trajectory-sequence-store.md) | F | 演进轨迹消息序列共享 | zhangzhongteng | 无独立 D：依据用户在本次任务中提供并要求执行的方案，无独立 D 文件。 |
 
 <a id="module-harness-subagents"></a>
 
@@ -559,6 +682,22 @@ generated: true
 |---|---|---|---|---|
 | [D-20261110-1839-leader-external-harness](designs/active/D-20261110-1839-leader-external-harness/design.md) | D | Leader 三方 Harness 插拔设计方案 | alan_cheng | — |
 | [F_20261104_1638_drop-llm-span-cost-attrs](features/F_20261104_1638_drop-llm-span-cost-attrs.md) | F | LLM span 去掉 usage cost 属性（openjiuwen.gen_ai.usage.*_cost） | weixin_39960157 | 无独立 D：纯删减类变更（去掉一处已定属性的发射），无方案级取舍需要独立设计；键的引入背景与命名迁移见 |
+
+<a id="module-symphony-shared-fingerprint"></a>
+
+## symphony/shared/fingerprint
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261109_1721_symphony-hidden-skill-scan](bugfix/openjiuwen/symphony/B_20261109_1721_symphony-hidden-skill-scan.md) | B | Symphony 忽略技能归档和隐藏资产 | lin-xiaoyu | 无独立 D：技能文件夹扫描的局部修复。 |
+
+<a id="module-tests-unit_tests-agent-react_agent"></a>
+
+## tests/unit_tests/agent/react_agent
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261118_1219_turn-step-runtime-cleanup](bugfix/core_runtime/B_20261118_1219_turn-step-runtime-cleanup.md) | B | turn.step 测试会话绑定泄漏导致 PR 门禁偶发失败 | liaojunzhuo-sefonsoft | 无独立 D：修复既有测试的资源清理与隔离，不改变生产代码或公开契约，无需独立设计。 |
 
 <a id="module-unclassified"></a>
 

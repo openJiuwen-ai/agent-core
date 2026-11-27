@@ -35,7 +35,7 @@ PositiveInt = Annotated[int, Field(gt=0)]
 NonNegativeInt = Annotated[int, Field(ge=0)]
 PositiveFloat = Annotated[float, Field(gt=0)]
 Probability = Annotated[float, Field(ge=0, le=1)]
-CapabilityType = Literal["skill", "expert", "connector", "mcp"]
+CapabilityType = Literal["skill", "expert", "mcp"]
 RootCategoryInput = list[str | dict[str, JsonValue]] | ConfigPath | None
 
 
@@ -355,11 +355,11 @@ class CapabilitySourceConfig(SymphonyConfigModel):
     """能力集合中的一个本地目录及其对象定义格式。"""
 
     type: CapabilityType = Field(
-        title="对象类型", description="对象定义格式；枚举值表达目标支持范围，不表示对应读取器已经实现。",
-        examples=["skill", "expert"],
+        title="对象类型", description="skill 和 expert 从目录读取并参与分类树，mcp 由宿主按会话提供。",
+        examples=["skill", "expert", "mcp"],
     )
     root: ConfigPath = Field(
-        title="对象根目录", description="静态对象定义所在的本地目录；运行层负责解析相对路径。",
+        title="对象根目录", description="来源根路径。Core 扫描技能和专家目录，MCP 的可见能力由宿主提供。",
         examples=["./capabilities"],
     )
 
@@ -368,7 +368,7 @@ class CapabilityConfig(SymphonyConfigModel):
     """一个 Runtime 的对象定义集合及共享的扫描、指纹策略。"""
 
     sources: list[CapabilitySourceConfig] = Field(
-        min_length=1, title="能力来源目录", description="按目录声明对象定义格式；同一类型可以配置多个目录。",
+        min_length=1, title="能力来源目录", description="多个技能和专家目录共用一棵分类树，编排要求恰有一个技能目录。",
     )
     scan: DirectoryScanConfig = Field(
         default_factory=DirectoryScanConfig, title="目录扫描", description="目录深度、资源预算和入口文档解析限制。",

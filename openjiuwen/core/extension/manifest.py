@@ -18,6 +18,7 @@ from openjiuwen.core.extension.versions import parse_version, specifier_matches
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 MANIFEST_NAME = "manifest.json"
 PACKAGE_TYPE = "extension"
+BUNDLE_FLAG = "is_bundle"
 
 
 def has_manifest(package_root: Path) -> bool:
@@ -82,9 +83,27 @@ def parse_manifest_mapping(
             StatusCode.EXTENSION_MANIFEST_INVALID,
             reason="package must be a mapping",
         )
+    is_bundle = raw.get(BUNDLE_FLAG) is True
     domain = package.get("domain")
+    if is_bundle:
+        if isinstance(domain, str) and domain.strip():
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_MANIFEST_INVALID,
+                reason="a bundle root must not declare package.domain",
+            )
+        if raw.get("extensions"):
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_MANIFEST_INVALID,
+                reason="a bundle root must not declare extensions",
+            )
+        members = raw.get("members")
+        if not isinstance(members, list) or not members:
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_MANIFEST_INVALID,
+                reason="bundle members must be a nonempty list",
+            )
     if not isinstance(domain, str) or not domain.strip():
-        if require_domain:
+        if require_domain and not is_bundle:
             raise ExtensionFailure(StatusCode.EXTENSION_MANIFEST_INVALID,
                                    reason="package.domain must be a nonempty string")
         domain = None
@@ -113,7 +132,9 @@ def parse_manifest_mapping(
     requires_packages = _package_dependencies(requires.get("packages"))
 
     extensions = _extensions(raw.get("extensions"), package_root)
-    enable = _enable(raw)
+    # A bundle root is a container for member packages, never a loadable package;
+    # Core discovers it like any installed copy but must not activate it.
+    enable = False if is_bundle else _enable(raw)
     return Manifest(
         schema_version=1,
         package_id=package_id,
@@ -125,6 +146,7 @@ def parse_manifest_mapping(
         extensions=extensions,
         domain=domain,
         enable=enable,
+        is_bundle=is_bundle,
     )
 
 

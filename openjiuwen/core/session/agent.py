@@ -112,14 +112,17 @@ class Session:
     def get_envs(self):
         return self._inner.config().get_envs()
 
-    def get_agent_id(self):
-        return self._card.id
+    def get_agent_id(self) -> str | None:
+        """Return the owner identity, if this session has an agent card."""
+        return self._card.id if self._card is not None else None
 
-    def get_agent_name(self):
-        return self._card.name
+    def get_agent_name(self) -> str | None:
+        """Return the owner name, if this session has an agent card."""
+        return self._card.name if self._card is not None else None
 
-    def get_agent_description(self):
-        return self._card.description
+    def get_agent_description(self) -> str | None:
+        """Return the owner description, if this session has an agent card."""
+        return self._card.description if self._card is not None else None
 
     def get_source_metadata(self) -> dict[str, Any]:
         """Return immutable-by-convention metadata describing the session owner."""
@@ -257,6 +260,10 @@ class Session:
     def stream_iterator(self) -> AsyncIterator[Any]:
         return self._inner.stream_writer_manager(
         ).stream_output()
+
+    def checkpoint_agent_id(self) -> str:
+        """Return the agent identity used to key this session's checkpoint."""
+        return self._inner.agent_id()
 
     async def pre_run(self, **kwargs):
         if self._pre_run_done:

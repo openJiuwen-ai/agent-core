@@ -459,6 +459,14 @@ the iteration budget (normal provider/context recovery may retry it); it never e
 Streaming uses the same policy and emits the structured result at the end. Streamed text is provisional: a provider can report truncation after emitting text, so consumers must inspect the final result.
 A rail requesting another model step or user input arriving during finalization also causes a fallback; the iteration limit does not permit further tool work.
 
+Every result returned by `invoke`, and every terminal frame written to a stream, also carries
+`termination_reason`: one of `text_termination`, `max_iterations`, `force_finish`, `tool_interrupt`,
+`model_error`, `error`, or `cancelled`. The value set is additive and may grow, so consumers must
+ignore unknown values and keep reading `result_type` for the result category. A cancelled run is
+delivered as `result_type="cancelled"` with `termination_reason="cancelled"`. One exception: during
+streaming, a framework error outside the model error family ends the stream without a terminal
+frame; the raised exception carries the reason instead.
+
 Available evidence is recovered from persisted context on interrupt/continuation resume,
 without including earlier user turns. Evidence removed by a context compactor or retention
 policy cannot be reconstructed. `iterations_used` follows the existing ReAct loop counter;

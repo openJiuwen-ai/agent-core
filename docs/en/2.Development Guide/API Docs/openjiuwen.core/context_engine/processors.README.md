@@ -29,5 +29,5 @@ The Harness assembles the default context processor chain through
 `SessionMemoryCompressor` (disabled by default),
 `ReasoningToolLoopCompactProcessor`, `DialogueCompressor`,
 `CurrentRoundCompressor`, and `RoundLevelCompressor` in a fixed order. See
-[Context Engine](../../Advanced%20Usage/Context%20Engine.md) for the chain
+[Context Engine](../../../Advanced%20Usage/Context%20Engine.md) for the chain
 order and enablement examples.

@@ -130,6 +130,23 @@ class TracerWorkflowUtils:
                              chunk=dict(chunk))
 
     @staticmethod
+    async def trace_component_finalize(session):
+        """Emit the finalize marker for stream-consumer end nodes.
+
+        Fired once the end node has fully consumed its stream and starts the
+        real finalization (sanitize / collect / post-invoke). OTel consumers
+        use this as the end-node span start instead of the first-chunk
+        on_call_start; handlers without an on_call_finalize attribute (the
+        built-in trace-schema handler) skip the event entirely.
+        """
+        tracer = session.tracer()
+        if tracer is None or not tracer.workflow_handler_valid():
+            return
+        await tracer.trigger(TracerHandlerName.TRACER_WORKFLOW.value, "on_call_finalize",
+                             invoke_id=session.executable_id(),
+                             parent_node_id=session.parent_id())
+
+    @staticmethod
     async def trace_workflow_done(session, outputs: Optional[dict]):
         tracer = session.tracer()
         if tracer is None or not tracer.workflow_handler_valid():

@@ -153,6 +153,16 @@ class MemberDao:
             )
             return (await session.execute(stmt)).scalar_one_or_none() is not None
 
+    async def host_managed_members(self, team_name: str, names: list[str]) -> set[str]:
+        """Return the host-managed identities among the given recipient names."""
+        async with self._sessions.read() as session:
+            stmt = select(TeamMember.member_name).where(
+                TeamMember.team_name == team_name,
+                TeamMember.member_name.in_(names),
+                TeamMember.role == "host_managed",
+            )
+            return set((await session.execute(stmt)).scalars())
+
     async def is_passive_human(self, team_name: str, member_name: str) -> bool:
         """Return True if ``member_name`` is a passive human member.
 
@@ -299,6 +309,18 @@ class MemberDao:
                 )
             )
             return result.scalar_one_or_none()
+
+    async def count_members_by_team(self) -> dict[str, int]:
+        """Count members per team across the static roster in one query.
+
+        Teams with no members are absent from the mapping; callers treat a
+        missing key as zero.
+        """
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(TeamMember.team_name, func.count()).group_by(TeamMember.team_name)
+            )
+            return {team_name: count for team_name, count in result.all()}
 
     async def get_team_members(
         self,
@@ -758,22 +780,26 @@ class MemberDao:
             return False
 
         async with self._sessions.write() as session:
-            result = await session.execute(
-                update(TeamMember)
-                .where(
-                    TeamMember.member_name == member_name,
-                    TeamMember.team_name == team_name,
-                    TeamMember.status == expected_status.value,
-                )
-                .values(
-                    status=MemberStatus.RESTARTING.value,
-                    execution_status=ExecutionStatus.IDLE.value,
-                )
-            )
-            if result.rowcount != 1:
-                return False
-            await session.commit()
-            return True
+            claimed = await self.claim_restart_in_session(session, member_name, team_name, expected_status)
+            if claimed:
+                await session.commit()
+            return claimed
+
+    async def claim_restart_in_session(
+        self, session, member_name: str, team_name: str, expected_status: MemberStatus, *, role: str | None = None,
+    ) -> bool:
+        """Occupy the member row without committing the caller's transaction."""
+        stmt = update(TeamMember).where(
+            TeamMember.member_name == member_name,
+            TeamMember.team_name == team_name,
+            TeamMember.status == expected_status.value,
+        )
+        if role is not None:
+            stmt = stmt.where(TeamMember.role == role)
+        result = await session.execute(stmt.values(
+            status=MemberStatus.RESTARTING.value, execution_status=ExecutionStatus.IDLE.value,
+        ))
+        return result.rowcount == 1
 
     async def update_member_worktree(
         self,

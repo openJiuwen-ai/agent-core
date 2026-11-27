@@ -68,3 +68,5 @@ sweep 的扫描面、节流与升级规则，以及调度模式两个 handler �
 - `interaction/` 把三视角入口（GodView / Operator / HumanAgent）解析成 `EventMessage` 后才进 dispatcher，不要让 dispatcher / handler 自己解析 mention 字符串——那段已搬到 `interaction/router.py`。
 - 真正干活的 LLM 在 `harness/deep_agent.py`，本目录只装配 + 调度。
 - 跨 team 的对象池 / 派发 / 并发门禁在 `runtime/`，本目录不感知。
+
+Jiuwen 团队记忆收口与原生 manager 独立：Leader 的 pause、running→stop 在释放 session 前委托 memory/jiuwen.py，后者仅在已挂 Team Rail 时读取任务/消息并调用 conclude_round；不会为关闭的记忆路线新建 Provider。

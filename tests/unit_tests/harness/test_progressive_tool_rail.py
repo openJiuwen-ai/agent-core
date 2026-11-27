@@ -420,3 +420,121 @@ async def test_deferred_catalog_recreates_full_snapshot_when_history_has_no_base
     recovered_again = await manager.sync_to_context(third_context, session.session_id)
     assert recovered_again is not None
     assert "目录版本：1" in recovered_again.content
+
+
+class _PathExpandingSession(_AttachmentSession):
+    """Session state that applies the real nested-path expansion."""
+
+    def get_state(self, key):
+        from openjiuwen.core.session.utils import get_by_schema
+
+        return get_by_schema(key, self._state)
+
+    def update_state(self, updates):
+        from openjiuwen.core.session.utils import update_dict
+
+        update_dict(updates, self._state)
+
+
+class _ExecutableRegistry(_ToolRegistry):
+    def get(self, name):
+        return next((card for card in self.cards if card.name == name), None)
+
+    async def execute(self, **_kwargs):
+        return [
+            (
+                SimpleNamespace(success=True, data={"ok": True}),
+                SimpleNamespace(content="ok"),
+            )
+        ]
+
+
+def test_legacy_expanded_catalog_names_are_dropped():
+    """Legacy state stores dotted names as nested dicts; keep only real entries."""
+
+    normalized = ProgressiveToolRail._normalize_deferred_catalog({
+        "mcp_tencent-docs_manage": {"folder_list": "列出目录"},
+        "cron_create": "创建定时任务",
+    })
+
+    assert normalized == {"cron_create": "创建定时任务"}
+
+
+@pytest.mark.asyncio
+async def test_dotted_tool_name_stays_callable_after_search():
+    """A tool named ``manage.folder_list`` must keep its full authorization key."""
+
+    config = DeepAgentConfig(progressive_tool_enabled=True, language="cn")
+    rail = ProgressiveToolRail(config)
+    name = "mcp_tencent-docs_manage.folder_list"
+    registry = _ExecutableRegistry([_deferred_card(name, "列出目录")])
+    rail._tool_search_registry = registry
+    session = _PathExpandingSession()
+
+    await rail._search_tools(query=name, limit=1, session=session)
+
+    assert name in rail._get_discovered_tools(session)
+    assert name in (rail._get_discovered_tool_fingerprints(session) or {})
+
+    callback_context = SimpleNamespace(
+        agent=SimpleNamespace(ability_manager=registry),
+        inputs=SimpleNamespace(tool_call=SimpleNamespace(id="call-1")),
+        extra={},
+    )
+    output = await rail._call_discovered_tool(name, {}, session, callback_context)
+
+    assert output.success is True
+
+
+@pytest.mark.asyncio
+async def test_dotted_tool_name_catalog_is_stable_between_turns():
+    """Dotted names must not produce a bogus catalog delta on every turn."""
+
+    config = DeepAgentConfig(progressive_tool_enabled=True, language="cn")
+    registry = _ToolRegistry(
+        [_deferred_card("mcp_tencent-docs_manage.folder_list", "列出目录")]
+    )
+    manager = PromptAttachmentManager(language="cn")
+    builder = SystemPromptBuilder(language="cn")
+    agent = SimpleNamespace(
+        system_prompt_builder=builder,
+        ability_manager=registry,
+        prompt_attachment_manager=manager,
+    )
+    session = _PathExpandingSession()
+    context = SessionModelContext(
+        "ctx-dotted",
+        session.session_id,
+        ContextEngineConfig(),
+        history_messages=[],
+        processors=[],
+    )
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ModelCallInputs(tools=[]),
+        session=session,
+        context=context,
+    )
+
+    rail = ProgressiveToolRail(config)
+    await rail.before_model_call(ctx)
+    await manager.add_section(
+        session_id=session.session_id,
+        section="runtime",
+        kind="runtime",
+        source="test.runtime",
+        content="runtime state",
+    )
+    assert await manager.sync_to_context(context, session.session_id) is not None
+
+    from openjiuwen.harness.rails.progressive_tool_rail import (
+        _DEFERRED_TOOL_CATALOG_STATE_KEY,
+        _decode_name_map,
+    )
+
+    stored = _decode_name_map(session.get_state(_DEFERRED_TOOL_CATALOG_STATE_KEY))
+    assert stored["tools"]["mcp_tencent-docs_manage.folder_list"] == "列出目录"
+
+    await rail.before_model_call(ctx)
+
+    assert await manager.sync_to_context(context, session.session_id) is None

@@ -34,6 +34,17 @@ class CustomStream(WorkflowComponent):
             yield {"value": "transform_{}".format(item)}
 
 
+class EmitComponent(WorkflowComponent):
+    """Component that produces a fixed output for batch invoke / stream paths."""
+
+    async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        return {"value": 1}
+
+    async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
+        yield {"value": 1}
+        yield {"value": 2}
+
+
 class BatchConsumerComponent(WorkflowComponent):
     """Component that consumes batch output from sub_workflow"""
     last_invoked_inputs = None
@@ -43,6 +54,20 @@ class BatchConsumerComponent(WorkflowComponent):
         result = inputs.get("result") if inputs else None
         BatchConsumerComponent.last_invoked_inputs = inputs
         return {"consumed_result": result}
+
+
+class RecordingSubWorkflowComp(SubWorkflowComponent):
+    """SubWorkflowComponent that records frames yielded by the sub workflow."""
+
+    def __init__(self, sub_workflow: Workflow, *, cache_stream: bool = False):
+        super().__init__(sub_workflow, cache_stream=cache_stream)
+        self.frames = []
+
+    async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
+        self.frames = []
+        async for value in super().stream(inputs, session, context):
+            self.frames.append(value)
+            yield value
 
 
 class TestSubWorkflowComp:
@@ -223,3 +248,166 @@ class TestSubWorkflowComp:
             chunks.append(chunk)
 
         assert chunks == expect_chunks
+
+    async def test_workflow_with_batch_sub_workflow_on_stream_edge(self):
+        """Regression test: sub workflow with default batch mode on a parent stream edge.
+
+        Sub workflow: Start -> CustomStream (stream) -> End (batch, no response_mode)
+        Main workflow: Start -> SubWorkflowComp (stream edge) -> End (streaming)
+
+        Before the fix, Workflow._sub_stream referenced `sub_end_ability` outside
+        the `if self._is_streaming:` block, so this legal combination always
+        crashed with `UnboundLocalError`.
+
+        Review follow-up: the batched end-node output `{'output': [chunks...]}` is
+        split into per-frame deliveries `{'output': chunk}`, so downstream
+        per-frame templates (e.g. `${sub_workflow_comp.output.out}`) resolve the
+        same values as with a streaming sub workflow instead of silently
+        producing None.
+        """
+        sub_workflow = Workflow()
+        sub_workflow.set_start_comp("sub_start", Start())
+        sub_workflow.add_workflow_comp("custom", CustomStream(), inputs_schema={"value": "123"})
+        sub_workflow.add_workflow_comp("custom1", CustomStream(), stream_inputs_schema={"value": "${custom.value}"})
+        # No response_mode="streaming": the sub workflow stays in default batch mode
+        sub_workflow.set_end_comp("sub_end", End(), stream_inputs_schema={'out': '${custom1.value}'})
+        sub_workflow.add_connection("sub_start", "custom")
+        sub_workflow.add_stream_connection("custom", "custom1")
+        sub_workflow.add_stream_connection("custom1", "sub_end")
+
+        main_workflow = Workflow()
+        sub_workflow_comp = RecordingSubWorkflowComp(sub_workflow)
+        main_workflow.set_start_comp("start", Start(), inputs_schema={})
+        main_workflow.add_workflow_comp("sub_workflow_comp", sub_workflow_comp, inputs_schema={})
+        main_workflow.set_end_comp("end", End(), response_mode="streaming",
+                                   stream_inputs_schema={'result': '${sub_workflow_comp.output.out}'})
+        main_workflow.add_connection("start", "sub_workflow_comp")
+        main_workflow.add_stream_connection("sub_workflow_comp", "end")
+
+        # Must complete without raising (it crashed before the fix)
+        chunks = []
+        async for chunk in main_workflow.stream(inputs={}, session=create_workflow_session(),
+                                                stream_modes=[BaseStreamMode.OUTPUT]):
+            chunks.append(chunk)
+
+        # The batched end-node output is split into per-frame deliveries with the
+        # same shape as streaming sub-workflow frames
+        assert sub_workflow_comp.frames == [
+            {'output': {'out': 'transform_stream_1'}},
+            {'output': {'out': 'transform_stream_2'}},
+            {'output': {'out': 'transform_stream_3'}},
+        ]
+
+        # Downstream output is identical to the streaming sub-workflow case
+        # (test_workflow's expectation), not silently None
+        expect_chunks = [
+            OutputSchema(type='end node stream', index=0, payload={'output': {'result': 'transform_stream_1'}}),
+            OutputSchema(type='end node stream', index=1, payload={'output': {'result': 'transform_stream_2'}}),
+            OutputSchema(type='end node stream', index=2, payload={'output': {'result': 'transform_stream_3'}})]
+        assert chunks == expect_chunks
+
+    async def test_workflow_with_batch_invoke_sub_workflow_on_stream_edge(self):
+        """Regression test: batch fallback delivers INVOKE-mode end output in the
+        {'output': ...} frame contract.
+
+        Sub workflow: Start -> Emit (batch invoke) -> End (no template, plain
+        edge + inputs_schema). The end output {'output': {...}} must be forwarded
+        as-is so downstream per-frame templates resolve.
+        """
+        sub_workflow = Workflow()
+        sub_workflow.set_start_comp("sub_start", Start())
+        sub_workflow.add_workflow_comp("emit", EmitComponent(), inputs_schema={"value": 1})
+        sub_workflow.set_end_comp("sub_end", End(), inputs_schema={'out': '${emit.value}'})
+        sub_workflow.add_connection("sub_start", "emit")
+        sub_workflow.add_connection("emit", "sub_end")
+
+        main_workflow = Workflow()
+        sub_workflow_comp = RecordingSubWorkflowComp(sub_workflow)
+        main_workflow.set_start_comp("start", Start(), inputs_schema={})
+        main_workflow.add_workflow_comp("sub_workflow_comp", sub_workflow_comp, inputs_schema={})
+        main_workflow.set_end_comp("end", End(), response_mode="streaming",
+                                   stream_inputs_schema={'result': '${sub_workflow_comp.output.out}'})
+        main_workflow.add_connection("start", "sub_workflow_comp")
+        main_workflow.add_stream_connection("sub_workflow_comp", "end")
+
+        chunks = []
+        async for chunk in main_workflow.stream(inputs={}, session=create_workflow_session(),
+                                                stream_modes=[BaseStreamMode.OUTPUT]):
+            chunks.append(chunk)
+
+        assert sub_workflow_comp.frames == [{'output': {'out': 1}}]
+        assert chunks == [OutputSchema(type='end node stream', index=0, payload={'output': {'result': 1}})]
+
+    async def test_workflow_with_batch_sub_workflow_no_output_on_stream_edge(self):
+        """Regression test: batch fallback yields no frame when the sub workflow
+        end has no output (None), instead of yielding a None frame.
+
+        A streaming End with no inputs produces no frames either, so the batch
+        fallback must stay silent rather than emitting a contract-breaking None.
+        """
+        sub_workflow = Workflow()
+        sub_workflow.set_start_comp("sub_start", Start())
+        sub_workflow.add_workflow_comp("emit", EmitComponent(), inputs_schema={"value": 1})
+        sub_workflow.set_end_comp("sub_end", End())
+        sub_workflow.add_connection("sub_start", "emit")
+        sub_workflow.add_connection("emit", "sub_end")
+
+        main_workflow = Workflow()
+        sub_workflow_comp = RecordingSubWorkflowComp(sub_workflow)
+        main_workflow.set_start_comp("start", Start(), inputs_schema={})
+        main_workflow.add_workflow_comp("sub_workflow_comp", sub_workflow_comp, inputs_schema={})
+        main_workflow.set_end_comp("end", End(), response_mode="streaming",
+                                   stream_inputs_schema={'result': '${sub_workflow_comp.output.result}'})
+        main_workflow.add_connection("start", "sub_workflow_comp")
+        main_workflow.add_stream_connection("sub_workflow_comp", "end")
+
+        chunks = []
+        async for chunk in main_workflow.stream(inputs={}, session=create_workflow_session(),
+                                                stream_modes=[BaseStreamMode.OUTPUT]):
+            chunks.append(chunk)
+
+        assert sub_workflow_comp.frames == []
+        assert chunks == []
+
+    async def test_workflow_with_batch_template_sub_workflow_on_stream_edge(self):
+        """Regression test: batch fallback for a response_template End keeps the
+        same frame key shape ({'response': ...}) as the streaming branch.
+
+        The streaming branch delivers per-segment frames keyed by 'response'; the
+        batch fallback delivers the aggregated render result under the same key,
+        so downstream sees a consistent key contract either way.
+        """
+        def build(response_mode):
+            sub_workflow = Workflow()
+            sub_workflow.set_start_comp("sub_start", Start())
+            sub_workflow.add_workflow_comp("emit", EmitComponent(), inputs_schema={"value": 1})
+            sub_workflow.set_end_comp(
+                "sub_end", End(conf={"responseTemplate": "resp: {{value}}"}),
+                stream_inputs_schema={'value': '${emit.value}'},
+                **({"response_mode": "streaming"} if response_mode else {}))
+            sub_workflow.add_connection("sub_start", "emit")
+            sub_workflow.add_stream_connection("emit", "sub_end")
+
+            main_workflow = Workflow()
+            sub_workflow_comp = RecordingSubWorkflowComp(sub_workflow)
+            main_workflow.set_start_comp("start", Start(), inputs_schema={})
+            main_workflow.add_workflow_comp("sub_workflow_comp", sub_workflow_comp, inputs_schema={})
+            main_workflow.set_end_comp("end", End(), response_mode="streaming",
+                                       stream_inputs_schema={'result': '${sub_workflow_comp.output.result}'})
+            main_workflow.add_connection("start", "sub_workflow_comp")
+            main_workflow.add_stream_connection("sub_workflow_comp", "end")
+            return main_workflow, sub_workflow_comp
+
+        async def run(workflow, comp):
+            chunks = []
+            async for chunk in workflow.stream(inputs={}, session=create_workflow_session(),
+                                               stream_modes=[BaseStreamMode.OUTPUT]):
+                chunks.append(chunk)
+            return comp.frames, chunks
+
+        batch_frames, _ = await run(*build(response_mode=False))
+        streaming_frames, _ = await run(*build(response_mode=True))
+
+        # Same key contract as the streaming branch: every frame is keyed by 'response'
+        assert batch_frames == [{'response': 'resp: 12'}]
+        assert all(set(frame.keys()) == {'response'} for frame in streaming_frames)

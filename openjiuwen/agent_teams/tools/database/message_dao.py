@@ -19,10 +19,12 @@ from openjiuwen.agent_teams.tools.database.engine import (
     DbSessions,
     get_current_time,
     retry_on_locked,
+    retry_on_transient,
 )
 from openjiuwen.agent_teams.tools.models import (
     TeamMember,
     TeamMessageBase,
+    _get_group_notification_model,
     _get_message_model,
     _get_message_read_status_model,
 )
@@ -360,6 +362,22 @@ class MessageDao:
 
         return await self._hydrate_rows_off_loop(rows)
 
+    async def approval_mail_matches(
+        self, session: AsyncSession, team_name: str, member_name: str, leader: str, expected_ids: frozenset[str],
+    ) -> bool:
+        """Check the prevalidated direct-mail identities inside the claim transaction."""
+        model = _get_message_model()
+        rows = (await session.execute(select(model.message_id, model.from_member_name).where(
+            model.team_name == team_name, model.to_member_name == member_name,
+            model.broadcast.is_(False), model.is_read.is_(False),
+        ))).all()
+        return (
+            bool(expected_ids)
+            and {row.message_id for row in rows} == expected_ids
+            and all(row.from_member_name == leader for row in rows)
+            and not await self._broadcast_unread_recipients(session, team_name, only=[member_name])
+        )
+
     async def get_unread_group_members(self, team_name: str) -> List[str]:
         """Read unstarted or failed recipients of explicit group mentions."""
         message_model = _get_message_model()
@@ -374,7 +392,7 @@ class MessageDao:
                     message_model.team_name == team_name,
                     message_model.broadcast.is_(True),
                     TeamMember.status.in_((MemberStatus.UNSTARTED.value, MemberStatus.ERROR.value)),
-                    TeamMember.role != "passive_human",
+                    TeamMember.role.notin_(("passive_human", "host_managed")),
                     (read_model.read_at.is_(None)) | (message_model.timestamp > read_model.read_at),
                 )
             )
@@ -384,7 +402,59 @@ class MessageDao:
             for row in result.all():
                 if row.member_name in group_metadata(row).get("mentions", []):
                     members.add(row.member_name)
+            notification_model = _get_group_notification_model()
+            notified = await session.execute(
+                select(TeamMember.member_name)
+                .join(notification_model, (notification_model.team_name == TeamMember.team_name)
+                      & (notification_model.member_name == TeamMember.member_name))
+                .where(
+                    TeamMember.team_name == team_name,
+                    notification_model.consumed_at.is_(None),
+                    TeamMember.status.in_((MemberStatus.UNSTARTED.value, MemberStatus.ERROR.value)),
+                    TeamMember.role.notin_(("passive_human", "host_managed")),
+                )
+            )
+            members.update(notified.scalars().all())
             return list(members)
+
+    async def create_group_notification(
+        self, notification_id: str, team_name: str, member_name: str, message_id: str,
+    ) -> bool:
+        """Persist one pending notification.
+
+        Returns:
+            False when ``notification_id`` already exists; the stored row is left untouched.
+        """
+        model = _get_group_notification_model()
+
+        async def _op() -> bool:
+            async with self._sessions.write() as session:
+                if await session.get(model, notification_id) is not None:
+                    return False
+                session.add(model(
+                    notification_id=notification_id, team_name=team_name, member_name=member_name,
+                    message_id=message_id, created_at=get_current_time(),
+                ))
+                try:
+                    await session.commit()
+                except IntegrityError as exc:
+                    original = exc.orig
+                    # Some SQLite drivers do not expose extended constraint codes.
+                    sqlite_primary_key = (
+                        str(original) == f"UNIQUE constraint failed: {model.__tablename__}.notification_id"
+                    )
+                    postgres_unique = getattr(original, "sqlstate", None) == "23505"
+                    mysql_duplicate = original.args[:1] == (1062,)
+                    if not (sqlite_primary_key or postgres_unique or mysql_duplicate):
+                        raise
+                    await session.rollback()
+                    # Confirm another writer stored this notification identity.
+                    if await session.get(model, notification_id) is None:
+                        raise
+                    return False
+            return True
+
+        return await retry_on_transient(_op, label=f"create_group_notification {notification_id}")
 
     async def get_broadcast_read_at(self, team_name: str, member_name: str) -> int:
         """Return the existing per-member broadcast watermark in this session."""
@@ -418,11 +488,27 @@ class MessageDao:
             result = await session.execute(query)
             from openjiuwen.agent_teams.group_chat.handler import group_metadata
 
+            notification_model = _get_group_notification_model()
+            notified = await session.execute(
+                select(notification_model.message_id, notification_model.consumed_at).where(
+                    notification_model.team_name == team_name,
+                    notification_model.member_name == member_name,
+                )
+            )
+            # message_id -> True while any notification of it is still pending for this member.
+            notifications: dict[str, bool] = {}
+            for item in notified.all():
+                notifications[item.message_id] = notifications.get(item.message_id, False) or item.consumed_at is None
+
             rows = []
+            # Rows addressed only through a notification ignore the broadcast watermark.
+            by_watermark = set()
             for row in result.scalars().all():
                 meta = group_metadata(row)
                 addressed = member_name in meta["mentions"] if meta else row.from_member_name != member_name
                 if addressed:
+                    by_watermark.add(row.message_id)
+                if addressed or (meta and row.message_id in notifications):
                     rows.append(row)
 
             read_result = await session.execute(
@@ -434,7 +520,15 @@ class MessageDao:
             read_status = read_result.scalar_one_or_none()
 
         if unread_only:
-            rows = [row for row in rows if read_status is None or row.timestamp > read_status.read_at]
+            unread_rows = []
+            read_at = read_status.read_at if read_status is not None else None
+            for row in rows:
+                has_pending_notification = notifications.get(row.message_id)
+                after_watermark = read_at is None or row.timestamp > read_at
+                unread_by_watermark = row.message_id in by_watermark and after_watermark
+                if has_pending_notification or unread_by_watermark:
+                    unread_rows.append(row)
+            rows = unread_rows
         return await self._hydrate_rows_off_loop(rows)
 
     async def get_team_messages(self, team_name: str, broadcast: Optional[bool] = None) -> List[TeamMessageBase]:
@@ -521,6 +615,7 @@ class MessageDao:
             .where(
                 TeamMember.team_name == message_model.team_name,
                 TeamMember.member_name == message_model.to_member_name,
+                TeamMember.role != "host_managed",
                 TeamMember.status.not_in(_UNREAD_EXEMPT_STATUSES),
             )
             .exists()
@@ -551,7 +646,7 @@ class MessageDao:
         """Members (restricted to ``only`` when given) with a broadcast above their read watermark.
 
         Group messages count only for mentioned non-passive members; ordinary
-        broadcasts for everyone but the sender. Exempt statuses never count.
+        broadcasts for everyone but the sender. Host-managed members and exempt statuses never count.
         """
         message_model = _get_message_model()
         read_status_model = _get_message_read_status_model()
@@ -571,6 +666,7 @@ class MessageDao:
                 message_model.team_name == team_name,
                 message_model.broadcast.is_(True),
                 TeamMember.status.not_in(_UNREAD_EXEMPT_STATUSES),
+                TeamMember.role != "host_managed",
                 ~covered_by_watermark,
             )
         )
@@ -586,6 +682,21 @@ class MessageDao:
                     pending.add(row.member_name)
             elif row.member_name != row.from_member_name:
                 pending.add(row.member_name)
+        notification_model = _get_group_notification_model()
+        notified = (
+            select(TeamMember.member_name)
+            .join(notification_model, (notification_model.team_name == TeamMember.team_name)
+                  & (notification_model.member_name == TeamMember.member_name))
+            .where(
+                TeamMember.team_name == team_name,
+                notification_model.consumed_at.is_(None),
+                TeamMember.status.not_in(_UNREAD_EXEMPT_STATUSES),
+                TeamMember.role.notin_(("passive_human", "host_managed")),
+            )
+        )
+        if only is not None:
+            notified = notified.where(TeamMember.member_name.in_(only))
+        pending.update((await session.execute(notified)).scalars().all())
         return pending
 
     async def _mark_read_in_session(
@@ -655,6 +766,19 @@ class MessageDao:
                 await session.flush()
             elif read_status.read_at is None or message.timestamp > read_status.read_at:
                 read_status.read_at = message.timestamp
+            notification_model = _get_group_notification_model()
+            pending = (
+                notification_model.team_name == message.team_name,
+                notification_model.member_name == member_name,
+                notification_model.message_id == message_id,
+                notification_model.consumed_at.is_(None),
+            )
+            # Most broadcasts carry no notification; skip the write and the clock read for them.
+            found = await session.execute(select(notification_model.notification_id).where(*pending).limit(1))
+            if found.first() is not None:
+                await session.execute(
+                    update(notification_model).where(*pending).values(consumed_at=get_current_time())
+                )
         else:
             message.is_read = True
 
