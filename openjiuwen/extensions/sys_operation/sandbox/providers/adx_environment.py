@@ -22,7 +22,9 @@ Idle lifecycle settings are passed through to the SDK create call:
 settings participate in the environment scope, so changing them selects a new
 environment instead of silently keeping an environment created with the old
 settings. A ``paused`` environment stays cached: the first data-plane operation
-wakes it and keeps the retained checkpoint.
+wakes it and keeps the retained checkpoint. When a create conflicts with an
+existing paused environment, ADX reports its environment ID; the provider
+attaches to that handle and resumes it explicitly instead of replacing it.
 """
 
 from __future__ import annotations
@@ -30,9 +32,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import shlex
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, ClassVar
@@ -48,6 +52,13 @@ from openjiuwen.extensions.sys_operation.sandbox.providers.adx_operations import
 )
 
 ADX_ENVIRONMENT_CAPABILITIES = frozenset({"local-rootfs"})
+
+logger = logging.getLogger(__name__)
+
+# A rejected resume can leave the record briefly in its transitional state
+# (resuming/pausing) before it settles back to paused.
+_RESUME_SETTLE_SECONDS = 10.0
+_RESUME_SETTLE_POLL_SECONDS = 0.5
 
 _PROCESS_IDENTITY = uuid.uuid4().hex
 _DEFAULT_RESTART_POLICY = {"maxAttempts": 3, "initialBackoffSeconds": 1, "maxBackoffSeconds": 30}
@@ -140,6 +151,46 @@ def _lifecycle_signature(settings: dict[str, Any]) -> str:
         return ""
     payload = json.dumps(lifecycle, sort_keys=True, separators=(",", ":"))
     return "|lifecycle=" + hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _definitive_resume_rejection(exc: BaseException) -> bool:
+    """Return whether ADX definitively rejected resuming the restore point.
+
+    An expired checkpoint, an incompatible release/recovery profile and a local
+    restore point that cannot move to another node are reported as 400 or 409
+    with ``retry=never`` and ``outcome=not_started``. Older SDKs wrap that
+    structured error, so follow the exception chain; a missing field keeps the
+    environment because the rejection may still be transient.
+    """
+    error = getattr(exc, "__cause__", None) or exc
+    return (
+        getattr(error, "status_code", None) in (400, 409)
+        and getattr(error, "retry", None) == "never"
+        and getattr(error, "outcome", None) == "not_started"
+    )
+
+
+def _settles_to_paused(environment: Any) -> bool:
+    """Return whether a rejected environment is (or returns to) paused.
+
+    The operation that was just rejected can leave the record in a transitional
+    state. Any terminal running/deleted/failed state keeps the environment.
+    """
+    from adx_environment import EnvironmentNotFound
+
+    deadline = time.monotonic() + _RESUME_SETTLE_SECONDS
+    while True:
+        try:
+            current = str(environment.get_info().state).lower()
+        except EnvironmentNotFound:
+            return False
+        except Exception:
+            return False
+        if current in ("paused", "running", "deleted", "failed"):
+            return current == "paused"
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_RESUME_SETTLE_POLL_SECONDS)
 
 
 def _network_policy(configuration: dict[str, Any]) -> Any:
@@ -356,7 +407,57 @@ class _AdxEnvironmentBackend:
             kwargs["cwd"] = self._extra.get("workdir")
             # Repeating this deterministic name must reconcile the same execution.
             # Unknown creates keep their name; never generate a fresh one on error.
-            environment = Environment(connection=connection, **kwargs)
+            try:
+                environment = Environment(connection=connection, **kwargs)
+            except Exception as exc:
+                # ADX reports a paused existing environment as a conflict carrying
+                # its environment ID. Attach to it and resume explicitly; never
+                # delete or replace a retained checkpoint from the create path.
+                environment_id = getattr(exc, "environment_id", None)
+                if (
+                    getattr(exc, "status_code", None) != 409
+                    or not isinstance(environment_id, str)
+                    or not environment_id
+                    or environment_id == "unknown"
+                    or "attach-paused-environment"
+                    not in getattr(adx_environment, "SDK_CAPABILITIES", ())
+                ):
+                    raise
+                environment = Environment.from_id(environment_id, connection=connection, require_running=False)
+                try:
+                    state = str(environment.get_info().state).lower()
+                    if state == "paused":
+                        try:
+                            environment.resume()
+                        except Exception as exc:
+                            if not _definitive_resume_rejection(exc):
+                                raise
+                            # An expired TTL, an incompatible release/profile or
+                            # an immovable local restore point can never resume.
+                            # Wait for the rejected operation to settle, then
+                            # discard only an environment that is still paused: a
+                            # concurrent resume or recreate must be preserved.
+                            if _settles_to_paused(environment):
+                                try:
+                                    Environment.delete(environment_id, connection=connection)
+                                    logger.warning(
+                                        "discarded ADX environment %s after an unusable restore point: %s",
+                                        environment_id,
+                                        exc,
+                                    )
+                                except Exception as cleanup_error:
+                                    logger.warning(
+                                        "failed to discard ADX environment %s with an unusable "
+                                        "restore point: %s",
+                                        environment_id,
+                                        cleanup_error,
+                                    )
+                            raise
+                    elif state != "running":
+                        raise
+                except BaseException:
+                    environment.close()
+                    raise
             self._instances[self._scope] = (environment, connection)
             return environment
 
