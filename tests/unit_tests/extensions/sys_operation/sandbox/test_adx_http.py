@@ -407,3 +407,73 @@ async def test_local_rootfs_variants_are_cleaned_by_the_original_scope(monkeypat
     assert await adx.delete_adx_sandbox(shared_key=scope) == [first, second]
     assert deleted == [(base, "one"), (base, "two")]
     assert set(instances) == {unrelated}
+
+
+def test_create_body_carries_idle_lifecycle():
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx import _adx_create_body
+
+    body = _adx_create_body({
+        "runtime": "runsc",
+        "idle_timeout": 900,
+        "idle_action": "pause",
+        "pause_policy": {
+            "retention": {"kind": "ttl", "ttlSeconds": 86400},
+            "timeoutSeconds": 300,
+            "storage": "configured",
+        },
+        "failover": True,
+    }, "supervisor")
+    assert body["idleAction"] == "pause"
+    assert body["pauseOptions"] == {
+        "retention": {"kind": "ttl", "ttlSeconds": 86400},
+        "timeoutSeconds": 300,
+        "storage": "configured",
+    }
+    assert body["failover"] is True
+
+
+@pytest.mark.parametrize("extra", [
+    {"idle_action": "keep"},
+    {"idle_action": "pause", "idle_timeout": 0},
+    {"idle_action": "pause", "idle_timeout": 900, "pause_policy": {"retention": {"kind": "ttl", "ttlSeconds": 0}}},
+    {"idle_action": "pause", "idle_timeout": 900, "pause_policy": {"retention": {"kind": "ttl", "ttlSeconds": -1}}},
+    {"idle_action": "pause", "idle_timeout": 900, "pause_policy": {"retention": {"kind": "forever"}, "timeoutSeconds": 0}},
+    {"idle_action": "pause", "idle_timeout": 900, "pause_policy": {"retention": {"kind": "forever"}, "storage": "cluster"}},
+    {"failover": "yes"},
+])
+def test_create_body_rejects_invalid_lifecycle(extra):
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx import _adx_create_body
+
+    with pytest.raises(ValueError):
+        _adx_create_body(dict(extra), "supervisor")
+
+
+def test_create_body_rejects_pause_for_conch():
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx import _adx_create_body
+
+    with pytest.raises(ValueError, match="conch"):
+        _adx_create_body({"runtime": "conch", "idle_action": "pause", "idle_timeout": 900}, "conch")
+
+
+def test_shared_scope_tracks_lifecycle():
+    import copy
+
+    from openjiuwen.core.sys_operation.sandbox.gateway.gateway import SandboxEndpoint
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    def scope(extra):
+        provider = object.__new__(adx.AdxShellProvider)
+        provider.endpoint = SandboxEndpoint(base_url="https://example.test", isolation_key="alice")
+        provider.config = SandboxGatewayConfig(launcher_config=PreDeployLauncherConfig(
+            base_url="https://example.test", sandbox_type="adx-environment", extra_params=extra))
+        provider._executor = "supervisor"
+        return provider._shared_scope_key()
+
+    pause = {
+        "runtime": "runsc", "idle_timeout": 900, "idle_action": "pause",
+        "pause_policy": {"retention": {"kind": "ttl", "ttlSeconds": 86400}},
+        "failover": True,
+    }
+    assert "|lifecycle=" not in scope({"runtime": "runsc"})
+    assert scope(copy.deepcopy(pause)) == scope(copy.deepcopy(pause))
+    assert scope(pause) != scope({**copy.deepcopy(pause), "idle_timeout": 3600})
