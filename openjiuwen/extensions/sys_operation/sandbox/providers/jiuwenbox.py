@@ -1484,12 +1484,17 @@ async def _run_local_subprocess(
 
 
 def _kill_process_group(proc: subprocess.Popen[Any]) -> None:
-    """Best-effort terminate a process group started with start_new_session."""
+    """Best-effort terminate a process group started with start_new_session.
+
+    On Windows os.killpg does not exist at all (AttributeError, not OSError),
+    so the fallback must also catch AttributeError or the timed-out child is
+    left running as an orphan.
+    """
     if proc.pid is None:
         return
     try:
         os.killpg(proc.pid, signal.SIGTERM)
-    except OSError:
+    except (AttributeError, OSError):
         try:
             proc.terminate()
         except Exception:  # noqa: BLE001
@@ -1501,7 +1506,7 @@ def _kill_process_group(proc: subprocess.Popen[Any]) -> None:
         pass
     try:
         os.killpg(proc.pid, signal.SIGKILL)
-    except OSError:
+    except (AttributeError, OSError):
         try:
             proc.kill()
         except Exception:  # noqa: BLE001
