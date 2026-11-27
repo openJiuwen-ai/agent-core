@@ -782,7 +782,11 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             ToolCheckTriggerContext,
         )
 
-        event_input = ToolCheckInput(tool_call_id=getattr(tool_call, "id", None), tool_name=tool_name)
+        event_input = ToolCheckInput(
+            tool_call_id=getattr(tool_call, "id", None),
+            tool_name=tool_name,
+            agent_id=getattr(getattr(ctx.agent, "card", None), "id", None),
+        )
 
         async def invoke_original(_ctx: AgentCallbackContext) -> tuple[PermissionResult, ToolCheckOutput]:
             result = await self._first_permission_check(

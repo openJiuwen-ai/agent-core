@@ -16,8 +16,11 @@ def path_to_file_uri(file_path: str) -> str:
     """
     if sys.platform == "win32":
         abs_path = Path(file_path).resolve()
-        posix_path = abs_path.as_posix()
-        return "file:///" + posix_path.replace("\\", "/")
+        # Percent-encode like the POSIX branch: paths with spaces, '#' or '%'
+        # otherwise produce invalid URIs that strict servers mis-parse (a '#'
+        # truncates the URI at the fragment marker). 'safe' keeps the drive
+        # colon and separators intact.
+        return "file:///" + urllib.parse.quote(abs_path.as_posix(), safe="/:")
     else:
         return "file://" + urllib.parse.quote(Path(file_path).resolve().as_posix(), safe="/:")
 

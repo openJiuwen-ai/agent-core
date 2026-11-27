@@ -54,6 +54,8 @@ _UNSUPPORTED_PARAMETER_MARKERS = (
 )
 _STOP_FIELD = re.compile(r"(?<![a-z0-9_])stop(?![a-z0-9_])")
 _MAX_STOP_CACHE_ENTRIES = 128
+_TOP_P_FIELD = re.compile(r"(?<![a-z0-9_])top_p(?![a-z0-9_])")
+_MAX_TOP_P_CACHE_ENTRIES = 128
 _MAX_TEMPERATURE_CACHE_ENTRIES = 128
 _TEMPERATURE_FIELD = re.compile(r"\btemperature\b")
 _UNSUPPORTED_TEMPERATURE = re.compile(
@@ -78,26 +80,46 @@ class RequestParameterFallback:
     ``stop`` is also retried without it on every request: some Responses endpoints
     (OpenAI) reject the field while others (e.g. Qwen and DeepSeek via OpenRouter)
     honour it, so it is sent as configured and dropped only after a refusal.
+    ``retry_without_temperature`` and ``retry_without_top_p`` do the same for a
+    refused ``temperature`` or ``top_p``.
     """
 
-    def __init__(self, provider: str, api_label: str, *, retry_without_stop: bool = False) -> None:
+    def __init__(
+        self,
+        provider: str,
+        api_label: str,
+        *,
+        retry_without_stop: bool = False,
+        retry_without_temperature: bool = False,
+        retry_without_top_p: bool = False,
+    ) -> None:
         self._provider = provider
         self._api_label = api_label
         self._retry_without_stop = retry_without_stop
+        self._retry_without_temperature = retry_without_temperature
+        self._retry_without_top_p = retry_without_top_p
         self._models_rejecting_disabled_thinking: set[str] = set()
         self._models_rejecting_stop: OrderedDict[str, None] = OrderedDict()
         self._rejected_temperatures: OrderedDict[tuple[str, str], None] = OrderedDict()
+        self._rejected_top_p: OrderedDict[tuple[str, str], None] = OrderedDict()
 
     def apply_cached(self, params: dict[str, Any]) -> dict[str, Any]:
         if self._retry_without_stop and "stop" in params and self._model_key(params) in self._models_rejecting_stop:
             params = self._without_stop(params)
-        if not is_disabled_thinking_fallback_allowed():
-            return params
-        model_key = self._model_key(params)
-        if model_key in self._models_rejecting_disabled_thinking and self._has_disabled_thinking_params(params):
-            params = self._without_disabled_thinking_params(params)
-        if self._temperature_cache_key(params) in self._rejected_temperatures:
-            params = self._without_temperature(params)
+        if (
+            self._retry_without_top_p
+            and self._has_field(params, "top_p")
+            and self._sampling_cache_key(params, "top_p") in self._rejected_top_p
+        ):
+            params = self._without_field(params, "top_p")
+        scoped = is_disabled_thinking_fallback_allowed()
+        if scoped:
+            model_key = self._model_key(params)
+            if model_key in self._models_rejecting_disabled_thinking and self._has_disabled_thinking_params(params):
+                params = self._without_disabled_thinking_params(params)
+        retry_temperature = scoped or self._retry_without_temperature
+        if retry_temperature and self._sampling_cache_key(params, "temperature") in self._rejected_temperatures:
+            params = self._without_field(params, "temperature")
         return params
 
     async def call(
@@ -108,12 +130,14 @@ class RequestParameterFallback:
         is_stream: bool,
     ) -> Any:
         scoped = is_disabled_thinking_fallback_allowed()
-        if not scoped and not self._retry_without_stop:
+        retry_temperature = scoped or self._retry_without_temperature
+        if not retry_temperature and not self._retry_without_stop and not self._retry_without_top_p:
             return await create(**params)
 
         request_params = self.apply_cached(params)
         model_key = self._model_key(request_params)
         rejected_temperature = None
+        rejected_top_p = None
         rejected_stop = False
         # Each recovery removes the fields it matches, so it can run only once.
         while True:
@@ -124,14 +148,20 @@ class RequestParameterFallback:
                     request_params = self._without_stop(request_params)
                     rejected_stop = True
                     rejected_option = "stop"
+                elif retry_temperature and self._rejects_temperature(exc):
+                    if self._exception_status_code(exc) != 400 or not self._has_field(request_params, "temperature"):
+                        raise exc
+                    rejected_temperature = self._sampling_cache_key(request_params, "temperature")
+                    request_params = self._without_field(request_params, "temperature")
+                    rejected_option = "temperature"
+                elif (
+                    self._retry_without_top_p and self._has_field(request_params, "top_p") and self._rejects_top_p(exc)
+                ):
+                    rejected_top_p = self._sampling_cache_key(request_params, "top_p")
+                    request_params = self._without_field(request_params, "top_p")
+                    rejected_option = "top_p"
                 elif not scoped:
                     raise exc
-                elif self._rejects_temperature(exc):
-                    if self._exception_status_code(exc) != 400 or not self._has_temperature(request_params):
-                        raise exc
-                    rejected_temperature = self._temperature_cache_key(request_params)
-                    request_params = self._without_temperature(request_params)
-                    rejected_option = "temperature"
                 elif self._has_disabled_thinking_params(request_params) and self._is_disabled_thinking_rejection(exc):
                     request_params = self._without_disabled_thinking_params(request_params)
                     if model_key:
@@ -155,6 +185,10 @@ class RequestParameterFallback:
                     self._rejected_temperatures[rejected_temperature] = None
                     if len(self._rejected_temperatures) > _MAX_TEMPERATURE_CACHE_ENTRIES:
                         self._rejected_temperatures.popitem(last=False)
+                if rejected_top_p is not None:
+                    self._rejected_top_p[rejected_top_p] = None
+                    if len(self._rejected_top_p) > _MAX_TOP_P_CACHE_ENTRIES:
+                        self._rejected_top_p.popitem(last=False)
                 return result
 
     @staticmethod
@@ -165,11 +199,19 @@ class RequestParameterFallback:
 
     @classmethod
     def _rejects_stop(cls, exc: BaseException) -> bool:
-        """Return whether ``exc`` says the endpoint does not accept the ``stop`` field at all.
+        return cls._rejects_field(exc, "stop", _STOP_FIELD)
 
-        A structured error that names ``stop`` in ``param`` counts only with an
+    @classmethod
+    def _rejects_top_p(cls, exc: BaseException) -> bool:
+        return cls._rejects_field(exc, "top_p", _TOP_P_FIELD)
+
+    @classmethod
+    def _rejects_field(cls, exc: BaseException, name: str, pattern: re.Pattern) -> bool:
+        """Return whether ``exc`` says the endpoint does not accept the field ``name`` at all.
+
+        A structured error that names the field in ``param`` counts only with an
         unknown/unsupported-parameter ``code`` or refusal wording, because value and
-        type errors set ``param`` too. Otherwise the error text must name ``stop`` and
+        type errors set ``param`` too. Otherwise the error text must name the field and
         use refusal wording. Value errors such as "Invalid type for 'stop'" and errors
         about other fields are raised as before.
         """
@@ -182,7 +224,7 @@ class RequestParameterFallback:
         details = error if isinstance(error, Mapping) else {}
         field = str(details.get("param") or "").strip().lower()
         if field:
-            if field != "stop":
+            if field != name:
                 return False
             code = str(details.get("code") or "").lower()
             message = str(details.get("message") or "").lower()
@@ -193,21 +235,22 @@ class RequestParameterFallback:
         # The whole error is searched, so errors that a gateway wraps (e.g. OpenRouter's
         # error.metadata.raw) are found too.
         text = cls._exception_text(exc).lower()
-        return any(marker in text for marker in _UNSUPPORTED_PARAMETER_MARKERS) and bool(_STOP_FIELD.search(text))
+        return any(marker in text for marker in _UNSUPPORTED_PARAMETER_MARKERS) and bool(pattern.search(text))
 
     @staticmethod
-    def _has_temperature(params: Mapping[str, Any]) -> bool:
+    def _has_field(params: Mapping[str, Any], name: str) -> bool:
         extra_body = params.get("extra_body")
-        return "temperature" in params or (isinstance(extra_body, Mapping) and "temperature" in extra_body)
+        return name in params or (isinstance(extra_body, Mapping) and name in extra_body)
 
     @staticmethod
-    def _without_temperature(params: Mapping[str, Any]) -> dict[str, Any]:
+    def _without_field(params: Mapping[str, Any], name: str) -> dict[str, Any]:
+        """Remove ``name`` from the request and from ``extra_body``, which the SDK merges into the payload."""
         cleaned = dict(params)
-        cleaned.pop("temperature", None)
+        cleaned.pop(name, None)
         extra_body = cleaned.get("extra_body")
-        if isinstance(extra_body, Mapping) and "temperature" in extra_body:
+        if isinstance(extra_body, Mapping) and name in extra_body:
             cleaned_extra = dict(extra_body)
-            cleaned_extra.pop("temperature")
+            cleaned_extra.pop(name)
             if cleaned_extra:
                 cleaned["extra_body"] = cleaned_extra
             else:
@@ -215,8 +258,13 @@ class RequestParameterFallback:
         return cleaned
 
     @classmethod
-    def _temperature_cache_key(cls, params: Mapping[str, Any]) -> Optional[tuple[str, str]]:
-        if not cls._has_temperature(params):
+    def _sampling_cache_key(cls, params: Mapping[str, Any], name: str) -> Optional[tuple[str, str]]:
+        """Key a refused ``temperature`` or ``top_p`` by model, value and reasoning settings.
+
+        Some models refuse only some values (e.g. "Only the default (1) value is supported"), and OpenAI accepts
+        both only at reasoning effort ``none``, so a refusal is not reused for another value or reasoning setting.
+        """
+        if not cls._has_field(params, name):
             return None
         extra_body = params.get("extra_body")
         # SDK extra_body keys take precedence in the outgoing JSON payload.
@@ -232,7 +280,7 @@ class RequestParameterFallback:
         if isinstance(template_kwargs, Mapping) and "enable_thinking" in template_kwargs:
             controls["chat_template_kwargs.enable_thinking"] = template_kwargs["enable_thinking"]
         try:
-            return model, json.dumps([wire["temperature"], controls], sort_keys=True)
+            return model, json.dumps([wire[name], controls], sort_keys=True)
         except (TypeError, ValueError):
             return None
 

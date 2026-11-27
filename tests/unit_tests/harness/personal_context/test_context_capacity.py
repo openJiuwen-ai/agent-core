@@ -102,7 +102,8 @@ def test_accounting_failure_preserves_read_and_next_read_records_usage(tmp_path,
     assert read_with_usage(tmp_path, "description.md", allowed=lambda: True)["markdown"] == (
         tmp_path / "workspace/context/description.md"
     ).read_bytes().decode("utf-8")
-    assert maintain_capacity(tmp_path, limit_bytes=1000)["removed_count"] == 1
+    result = maintain_capacity(tmp_path, limit_bytes=1000, commit_candidate=_commit_without_process_scheduling)
+    assert result["removed_count"] == 1, result
     assert not page.exists()
 
 
@@ -117,7 +118,8 @@ def test_old_suspension_marker_does_not_affect_read_publication_or_eviction(tmp_
     (candidate / "topic/page.md").write_text("# Updated\n" + "x" * 20000, encoding="utf-8")
     publish_with_usage(tmp_path, candidate, {})
     assert page.read_text(encoding="utf-8").startswith("# Updated")
-    assert maintain_capacity(tmp_path, limit_bytes=1000)["removed_count"] == 1
+    result = maintain_capacity(tmp_path, limit_bytes=1000, commit_candidate=_commit_without_process_scheduling)
+    assert result["removed_count"] == 1, result
     assert not page.exists()
     assert marker.read_text(encoding="utf-8") == "legacy suspension"
 
@@ -194,7 +196,7 @@ def test_valid_ledger_allows_eviction_despite_persistent_usage_save_failure(tmp_
         patcher.setattr(context_usage, "_save_usage", fail)
         patcher.setattr(context_capacity, "_save_usage", fail_after_deletion)
         assert read_with_usage(tmp_path, "recent.md", allowed=lambda: True) == expected
-        result = maintain_capacity(tmp_path, limit_bytes=9000)
+        result = maintain_capacity(tmp_path, limit_bytes=9000, commit_candidate=_commit_without_process_scheduling)
     assert result["status"] == "succeeded" and result["removed_count"] == 1
     assert result["after_bytes"] <= 5400 and recent.exists() and not cold.exists()
     assert saved_after_deletion == [True]
@@ -202,7 +204,8 @@ def test_valid_ledger_allows_eviction_despite_persistent_usage_save_failure(tmp_
     context_pipeline._validate_description_coverage(tmp_path / "workspace/context")
     assert not (tmp_path / "context_usage.suspended").exists()
     assert read_with_usage(tmp_path, "recent.md", allowed=lambda: True) == expected
-    assert maintain_capacity(tmp_path, limit_bytes=1000)["removed_count"] == 1
+    result = maintain_capacity(tmp_path, limit_bytes=1000, commit_candidate=_commit_without_process_scheduling)
+    assert result["removed_count"] == 1, result
     assert not recent.exists()
 
 
@@ -273,13 +276,14 @@ def test_post_eviction_fingerprint_failure_preserves_success_and_next_reclamatio
         return original_pages(path)
 
     monkeypatch.setattr(context_capacity, "_pages", scan)
-    result = maintain_capacity(tmp_path, limit_bytes=9000)
-    assert result["status"] == "succeeded" and result["removed_count"] == 1
+    result = maintain_capacity(tmp_path, limit_bytes=9000, commit_candidate=_commit_without_process_scheduling)
+    assert result["status"] == "succeeded" and result["removed_count"] == 1, result
     assert result["after_bytes"] <= 5400
     assert not (tmp_path / "workspace/context/old.md").exists()
     assert (tmp_path / "workspace/context/new.md").exists()
     assert not (tmp_path / "context_usage.suspended").exists()
-    assert maintain_capacity(tmp_path, limit_bytes=1000)["removed_count"] == 1
+    result = maintain_capacity(tmp_path, limit_bytes=1000, commit_candidate=_commit_without_process_scheduling)
+    assert result["removed_count"] == 1, result
     assert not (tmp_path / "workspace/context/new.md").exists()
 
 
@@ -297,7 +301,8 @@ def test_capacity_publication_failure_is_not_swallowed(tmp_path, monkeypatch):
             maintain_capacity(tmp_path, limit_bytes=1000)
     assert page.exists()
     assert not (tmp_path / "context_usage.suspended").exists()
-    assert maintain_capacity(tmp_path, limit_bytes=1000)["removed_count"] == 1
+    result = maintain_capacity(tmp_path, limit_bytes=1000, commit_candidate=_commit_without_process_scheduling)
+    assert result["removed_count"] == 1, result
 
 
 def test_capacity_candidate_path_safety_rejection_is_not_swallowed(tmp_path, monkeypatch):
@@ -378,8 +383,8 @@ def test_lru_deletes_oldest_unread_and_repairs_links_but_preserves_sources(tmp_p
     cursor.parent.mkdir(exist_ok=True)
     cursor.write_text('{"version": 1}', encoding="utf-8")
     read_with_usage(tmp_path, "old/old.md", allowed=lambda: True)
-    result = maintain_capacity(tmp_path, limit_bytes=13_000)
-    assert result["removed_count"] == 1
+    result = maintain_capacity(tmp_path, limit_bytes=13_000, commit_candidate=_commit_without_process_scheduling)
+    assert result["removed_count"] == 1, result
     assert result["after_bytes"] <= 7_800
     assert old.exists() and recent.exists() and not cold.exists()
     assert not (root / "cold").exists()
@@ -405,9 +410,9 @@ def test_capacity_waits_for_limit_even_when_above_reclaim_target(tmp_path, total
 def test_over_limit_reclaims_to_sixty_percent_then_waits_for_limit_again(tmp_path):
     for number in range(7):
         _page(tmp_path, f"page-{number}.md", f"# Page {number}\n" + "x" * 1700, 100 + number)
-    result = maintain_capacity(tmp_path, limit_bytes=10_000)
+    result = maintain_capacity(tmp_path, limit_bytes=10_000, commit_candidate=_commit_without_process_scheduling)
     assert result["before_bytes"] > 10_000
-    assert 4_000 < result["after_bytes"] <= 6_000
+    assert 4_000 < result["after_bytes"] <= 6_000, result
     assert result["removed_count"] == 4 and result["oversized_count"] == 0
     root = tmp_path / "workspace/context"
     assert all(not (root / f"page-{number}.md").exists() for number in range(4))
@@ -422,7 +427,8 @@ def test_over_limit_reclaims_to_sixty_percent_then_waits_for_limit_again(tmp_pat
 def test_page_below_limit_but_above_target_uses_lru_reason(tmp_path):
     _page(tmp_path, "old.md", "# Old\n" + "a" * 3000, 100)
     _page(tmp_path, "new.md", "# New\n" + "b" * 7000, 200)
-    result = maintain_capacity(tmp_path, limit_bytes=10_000)
+    result = maintain_capacity(tmp_path, limit_bytes=10_000, commit_candidate=_commit_without_process_scheduling)
+    assert result["status"] == "succeeded", result
     assert result["after_bytes"] <= 6000
     assert result["removed_count"] == 2 and result["oversized_count"] == 0
     assert _load_usage(tmp_path)["pages"]["new.md"]["removal_reason"] == "least_recently_used"
@@ -465,7 +471,8 @@ def test_navigation_above_reclaim_target_does_not_clear_bodies(tmp_path):
 def test_oversized_singleton_does_not_evict_fitting_older_knowledge(tmp_path):
     old = _page(tmp_path, "old/old.md", "# Old\n" + "a" * 4000, 100)
     huge = _page(tmp_path, "huge/page.md", "# Huge\n" + "x" * 12000, 200)
-    result = maintain_capacity(tmp_path, limit_bytes=10_000)
+    result = maintain_capacity(tmp_path, limit_bytes=10_000, commit_candidate=_commit_without_process_scheduling)
+    assert result["status"] == "succeeded", result
     assert old.exists() and not huge.exists()
     assert result["removed_count"] == result["oversized_count"] == 1
     assert result["after_bytes"] <= 10_000
@@ -474,7 +481,8 @@ def test_oversized_singleton_does_not_evict_fitting_older_knowledge(tmp_path):
 def test_singleton_uses_body_size_without_exact_navigation_measurement(tmp_path):
     old = _page(tmp_path, "old/page.md", "# Old\n" + "a" * 1000, 100)
     huge = _page(tmp_path, "new/page.md", "# Huge\n" + "b" * 9500, 200)
-    result = maintain_capacity(tmp_path, limit_bytes=10_000)
+    result = maintain_capacity(tmp_path, limit_bytes=10_000, commit_candidate=_commit_without_process_scheduling)
+    assert result["status"] == "succeeded", result
     assert result["oversized_count"] == 0
     assert not old.exists() and not huge.exists()
     assert _load_usage(tmp_path)["pages"]["new/page.md"]["removal_reason"] == "least_recently_used"
@@ -483,7 +491,8 @@ def test_singleton_uses_body_size_without_exact_navigation_measurement(tmp_path)
 def test_deep_navigation_does_not_require_single_page_candidate_trees(tmp_path):
     old = _page(tmp_path, "old.md", "# Old\n" + "a" * 4000, 100)
     huge = _page(tmp_path, "/".join([f"d{i}" for i in range(12)]) + "/page.md", "# New\n" + "b" * 6000, 200)
-    result = maintain_capacity(tmp_path, limit_bytes=10_000)
+    result = maintain_capacity(tmp_path, limit_bytes=10_000, commit_candidate=_commit_without_process_scheduling)
+    assert result["status"] == "succeeded", result
     assert result["oversized_count"] == 0
     assert not old.exists() and not huge.exists()
 
@@ -550,7 +559,7 @@ async def test_busy_usage_ledger_skips_only_current_maintenance(tmp_path):
         assert result["reason"] == "usage_busy" and result["removed_count"] == 0
         assert (tmp_path / "workspace/context/a/page.md").exists()
     result = maintain_capacity(tmp_path, limit_bytes=8000, commit_candidate=_commit_without_process_scheduling)
-    assert result["removed_count"] > 0
+    assert result["removed_count"] > 0, result
     assert not (tmp_path / "workspace/context/a/page.md").exists()
 
 
@@ -606,8 +615,8 @@ def test_capacity_batch_repairs_navigation_once_and_reports_actual_size(tmp_path
 
     monkeypatch.setattr(context_capacity, "_prepare_capacity_candidate", prepare)
     monkeypatch.setattr(context_capacity, "_markdown_sizes", sizes)
-    result = maintain_capacity(tmp_path, limit_bytes=125_000)
-    assert result["removed_count"] > 1
+    result = maintain_capacity(tmp_path, limit_bytes=125_000, commit_candidate=_commit_without_process_scheduling)
+    assert result["removed_count"] > 1, result
     assert len(render_calls) == 1 and len(size_calls) == 1
     assert result["after_bytes"] == sum(original_sizes(tmp_path / "workspace/context").values())
     assert not hasattr(context_capacity, "_single_page_size")
@@ -876,7 +885,8 @@ async def test_maintenance_failure_does_not_rollback_committed_cursor(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_eviction_keeps_cursor_but_source_update_can_publish_again(tmp_path):
+@pytest.mark.parametrize("commit_candidate", [None, _commit_without_process_scheduling], ids=["optional", "completed"])
+async def test_eviction_keeps_cursor_but_source_update_can_publish_again(tmp_path, commit_candidate):
     from openjiuwen.harness.personal_context import PersonalContext
 
     source = tmp_path / "source"
@@ -902,16 +912,29 @@ async def test_eviction_keeps_cursor_but_source_update_can_publish_again(tmp_pat
         first = await collect()
         assert first["run_state"] == "succeeded" and first["created_node_count"] > 0
         cursor = core._read_cursor("notes")
-        removed = maintain_capacity(home, limit_bytes=1000)
-        assert removed["removed_count"] > 0
+        assert cursor
+        root = home / "workspace/context"
+        published = [
+            page for page in context_pipeline._context_ordinary_pages(root)
+            if "useful facts" in page.read_text(encoding="utf-8")
+        ]
+        assert published
+        result = maintain_capacity(home, limit_bytes=1000, commit_candidate=commit_candidate)
+        removed = [page for page in published if not page.exists()]
+        if commit_candidate is not None:
+            assert result["status"] == "succeeded" and result["removed_count"] > 0, result
+            assert removed
         assert core._read_cursor("notes") == cursor
         second = await collect()
-        assert second["no_new_content"] is True
-        assert second["created_node_count"] == 0
+        assert second["run_state"] == "succeeded" and second["no_new_content"] is True
+        assert second["completed_items"] == second["created_node_count"] == 0
+        assert all(not page.exists() for page in removed)
         original.write_text("# Knowledge\nNew version contains new facts", encoding="utf-8")
         third = await collect()
-        assert third["run_state"] == "succeeded" and third["created_node_count"] > 0
-        assert any("New version" in page.read_text(encoding="utf-8") for page in (home / "workspace/context").rglob("*.md"))
+        assert third["run_state"] == "succeeded" and third["completed_items"] > 0
+        assert any(
+            "New version" in page.read_text(encoding="utf-8") for page in context_pipeline._context_ordinary_pages(root)
+        )
     finally:
         await core.deactivate_runtime()
         core.shutdown()

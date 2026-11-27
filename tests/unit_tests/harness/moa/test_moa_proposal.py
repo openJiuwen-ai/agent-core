@@ -338,6 +338,7 @@ async def test_responses_conversion_keeps_multimodal_tool_pair_and_tail() -> Non
 @pytest.mark.asyncio
 async def test_responses_unspecified_output_allowance_injects_without_adding_a_cap() -> None:
     model = primary(api_mode=LLMApiMode.Responses)
+    model.model_config.max_tokens = None
     sent = {}
 
     async def handler(request: httpx.Request) -> httpx.Response:
