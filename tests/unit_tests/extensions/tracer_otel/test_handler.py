@@ -51,7 +51,6 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_REQUEST_TOP_P,
     GEN_AI_RESPONSE_FINISH_REASONS,
     GEN_AI_RESPONSE_MODEL,
-    GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK,
     GEN_AI_RETRIEVAL_DOCUMENTS,
     GEN_AI_RETRIEVAL_QUERY_TEXT,
     GEN_AI_RETRIEVAL_TOP_K,
@@ -72,13 +71,19 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_ERROR,
     OJ_GEN_AI_METADATA,
     OJ_GEN_AI_REASONING_DURATION_MS,
+    OJ_GEN_AI_RESPONSE_TIME_TO_FIRST_TOKEN_MS,
+    OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS,
     OJ_GEN_AI_RESPONSE_TPOT_MS,
     OJ_GEN_AI_TRACE_NAME,
     OJ_GEN_AI_USER_ID,
+    OJ_GEN_AI_USAGE_INPUT_COST,
+    OJ_GEN_AI_USAGE_OUTPUT_COST,
+    OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_INVOKE_ID,
     OJ_LLM_PREV_MESSAGE_COUNT,
     OJ_PARENT_INVOKE_ID,
     OJ_PARENT_NODE_ID,
+    OJ_REQUEST_RETRY_COUNT,
     OJ_SESSION_ID,
     OJ_START_TIME,
     OJ_STATUS,
@@ -2211,11 +2216,11 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 22
         assert s.attributes[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] == 5
         assert s.attributes[GEN_AI_USAGE_REASONING_OUTPUT_TOKENS] == 3
-        # Usage cost values stay business data only — never span attributes.
-        for key in ("openjiuwen.gen_ai.usage.total_cost",
-                    "openjiuwen.gen_ai.usage.input_cost",
-                    "openjiuwen.gen_ai.usage.output_cost"):
-            assert key not in s.attributes
+        # Provider-reported costs surface on the span, written only when
+        # strictly positive (an unpriced call must not look like a free one).
+        assert s.attributes[OJ_GEN_AI_USAGE_INPUT_COST] == pytest.approx(0.001)
+        assert s.attributes[OJ_GEN_AI_USAGE_OUTPUT_COST] == pytest.approx(0.002)
+        assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == pytest.approx(0.003)
 
     async def test_llm_end_sets_zero_usage_values(self):
         """Present-but-zero usage facts are recorded, not skipped.
@@ -2240,6 +2245,13 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 0
         assert s.attributes[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] == 0
         assert s.attributes[GEN_AI_RESPONSE_MODEL] == ""
+        # Zero-valued costs / retry count are skipped: the provider reported
+        # no price and no retry source ran — absence, not a free call.
+        for key in (OJ_GEN_AI_USAGE_TOTAL_COST,
+                    OJ_GEN_AI_USAGE_INPUT_COST,
+                    OJ_GEN_AI_USAGE_OUTPUT_COST,
+                    OJ_REQUEST_RETRY_COUNT):
+            assert key not in s.attributes
 
     async def test_llm_end_reads_usage_sibling_of_chunk_list(self):
         """Decorator-measured streams: usage rides the container next to
@@ -2273,7 +2285,9 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[GEN_AI_RESPONSE_MODEL] == "stream-test"
         assert s.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 4
         assert s.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 2
-        assert s.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.42)
+        # TTFT rides the project key in milliseconds (seconds × 1000); the
+        # standard time_to_first_chunk key stays unset — different window.
+        assert s.attributes[OJ_GEN_AI_RESPONSE_TIME_TO_FIRST_TOKEN_MS] == pytest.approx(420.0)
         assert s.attributes[OJ_GEN_AI_RESPONSE_TPOT_MS] == pytest.approx(12.5)
         # A chunk list carries no finish_reason — skipped, not fatal.
         assert GEN_AI_RESPONSE_FINISH_REASONS not in s.attributes
@@ -2493,8 +2507,9 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[OJ_GEN_AI_TRACE_NAME] == "MyChain"
 
     async def test_llm_end_sets_streaming_and_reasoning_latency(self):
-        """first_token_time parses to time_to_first_chunk; the *_ms latency
-        keys flow through raw-dict usage payloads schema-transparently."""
+        """ttft_seconds maps to the project TTFT key in milliseconds; total
+        latency, costs and retry counts ride the project keys; the *_ms
+        latency keys flow through raw-dict usage payloads schema-transparently."""
         config = OtelTracerConfig(redaction_enabled=False)
         handler = OtelAgentHandler(_OTEL_TRACER, config)
 
@@ -2506,12 +2521,24 @@ class TestGenAiSemconvAttrs:
         )
         message = AssistantMessage(
             content="x",
-            usage_metadata=UsageMetadata(first_token_time="0.35"),
+            usage_metadata=UsageMetadata(
+                ttft_seconds=0.35,
+                total_latency=1.25,
+                retry_count=2,
+                input_cost=0.5,
+                output_cost=1.0,
+                total_cost=1.5,
+            ),
         )
         await handler.on_llm_end(span=agent_span, outputs=message)
 
         s = _EXPORTER.get_finished_spans()[0]
-        assert s.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.35)
+        assert s.attributes[OJ_GEN_AI_RESPONSE_TIME_TO_FIRST_TOKEN_MS] == pytest.approx(350.0)
+        assert s.attributes[OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS] == pytest.approx(1250.0)
+        assert s.attributes[OJ_REQUEST_RETRY_COUNT] == 2
+        assert s.attributes[OJ_GEN_AI_USAGE_INPUT_COST] == pytest.approx(0.5)
+        assert s.attributes[OJ_GEN_AI_USAGE_OUTPUT_COST] == pytest.approx(1.0)
+        assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == pytest.approx(1.5)
         # Declared schema has no producer for these yet — absent, not zero.
         assert OJ_GEN_AI_RESPONSE_TPOT_MS not in s.attributes
         assert OJ_GEN_AI_REASONING_DURATION_MS not in s.attributes

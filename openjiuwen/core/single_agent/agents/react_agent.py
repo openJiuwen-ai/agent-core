@@ -1051,7 +1051,11 @@ class ReActAgent(BaseAgent):
         # Streaming path: accumulate chunks via __add__, write to session in real-time
         accumulated_chunk = None
         chunk_index = 0
-        call_start_time = time.monotonic()
+        # time.perf_counter, not monotonic: Windows' monotonic clock ticks at
+        # 64Hz (~15.6ms), which zeroes short streams' latencies entirely;
+        # perf_counter is the high-resolution monotonic clock and the correct
+        # counterpart of Java's System.nanoTime used by the same measurements.
+        call_start_time = time.perf_counter()
         call_first_token_time = None
         call_last_token_time = None
         call_chunk_count = 0
@@ -1068,9 +1072,15 @@ class ReActAgent(BaseAgent):
                 else:
                     accumulated_chunk = accumulated_chunk + chunk
 
-                if call_first_token_time is None:
-                    call_first_token_time = time.monotonic()
-                call_last_token_time = time.monotonic()
+                # Only chunks that actually carry model output advance the
+                # latency window: role-only deltas, heartbeats, and usage-only
+                # or finish-only frames would otherwise inflate both TTFT and
+                # inter-token latency.
+                if chunk.carries_output_token():
+                    now = time.perf_counter()
+                    if call_first_token_time is None:
+                        call_first_token_time = now
+                    call_last_token_time = now
                 call_chunk_count += 1
                 ctx.extra["_stream_chunks_emitted"] = call_chunk_count
 
@@ -1127,12 +1137,27 @@ class ReActAgent(BaseAgent):
         if ai_message.usage_metadata:
 
             perf_metrics = {}
-            call_latency = (time.monotonic() - call_start_time) * 1000
-            perf_metrics["total_latency_ms"] = round(call_latency, 2)
-            if call_first_token_time is not None:
+            call_latency = (time.perf_counter() - call_start_time) * 1000
+            # TTFT / TPOT / total latency are computed centrally by the model
+            # layer (Model.stream timing backfill) and carried on the usage
+            # object — prefer those so this UI frame and the OTel span report
+            # the same window; the local clock starts after the request is
+            # dispatched and would come out slightly short. Fall back to the
+            # local window only when the model layer did not run (e.g. an
+            # undecorated client).
+            usage = ai_message.usage_metadata
+            if usage.total_latency > 0:
+                perf_metrics["total_latency_ms"] = round(usage.total_latency * 1000, 2)
+            else:
+                perf_metrics["total_latency_ms"] = round(call_latency, 2)
+            if usage.ttft_seconds is not None:
+                perf_metrics["ttft_ms"] = round(usage.ttft_seconds * 1000, 2)
+            elif call_first_token_time is not None:
                 perf_metrics["ttft_ms"] = round((call_first_token_time - call_start_time) * 1000, 2)
-            output_tokens = ai_message.usage_metadata.output_tokens
-            if call_first_token_time is not None and call_last_token_time is not None and output_tokens > 1:
+            output_tokens = usage.output_tokens
+            if usage.inter_token_latency_ms is not None:
+                perf_metrics["tpot_ms"] = round(usage.inter_token_latency_ms, 2)
+            elif call_first_token_time is not None and call_last_token_time is not None and output_tokens > 1:
                 perf_metrics["tpot_ms"] = round(
                     (call_last_token_time - call_first_token_time) / (output_tokens - 1) * 1000, 2
                 )
@@ -1142,12 +1167,14 @@ class ReActAgent(BaseAgent):
             # 50e97707b 同款契约）；perf_metrics 只进下方 UI 流通道，遥测侧拿不到。
             # ttft_seconds 承载相对延迟（秒），first_token_time 保持「首 token 时刻」
             # 契约不复用为延迟载体；total_latency（秒）一并回填，只回填 TTFT 会让
-            # span 出现「TTFT 有、total latency 为 0」的半缺失。
-            if "ttft_ms" in perf_metrics:
-                ai_message.usage_metadata.ttft_seconds = round(perf_metrics["ttft_ms"] / 1000, 6)
-            ai_message.usage_metadata.total_latency = round(call_latency / 1000, 6)
-            if "tpot_ms" in perf_metrics:
-                ai_message.usage_metadata.inter_token_latency_ms = perf_metrics["tpot_ms"]
+            # span 出现「TTFT 有、total latency 为 0」的半缺失。模型层（Model.stream
+            # 计时回填）已测量的值权威优先、不覆盖——本层本地窗口仅作兜底。
+            if "ttft_ms" in perf_metrics and usage.ttft_seconds is None:
+                usage.ttft_seconds = round(perf_metrics["ttft_ms"] / 1000, 6)
+            if usage.total_latency <= 0:
+                usage.total_latency = round(call_latency / 1000, 6)
+            if "tpot_ms" in perf_metrics and usage.inter_token_latency_ms is None:
+                usage.inter_token_latency_ms = perf_metrics["tpot_ms"]
 
             await session.write_stream(OutputSchema(
                 type="llm_usage",

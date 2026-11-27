@@ -149,6 +149,27 @@ class BaseMessageChunk(BaseMessage):
 
 
 class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
+    def carries_output_token(self) -> bool:
+        """Whether this chunk carries model output rather than stream framing.
+
+        A chunk counts once it holds a non-empty content or reasoning fragment
+        (whitespace included, since it is still a generated token), or a tool
+        call fragment that names the tool or extends its arguments. Role-only
+        deltas, heartbeat deltas, and usage-only or finish-only frames do not
+        count. Latency metrics (time to first token) share this definition so
+        they measure real generation progress.
+        """
+        if not _is_empty_content(self.content):
+            return True
+        if self.reasoning_content:
+            return True
+        for call in self.tool_calls or []:
+            if call is None:
+                continue
+            if call.name or call.arguments:
+                return True
+        return False
+
     def __add__(self, other: Any) -> "AssistantMessageChunk":
         if not isinstance(other, AssistantMessageChunk):
             raise TypeError(f"Cannot add AssistantMessageChunk to {type(other)}")
@@ -225,6 +246,22 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
             completion_token_ids=merged_completion_token_ids,
             logprobs=merged_logprobs,
         )
+
+
+def _is_empty_content(content: Any) -> bool:
+    """Judge whether a chunk content payload is empty.
+
+    String payloads count as empty when zero-length; collection payloads
+    (multimodal parts) count as empty when they contain no element. Any other
+    non-None payload is treated as content.
+    """
+    if content is None:
+        return True
+    if isinstance(content, str):
+        return len(content) == 0
+    if isinstance(content, (list, tuple)):
+        return len(content) == 0
+    return False
 
 
 def _concat_token_ids(left: Any, right: Any) -> Any:

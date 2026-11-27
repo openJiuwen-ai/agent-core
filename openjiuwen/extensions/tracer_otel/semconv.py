@@ -78,6 +78,26 @@ OJ_GEN_AI_METADATA = "openjiuwen.gen_ai.metadata"
 OJ_GEN_AI_TRACE_NAME = "openjiuwen.trace.name"
 OJ_GEN_AI_RESPONSE_TPOT_MS = "openjiuwen.gen_ai.response.tpot_ms"
 OJ_GEN_AI_REASONING_DURATION_MS = "openjiuwen.gen_ai.reasoning.duration_ms"
+# Time from request dispatch to the first chunk **carrying model output**, in
+# milliseconds — the real TTFT. Deliberately NOT written to the standard
+# gen_ai.response.time_to_first_chunk: that key measures the first chunk of
+# any kind — on a reasoning model the provider may open with a role-only
+# delta seconds before prefill finishes — so reusing it for TTFT would
+# understate the wait for standard-key consumers.
+OJ_GEN_AI_RESPONSE_TIME_TO_FIRST_TOKEN_MS = "openjiuwen.gen_ai.response.time_to_first_token_ms"
+# Whole-call elapsed time in milliseconds, from dispatch to the end of the
+# stream. UsageMetadata.total_latency carries the same measurement in seconds.
+OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS = "openjiuwen.gen_ai.response.total_latency_ms"
+
+# Cost as reported by the provider's pricing table, never recomputed. Written
+# only when non-zero so an unpriced call is distinguishable from a genuinely
+# free one.
+OJ_GEN_AI_USAGE_INPUT_COST = "openjiuwen.gen_ai.usage.input_cost"
+OJ_GEN_AI_USAGE_OUTPUT_COST = "openjiuwen.gen_ai.usage.output_cost"
+OJ_GEN_AI_USAGE_TOTAL_COST = "openjiuwen.gen_ai.usage.total_cost"
+# Number of retries the client attempted for this call; 0 means "no retry
+# occurred" and is written when present-and-positive only.
+OJ_REQUEST_RETRY_COUNT = "openjiuwen.request.retry_count"
 
 
 # ---------------------------------------------------------------------------

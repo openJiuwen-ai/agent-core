@@ -59,7 +59,6 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_REQUEST_TOP_P,
     GEN_AI_RESPONSE_FINISH_REASONS,
     GEN_AI_RESPONSE_MODEL,
-    GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK,
     GEN_AI_RETRIEVAL_DOCUMENTS,
     GEN_AI_RETRIEVAL_QUERY_TEXT,
     GEN_AI_RETRIEVAL_TOP_K,
@@ -83,9 +82,14 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_ERROR,
     OJ_GEN_AI_METADATA,
     OJ_GEN_AI_REASONING_DURATION_MS,
+    OJ_GEN_AI_RESPONSE_TIME_TO_FIRST_TOKEN_MS,
+    OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS,
     OJ_GEN_AI_RESPONSE_TPOT_MS,
     OJ_GEN_AI_TRACE_NAME,
     OJ_GEN_AI_USER_ID,
+    OJ_GEN_AI_USAGE_INPUT_COST,
+    OJ_GEN_AI_USAGE_OUTPUT_COST,
+    OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_INNER_ERROR,
     OJ_INTERACTIVE_INPUTS,
     OJ_ENVIRONMENT_ID,
@@ -94,6 +98,7 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_PARENT_INVOKE_ID,
     OJ_PARENT_NODE_ID,
     OJ_PROJECT_ID,
+    OJ_REQUEST_RETRY_COUNT,
     OJ_SESSION_ID,
     OJ_SOURCE_IDS,
     OJ_START_TIME,
@@ -322,16 +327,39 @@ def _unwrap_llm_payload(value: Any) -> Any:
     return normalized
 
 
+def _coerce_number(value: Any) -> float | None:
+    """Coerce an arbitrary payload value to a finite float, or None.
+
+    Booleans, non-numeric strings, NaN and infinities are all "not a
+    measurement" — the caller skips its attribute rather than writing a
+    corrupted value. Mirrors the Java handler's coerceDouble helper.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        result = float(value)
+    else:
+        try:
+            result = float(str(value))
+        except (TypeError, ValueError):
+            return None
+    if result != result or result == float("inf") or result == float("-inf"):
+        return None
+    return result
+
+
 def _set_llm_response_attrs(otel_span: trace.Span, outputs: Any) -> None:
     """Set GenAI response / usage / cost / latency attributes on the span.
 
     Reads ``finish_reason`` and ``usage_metadata`` (input/output tokens, cache
-    read tokens, reasoning tokens, response model, per-kind costs,
-    first-token timing) off an ``AssistantMessage`` payload, normalized via
+    read tokens, reasoning tokens, response model, per-kind costs, stream
+    timing) off an ``AssistantMessage`` payload, normalized via
     ``model_dump`` semantics; decorator-measured streams instead carry usage
     as a container-level ``usage_metadata`` sibling of ``outputs`` (see the
-    note at the unwrap call below). Present values are set unconditionally —
-    a recorded 0 is a fact, not an absence.
+    note at the unwrap call below). Token facts are set unconditionally — a
+    recorded 0 is a fact, not an absence. Costs and the retry count are
+    written only when strictly positive: an unpriced call or a call with no
+    retry source must not read as a genuine zero measurement downstream.
     """
     obj = _unwrap_llm_payload(outputs)
     # Decorator-measured streams attach usage as a container-level sibling of
@@ -371,40 +399,54 @@ def _set_llm_response_attrs(otel_span: trace.Span, outputs: Any) -> None:
     # the split keys stay schema-transparent for raw-dict callers.
     otel_span.set_attribute(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, int(usage.get("cache_tokens") or 0))
     otel_span.set_attribute(GEN_AI_USAGE_REASONING_OUTPUT_TOKENS, int(usage.get("reasoning_tokens") or 0))
-    # Streaming / reasoning latency. TTFT comes from the semantically explicit
-    # `ttft_seconds` field (decorator-measured streams stamp it on the usage
-    # snapshot); `first_token_time` is kept as a **legacy fallback** only — by
-    # contract it is a "first token instant" (timestamp string), so a
-    # non-numeric value simply skips the attribute. The *_ms keys are
-    # schema-transparent: raw-dict callers and future UsageMetadata fields
-    # flow through unchanged. All parses are guarded — a malformed value skips
+    # Costs / retry count, written only when strictly positive — a call whose
+    # price the provider did not report must not look like a free one, and
+    # "no retry source ran" must not read as "no retry happened" (0 is itself
+    # a real measurement the collector would have stamped; the schema field
+    # stays None when absent).
+    for cost_key, cost_attr in (
+        ("input_cost", OJ_GEN_AI_USAGE_INPUT_COST),
+        ("output_cost", OJ_GEN_AI_USAGE_OUTPUT_COST),
+        ("total_cost", OJ_GEN_AI_USAGE_TOTAL_COST),
+    ):
+        cost = _coerce_number(usage.get(cost_key))
+        if cost is not None and cost > 0:
+            otel_span.set_attribute(cost_attr, cost)
+    retry_count = usage.get("retry_count")
+    retry_count = _coerce_number(retry_count)
+    if retry_count is not None and retry_count > 0:
+        otel_span.set_attribute(OJ_REQUEST_RETRY_COUNT, int(retry_count))
+    # Streaming latency. TTFT comes from the semantically explicit
+    # `ttft_seconds` field (Model.stream's timing backfill stamps it on the
+    # usage object; decorator-measured streams keep the same field on the
+    # snapshot) and is written to the project TTFT key in **milliseconds**:
+    # it measures dispatch → first chunk *carrying model output*, which is a
+    # different window than the standard gen_ai.response.time_to_first_chunk
+    # (first chunk of any kind — a reasoning model may open with a role-only
+    # delta seconds before prefill finishes), so the standard key stays unset
+    # rather than silently substituting a different measurement under a
+    # standard name. total_latency is seconds on UsageMetadata; the project
+    # key is milliseconds. All parses are guarded — a malformed value skips
     # its attribute; it must never raise and abort the span finalization that
     # follows in on_llm_end.
-    ttft_seconds = usage.get("ttft_seconds")
-    if ttft_seconds is None:
-        ttft_seconds = usage.get("first_token_time") or ""
-    if ttft_seconds != "":
-        try:
-            otel_span.set_attribute(GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK, float(ttft_seconds))
-        except (TypeError, ValueError):
-            pass
+    ttft_seconds = _coerce_number(usage.get("ttft_seconds"))
+    if ttft_seconds is not None and ttft_seconds >= 0:
+        otel_span.set_attribute(OJ_GEN_AI_RESPONSE_TIME_TO_FIRST_TOKEN_MS, ttft_seconds * 1000)
+    total_latency = _coerce_number(usage.get("total_latency"))
+    if total_latency is not None and total_latency > 0:
+        otel_span.set_attribute(OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS, total_latency * 1000)
     # TPOT payload keys: tpot_ms is canonical; inter_token_latency_ms is the
     # legacy producer key (agent-studio usage payload) — still accepted so
     # every studio release keeps flowing, written once under the single key.
     inter_token = usage.get("tpot_ms")
     if inter_token is None:
         inter_token = usage.get("inter_token_latency_ms")
+    inter_token = _coerce_number(inter_token)
     if inter_token is not None:
-        try:
-            otel_span.set_attribute(OJ_GEN_AI_RESPONSE_TPOT_MS, float(inter_token))
-        except (TypeError, ValueError):
-            pass
-    reasoning_duration = usage.get("reasoning_duration_ms")
+        otel_span.set_attribute(OJ_GEN_AI_RESPONSE_TPOT_MS, inter_token)
+    reasoning_duration = _coerce_number(usage.get("reasoning_duration_ms"))
     if reasoning_duration is not None:
-        try:
-            otel_span.set_attribute(OJ_GEN_AI_REASONING_DURATION_MS, float(reasoning_duration))
-        except (TypeError, ValueError):
-            pass
+        otel_span.set_attribute(OJ_GEN_AI_REASONING_DURATION_MS, reasoning_duration)
 
 
 # ---------------------------------------------------------------------------

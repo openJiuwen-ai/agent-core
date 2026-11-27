@@ -10,6 +10,7 @@ from openjiuwen.core.foundation.llm.schema.message_chunk import (
     merge_dicts,
     merge_pydantic_models,
 )
+from openjiuwen.core.foundation.llm.schema.message import UsageMetadata
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 
 
@@ -412,3 +413,56 @@ def test_tool_add_handles_none_content():
 
     result = chunk1 + chunk2
     assert result.content == "result"
+
+
+# Tests for carries_output_token (stream framing vs. real output, PR-501 sync)
+def test_carries_output_token_non_empty_content():
+    """Non-empty string content is real output."""
+    assert AssistantMessageChunk(content="hello").carries_output_token() is True
+
+
+def test_carries_output_token_whitespace_content_counts():
+    """Whitespace is still a generated token."""
+    assert AssistantMessageChunk(content=" ").carries_output_token() is True
+
+
+def test_carries_output_token_empty_string_content():
+    assert AssistantMessageChunk(content="").carries_output_token() is False
+
+
+def test_carries_output_token_default_content():
+    """Default (empty) content carries no output — Python's schema has no
+    null content; the empty-string default is the Java null counterpart."""
+    assert AssistantMessageChunk().carries_output_token() is False
+
+
+def test_carries_output_token_list_content():
+    """Multimodal parts: non-empty list counts, empty list does not."""
+    assert AssistantMessageChunk(content=[{"type": "text", "text": "hi"}]).carries_output_token() is True
+    assert AssistantMessageChunk(content=[]).carries_output_token() is False
+
+
+def test_carries_output_token_reasoning_counts():
+    assert AssistantMessageChunk(reasoning_content="thinking").carries_output_token() is True
+    assert AssistantMessageChunk(reasoning_content="").carries_output_token() is False
+
+
+def test_carries_output_token_tool_call_fragments():
+    """A tool call counts once it names the tool or extends its arguments."""
+    named = ToolCall(id="c1", type="function", name="echo", arguments="")
+    assert AssistantMessageChunk(tool_calls=[named]).carries_output_token() is True
+    args_only = ToolCall(id="c1", type="function", name="", arguments='{"k"')
+    assert AssistantMessageChunk(tool_calls=[args_only]).carries_output_token() is True
+    bare = ToolCall(id="c1", type="function", name="", arguments="")
+    assert AssistantMessageChunk(tool_calls=[bare]).carries_output_token() is False
+
+
+def test_carries_output_token_role_only_frame():
+    """Role-only deltas and usage/finish-only frames are stream framing."""
+    assert AssistantMessageChunk(role="assistant", content="").carries_output_token() is False
+    framing = AssistantMessageChunk(
+        content="",
+        finish_reason="stop",
+        usage_metadata=UsageMetadata(input_tokens=1, output_tokens=1),
+    )
+    assert framing.carries_output_token() is False

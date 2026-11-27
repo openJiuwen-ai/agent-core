@@ -32,6 +32,13 @@ class UsageMetadata(BaseModel):
     #: 流式 token 间平均延迟（毫秒）。同一 `usage_metadata` 里的 `total_latency`
     #: 是秒，两者不可混用。回填方为 ReAct 引擎流式路径，tracer_otel 据此盖 span 属性。
     inter_token_latency_ms: Optional[float] = None
+    #: 推理阶段时长（毫秒），从首个到末个携带 `reasoning_content` 的 chunk。
+    #: None 表示没有推理片段流出——消费方据此区分「非推理调用」与「推理
+    #: 耗时为 0」：0 本身是合法测量值，缺席绝不写成 0。
+    reasoning_duration_ms: Optional[float] = None
+    #: 本次调用客户端重试的次数。0 表示「未发生重试」，是真实测量而非缺席；
+    #: None 表示调用方没有重试采集（如未走重试监听路径）。仅流式路径回填。
+    retry_count: Optional[int] = None
 
 
 class BaseMessage(BaseModel):
