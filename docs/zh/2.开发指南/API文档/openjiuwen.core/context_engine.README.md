@@ -14,3 +14,5 @@
 | [ContextEngine](./context_engine/context_engine.md)       | 上下文引擎类。       |
 
 处理器列表参见 [processor](./context_engine/processors.README.md)。
+
+显式共享对话的数据类型、存储与 Session 绑定参见[共享对话存储](./context_engine/conversation.md)。

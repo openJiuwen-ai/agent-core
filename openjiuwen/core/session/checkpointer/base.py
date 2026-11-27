@@ -5,6 +5,7 @@ from abc import (
     ABC,
     abstractmethod,
 )
+from typing import TYPE_CHECKING
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -14,8 +15,19 @@ from openjiuwen.core.session.constants import SINGLE_COMPONENT_EXECUTION_KEY
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.session import BaseSession
 
+if TYPE_CHECKING:
+    from openjiuwen.core.context_engine.schema.conversation import SessionConversationStore
+
 
 class Checkpointer(ABC):
+    def conversation_store(self) -> "SessionConversationStore":
+        """Return a provider-owned conversation store, if supported.
+
+        This optional capability does not change custom checkpointer subclasses.
+        Conversation lifecycle is separate from executor checkpoint release.
+        """
+        raise build_error(StatusCode.CHECKPOINTER_CONFIG_ERROR, reason="checkpointer has no conversation store")
+
     @staticmethod
     def get_thread_id(session: BaseSession) -> str:
         return ":".join([session.session_id(), session.workflow_id()])

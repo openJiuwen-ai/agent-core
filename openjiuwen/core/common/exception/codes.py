@@ -473,6 +473,7 @@ class StatusCode(Enum):
 
     CONTEXT_MESSAGE_PROCESS_ERROR = (153000, "context message process error, reason: {error_msg}")
     CONTEXT_EXECUTION_ERROR = (153001, "context execution execution error, reason: {error_msg}")
+    CONTEXT_CONVERSATION_NOT_FOUND = (153002, "conversation not found, reason: {error_msg}")
     CONTEXT_MESSAGE_INVALID = (153003, "context message is invalid, reason: {error_msg}")
 
     # =========================

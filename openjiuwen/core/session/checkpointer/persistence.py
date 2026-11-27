@@ -15,6 +15,7 @@ from typing import (
     Any,
     Optional,
     Tuple,
+    TYPE_CHECKING,
 )
 
 from sqlalchemy import event
@@ -57,6 +58,10 @@ from openjiuwen.core.session.checkpointer import (
     WORKFLOW_NAMESPACE_GRAPH,
 )
 from openjiuwen.core.session.constants import FORCE_DEL_WORKFLOW_STATE_KEY
+from openjiuwen.core.session.checkpointer.conversation_state import executor_checkpoint_state
+
+if TYPE_CHECKING:
+    from openjiuwen.core.context_engine.schema.conversation import SessionConversationStore
 
 
 class BaseStorage(Storage, ABC):
@@ -297,10 +302,10 @@ class AgentStorage(BaseSingleStateStorage):
         return session.agent_id()
 
     def _get_state_to_save(self, session: BaseSession) -> Any:
-        return session.state().get_state(copied=False)
+        return executor_checkpoint_state(session, session.state().get_state(copied=False))
 
     def _restore_state(self, session: BaseSession, state: Any) -> None:
-        session.state().set_state(state)
+        session.state().set_state(executor_checkpoint_state(session, state))
 
 
 class AgentTeamStorage(BaseSingleStateStorage):
@@ -742,6 +747,14 @@ class PersistenceCheckpointer(Checkpointer):
         self._agent_team_storage = AgentTeamStorage(kv_store)
         self._workflow_storage = WorkflowStorage(kv_store)
         self._graph_state = GraphStore(kv_store)
+        self._conversation_store = None
+
+    def conversation_store(self) -> "SessionConversationStore":
+        from openjiuwen.core.session.checkpointer.conversation_store import KVSessionConversationStore
+
+        if self._conversation_store is None:
+            self._conversation_store = KVSessionConversationStore(self._kv_store)
+        return self._conversation_store
 
     async def pre_agent_execute(self, session: BaseSession, inputs):
         """Prepare agent execution by recovering agent state."""

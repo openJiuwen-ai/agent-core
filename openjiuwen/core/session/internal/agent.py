@@ -1,7 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from openjiuwen.core.session.checkpointer import (
     Checkpointer,
@@ -19,6 +19,9 @@ from openjiuwen.core.session.state.workflow_state import InMemoryState
 from openjiuwen.core.session.stream.emitter import StreamEmitter
 from openjiuwen.core.session.stream.manager import StreamWriterManager
 from openjiuwen.core.session.tracer.tracer import Tracer
+
+if TYPE_CHECKING:
+    from openjiuwen.core.context_engine.schema.conversation import ConversationBinding
 
 
 class AgentSession(BaseSession):
@@ -45,6 +48,25 @@ class AgentSession(BaseSession):
         self._checkpointer = CheckpointerFactory.get_checkpointer() if checkpointer is None else checkpointer
         self._agent_span = self._tracer.tracer_agent_span_manager.create_agent_span() if self._tracer else None
         self._card = card
+        self._conversation_bindings = {}
+
+    def conversation_bindings(self) -> dict[str, "ConversationBinding"]:
+        """Return runtime bindings; these never enter serialized Session state."""
+        return dict(self._conversation_bindings)
+
+    def bind_conversation(self, binding: "ConversationBinding", *, context_id: str = "default_context_id") -> None:
+        from openjiuwen.core.common.exception.codes import StatusCode
+        from openjiuwen.core.common.exception.errors import build_error
+        from openjiuwen.core.context_engine.schema.conversation import ConversationBinding
+
+        if not isinstance(binding, ConversationBinding) or not isinstance(context_id, str) or not context_id.strip():
+            raise build_error(StatusCode.CONTEXT_MESSAGE_INVALID, error_msg="invalid conversation binding")
+        current = self._conversation_bindings.get(context_id)
+        if current is not None and (current.key != binding.key or current.store is not binding.store):
+            raise build_error(
+                StatusCode.CONTEXT_MESSAGE_INVALID, error_msg="context is already bound to a conversation",
+            )
+        self._conversation_bindings[context_id] = binding
 
     def config(self) -> Config:
         return self._config

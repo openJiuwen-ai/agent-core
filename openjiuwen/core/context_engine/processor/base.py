@@ -13,6 +13,7 @@ from openjiuwen.core.context_engine import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.compaction import CompactionError
 from openjiuwen.core.context_engine.context.session_memory_manager import group_completed_api_rounds
 from openjiuwen.core.context_engine.schema.messages import create_offload_message
+from openjiuwen.core.context_engine.schema.conversation import ConversationBinding
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.sys_operation import SysOperation
 
@@ -356,6 +357,11 @@ class ContextProcessor(metaclass=MetaContextProcessor):
             offload_handle = uuid.uuid4().hex
 
         if context is not None:
+            get_binding = getattr(context, "get_conversation_binding", None)
+            if callable(get_binding) and isinstance(get_binding(), ConversationBinding):
+                # Shared offloads belong to the conversation provider rather
+                # than an executor's private workspace or in-process cache.
+                offload_type = "in_memory"
             if offload_type == "in_memory":
                 return self._offload_messages_to_memory(
                     role, content, messages, context, offload_handle, **kwargs

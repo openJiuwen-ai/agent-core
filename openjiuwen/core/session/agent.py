@@ -28,6 +28,7 @@ from openjiuwen.core.common.logging import logger
 
 if TYPE_CHECKING:
     from openjiuwen.core.single_agent import AgentCard
+    from openjiuwen.core.context_engine.schema.conversation import ConversationBinding
 
 
 class Session:
@@ -41,7 +42,8 @@ class Session:
                  source_metadata: dict[str, Any] | None = None,
                  parent_session_id: str | None = None,
                  kv_cache_runtime: KVCacheRuntimeProtocol | None = None,
-                 checkpointer: Checkpointer | None = None):
+                 checkpointer: Checkpointer | None = None,
+                 conversation_binding: "ConversationBinding | None" = None):
         if session_id is None:
             session_id = str(uuid.uuid4())
         self._session_id = session_id
@@ -71,6 +73,24 @@ class Session:
         self._team_cache_scope: tuple[str, str] | None = None
         self._kv_cache_runtime: KVCacheRuntimeProtocol | None = kv_cache_runtime
         self._kvc_released = False
+        if conversation_binding is not None:
+            self.bind_conversation(conversation_binding)
+
+    def bind_conversation(self, binding: "ConversationBinding", *, context_id: str = "default_context_id") -> None:
+        """Bind before checkpoint recovery. Rebinding the same resource is idempotent."""
+        from openjiuwen.core.common.exception.codes import StatusCode
+        from openjiuwen.core.common.exception.errors import build_error
+
+        if isinstance(context_id, str):
+            context_id = context_id.replace(".", "_")
+        if self._pre_run_done and context_id not in self._inner.conversation_bindings():
+            raise build_error(StatusCode.CONTEXT_MESSAGE_INVALID, error_msg="bind conversation before pre_run")
+        self._inner.bind_conversation(binding, context_id=context_id)
+
+    def get_conversation_binding(self, context_id: str = "default_context_id") -> "ConversationBinding | None":
+        if isinstance(context_id, str):
+            context_id = context_id.replace(".", "_")
+        return self._inner.conversation_bindings().get(context_id)
 
     def get_session_id(self) -> str:
         return self._session_id
@@ -354,6 +374,7 @@ def create_agent_session(session_id: str = None,
                          parent_session_id: str | None = None,
                          kv_cache_runtime: KVCacheRuntimeProtocol | None = None,
                          checkpointer: Checkpointer | None = None,
+                         conversation_binding: "ConversationBinding | None" = None,
                          **kwargs) -> Session:
     close_stream_on_post_run = kwargs.get("close_stream_on_post_run", True)
     session = Session(
@@ -366,5 +387,6 @@ def create_agent_session(session_id: str = None,
         parent_session_id=parent_session_id,
         kv_cache_runtime=kv_cache_runtime,
         checkpointer=checkpointer,
+        conversation_binding=conversation_binding,
     )
     return session
