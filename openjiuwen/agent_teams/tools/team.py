@@ -10,7 +10,7 @@ import asyncio
 import json
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -106,6 +106,48 @@ class CapabilityOverrides:
     enable_task_verification: bool | None = None
 
 
+@dataclass
+class MemberRestoreFailure:
+    """One roster entry whose reconcile registration did not complete.
+
+    ``member_name`` is the member-name routing token (or ``"roster"`` for a
+    roster-read failure); ``reason`` is the human-readable cause. Keeping the
+    two fields apart lets logs and the LLM-facing error format them
+    consistently instead of parsing pre-joined strings.
+    """
+
+    member_name: str
+    reason: str
+
+
+@dataclass
+class MemberReconcileReport:
+    """Outcome of ``TeamBackend.reconcile_predefined_members``.
+
+    ``expected`` counts the leader plus every predefined spec that the current
+    capability flags say must exist; ``present`` counts how many of those are
+    on the roster after the reconcile attempt. ``created`` / ``failed`` list
+    the per-member outcomes for diagnostics (and for the LLM-facing error when
+    the roster still cannot be completed).
+    """
+
+    expected: int = 0
+    present: int = 0
+    created: list[str] = field(default_factory=list)
+    failed: list[MemberRestoreFailure] = field(default_factory=list)
+
+    @property
+    def complete(self) -> bool:
+        """True when every expected member is on the roster and none failed."""
+        return not self.failed and self.present >= self.expected
+
+    def failure_summary(self) -> str:
+        """One-line ``name: reason; ...`` rendering for logs and tool errors."""
+        return "; ".join(
+            f"{item.member_name}: {item.reason}" for item in self.failed
+        )
+
+
 class TeamBackend:
     """Agent Team Manager
 
@@ -147,6 +189,8 @@ class TeamBackend:
             plan_id: str | None = None,
             leader_member_name: str | None = None,
             leader_prompt: str = "",
+            leader_display_name: str = "",
+            leader_desc: str = "",
     ):
         """Initialize agent team manager.
 
@@ -229,9 +273,13 @@ class TeamBackend:
             leader_prompt: The leader's private prompt (``LeaderSpec.prompt``
                 via ``ctx.prompt``). Persisted on the leader's DB row at
                 ``build_team`` so cold-recovery — which rebuilds the leader
-                context from the DB — restores the same private prompt. The
-                public ``leader_desc`` is supplied separately by the
-                ``build_team`` caller (LLM-filled tool arg).
+                context from the DB — restores the same private prompt.
+            leader_display_name: Leader display identity from the runtime
+                context (``ctx.display_name``). Baseline for leader
+                (re)registration; ``build_team`` overrides it with its
+                explicit LLM-filled arg when present.
+            leader_desc: Leader description from the runtime context
+                (``ctx.desc``), same override rule as ``leader_display_name``.
         """
         self.team_name = team_name
         self.member_name = member_name
@@ -251,6 +299,11 @@ class TeamBackend:
         # on the leader's DB row at build_team so cold-recovery, which rebuilds
         # the leader context from the DB, restores the same private prompt.
         self._leader_prompt = leader_prompt
+        # Leader identity from the runtime context (ctx.display_name/desc for
+        # the leader role). Injected at construction so leader (re)registration
+        # never depends on a prior build_team call having run.
+        self.leader_display_name = leader_display_name or ""
+        self.leader_desc = leader_desc or ""
         # HITT capability ceiling (immutable, from spec) and the runtime
         # effective flag that ``build_team`` may downgrade. All human-agent
         # creation paths gate on ``_enable_hitt``; the spec ceiling is
@@ -1583,6 +1636,15 @@ class TeamBackend:
         # the effective verification flag is persisted alongside.
         team_name = self.team_name
         leader_member_name = self.member_name
+        # Retain the leader identity args for half-built reconciliation: the
+        # leader row is registered earlier than any teammate and is the first
+        # write after create_team, so its failure is exactly the case a later
+        # build_team retry cannot repair without these values.
+        # build_team's explicit args win over the ctx defaults injected at
+        # construction: they are what the intended leader row would carry, and
+        # leader (re)registration must stay byte-identical to the first try.
+        self.leader_display_name = leader_display_name
+        self.leader_desc = leader_desc
         success = await self.db.team.create_team(
             team_name=team_name,
             display_name=display_name,
@@ -1624,27 +1686,12 @@ class TeamBackend:
             if not result.ok:
                 registration_failures.append(f"{label}: {result.reason}")
 
-        # Register leader as a member — starts busy/running immediately
-        leader_card_id = f"{team_name}_{leader_member_name}"
-        leader_card = AgentCard(
-            id=leader_card_id,
-            name=leader_display_name,
-            description=leader_desc,
-        )
+        # Register leader as a member — starts busy/running immediately.
+        # Parameters come from the single registration source shared with
+        # half-built reconciliation, so the two paths cannot drift apart.
         await _record_registration(
             f"leader {leader_member_name}",
-            self.spawn_member(
-                member_name=leader_member_name,
-                display_name=leader_display_name,
-                agent_card=leader_card,
-                desc=leader_desc,
-                prompt=self._leader_prompt,
-                status=MemberStatus.BUSY,
-                execution_status=ExecutionStatus.RUNNING,
-                mode=MemberMode.BUILD_MODE,
-                allocation=self.leader_allocation,
-                skip_team_exists=True,
-            ),
+            self.spawn_member(**self._leader_registration()),
         )
 
         # Register predefined teammates (UNSTARTED, launched later via broadcast).
@@ -1768,6 +1815,286 @@ class TeamBackend:
             raise RuntimeError(f"Failed to register team members: {summary}")
 
         team_logger.info(f"Team {team_name} created successfully")
+
+    def _predefined_spawn_plan(self) -> list[TeamMemberSpec]:
+        """Predefined specs that must be registered under the current flags.
+
+        Mirrors the ``build_team`` registration filter: HUMAN_AGENT specs only
+        when HITT is engaged, BRIDGE_AGENT specs only when the bridge
+        capability is on. Shared with ``reconcile_predefined_members`` so a
+        recovery run cannot register a different roster than the original
+        build would have.
+        """
+        plan: list[TeamMemberSpec] = []
+        for spec in self.predefined_members:
+            if spec.role_type == TeamRole.HUMAN_AGENT:
+                if self._enable_hitt:
+                    plan.append(spec)
+                continue
+            if isinstance(spec, BridgeMemberSpec) and not self._enable_bridge:
+                continue
+            plan.append(spec)
+        return plan
+
+    async def _spawn_predefined_spec(self, spec: TeamMemberSpec) -> MemberOpResult:
+        """Register one predefined member (teammate / human) idempotently.
+
+        The caller is responsible for roster de-duplication; this method maps
+        a spec onto the same registration parameters ``build_team`` uses, so
+        late registration (reconcile) is indistinguishable from initial one.
+        """
+        if spec.role_type == TeamRole.HUMAN_AGENT:
+            return await self.spawn_human_agent(
+                member_name=spec.member_name,
+                display_name=spec.display_name,
+                desc=spec.desc,
+                prompt=spec.prompt,
+            )
+        member_card = AgentCard(
+            id=f"{self.team_name}_{spec.member_name}",
+            name=spec.display_name,
+            description=spec.desc,
+        )
+        allocation = (
+            self._allocate_model_config(spec.model_name)
+            if self._allocate_model_config
+            else None
+        )
+        return await self.spawn_member(
+            member_name=spec.member_name,
+            display_name=spec.display_name,
+            agent_card=member_card,
+            desc=spec.desc,
+            prompt=spec.prompt,
+            status=MemberStatus.UNSTARTED,
+            execution_status=ExecutionStatus.IDLE,
+            mode=self.teammate_mode,
+            allocation=allocation,
+            role=spec.role_type,
+        )
+
+    def expected_member_count(self) -> int:
+        """Size of the roster a completed ``build_team`` must have produced."""
+        plan = self._predefined_spawn_plan()
+        return len(plan) + (1 if self.leader_member_name else 0)
+
+    def _leader_registration(self) -> dict[str, Any]:
+        """Registration parameters for the leader's own member row.
+
+        Single source of truth for the initial ``build_team`` write and for
+        half-built reconciliation — "restored leader == originally intended
+        leader" is guaranteed by construction instead of by comment.
+        """
+        display_name = self.leader_display_name or self.leader_member_name
+        desc = self.leader_desc or ""
+        return {
+            "member_name": self.leader_member_name,
+            "display_name": display_name,
+            "agent_card": AgentCard(
+                id=f"{self.team_name}_{self.leader_member_name}",
+                name=display_name,
+                description=desc,
+            ),
+            "desc": desc,
+            "prompt": self._leader_prompt,
+            "status": MemberStatus.BUSY,
+            "execution_status": ExecutionStatus.RUNNING,
+            "mode": MemberMode.BUILD_MODE,
+            "allocation": self.leader_allocation,
+            "skip_team_exists": True,
+        }
+
+    async def _restore_leader_member(self) -> MemberOpResult:
+        """Register the leader's own row for a half-built team.
+
+        The leader runtime is already live (it is the caller); only its
+        persisted identity row is missing, so this reuses the exact
+        registration used by ``build_team``.
+        """
+        return await self.spawn_member(**self._leader_registration())
+
+    async def _leader_restore_blocker(self, team: Any | None) -> str | None:
+        """Refuse leader restore when the persisted team row disagrees.
+
+        ``team_info.leader_member_name`` is the team's durability record; a
+        mismatch (session rebind / rename / manual edit) means restoring the
+        caller would silently rewrite another leader's roster. ``team`` is the
+        row the caller already probed (the tool boundary read it to classify
+        the half-built state); direct callers may pass ``None`` to read it
+        here. Transient read failures do not block recovery — the caller only
+        reaches here after a positive team-row probe.
+        """
+        if team is None:
+            try:
+                team = await self.db.team.get_team(self.team_name)
+            except Exception as e:  # noqa: BLE001 - transient read, do not block
+                team_logger.warning(
+                    "[TeamBackend] reconcile_predefined_members: team row read "
+                    "failed before leader restore (%s); proceeding: %s",
+                    type(e).__name__,
+                    e,
+                )
+                return None
+        if team is None:
+            return "team row missing"
+        stored = str(getattr(team, "leader_member_name", "") or "").strip()
+        if stored and stored != self.leader_member_name:
+            return (
+                f"team row leader is {stored!r}, "
+                f"not {self.leader_member_name!r}"
+            )
+        return None
+
+    async def _reconcile_leader(
+            self,
+            report: MemberReconcileReport,
+            present: set[str],
+            team: Any | None,
+    ) -> int:
+        """Restore the leader row when absent; return its roster contribution."""
+        if not self.leader_member_name:
+            return 0
+        if self.leader_member_name in present:
+            return 1
+        blocker = await self._leader_restore_blocker(team)
+        if blocker is not None:
+            report.failed.append(
+                MemberRestoreFailure(
+                    self.leader_member_name,
+                    f"restore skipped — {blocker}",
+                )
+            )
+            return 0
+        try:
+            result = await self._restore_leader_member()
+        except Exception as e:  # noqa: BLE001 - collected in report
+            team_logger.warning(
+                "[TeamBackend] reconcile_predefined_members: leader restore "
+                "failed for team %s: %s",
+                self.team_name,
+                e,
+            )
+            report.failed.append(
+                MemberRestoreFailure(
+                    self.leader_member_name,
+                    f"{type(e).__name__}: {e}",
+                )
+            )
+            return 0
+        if not result.ok:
+            report.failed.append(
+                MemberRestoreFailure(self.leader_member_name, result.reason)
+            )
+            return 0
+        report.created.append(self.leader_member_name)
+        team_logger.info(
+            "[TeamBackend] reconcile_predefined_members: leader row restored "
+            "for team %s",
+            self.team_name,
+        )
+        return 1
+
+    async def reconcile_predefined_members(
+            self,
+            *,
+            team: Any | None = None,
+    ) -> MemberReconcileReport:
+        """Register predefined members missing from the persisted roster.
+
+        Recovery path for a ``build_team`` that persisted the team row but
+        failed mid-registration (e.g. a DB read watchdog trip): reads the
+        roster, first restores the leader's own row when it is missing (the
+        leader is the first member write after ``create_team``, so its failure
+        is the earliest half-built shape), then diffs the rest against
+        ``_predefined_spawn_plan`` and registers each missing member through
+        the same path ``build_team`` uses. Idempotent — re-running after a
+        partial success only fills the remaining gaps.
+
+        Args:
+            team: The ``team_info`` row the caller already probed to classify
+                the half-built state. Reusing it avoids a second read on the
+                recovery path; ``None`` makes this method read the row itself.
+
+        Never raises: roster-read and per-member failures are collected in the
+        report so the caller can decide whether the team is usable. Registration
+        failures are logged as warnings (the tool boundary surfaces the report
+        to the LLM).
+
+        Returns:
+            ``MemberReconcileReport`` with expected/present counts and the
+            per-member created/failed lists.
+        """
+        report = MemberReconcileReport()
+        plan = self._predefined_spawn_plan()
+        report.expected = len(plan) + (1 if self.leader_member_name else 0)
+        try:
+            rows = await self.db.member.get_team_members(self.team_name)
+        except Exception as e:  # noqa: BLE001 - recovery probe must not raise
+            team_logger.warning(
+                "[TeamBackend] reconcile_predefined_members: roster read failed "
+                "for team %s: %s",
+                self.team_name,
+                e,
+            )
+            report.failed.append(
+                MemberRestoreFailure(
+                    "roster",
+                    f"{type(e).__name__}: {e}",
+                )
+            )
+            return report
+
+        present = {row.member_name for row in rows}
+        # leader 行是 create_team 后的第一笔成员写，也是半建成的第一个失败点；
+        # 补齐它才算真正恢复团队（否则 expected 含 leader、present 永远差一）。
+        report.present += await self._reconcile_leader(report, present, team)
+        for spec in plan:
+            if spec.member_name in present:
+                report.present += 1
+                continue
+            try:
+                result = await self._spawn_predefined_spec(spec)
+            except Exception as e:  # noqa: BLE001 - one member must not abort the rest
+                team_logger.warning(
+                    "[TeamBackend] reconcile_predefined_members: spawn %s "
+                    "failed for team %s: %s",
+                    spec.member_name,
+                    self.team_name,
+                    e,
+                )
+                report.failed.append(
+                    MemberRestoreFailure(
+                        spec.member_name,
+                        f"{type(e).__name__}: {e}",
+                    )
+                )
+                continue
+            if result.ok:
+                report.created.append(spec.member_name)
+                report.present += 1
+            else:
+                report.failed.append(
+                    MemberRestoreFailure(spec.member_name, result.reason)
+                )
+
+        if report.created:
+            team_logger.info(
+                "[TeamBackend] reconcile_predefined_members: registered %d "
+                "missing member(s) for team %s: %s",
+                len(report.created),
+                self.team_name,
+                ", ".join(report.created),
+            )
+        if report.failed:
+            team_logger.warning(
+                "[TeamBackend] reconcile_predefined_members: team %s still "
+                "incomplete (expected=%d present=%d): %s",
+                self.team_name,
+                report.expected,
+                report.present,
+                report.failure_summary(),
+            )
+        return report
 
     async def spawn_human_agent(
             self,

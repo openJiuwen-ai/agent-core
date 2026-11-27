@@ -888,6 +888,11 @@ class AgentConfigurator:
             model_config_allocator=self.model_allocator.allocate if self.model_allocator else None,
             leader_allocation=self.leader_allocation if is_leader else None,
             leader_prompt=ctx.prompt if is_leader else "",
+            # Leader identity from the runtime context, available before any
+            # build_team call — leader reconciliation must not depend on a
+            # prior build attempt having populated these.
+            leader_display_name=(ctx.display_name or "") if is_leader else "",
+            leader_desc=(ctx.desc or "") if is_leader else "",
             enable_hitt=spec.enable_hitt,
             enable_bridge=spec.enable_bridge,
             dispatch_mode=spec.dispatch_mode,
