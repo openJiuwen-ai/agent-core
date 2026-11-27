@@ -5,14 +5,13 @@
 from __future__ import annotations
 
 import time
-import json
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import requests
 
-from openjiuwen.core.sys_operation.local.operation_observer import before_operation_sync
-
+from openjiuwen.core.sys_operation.local.operation_observer import before_operation_sync, has_operation_observer
+from openjiuwen.harness.security.outbound.body_preview import request_body_preview
 from openjiuwen.harness.security.outbound.limits import cap_timeout, enforce_request_size
 from openjiuwen.harness.security.outbound.policy import (
     STATE_ACTIVE,
@@ -50,9 +49,7 @@ def strip_auth_on_host_change(kwargs: dict[str, Any], old_url: str, new_url: str
     headers = kwargs.get("headers")
     if isinstance(headers, dict):
         sensitive = {"authorization", "cookie", "proxy-authorization"}
-        kwargs["headers"] = {
-            k: v for k, v in headers.items() if str(k).lower() not in sensitive
-        }
+        kwargs["headers"] = {k: v for k, v in headers.items() if str(k).lower() not in sensitive}
     kwargs.pop("auth", None)
 
 
@@ -97,10 +94,9 @@ def request(
                 if remaining <= 0:
                     raise requests.exceptions.Timeout("outbound total timeout exceeded")
                 kwargs["timeout"] = cap_timeout(kwargs.get("timeout"), remaining)
-            data = json.dumps(kwargs["json"], ensure_ascii=False) if "json" in kwargs else kwargs.get("data", "")
-            if isinstance(data, bytes):
-                data = data[:8192].decode("utf-8", errors="replace")
-            before_operation_sync("network_send", {"url": current_url, "data": data if isinstance(data, str) else ""})
+            if has_operation_observer():
+                data = request_body_preview(kwargs, client="requests")
+                before_operation_sync("network_send", {"url": current_url, "data": data})
             before_operation_sync("network_fetch", current_url)
             resp = sess.request(current_method, current_url, allow_redirects=False, **kwargs)
             if not resp.is_redirect:

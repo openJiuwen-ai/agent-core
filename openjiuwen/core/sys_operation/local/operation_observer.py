@@ -13,6 +13,11 @@ _observing: ContextVar[bool] = ContextVar("local_operation_observing", default=F
 _owner_loop: ContextVar[asyncio.AbstractEventLoop | None] = ContextVar("local_operation_loop", default=None)
 
 
+def has_operation_observer() -> bool:
+    """Whether this operation needs a preview; host reporting is not observed."""
+    return _observer.get() is not None and not _observing.get()
+
+
 @contextmanager
 def bind_operation_observer(observer: OperationObserver | None) -> Iterator[None]:
     """The trusted host supplies tool identity; model arguments cannot bind it."""

@@ -5,13 +5,13 @@
 from __future__ import annotations
 
 import time
-import json
 from typing import Any
 from urllib.parse import urljoin
 
 import aiohttp
-from openjiuwen.core.sys_operation.local.operation_observer import before_operation
 
+from openjiuwen.core.sys_operation.local.operation_observer import before_operation, has_operation_observer
+from openjiuwen.harness.security.outbound.body_preview import async_request_body_preview
 from openjiuwen.harness.security.outbound.limits import cap_timeout, enforce_request_size
 from openjiuwen.harness.security.outbound.policy import (
     STATE_ACTIVE,
@@ -63,10 +63,9 @@ async def request(
                 remaining,
                 aiohttp_module=aiohttp,
             )
-        data = json.dumps(kwargs["json"], ensure_ascii=False) if "json" in kwargs else kwargs.get("data", "")
-        if isinstance(data, bytes):
-            data = data[:8192].decode("utf-8", errors="replace")
-        await before_operation("network_send", {"url": current_url, "data": data if isinstance(data, str) else ""})
+        if has_operation_observer():
+            data = await async_request_body_preview(kwargs)
+            await before_operation("network_send", {"url": current_url, "data": data})
         await before_operation("network_fetch", current_url)
         resp = await session.request(current_method, current_url, allow_redirects=False, **kwargs)
         status = resp.status
