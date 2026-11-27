@@ -10,6 +10,7 @@ from filelock import FileLock
 
 from openjiuwen.harness.personal_context import _capacity_commit as worker
 from openjiuwen.harness.personal_context import context_capacity as capacity
+from openjiuwen.harness.personal_context import context_retirement as retirement
 
 
 def _plan(home, count=1):
@@ -30,7 +31,7 @@ def _plan(home, count=1):
     }
 
 
-def test_large_snapshot_is_checked_before_the_short_write_window(tmp_path, monkeypatch):
+def test_large_snapshot_checks_only_mutation_targets(tmp_path, monkeypatch):
     root, plan = _plan(tmp_path, 2000)
     clock = [0.0]
     stages = []
@@ -53,8 +54,8 @@ def test_large_snapshot_is_checked_before_the_short_write_window(tmp_path, monke
     assert result == {"status": "succeeded", "removed": ["old.md"]}
     assert not (root / "old.md").exists()
     assert len(list(root.glob("keep-*.md"))) == 1999
-    assert all(not in_window for name, in_window in stages if name.startswith("keep-"))
-    assert clock[0] > 2  # Checking everything inside the 100ms window cannot pass.
+    assert not any(name.startswith("keep-") for name, _in_window in stages)
+    assert clock[0] < 0.1
 
 
 @pytest.mark.parametrize("changed", ["description.md", "old.md"])
@@ -70,21 +71,19 @@ def test_change_after_preflight_is_not_overwritten(tmp_path, changed):
     assert (root / "old.md").exists()
 
 
-def test_change_to_page_outside_commit_targets_rejects_stale_plan(tmp_path):
+def test_new_reference_outside_commit_targets_does_not_keep_deleted_body(tmp_path):
     root, plan = _plan(tmp_path, 2)
     assert "keep-0.md" not in plan["replace"] + plan["remove"]
-    # A new reference after preparation makes the old plan stale, even though
-    # this page is not a commit target. Preparation owns backlink cleanup.
+    # References in another page do not protect an unchanged deletion target.
     updated = "# Keep\n[Old](old.md)\n"
     (root / "keep-0.md").write_text(updated, encoding="utf-8")
     starts = []
     result = worker.commit(plan, seconds=1, on_commit=lambda: starts.append(True))
-    assert result["reason"] == "context_changed"
-    assert result["removed"] == []
-    assert not starts
+    assert result == {"status": "succeeded", "removed": ["old.md"]}
+    assert starts
     assert (root / "keep-0.md").read_text(encoding="utf-8") == updated
-    assert (root / "old.md").exists()
-    assert "[Old]" in (root / "description.md").read_text(encoding="utf-8")
+    assert not (root / "old.md").exists()
+    assert "[Old]" not in (root / "description.md").read_text(encoding="utf-8")
 
 
 def test_expired_preflight_never_enters_the_write_window(tmp_path, monkeypatch):
@@ -119,3 +118,37 @@ def test_generation_is_captured_before_preparation_scans(tmp_path, monkeypatch):
     assert result["reason"] == "context_changed"
     assert (root / "old.md").exists()
     assert "Concurrent publication" in (root / "description.md").read_text(encoding="utf-8")
+
+
+def test_retired_cleanup_failure_does_not_fail_optional_maintenance(tmp_path, monkeypatch):
+    root, _plan_data = _plan(tmp_path)
+
+    def fail(*_args, **_kwargs):
+        raise OSError("cleanup unavailable")
+
+    monkeypatch.setattr(capacity, "cleanup_retired", fail)
+    result = capacity.maintain_capacity(tmp_path, limit_bytes=1000)
+    assert result["status"] == "succeeded"
+    assert (root / "old.md").exists()
+
+
+def test_sandbox_registered_between_deletions_is_associated_with_later_body(tmp_path, monkeypatch):
+    _root, plan = _plan(tmp_path, 2)
+    plan["remove"].append("keep-0.md")
+    leases = [retirement.register_sandbox(tmp_path)]
+    receipts = []
+    retire_page = worker.retire_page
+
+    def retire(home, relative):
+        receipts.append(retire_page(home, relative))
+        if len(receipts) == 1:
+            leases.append(retirement.register_sandbox(home))
+
+    monkeypatch.setattr(worker, "retire_page", retire)
+    try:
+        assert worker.commit(plan, seconds=1)["status"] == "succeeded"
+        assert receipts[0]["sandbox_ids"] == [leases[0][0]]
+        assert set(receipts[1]["sandbox_ids"]) == {lease[0] for lease in leases}
+    finally:
+        for lease in leases:
+            retirement.release_sandbox(lease)

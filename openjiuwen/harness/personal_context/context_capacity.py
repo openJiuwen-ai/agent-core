@@ -6,9 +6,11 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import hashlib
 import json
 import os
 import posixpath
+import re
 import shutil
 import subprocess
 import sys
@@ -43,6 +45,7 @@ from openjiuwen.harness.personal_context.context_pipeline import (
     _markdown_label,
     _markdown_link_target,
     _path_is_file,
+    _remove_tree,
     _replace_managed_block,
     _split_markdown_destination,
     _walk_tree_paths,
@@ -51,6 +54,7 @@ from openjiuwen.harness.personal_context.context_usage import (
     _load_usage, _pages, _reconcile, _save_usage, _state_path, usage_lock,
 )
 from openjiuwen.harness.personal_context.source_markdown import rewrite_markdown_prose
+from openjiuwen.harness.personal_context.context_retirement import cleanup_retired
 
 
 _CAPACITY_WORKERS: dict[Path, dict] = {}
@@ -227,7 +231,14 @@ def _warm_capacity_worker(home: Path) -> dict | None:
                   "loop": loop, "startup": None, "launch": None,
                   "io": concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="pcs-capacity-io")}
         _CAPACITY_WORKERS[home] = worker
-        worker["startup"] = loop.create_task(_start_worker(home, worker), name="pcs-capacity-startup")
+        startup = _start_worker(home, worker)
+        try:
+            worker["startup"] = loop.create_task(startup, name="pcs-capacity-startup")
+        except Exception:
+            startup.close()
+            _CAPACITY_WORKERS.pop(home, None)
+            worker["io"].shutdown(wait=False)
+            raise
         if worker["closing"]:
             _cancel_worker_startup(worker)
         return worker
@@ -247,10 +258,12 @@ def _cancel_worker_startup(worker: dict) -> None:
         worker["loop"].call_soon_threadsafe(cancel)
 
 
-def _cancel_capacity_worker(home: Path) -> None:
-    """Request immediate termination from synchronous Core shutdown."""
+def _cancel_capacity_worker(home: Path, *, only_busy: bool = False) -> None:
+    """Stop owned maintenance for shutdown or normal publication priority."""
     worker = _CAPACITY_WORKERS.get(home)
     if worker is None:
+        return
+    if only_busy and (not worker["busy"] or worker["closing"]):
         return
     _reap_worker(home, worker)
     _cancel_worker_startup(worker)
@@ -366,6 +379,52 @@ def _cleanup_capacity_temporary(home: Path) -> None:
             continue
 
 
+def _cleanup_unused_baselines(home: Path, deadline: float) -> None:
+    """Drop private arrangement copies only after their physical run has gone."""
+    if time.monotonic() >= deadline:
+        return
+    try:
+        state = _state_path(home, "context_usage.json").parent
+        # Take this snapshot first. A newly created run can only create its
+        # own unique copy after the run directory exists.
+        copies = []
+        for path in state.glob("context-baseline-*"):
+            if time.monotonic() >= deadline:
+                return
+            match = re.fullmatch(r"context-baseline-([0-9a-f]{64})-[0-9a-f]{32}(?:\.[a-z0-9_]+)?", path.name)
+            if match:
+                copies.append((path, match[1]))
+        if not copies:
+            return
+        runs = home / "workspace" / "sandboxes"
+        _assert_path_chain_no_symlinks(runs)
+        active = set()
+        try:
+            services = list(runs.iterdir())
+        except FileNotFoundError:
+            services = []
+        for service in services:
+            if time.monotonic() >= deadline:
+                return
+            _assert_path_chain_no_symlinks(service)
+            for run in service.iterdir():
+                if time.monotonic() >= deadline:
+                    return
+                relative = run.relative_to(runs).as_posix()
+                active.add(hashlib.sha256(relative.encode("utf-8")).hexdigest())
+        for path, prefix in copies:
+            if time.monotonic() >= deadline:
+                return
+            if prefix not in active:
+                try:
+                    _assert_path_chain_no_symlinks(path)
+                    _remove_tree(path)
+                except (OSError, BaseError) as exc:
+                    logger.debug("PersonalContext baseline cleanup deferred (%s)", type(exc).__name__)
+    except (OSError, BaseError) as exc:
+        logger.debug("PersonalContext run enumeration deferred (%s)", type(exc).__name__)
+
+
 def _file_signature(path: Path) -> list[int]:
     info = _extended_path(path).stat()
     return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
@@ -375,9 +434,17 @@ def _commit_candidate(
     manifest: Path, *, deadline: float, cancelled: Callable[[], bool],
 ) -> dict[str, object]:
     """Only the disposable child can mutate published knowledge during GC."""
+    from openjiuwen.harness.personal_context._capacity_commit import _publication_waiting
+
     remaining = min(_COMMIT_TIMEOUT_SECONDS, deadline - time.monotonic())
     skipped = {"status": "failed", "reason": "commit_time_budget", "removed": []}
     if remaining <= 0 or cancelled():
+        return skipped
+    try:
+        state = Path(json.loads(manifest.read_text(encoding="utf-8"))["lock"]).parent
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return {"status": "failed", "reason": type(exc).__name__, "removed": []}
+    if _publication_waiting(state):
         return skipped
     end = min(deadline, time.monotonic() + remaining)
     ready_path = manifest.with_suffix(".ready")
@@ -393,7 +460,7 @@ def _commit_candidate(
             if not ready and ready_path.exists():
                 ready = True
                 end = min(end, time.monotonic() + COMMIT_LOCK_SECONDS)
-            if cancelled() or time.monotonic() >= end:
+            if cancelled() or time.monotonic() >= end or _publication_waiting(state):
                 process.kill()
                 return skipped
             try:
@@ -423,6 +490,22 @@ def _markdown_sizes(root: Path) -> dict[str, int]:
         for page in _walk_tree_paths(root)
         if page.suffix.casefold() == ".md" and _path_is_file(page)
     }
+
+
+def _remove_retired_links(markdown: str, relative: str, removed: set[str]) -> str:
+    def remove_link(match):
+        split = _split_markdown_destination(match.group(1))
+        if split is None:
+            return match.group(0)
+        parsed = urlsplit(split[0])
+        if parsed.scheme or parsed.netloc:
+            return match.group(0)
+        target = posixpath.normpath(posixpath.join(posixpath.dirname(relative), unquote(parsed.path)))
+        if target not in removed:
+            return match.group(0)
+        return match.group(0)[1:].partition("](")[0]
+
+    return rewrite_markdown_prose(markdown, partial(_MARKDOWN_LINK.sub, remove_link))
 
 
 def _prepare_capacity_candidate(
@@ -455,21 +538,6 @@ def _prepare_capacity_candidate(
     descriptions = {}
     replacements = {}
 
-    def clean_links(markdown, relative):
-        def remove_link(match, page_relative=relative):
-            split = _split_markdown_destination(match.group(1))
-            if split is None:
-                return match.group(0)
-            parsed = urlsplit(split[0])
-            if parsed.scheme or parsed.netloc:
-                return match.group(0)
-            target = posixpath.normpath(posixpath.join(posixpath.dirname(page_relative), unquote(parsed.path)))
-            if target not in removed:
-                return match.group(0)
-            return match.group(0)[1:].partition("](")[0]
-
-        return rewrite_markdown_prose(markdown, partial(_MARKDOWN_LINK.sub, remove_link))
-
     def replace(relative, markdown):
         data = markdown.encode("utf-8")
         _atomic_write(candidate / relative, data)
@@ -481,7 +549,7 @@ def _prepare_capacity_candidate(
         if _is_program_description(relative):
             descriptions[relative] = original
             continue
-        markdown = clean_links(original, relative)
+        markdown = _remove_retired_links(original, relative, removed)
         if markdown != original:
             replace(relative, markdown)
 
@@ -496,7 +564,7 @@ def _prepare_capacity_candidate(
         relative = (directory / "description.md").as_posix()
         original = descriptions.get(relative, "")
         heading = "PersonalContext" if directory == Path() else _markdown_label(directory.name)
-        markdown = clean_links(original, relative) if original.strip() else f"# {heading}\n"
+        markdown = _remove_retired_links(original, relative, removed) if original.strip() else f"# {heading}\n"
         if directory in affected:
             bounds = _managed_block_bounds(
                 markdown, start=_DIRECTORY_DESCRIPTION_START, end=_DIRECTORY_DESCRIPTION_END,
@@ -533,6 +601,17 @@ def maintain_capacity(
     home: Path, *, limit_bytes: int, cancelled: Callable[[], bool] | None = None,
     deadline: float | None = None, commit_candidate: Callable | None = None,
 ) -> dict[str, object]:
+    deadline = deadline if deadline is not None else time.monotonic() + _DEFAULT_MAINTENANCE_SECONDS
+    cancelled = cancelled or (lambda: False)
+    result = _maintain_capacity(home, limit_bytes, cancelled, deadline, commit_candidate or _commit_candidate)
+    if not cancelled():
+        _cleanup_unused_baselines(home, deadline)
+    return result
+
+
+def _maintain_capacity(
+    home: Path, limit_bytes: int, cancelled: Callable[[], bool], deadline: float, commit_candidate: Callable,
+) -> dict[str, object]:
     """Prepare without a publication lock and try one short, optional commit.
 
     Above the limit, select a batch toward 60% using existing file sizes. Rebuild
@@ -541,13 +620,19 @@ def maintain_capacity(
     """
     _cleanup_capacity_temporary(home)
     root = home / "workspace" / "context"
-    commit_candidate = commit_candidate or _commit_candidate
-    deadline = deadline if deadline is not None else time.monotonic() + _DEFAULT_MAINTENANCE_SECONDS
-    cancelled = cancelled or (lambda: False)
 
     def expired():
         return cancelled() or time.monotonic() >= deadline
 
+    def cleanup():
+        if expired():
+            return
+        try:
+            cleanup_retired(home, seconds=min(0.02, deadline - time.monotonic()))
+        except Exception as exc:
+            logger.warning("PersonalContext retired cleanup failed (%s)", type(exc).__name__)
+
+    cleanup()
     # Preparation never owns a lock needed by normal publication or reads.
     # Capture the publication generation before scanning or preparing any pages.
     try:
@@ -638,6 +723,7 @@ def maintain_capacity(
                 "remove": sorted(deleted_paths),
             }), encoding="utf-8")
             outcome = commit_candidate(manifest, deadline=deadline, cancelled=cancelled)
+            cleanup()
             actually_removed = set(outcome.get("removed", []))
             if outcome["status"] != "succeeded":
                 result.update(

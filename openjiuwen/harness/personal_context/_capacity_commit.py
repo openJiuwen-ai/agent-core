@@ -16,6 +16,11 @@ from typing import Callable
 
 from filelock import FileLock, Timeout
 
+if __package__:
+    from .context_retirement import active_sandbox_ids, retire_empty_topic, retire_page
+else:
+    from context_retirement import active_sandbox_ids, retire_empty_topic, retire_page
+
 
 def _safe_path(root: Path, relative: str = "", *, checked_parents: set[Path] | None = None) -> Path:
     path = root / relative
@@ -48,6 +53,18 @@ def _signature(path: Path) -> list[int]:
     return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
 
 
+def _publication_waiting(state: Path) -> bool:
+    """Observe normal publication intent across processes without waiting."""
+    priority = state / "context_priority.lock"
+    if not priority.exists():
+        return False
+    try:
+        with FileLock(priority, timeout=0):
+            return False
+    except (Timeout, OSError):
+        return True
+
+
 def commit(
     manifest: dict, *, seconds: float, deadline: float | None = None,
     on_commit: Callable[[], None] | None = None,
@@ -59,9 +76,12 @@ def commit(
     root = _safe_path(Path(manifest["root"]))
     candidate = _safe_path(Path(manifest["candidate"]))
     lock_path = _safe_path(Path(manifest["lock"]))
-    retired = _safe_path(candidate.parent / "retired")
-    retired.mkdir(exist_ok=True)
+    home = lock_path.parent.parent
+    if root != _safe_path(home, "workspace/context"):
+        raise ValueError("maintenance root does not match state")
     removed = []
+    if _publication_waiting(lock_path.parent):
+        return {"status": "over_limit", "reason": "publication_busy", "removed": removed}
 
     def unchanged(relative, checked_parents=None):
         try:
@@ -70,11 +90,10 @@ def commit(
             current = None
         return current == manifest["baseline"].get(relative)
 
-    # Check the complete snapshot without holding up ordinary publication.
-    # The root generation and each mutation target are checked again under the
-    # lock, so a concurrent publication cannot make this old plan authoritative.
+    # Only mutation targets can veto this optional batch. A reference in an
+    # unrelated page must not keep an otherwise unused body alive.
     checked_parents: set[Path] = set()
-    for relative in manifest["baseline"]:
+    for relative in set(manifest["replace"]) | set(manifest["remove"]) | {"description.md"}:
         if time.monotonic() >= deadline:
             return {"status": "over_limit", "reason": "time_budget", "removed": removed}
         if not unchanged(relative, checked_parents):
@@ -84,8 +103,15 @@ def commit(
         on_commit()
     try:
         with FileLock(lock_path, timeout=0):
+            if _publication_waiting(lock_path.parent):
+                return {"status": "over_limit", "reason": "publication_busy", "removed": removed}
             if not unchanged("description.md"):
                 return {"status": "over_limit", "reason": "context_changed", "removed": removed}
+            if manifest["remove"]:
+                try:
+                    active_sandbox_ids(home)
+                except (OSError, ValueError):
+                    return {"status": "over_limit", "reason": "sandbox_state_unavailable", "removed": removed}
             # Root replacement is the normal publication's generation marker.
             # Repair links first. An interrupted maintenance may leave extra
             # bodies, but must never delete before their references are repaired.
@@ -107,9 +133,9 @@ def commit(
                     return {"status": "over_limit", "reason": "time_budget", "removed": removed}
                 if not unchanged(relative):
                     return {"status": "over_limit", "reason": "context_changed", "removed": removed}
-                _safe_path(root, relative).unlink(missing_ok=True)
+                retire_page(home, relative)
                 removed.append(relative)
-            for index, relative in enumerate(descriptions):
+            for relative in descriptions:
                 if time.monotonic() >= deadline:
                     return {"status": "over_limit", "reason": "time_budget", "removed": removed}
                 if not unchanged(relative):
@@ -119,7 +145,7 @@ def commit(
                 # must never leave a published directory without navigation.
                 if any(item.name.casefold() != "description.md" for item in directory.iterdir()):
                     return {"status": "over_limit", "reason": "context_changed", "removed": removed}
-                os.replace(directory, retired / str(index))
+                retire_empty_topic(home, Path(relative).parent.as_posix())
                 removed.append(relative)
     except Timeout:
         return {"status": "over_limit", "reason": "publication_busy", "removed": removed}
