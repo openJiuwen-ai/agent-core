@@ -239,3 +239,186 @@ def test_plain_string_paths_unchanged_and_tool_calls_still_priced() -> None:
         ]
     )
     assert with_calls > bare
+
+
+# ---------------------------------------------------------------------------
+# Regression nails for the E-1125 family: a vocab download that hangs forever
+# (silent network black hole) must never hang session initialization. Before
+# the bounded-lock / preflight-download / negative-cache fix, a stuck loader
+# held ``_ENCODING_LOAD_LOCK`` indefinitely and every ``TiktokenCounter()``
+# blocked on it until the relay watchdog killed the request (2h, zero model
+# calls, OA.05000030).
+# ---------------------------------------------------------------------------
+
+_VOCAB_MODULE = "openjiuwen.core.context_engine.token.tiktoken_counter"
+
+
+class _StuckLockGuard:
+    """Hold the load lock in a background thread without releasing it."""
+
+    def __enter__(self):
+        import threading
+
+        import openjiuwen.core.context_engine.token.tiktoken_counter as mod
+
+        self._holder = threading.Event()
+        self._release_evt = threading.Event()
+        self._mod = mod
+
+        def _hold() -> None:
+            with mod._ENCODING_LOAD_LOCK:
+                self._holder.set()
+                self._release_evt.wait(timeout=30)
+
+        self._thread = threading.Thread(target=_hold, name="stuck-encoding-lock", daemon=True)
+        self._thread.start()
+        assert self._holder.wait(timeout=5), "test lock holder failed to start"
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._release_evt.set()
+        self._thread.join(timeout=5)
+
+
+def _reset_vocab_state(monkeypatch) -> None:
+    import time as _time
+
+    import openjiuwen.core.context_engine.token.tiktoken_counter as mod
+
+    monkeypatch.setattr(mod, "_vocab_unavailable_until", 0.0)
+    monkeypatch.setattr(mod, "_ENCODING_LOAD_TIMEOUT_S", 1.0)
+    assert mod._vocab_unavailable_until <= _time.monotonic()
+
+
+def test_init_falls_back_when_load_lock_is_stuck(monkeypatch) -> None:
+    """A permanently stuck loader (the E-1125 shape) must degrade init to
+    character estimation within the bounded lock timeout instead of hanging."""
+    import time
+
+    _reset_vocab_state(monkeypatch)
+    with _StuckLockGuard():
+        started = time.monotonic()
+        counter = TiktokenCounter()
+        elapsed = time.monotonic() - started
+    assert counter._enc is None
+    assert counter.measurement_source == "string_length_fallback"
+    assert elapsed < 5.0, f"init waited {elapsed:.1f}s on a stuck lock; bounded acquire regressed"
+    assert counter.count("你好世界") > 0
+
+
+def test_cooldown_makes_subsequent_inits_instant(monkeypatch) -> None:
+    """After a failure the negative cache must skip the lock and the download
+    entirely: every new session must not re-pay the timeout."""
+    import time
+
+    import openjiuwen.core.context_engine.token.tiktoken_counter as mod
+
+    _reset_vocab_state(monkeypatch)
+    with _StuckLockGuard():
+        first = TiktokenCounter()  # pays the lock timeout once, arms the cooldown
+        assert first.measurement_source == "string_length_fallback"
+        started = time.monotonic()
+        second = TiktokenCounter()  # cooldown active: no lock wait at all
+        elapsed = time.monotonic() - started
+    assert second.measurement_source == "string_length_fallback"
+    assert elapsed < 0.5, f"cooldown did not skip the lock wait ({elapsed:.2f}s)"
+
+
+def test_preflight_download_times_out_on_blackhole(monkeypatch, tmp_path) -> None:
+    """``_ensure_vocab_cached`` must fail within its own timeout against a
+    TCP server that accepts the connection but never answers (the field
+    shape of E-1125: handshake OK, data black-holed)."""
+    import socket
+    import threading
+    import time
+
+    import pytest
+
+    import openjiuwen.core.context_engine.token.tiktoken_counter as mod
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    port = srv.getsockname()[1]
+    conns: list = []
+
+    def _swallow() -> None:
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            conns.append(conn)  # hold; never respond
+
+    t = threading.Thread(target=_swallow, name="blackhole", daemon=True)
+    t.start()
+
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(mod, "_VOCAB_URLS", {"cl100k_base": f"http://127.0.0.1:{port}/vocab.tiktoken"})
+    monkeypatch.setattr(mod, "_VOCAB_DOWNLOAD_TIMEOUT_S", (0.5, 1.0))
+    monkeypatch.setattr(mod, "_vocab_unavailable_until", 0.0)
+
+    try:
+        started = time.monotonic()
+        with pytest.raises(Exception):
+            mod._ensure_vocab_cached("cl100k_base")
+        elapsed = time.monotonic() - started
+        assert elapsed < 5.0, f"preflight download took {elapsed:.1f}s against a black hole"
+    finally:
+        srv.close()
+        for conn in conns:
+            conn.close()
+
+
+def test_vocab_cache_dir_mirrors_tiktoken_resolution(monkeypatch, tmp_path) -> None:
+    """Review-2 nail: the prefill dir must equal ``get_encoding``'s lookup
+    dir under every tiktoken-supported env combo, including the empty-string
+    "caching disabled" sentinel."""
+    import os
+    import tempfile
+
+    import openjiuwen.core.context_engine.token.tiktoken_counter as mod
+
+    monkeypatch.delenv("TIKTOKEN_CACHE_DIR", raising=False)
+    monkeypatch.delenv("DATA_GYM_CACHE_DIR", raising=False)
+    assert mod._vocab_cache_dir() == os.path.join(tempfile.gettempdir(), "data-gym-cache")
+
+    monkeypatch.setenv("DATA_GYM_CACHE_DIR", str(tmp_path))
+    assert mod._vocab_cache_dir() == str(tmp_path)
+
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", "C:/prefers-this")
+    assert mod._vocab_cache_dir() == "C:/prefers-this"  # TIKTOKEN wins over DATA_GYM
+
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", "")
+    assert mod._vocab_cache_dir() is None  # empty == caching disabled in tiktoken
+
+
+def test_preflight_covers_every_encoding_name_branch(monkeypatch) -> None:
+    """Review-1 nail: models resolved via ``encoding_name_for_model`` (known
+    to tiktoken but absent from ``_MODEL2ENC``, e.g. gpt-4.1 -> o200k_base)
+    must go through the preflight too, so no branch can run tiktoken's
+    unbounded internal download on the lock-holding thread."""
+    import tiktoken
+
+    import openjiuwen.core.context_engine.token.tiktoken_counter as mod
+
+    class _StubEncoding:
+        name = "stub"
+
+        def encode(self, text, disallowed_special=()):
+            return [0] * (len(text) // 4 + 1)
+
+    prefilled: list = []
+    monkeypatch.setattr(mod, "_ensure_vocab_cached", lambda name: prefilled.append(name))
+    monkeypatch.setattr(mod, "_vocab_unavailable_until", 0.0)
+    monkeypatch.setattr(tiktoken, "get_encoding", lambda name="cl100k_base": _StubEncoding())
+
+    assert tiktoken.encoding_name_for_model("gpt-4.1") == "o200k_base"  # assumption guard
+
+    TiktokenCounter(model="gpt-4.1")
+    assert prefilled[-1] == "o200k_base", "tiktoken-known model bypassed the preflight"
+
+    unknown = TiktokenCounter(model="totally-unknown-model")
+    assert prefilled[-1] == "cl100k_base", "unregistered model must prefill the default encoding"
+    assert unknown.measurement_source == "tiktoken_fallback"
+    assert unknown.measurement_fallback_reason == "model_not_registered"

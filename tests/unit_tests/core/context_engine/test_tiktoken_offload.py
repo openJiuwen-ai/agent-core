@@ -37,6 +37,12 @@ def _fake_tiktoken(monkeypatch):
     import tiktoken
 
     monkeypatch.setattr(tiktoken, "get_encoding", lambda name="cl100k_base": _FakeEncoding())
+    # P1 bounded-load contract: the preflight vocab download must stay off
+    # the network in tests (empty URL table = no-op) and the negative cache
+    # must start clean, so the mocked get_encoding is always reachable and
+    # the off-loop assertions below are deterministic on any machine.
+    monkeypatch.setattr(tiktoken_counter_module, "_VOCAB_URLS", {})
+    monkeypatch.setattr(tiktoken_counter_module, "_vocab_unavailable_until", 0.0)
 
 
 @pytest.fixture(autouse=True)
