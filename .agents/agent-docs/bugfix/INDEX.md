@@ -85,6 +85,7 @@ generated: true
 |---|---|---|---|---|
 | [B_20261126_2215_log-rollover-truncate-guard](core_runtime/B_20261126_2215_log-rollover-truncate-guard.md) | B | 日志滚动备份复制失败仍截断活动文件造成日志段丢失 | linghb | 无独立 D：单点数据安全修复,不改变契约与公开接口,无需独立设计。 |
 | [B_20261126_2110_single-component-exception-config](core_runtime/B_20261126_2110_single-component-exception-config.md) | B | 单组件直调错误路径被 AttributeError 掩盖原始组件异常 | linghb | 无独立 D：对单组件直调路径的对齐性修复,不改变任何契约,无需独立设计。 |
+| [B_20261126_2200_kb-close-symmetry](core_runtime/B_20261126_2200_kb-close-symmetry.md) | B | KnowledgeBase.close 异步分支无保护,单组件失败泄漏其余组件 | linghb | 无独立 D：异常保护对称性补齐,不改变契约与公开接口,无需独立设计。 |
 
 <a id="module-core-extension"></a>
 
