@@ -1,6 +1,6 @@
 ---
 id: B_20261125_1037_review-followups-on-issue-115-concurrency-fix
-title: issue #115 第二至五轮检视遗留并发洞的修复
+title: issue #115 检视遗留并发洞的修复
 type: B
 author: DaiYuxin511
 author_email: 455472400@qq.com
@@ -15,138 +15,114 @@ files:
 - openjiuwen/agent_teams/tools/AGENTS.md
 - openjiuwen/agent_teams/schema/blueprint.py
 - openjiuwen/agent_teams/agent/team_agent.py
-- tests/unit_tests/agent_teams/test_database.py
-- tests/unit_tests/agent_teams/test_db_sessions_watchdog.py
-- tests/unit_tests/agent_teams/organization/test_org_db.py
 designs: []
 design_note: 91ad1d944 把锁的边界从「全写锁」收窄到「DDL 锁 + CAS + 行锁」时漏掉的入口；本修复把同一套并发模型补齐到所有剩余读改写路径，不引入新设计
 ---
 
-# issue #115 第二至五轮检视遗留并发洞的修复记录
+# issue #115 检视遗留并发洞的修复记录
 
 ## 现象与影响
 
 91ad1d944（`fix(swarm): restore DDL mutex + CAS-guard non-CAS DAO writes under
 PG/MySQL`）把 PostgreSQL / MySQL 上的进程级写锁去掉、改为「DDL 锁 + CAS + 行锁」
-三件套。第二、三轮代码检视发现这套模型在多个入口上没收齐，并伴随契约文本失真与
-一处死引用。
-
-### 第二轮检视（三条，commit 53f1d5e38 已修）
-
-1. **下游任务卡在 BLOCKED**：MySQL `READ COMMITTED` 下两个上游并发完成，下游 C
-   （同时依赖 A 与 B）的 `BLOCKED` 状态无法被任一上游翻成 `PENDING`。
-2. **`options` JSON 丢更新**：`update_member_builtin_model` /
-   `update_member_served_model` / `promote_member_fallback_model` 三个 options 写入
-   入口仍是普通 SELECT-then-overwrite，与已加 `FOR UPDATE` 的
-   `update_member_worktree` 不一致。
-3. **`_ensure_org_schema` 重复 ALTER 报错**：组织表迁移入口未取 `ddl_lock()`，PG/MySQL
-   跳过写锁后两个首次访问可同时通过 `_ORG_SCHEMA_READY` 复查、同时执行
-   `ALTER TABLE ... ADD COLUMN`，第二次命中「duplicate column」失败。
-
-### 第三轮检视（两条，本次修复）
-
-4. **PG/MySQL 仍跳过进程级写锁，未覆盖的跨语句读改写路径失去串行化**
-   （审查意见 #1，P2）：第二轮的 `ddl_lock` 只闭合 DDL-vs-DDL，仍有两类读改写路径
-   未覆盖：
-   - `update_task` 的 revision 自增（SELECT task → Python 改 revision → commit）
-   - `add_graph` / `mutate_dependency_graph` 的环校验（SELECT existing edges →
-     Python 算 adjacency → INSERT new edges）
-   未修改的契约文本（`tools/AGENTS.md` 的 `DbSessions` 段落）仍以「`write()` 持有
-   一把进程级 `asyncio.Lock`」为前提，与 91ad1d944 后 PG/MySQL 跳过写锁的实际行为
-   不符。
-
-   系统排查发现**另外 4 个同构入口**也未被覆盖（审查意见未点名，但不修会来下一轮）：
-   - `reset_task`（SELECT task → Python 改 status/assignee/summary/note → commit）：
-     与并发 `cancel_task` CAS 之间会丢更新，已取消的任务被复活。
-   - `approve_plan_task`（SELECT task → Python 改 status → commit）：同构。
-   - `_mark_read_in_session` 广播分支（SELECT read_status → Python 改 read_at →
-     commit）：水位回退，已读的广播被重新标记未读。
-   - `mark_messages_read` 批量路径共用 `_mark_read_in_session`，同构。
-
-5. **`test_db_sessions_watchdog.py:18` 死引用**（审查意见 #2，P3）：三个用例改用
-   实例属性（`sessions._watchdog_seconds` / `sessions._write_lock`）后，
-   `from ... import engine as engine_module` 成为死引用，触发 F401 lint。
+三件套。检视发现这套模型在多个入口上没收齐，本修复把同一套并发模型补齐到所有剩余
+读改写路径。
 
 ## 根因与修复决策
 
-### 第二轮（已在 53f1d5e38 修复，此处仅记录要点）
+### #1 下游任务卡在 BLOCKED（`_refresh_status_in_session` + MySQL READ COMMITTED）
 
-- **#1**：`_refresh_status_in_session` 候选任务 SELECT 加 `with_for_update()`。
-- **#2**：3 个 member options 写入口 SELECT 加 `with_for_update()`。
-- **#3**：`_ensure_org_schema` 的 `_ddl_once` 用 `sessions.ddl_lock()` 外层包裹
-  `sessions.write()`，docstring 同步更新。
+复现条件：MySQL READ COMMITTED。创建任务 A、B、C，让 C 同时依赖 A 和 B。将 A、B
+置为 IN_PROGRESS，并发调用 `TaskDao.complete_task()`。用屏障让两笔事务都执行完
+`_refresh_status_in_session()` 后再提交。此时每笔事务只能看到自己解决的那条依赖，
+都会判断 C 仍有一条未解决依赖，C 卡在 BLOCKED。
 
-### 第三轮（本次修复）
+**修法**：
+- `_refresh_status_in_session` 候选任务 SELECT 加 `with_for_update()`，串行化两个
+  上游的 dependent refresh。
+- `engine.py` 显式为 PG/MySQL 引擎设 `isolation_level="READ COMMITTED"`。MySQL
+  默认 `REPEATABLE READ` 会在事务首个一致性读建立 read view，使 deps count 查询
+  在 FOR UPDATE 行锁拿到后仍读旧 view，看不到并发上游已提交的 dep 解析 → 下游卡
+  BLOCKED。READ COMMITTED 让每条语句取新快照，FOR UPDATE 串行化才真正生效。
 
-#### #4 未覆盖的读改写路径
+### #2 `_ensure_org_schema` 重复 ALTER 报错
 
-修复策略：所有「SELECT 同表行 → Python 改属性 → commit」的入口统一加 `with_for_update()`，
-与第二轮 `update_member_worktree` / `_refresh_status_in_session` 同模式。SQLite 方言
-剥离 `FOR UPDATE`（进程级写锁兜底），PG/MySQL 靠行锁串行化读改写。
+组织表迁移入口未取 `ddl_lock()`，PG/MySQL 跳过写锁后两个首次访问可同时通过
+`_ORG_SCHEMA_READY` 复查、同时执行 `ALTER TABLE ... ADD COLUMN`，第二次命中
+「duplicate column」失败。
 
-| 入口 | 文件:行 | 修法 |
-|---|---|---|
-| `update_task`（revision 自增） | task_dao.py:1419 | task SELECT 加 `.with_for_update()` |
-| `_check_cycle_and_compute_new_edges`（环校验） | task_dao.py:413 | existing edges SELECT 加 `.with_for_update()` |
-| `reset_task` | task_dao.py:1052 | task SELECT 加 `.with_for_update()` |
-| `approve_plan_task` | task_dao.py:1291 | task SELECT 加 `.with_for_update()` |
-| `_mark_read_in_session` 广播分支 | message_dao.py:635 | read_status SELECT 加 `.with_for_update()` |
+**修法**：`_ensure_org_schema` 的 `_ddl_once` 用 `sessions.ddl_lock()` 外层包裹
+`sessions.write()`，docstring 同步更新。
 
-`_check_cycle_and_compute_new_edges` 的 `FOR UPDATE` 会锁住该 team 的所有
-`task_dependency` 行——`add_graph` 不是高频操作，锁全队边集的代价可接受；两个并发
-`add_graph` 串行化后，第二个读到的边集已包含第一个提交的新边，环校验在 union 集上
-运行，不会漏检。
+### #3 options JSON 丢更新
 
-不改 CAS 的原因：`update_task` / `reset_task` / `approve_plan_task` 的 Python 改写
-涉及多列（title/content/revision/change_notes/assignee/summary/note/...），CAS UPDATE
-需要把所有列写进 `values()`，且 `reset_task` 的 `observed_revision = task.revision`
-需要读当前 revision——SQL 列引用列在 SQLAlchemy `values()` 里不直观。`FOR UPDATE`
-与第二轮已建立的修复模式一致，统一性优先。CAS 风格保留给纯状态翻转
-（`update_task_status` / `delete_task` / `cancel_task` / `delete_team`）与无前置 SELECT
-的原子写（`start_task` / `claim_task` / `reassign_task` / `observe_revision` 等）。
+`update_member_worktree` 已加 `FOR UPDATE`，但同款的 3 个 options 写入口
+（`update_member_builtin_model` / `update_member_served_model` /
+`promote_member_fallback_model`）仍是普通 SELECT-then-overwrite，与
+`update_member_worktree` 不一致。两个并发写会丢更新。
 
-#### 契约文本同步
+**修法**：3 个 options 写入口 SELECT 加 `with_for_update()`，与
+`update_member_worktree` / `_refresh_status_in_session` 同模式。SQLite 方言剥离
+`FOR UPDATE`（进程级写锁兜底），PG/MySQL 靠行锁串行化读改写。
 
-`tools/AGENTS.md` 的 `DbSessions` 段落（原 47-58 行）改写：
-- 「`write()` 持有一把进程级 `asyncio.Lock`」→「SQLite 上 `write()` 持有进程级
-  `asyncio.Lock`；PG/MySQL 跳过进程级写锁，原生写并发才是写仲裁者」。
-- 新增「DDL 锁 + CAS + 行锁」三件套的完整说明，列出每类入口的代表方法。
-- 新增「新增读改写入口前先归类属于哪一类（DDL / CAS / FOR UPDATE）」的防错指引。
-- 删除「DROP 路径暂未收编，见 F_83 已知遗留」（91ad1d944 已收编 DROP 路径）。
-- 组织表 DDL 改为「在 `write()` + `ddl_lock()` 内执行」。
+### #4 新增依赖与上游完成并发时下游卡住（`_apply_new_edges` 的 `resolved` 决策用过期读）
 
-#### #5 死引用
+当给 B 添加对 A 的依赖时，`_apply_new_edges` 可能先读到 A 仍在执行。若 A 随后完成
+并提交，`complete_task(A)` 扫描依赖时还看不到这条边。加边事务接着按之前读到的状态
+写入 `resolved=False`，使 B 进入 BLOCKED。两次操作都返回成功，但 A 已完成，B 无法
+通过这次完成事件解锁。
 
-`test_db_sessions_watchdog.py:18` 删除 `from openjiuwen.agent_teams.tools.database
-import engine as engine_module`。三个用例已改用 `sessions._watchdog_seconds` /
-`sessions._write_lock` 实例属性，`engine_module` 不再被引用。
+**修法**：`_apply_new_edges` 在插边前对每条新边的上游端点取
+`select(task_id, status).where(...).with_for_update()` 的**标量行锁**，用现读的
+`status` 决定 `resolved`。标量列投影绕过 identity map（整行 FOR UPDATE 会回退缓存
+对象的过期属性而非现读 DB）。锁序与 `_terminate_task_in_session` 一致
+（task→dep→task），不重引反向死锁。
+
+### #5 `member_model` 回写判据与冷恢复重新物化判据不同源
+
+`AgentConfigurator` 的回写判据用已展开的 `ctx.team_spec.model_pool`（`build()` 时
+`model_router` / `model_intelli_router` 展开进 `team_spec.model_pool`），但冷恢复
+路径 `team_agent.py` 检查未展开的 `runtime_spec.model_pool`（对 router /
+intelli_router 团队为空），跳过 `context.member_model` 重新物化 —— 让 stale client
+跨冷恢复存活。
+
+**修法**：提取 `TeamAgentSpec.effective_model_pool()` 方法（返回展开后的
+`(pool, strategy)`），`build()` 与 `recover_from_session` 都改用此 helper，两条路径
+共享同一展开源。
+
+### #6 `router` 策略冷恢复重新物化 `member_model` 时丢失模型名 hint
+
+#5 的 `effective_model_pool()` 修复让 `router` 团队第一次进入冷恢复重新物化分支，但
+现有代码只处理 `intelli_router` / `by_model_name`，`router` 落到
+`allocator.allocate(None)` 返回 pool[0]，丢弃 checkpoint 的 model_name hint。
+
+**修法**：把 `router` 与 `by_model_name` 同等处理（两者都是按名路由）：用
+`checkpoint_name` 作 `allocate()` 的 hint，回写 `spec.leader.model_name`。
+
+### #7 广播已读水位的 CAS UPDATE 在 `read_at IS NULL` 时静默不生效
+
+CAS UPDATE 的 WHERE 子句 `read_at == current_read_at` 在 `current_read_at` 为
+`None` 时生成 SQL `read_at = NULL`，而 `NULL = NULL` 在 SQL 中结果是 `NULL`（不是
+`True`），WHERE 匹配 0 行、UPDATE 不生效，但函数仍返回 `True`。`read_at` 列是
+`nullable=True` + `default=None`。
+
+**修法**：`current_read_at` 为 `None` 时用 `read_at.is_(None)`（SQL `IS NULL`）；
+CAS UPDATE 后检查 `result.rowcount`，0 行时返回 `False`。
 
 ## 考虑过但未采用
 
 - **退回 PG/MySQL 进程级写锁**：会重新引入 issue #115 的 30s 看门狗堆积问题
-  （91ad1d944 的修复动机）。审查意见 #1 也说「改动方向正确」，方向不退。
+  （91ad1d944 的修复动机）。方向不退。
 - **`reset_task` / `approve_plan_task` 改 CAS**：这两个是状态翻转，CAS 可行；但
-  `reset_task` 还要清空 `summary` / `note` / `resume_pending` / `observed_revision`
-  等多列，CAS UPDATE 需要把所有列写进 `values()`，且 `observed_revision = revision`
-  需要读当前 revision。`FOR UPDATE` 与第二轮已建立的修复模式一致，统一性优先。
-- **`_check_cycle_and_compute_new_edges` 用 team 级 advisory lock**：PG/MySQL 有
-  `pg_advisory_xact_lock` / `GET_LOCK`，但 SQLite 没有，需要分后端分支。`FOR UPDATE`
-  锁全队边集在三后端统一生效，且 `add_graph` 低频，代价可接受。
-- **`mark_message_read` 调用方已串行**：`MessageHandler` 按成员逐个串行 flush，单成员
-  并发概率低；但严格按「PG/MySQL 跳过写锁后所有读改写入口必须显式串行化」的契约，
-  `FOR UPDATE` 是正确的，不依赖调用方的串行假设。
+  `reset_task` 还要清空多列，CAS UPDATE 需要把所有列写进 `values()`。`FOR UPDATE`
+  与已建立的修复模式一致，统一性优先。
 
 ## 回归证据与适用范围
 
-候选：`fix/issue-115-enterprise`（基于 53f1d5e38）。
+候选：`fix/issue-115-enterprise`。
 
 ```bash
-# 死引用删除 + org schema（覆盖 #3 #5）
-.venv/bin/python -m pytest tests/unit_tests/agent_teams/test_db_sessions_watchdog.py \
-    tests/unit_tests/agent_teams/organization/test_org_db.py -x -q
-# → 19 passed
-
-# database + task_manager + message_manager（覆盖 #1 #2 #4）
+# database + task_manager + message_manager（覆盖 #1 #3 #4 #7）
 .venv/bin/python -m pytest tests/unit_tests/agent_teams/test_database.py \
     tests/unit_tests/agent_teams/test_task_manager.py \
     tests/unit_tests/agent_teams/test_message_manager.py -x -q
@@ -168,603 +144,3 @@ import engine as engine_module`。三个用例已改用 `sessions._watchdog_seco
 `WHERE status=...`，整 JSON / 整行 read-modify-write 走 `SELECT ... FOR UPDATE`。
 新增读改写入口前先归类属于哪一类，套用对应模式，不要默认走普通
 SELECT-then-UPDATE。已把这条写进 `tools/AGENTS.md` 的 `DbSessions` 段落。
-
-### 第四轮检视追加：engine.py 四处 DDL helper docstring
-
-第四轮检视指出 engine.py 四处 DDL helper 的 docstring 仍声称「runs inside
-`DbSessions.write()` so ... serialises with every DAO write」——这条理由在
-91ad1d944 之后对 PG/MySQL 已不成立（`write()` 跳过进程级写锁）。本次修复把四处
-docstring（`create_cur_session_tables` / `drop_cur_session_tables` /
-`cleanup_all_runtime_state` / `drop_session_tables_by_id`）统一改为「On SQLite
-the per-write lock serialises ... with every DAO write; on PostgreSQL / MySQL
-`write()` skips the process-level lock, so DDL-vs-DAO-write is guarded by the
-DB's own table-level DDL lock ... `ddl_lock()` serialises ... with every other
-DDL helper on all backends」。与 `organization/db.py` 的 `_ensure_org_schema`
-docstring（53f1d5e38 已更新）措辞一致。
-
-### 第五轮检视：环校验锁修正、跨进程 ALTER 幂等、测试覆盖
-
-第五轮检视发现两个真实 bug 与一个测试覆盖缺失：
-
-1. **P2 #1 — `_check_cycle_and_compute_new_edges` 的 dep FOR UPDATE 在空边集上不生效**：
-   `SELECT ... FOR UPDATE` 只锁返回的行。若 team 没有任何现有边（空边集），SELECT 返回
-   零行、零锁。两个并发 `mutate_dependency_graph` 都不取锁，各自通过环校验，合在一起
-   可能成环。即使有现有边，两个加不相交端点新边的调用也可能各自通过但合并成环（经
-   现有边桥接）。
-
-   **修法**：移除 `_check_cycle_and_compute_new_edges` 的 dep FOR UPDATE，改为在
-   `mutate_dependency_graph` 开头锁 **team 行**（`SELECT Team WHERE team_name=? FOR UPDATE`）。
-   team 行锁串行化同 team 的所有图变更，不依赖边集大小。team 行是单行短锁，不与
-   `_terminate_task_in_session`（不锁 team_info）冲突。
-
-2. **P3 #4 — dep FOR UPDATE 与 `_terminate_task_in_session` 的锁序相反导致死锁**：
-   `mutate_dependency_graph`（dep→task）与 `_terminate_task_in_session`（task→dep）锁序
-   相反。A 持全部 dep 锁等 task T，B 持 task T 锁等 dep 锁 → PG/MySQL 检测死锁并 abort
-   一笔事务。移除 dep FOR UPDATE、改用 team 行锁后，`mutate_dependency_graph` 只锁
-   team 行 + task 行（refresh），不锁 dep 行，锁序与 `_terminate_task_in_session` 一致。
-
-3. **P2 #3 — `ddl_lock` 是 `asyncio.Lock`（进程级），多进程下 org 迁移仍可能报
-   duplicate column**：`_ddl_once` 的 `_ORG_SCHEMA_READY` 复查 + `ddl_lock` 都只在进程内
-   有效。两个进程同时首次访问同一 PG/MySQL 库时，各自通过复查、各自执行
-   `ALTER TABLE ADD COLUMN`，第二个进程命中「duplicate column」失败。
-
-   **修法**：新增 `_add_column_idempotent` 辅助函数，包裹 `ALTER TABLE ADD COLUMN` 并
-   捕获 `OperationalError`，对「duplicate column」/「already exists」类错误视为成功
-   （列已存在，正是所需状态）。三处 ALTER 调用（`_ensure_org_task_columns` 循环 /
-   `_ensure_org_summary_execution_columns` / `ensure_org_static_tables` 的
-   `unclaimed_task_policy_json`）全部改用此函数。
-
-4. **P3 #5 — client/server 写锁分支与 ddl_lock 无测试覆盖**：新增 3 个测试：
-   `test_sqlite_write_holds_process_lock`（SQLite 上 `write()` 持进程锁）、
-   `test_client_server_write_skips_process_lock`（PG/MySQL 上 `write()` 跳过进程锁）、
-   `test_ddl_lock_serialises_concurrent_acquirers`（`ddl_lock()` 串行化并发获取者）。
-
-### 第六轮检视：`_add_column_idempotent` 异常类错误 + 事务状态污染
-
-第六轮检视发现第五轮新增的 `_add_column_idempotent` 有两个真实 bug：
-
-1. **异常类错误**：`except OperationalError` 只捕获 SQLite 的重复列错误。PG 的重复列
-   （SQLSTATE 42701）在 SQLAlchemy 层是 `ProgrammingError`（与 `OperationalError` 平行，
-   都继承自 `DBAPIError`），旧代码根本捕获不到，异常照旧抛出——跨进程 duplicate column
-   在 PG/MySQL 上仍然失败。
-
-2. **事务状态污染**：即使改对异常类，PG 在语句失败后会把整个事务置为 aborted 状态，
-   `db.py:141` 的 `await session.commit()` 随后抛 `InFailedSQLTransaction`（非 transient，
-   `retry_on_transient` 不重试），`_ensure_org_schema` 依旧失败。
-
-   修法：用 `with sync_conn.begin_nested():`（SAVEPOINT）包住 ALTER，捕获
-   `DBAPIError`（覆盖 `OperationalError` + `ProgrammingError`）。失败时回滚到 savepoint，
-   外层事务保持 clean、可提交。**MySQL 路径单独处理**：MySQL 的 DDL 隐式提交会销毁
-   savepoint，`begin_nested` 退出时的 `ROLLBACK TO SAVEPOINT` 会抛二次 `DBAPIError`
-   （ERROR 1305 "SAVEPOINT does not exist"），掩盖原 "Duplicate column name" 错误——
-   因此 MySQL 跳过 `begin_nested`、直接执行 ALTER，吞掉 duplicate-column 错误后用
-   `inspect.get_columns` 兜底验证列确实存在（隐式提交使 post-ALTER 状态成为 ground truth）；
-   若列仍缺失则 re-raise（不一致状态）。
-
-   补 2 个迁移幂等单测（与 `_add_column_idempotent` 修复同 commit `f8a4ceb90` 落地于
-   `tests/unit_tests/agent_teams/organization/test_org_db.py`，本 B_ 文档跨轮累积记录、
-   本节只回溯引用该轮已落地的测试，不在后续 commit 重复提供）：
-   - `test_ensure_org_static_tables_is_idempotent_when_columns_already_exist`：先完整迁移，
-     再在显式事务里调 `ensure_org_static_tables`，断言 commit 成功。
-   - `test_add_column_idempotent_swallows_duplicate_column`：直接测 helper——预加列后调
-     `_add_column_idempotent`，断言不抛异常且事务可继续写入。
-
-## 遗留与后续
-
-- 修复的并发正确性依赖 PG/MySQL 的 `READ COMMITTED` 行为：A 提交后 B 才能看
-  到 A 的写入。`engine.py` 的 `create_async_engine` 已为 PG/MySQL 显式设
-  `isolation_level="READ COMMITTED"`——MySQL 默认 `REPEATABLE READ` 会在事务首个
-  一致性读建立 read view，使 `_refresh_status_in_session` 的 deps count 查询看不到
-  并发上游已提交的 dep 解析（FOR UPDATE 行锁拿到后 count 仍用旧 view → 下游卡
-  BLOCKED）。显式设 RC 后每条语句取新快照，FOR UPDATE 串行化才真正生效。
-- 未在真实 PostgreSQL / MySQL 后端按屏障构造跑过端到端复现。需 swarm 侧用
-  PG/MySQL 后端复测，确认下游不再卡 BLOCKED、options 不再丢更新、组织表迁移不再
-  报 duplicate column、`update_task` revision 不再丢增、`add_graph` 不再漏检环、
-  `reset_task` / `approve_plan_task` 不再被并发 `cancel_task` 复活、广播水位不再
-  回退、`mutate_dependency_graph` 与 `complete_task` 不再死锁、跨进程 org 迁移
-  不再报 duplicate column。
-- 排查报告确认的「无风险」入口（纯 INSERT / 纯 CAS / 已加 FOR UPDATE / 只读）未
-  在本记录逐一列出，详见排查报告。
-- **P2 #2**（PG/MySQL 跳过进程写锁的「未闭合」指控）：91ad1d944 的核心改动就是
-  跳过进程写锁以解决 issue #115 的吞吐问题。经五轮系统排查，所有 read-modify-write
-  入口已覆盖（FOR UPDATE / CAS / ddl_lock / team 行锁）。`ddl_lock` 的进程级局限
-  通过 `_add_column_idempotent` 跨进程兜底：SQLite/PG 走 SAVEPOINT + DBAPIError，
-  MySQL 跳过 savepoint（DDL 隐式提交销毁之）改为 ALTER + `inspect` 兜底验证。
-  方向不退——退回进程写锁会重新引入 issue #115 的 30s 看门狗堆积。
-
-### 第七轮检视：加边与上游并发完成竞态（`_apply_new_edges` 的 `resolved` 决策用过期读）
-
-第七轮检视点名 `_apply_new_edges` 的 `resolved` 决策：
-
-> 当给 B 添加对 A 的依赖时，这里可能先读到 A 仍在执行。若 A 随后完成并提交，
-> `complete_task(A)` 扫描依赖时还看不到这条边。加边事务接着按之前读到的状态写入
-> `resolved=False`，使 B 进入 BLOCKED。两次操作都返回成功，但 A 已完成，B 无法
-> 通过这次完成事件解锁。
-
-**根因**：第五轮把环校验的 dep `FOR UPDATE` 换成 team_info 行锁后，闭合了「两个并发
-加边各自通过环校验、合并成环」的竞态，但 `_apply_new_edges` 决定 `resolved` 用的
-仍是 `_load_endpoints_and_validate` 的**普通 SELECT 快照**（`endpoint_tasks[dep_id].status`）。
-team_info 行锁不与 `_terminate_task_in_session`（不锁 team_info）串行化，故加边与上游
-完成可交错：加边读到 A 仍在执行 → A 完成提交（其 dep 扫描看不到新边，不解锁 B）→
-加边按过期读写入 `resolved=False` → B 永久 BLOCKED（本应解锁它的完成事件已发完）。
-
-**修法**：`_apply_new_edges` 在插边前对每条新边的上游端点取
-`select(task_id, status).where(...).with_for_update()` 的**标量行锁**，用现读的
-`status` 决定 `resolved`。两点关键：
-
-1. **标量列投影，不是整行 FOR UPDATE**：上游行已被 `_load_endpoints_and_validate`
-   载入本 session 的 identity map，整行 `select(Model).with_for_update()` 会回退
-   identity map 里缓存对象的**过期属性**而非现读 DB（session 内 FOR UPDATE 不刷新
-   已加载对象的属性）；标量 `select(task_id, status)` 绕过 identity map，读 live
-   committed 值（PG/MySQL `READ COMMITTED` 下每条语句取新快照，FOR UPDATE 读看到
-   并发完成提交）。这条 identity-map 行为经实验确认（同 session 内整行 FOR UPDATE
-   回退缓存属性，`populate_existing=True` 在 aiosqlite 路径下也未刷新；标量列投影
-   稳定读到 in-transaction / committed 的现值）。
-2. **锁序与 `_terminate_task_in_session` 一致**：本路径锁上游 task（FOR UPDATE）→
-   插 dep 行 → 刷新下游 task（FOR UPDATE），即 task→dep→task；terminator 锁 task
-   （CAS）→ dep 行（UPDATE）→ 下游 task（refresh FOR UPDATE），同序。不重引第五轮
-   移除的 dep→task 反向死锁。team_info 行锁不被 terminator 触碰，不增冲突。
-
-**回归测试** `test_add_edge_to_upstream_completed_after_validation_is_born_resolved`
-（`tests/unit_tests/agent_teams/test_database.py`）：在单事务内复刻交错——验证读 A=
-in_progress → 在同事务内把 A 翻成 completed（`synchronize_session=False` 使验证时
-ORM 对象保持过期，忠实模拟「另一 session 已提交、本 session 的 identity map 尚未
-得知」）→ 调 `_apply_new_edges`。修前断言失败（`resolved=False`、B 卡 BLOCKED），
-修后通过（`resolved=True`、B 保持 PENDING）。SQLite 上 `FOR UPDATE` 被剥离，故测
-的是「插边用现读上游状态、不用过期 `endpoint_tasks` 快照」这一不变量，而非 PG/MySQL
-行锁行为本身——后者仍需 swarm 侧 PG/MySQL 端到端复测。
-
-**契约同步**：`tools/AGENTS.md` 第 (4) 条追加 `_apply_new_edges` 上游标量行锁的
-说明（标量投影绕 identity map 的理由 + 锁序与 terminator 一致、不重引第五轮死锁）。
-
-### 第八轮检视：`create_all` / `CREATE INDEX` 跨进程并发未幂等
-
-第八轮检视指出 `ensure_org_static_tables` 只对 `ADD COLUMN`（`_add_column_idempotent`）
-做了跨进程幂等，同函数的 `SQLModel.metadata.create_all`（建 org 静态表）与
-`Index.create`（建 `org_task` 两个索引）仍走 `checkfirst=True` 的 inspect-then-create
-模式——与第五轮修 `ADD COLUMN` 前完全同构的 TOCTOU 竞态。
-
-**根因**：`checkfirst=True` 对每个表 / 索引先 `inspect`（不存在）再 `CREATE`，两步
-之间有窗口。PG/MySQL 跳过进程级写锁后，两个进程的 `_ddl_once` 可同时通过
-`_ORG_SCHEMA_READY` 复查（进程级 `WeakSet`，跨进程不共享）、同时进入
-`ensure_org_static_tables`。进程 A 先提交创建了全部表，进程 B 的 `checkfirst` 在
-A 提交前已读到「不存在」、随后 `CREATE TABLE` 撞 PG 的表级 DDL 锁等待 A，A 提交后
-B 的 `CREATE` 报 `already exists` → PG 事务进入 aborted 状态 → 后续
-`_add_column_idempotent` 全部 `InFailedSQLTransaction`。
-
-**修法**：新增 `_run_ddl_idempotent(sync_conn, ddl, verify)` 辅助，把
-`_add_column_idempotent` 的 SAVEPOINT + DBAPIError catch 模式泛化到任意 DDL callable。
-SQLite / PG 走 `begin_nested` 包住 DDL，吞 `already exists` / `duplicate` 错误后
-savepoint 回滚、外层事务恢复 clean；MySQL 跳过 savepoint（DDL 隐式提交销毁之），
-改为裸执行 + 吞错误后调 `verify` callable 复查 DDL 目标确实存在（隐式提交使
-post-DDL 状态成为 ground truth）。`ensure_org_static_tables` 的 `create_all` 与
-两个 `index.create` 全部改用此辅助。
-
-**为什么 `create_all` 的 savepoint 回滚安全**：`create_all` 在并发进程里是原子的
-（要么全部建、要么全部不建），不会出现「表 1、2 建了、表 3 没建」的半态。savepoint
-回滚只会发生在「某个表已存在（并发进程建的）」时，此时并发进程已提交、全部表都
-可见，回滚本进程建的那几张等价于回退到「全部表已由对方建好」的状态，后续的
-`_ensure_org_task_columns` 等 inspect-only 迁移自然短路。
-
-**回归测试**（`tests/unit_tests/agent_teams/organization/test_org_db.py`）：
-- `test_run_ddl_idempotent_swallows_already_exists_on_savepoint_path`：预建表后
-  调 `_run_ddl_idempotent`（DDL 直接 `CREATE TABLE` 同名，不走 checkfirst），
-  断言不抛异常且事务可继续写入（INSERT 成功）。
-- `test_run_ddl_idempotent_mysql_skips_savepoint_and_rechecks`：fake MySQL 连接
-  驱动 MySQL 分支——断言不调 `begin_nested`、DDL 执行一次、`verify` 被调。
-- `test_run_ddl_idempotent_mysql_reraises_when_verify_fails`：`verify` 返回 False
-  （不一致态）时 helper 必须 re-raise。
-
-**契约同步**：`tools/AGENTS.md` 第 (1) 条 DDL 锁清单追加 `_run_ddl_idempotent` 对
-`create_all` / `CREATE INDEX` 的覆盖说明。
-
-### 第九轮检视：savepoint 路径复查目标存在性 + 文档措辞消歧
-
-第九轮检视指出两个点：
-
-1. **`_run_ddl_idempotent` / `_add_column_idempotent` 仅在 MySQL 分支复查目标是否存在**：
-   savepoint 路径（SQLite/PG）吞 `already exists` / `duplicate column` 错误后只靠
-   savepoint 回滚恢复事务 clean 状态，不复查 DDL 目标是否真存在。若错误信息含
-   `already exists` 但实际并发进程并未提交该 DDL（半态、错误信息掩盖），savepoint
-   路径会静默吞掉而不验证，schema 缺失。
-
-   **修法**：把 MySQL 分支的复查逻辑提到两条路径共享——吞错后无条件调 `verify`
-   （`_run_ddl_idempotent`）或 `inspect.get_columns` 复查（`_add_column_idempotent`）。
-   savepoint 路径的回滚恢复事务状态，复查确认 DDL 目标已就位；若仍缺失，re-raise
-   不一致态。MySQL 路径无 savepoint 可回滚，复查直接读隐式提交后的 ground truth。
-
-2. **B_ 文档第六轮段落「补 2 个迁移幂等单测」措辞易被误读为本次变更未提供**：
-   检视者两轮都基于此措辞认为单测未随本次变更提供。实际上两条测试在第六轮
-   commit `f8a4ceb90` 已与 `_add_column_idempotent` 修复一起新增、落在
-   `tests/unit_tests/agent_teams/organization/test_org_db.py`。本 B_ 文档跨轮累积记录，
-   第六节回溯引用该轮已落地的测试，不在后续 commit 重复提供。
-
-   **修法**：在该处加注 commit `f8a4ceb90` 落地位置 + 「本节回溯引用、不在后续
-   commit 重复提供」的说明，消除「本次变更未提供」的误读。
-
-新增 2 个回归测试覆盖 savepoint 路径的复查 re-raise：
-- `test_run_ddl_idempotent_savepoint_path_reraises_when_verify_fails`：fake SQLite
-  连接驱动 savepoint 分支，DDL 在 savepoint 内抛 `already exists`，`verify` 返回 False
-  （不一致态）→ helper 必须 re-raise。savepoint 用 fake context manager（`__exit__`
-  返回 False 让异常传播到外层 `except`，匹配真实 `begin_nested` 的
-  ROLLBACK-then-propagate 行为）。
-- `test_add_column_idempotent_savepoint_path_reraises_when_column_still_missing`：
-  fake SQLite 连接驱动 savepoint 分支，ALTER 在 savepoint 内抛 `duplicate column`，
-  `inspect.get_columns` 返回不含目标列 → helper 必须 re-raise。
-
-### 第十轮检视：`_ensure_session_tables` 的 `CREATE TABLE` 跨进程竞态
-
-第十轮检视指出：`_run_ddl_idempotent` / `_add_column_idempotent` 把组织静态表迁移
-（`organization/db.py` 的 `ensure_org_static_tables`）包成了 idempotent，但同类「跨进程
-并发首次 bind 同一 `session_id`」的动态会话表路径（`create_cur_session_tables` →
-`_ensure_session_tables`，`engine.py:1141`）依旧是 `model.__table__.create(checkfirst=True)`
-的 inspect-then-CREATE。
-
-**根因**：SQLAlchemy 的 `checkfirst=True` 是进程内的 `has_table` 探针 → `CREATE` 两步，
-不是原子的。`ddl_lock()` 是进程级 `asyncio.Lock`，跨进程不串行（同一份 B_ 文档第 (1) 条
-已记录此约束）。两个 teammate 进程并发首次 bind 同一 `session_id`（PG/MySQL 后端）时：
-两边 `checkfirst` 都读到「表不存在」→ 都发 `CREATE TABLE`；DB 的表级 DDL 锁串行后第二个
-失败（PG `ProgrammingError` SQLSTATE 42P07；MySQL 1050）。该错误不属于
-`_TRANSIENT_DB_ERRORS`（`OperationalError` / `SATimeoutError` / `TimeoutError`）也不匹配
-`_TRANSIENT_OPERATIONAL_MARKERS`（`"locked"` / `"busy"`），`retry_on_transient` 不重试，
-`create_cur_session_tables` 也不捕获 → 异常经 `TeamDatabase._wire_up` 冒出 `initialize()`，
-bind 失败（issue #115 现象 5 的形态）。SQLite 上单进程内 `write()` 持进程锁兜底，但同一
-文件后端跨进程（如独立 CLI 成员）仍有这个窗口。
-
-**修法**：把 `_add_column_idempotent` / `_run_ddl_idempotent` 从 `organization/db.py`
-搬到 `tools/database/engine.py`（更下层、被 `organization/db.py` import），作为 per-session
-动态表 DDL 与 org 静态表 DDL 共享的 idempotent CREATE/ALTER 原语。`organization/db.py`
-改为 import 后 re-export，保留 `org_db._add_column_idempotent` / `org_db._run_ddl_idempotent`
-属性（既有调用方与测试零改动）。`_ensure_session_tables` 的每个
-`model.__table__.create(checkfirst=True)` 改包到 `_run_ddl_idempotent` ——
-`verify = lambda: inspect(sync_conn).has_table(table.name)` —— savepoint 路径吞
-`already exists` 后复查表是否真在；MySQL 路径无 savepoint，复查直接读隐式提交后的 ground
-truth。
-
-**契约同步**：
-- `engine.py` 的 `_ensure_session_tables` docstring 扩展说明这次 wrap 的根因（checkfirst 的
-  in-process TOCTOU、`ddl_lock()` 跨进程不串行、`retry_on_transient` 不覆盖
-  `already exists`）。
-- 3 条 MySQL/savepoint 分支 fake-conn 单测（`test_add_column_idempotent_mysql_*` /
-  `test_add_column_idempotent_savepoint_path_reraises_when_column_still_missing`）改 patch
-  `engine_module.inspect` 而非 `org_db.inspect` —— helper 现在住在 `engine.py`，`inspect`
-  在其命名空间解析。其余 5 条测试（含 `test_run_ddl_idempotent_savepoint_path_reraises_*
-  `）不受影响（它们用真实 SQLite 跑 helper，不走 mock inspect）。
-
-**验证**：
-- `tests/unit_tests/agent_teams/organization/test_org_db.py`（23 用例）、
-  `test_database.py`、`test_database_concurrency.py`、`test_task_manager.py`、
-  `test_message_manager.py`：536 passed。
-- 自构造并发首次 bind 复现脚本：两个独立 `TeamDatabase` 实例并发
-  `create_cur_session_tables()` 同一 `session_id`，修复前必崩，修复后两路都返回 `True`。
-
-### 第十一轮检视：`_create_static_tables` 同款 TOCTOU 未收编
-
-第十一轮检视指出：第十轮只收编了 `_ensure_session_tables`（per-session 动态表）和
-`ensure_org_static_tables`（org 静态表）的 `create_all` / `Table.create` TOCTOU，但
-同款 DDL 入口 `_create_static_tables`（`initialize_engine` 跑在 writer engine 上的静态表
-`SQLModel.metadata.create_all(tables=static_tables())`）依旧是裸 `create_all(checkfirst=True)`，
-没走 `_run_ddl_idempotent`。
-
-**根因**：`initialize_engine` 在 `DbSessions` 发布前直接跑在 writer engine 上，无法取
-`sessions.ddl_lock()`（`ddl_lock()` 是 `DbSessions` 的方法）。`static_tables()`（`team_info`
-/ `team_member` 等）的 `create_all` 也是 SQLAlchemy `checkfirst=True` 的 in-process TOCTOU：
-两个进程并发首次 `initialize()` 同一 PG/MySQL 库时，两边 checkfirst 都读到「表不存在」并发
-`CREATE TABLE`，DB 表级 DDL 锁串行后第二个失败（PG `ProgrammingError` 42P07 / MySQL 1050）。
-该错误不在 `_TRANSIENT_DB_ERRORS`（`OperationalError` / `SATimeoutError` / `TimeoutError`）
-也不匹配 `_TRANSIENT_OPERATIONAL_MARKERS`（`"locked"` / `"busy"`），`retry_on_transient`
-不重试 → 异常经 `initialize_engine` 的 try/except 冒出 `initialize()` → bind 失败（issue #115
-现象 5 形态）。
-
-**修法**：`_create_static_tables` 改用 `_run_ddl_idempotent` 包住
-`SQLModel.metadata.create_all(sync_conn, tables=static_tables())`，
-`verify = all(t.name in set(inspect(sync_conn).get_table_names()) for t in static_tables())`
-——与 `ensure_org_static_tables` 同形。savepoint 路径吞 `already exists` 后复查所有静态表
-是否都真在；MySQL 路径无 savepoint，复查直接读隐式提交后的 ground truth。
-
-**契约同步**：
-- `engine.py` 的 `_create_static_tables` docstring 扩展说明这次 wrap 的根因（checkfirst 的
-  in-process TOCTOU、`initialize_engine` 在 `DbSessions` 发布前直接跑 writer engine 无
-  `ddl_lock()` 可取、`retry_on_transient` 不覆盖 `already exists`）。
-- `tools/AGENTS.md` 第 (1) 条 DDL 锁契约追加「`initialize_engine._create_static_tables`
-  的 `create_all` 也走同款包装」一段，补齐「DDL 锁 + CAS + 行锁」三件套对静态表 `create_all`
-  路径的覆盖说明。
-
-**验证**：
-- `tests/unit_tests/agent_teams/organization/test_org_db.py` + `test_database.py` +
-  `test_database_concurrency.py` + `TestCascadeDelete`：198 passed。
-- 「静态表已存在 → 再 `initialize()`」复现脚本：两个独立 `TeamDatabase` 实例先后
-  `initialize()` 同一文件后端，修复前裸 `create_all(checkfirst=True)` 对静态表已存在场景安全，
-  修复后 `_run_ddl_idempotent` 走 has_table=True → 不发 CREATE → 直接返回，行为等价。
-  SQLite 文件锁串行写、不暴露真竞态窗口；PG/MySQL 上两个进程并发首次 `initialize()` 才能真
-  复现，修复前必崩 `already exists`、修复后两路都返回成功。
-
-**未收编的同款 TOCTOU**：`_ensure_team_member_role_column` /
-`_ensure_team_member_options_column` / `_ensure_team_info_capability_columns` 三个
-migration helper 也是 in-process check-then-ALTER（`if "X" in columns` → `ALTER TABLE ADD
-COLUMN`），同款 TOCTOU 命中后第二个进程会撞 `duplicate column`。本次未收编这三个（第十一轮
-检视只点名了 `_create_static_tables`），可作下一轮 follow-up：把它们的 ALTER 全部换成
-`_add_column_idempotent` 包装即可（与 `organization/db.py` 的 `_ensure_org_task_columns`
-同款）。
-
-### 第十二轮检视：DDL verify 语义 + ALTER 幂等 + FOR UPDATE 读回 identity map stale 实体
-
-第十二轮检视点出 5 个遗留 + 新问题：
-
-1. **`_create_static_tables` 的 verify 语义错**（`engine.py:506-512`）：上一轮把 `create_all`
-   包进 `_run_ddl_idempotent`，但 verify 是 `all(t.name in has_table_names for t in
-   static_tables())`——「全部静态表都在」——而 `_run_ddl_idempotent` 是「吞 `already exists`
-   后才走 verify」。MySQL 并发首建场景下：第一个进程建表1，第二个进程建表1失败 → 吞
-   `already exists` → verify「全部表都在」时只有表1建好，表2-N 还没建 → verify=False →
-   re-raise 吞掉的错误。审查正确指出此 verify 语义不能闭合「第二个进程需要继续建表2-N」的
-   竞态。
-2. **`ensure_org_static_tables` 同款 verify 语义错**（`organization/db.py:58-65`）。
-3. **`_ensure_message_protocol_column` / `_ensure_message_meta_column` 缺跨进程幂等**
-   （`engine.py:624` / `engine.py:658`）：两个 migration helper 都是裸 `inspect.get_columns`
-   探针 + `ALTER TABLE ADD COLUMN`，没走 `_add_column_idempotent`，跨进程并发会撞
-   `duplicate column`（PG `ProgrammingError` 42701 / MySQL 1060）。`retry_on_transient` 不
-   覆盖，第二个 bind 崩 `create_cur_session_tables()`。
-4. **`_refresh_status_in_session` 的 FOR UPDATE 读回 identity map stale 实体**
-   （`task_dao.py:151-155`）：`select(team_task_model).with_for_update()` 返回 ORM 实体，落
-   进 identity map。如果同 session 此前已 load 过此实体（`_terminate_task_in_session` 的
-   CAS 路径 line 258 已经 `select(...).where(task_id=...)` load 过一次），会拿回那个被改写
-   过的对象（terminator 已把它改成 `COMPLETED`/`CANCELLED`）。`candidates` filter
-   `t.status in (PENDING, BLOCKED)` 会跳过它——对 terminator 自己的 task 是 OK 的，但对
-   **downstream task**（refresh 操作的对象）如果已被本 session 在别处 load 过，会拿回缓存
-   实体的 stale status，可能把 IN_PROGRESS 覆写为 BLOCKED。审查正确指出此风险。
-5. **`_mark_read_in_session` 广播水位的 FOR UPDATE 同款读回 identity map**
-   （`message_dao.py:655`）：`select(read_status_model).with_for_update()` 返回 ORM 实体，
-   如果同 session 已 load 过此实体（同 batch 内前一条广播消息 mark_read 后），会拿回缓存
-   实体的 stale `read_at`，水位可能被回退（lost update）。
-
-**修法**：
-
-- **#1 / #2（verify 语义）**：把 `create_all(tables=[])` 单调用拆为按表逐个
-  `_run_ddl_idempotent(create_all(tables=[table]), verify=has_table(table.name))`。每张表的
-  `already exists` 单独吞 + 单独 verify「这张表在不在」，闭合竞态到表级粒度。`create_all`
-  仍用于每张表（不用手写 `CREATE TABLE` DDL 字符串），`tables=[one_table]` 参数把每次调用
-  限定到一张表，FK 排序与方言特定 DDL 编译仍是 SQLAlchemy 的事。
-- **#3（ALTER 幂等）**：`_ensure_message_protocol_column` / `_ensure_message_meta_column`
-  的裸 `ALTER TABLE ADD COLUMN` 改用 `_add_column_idempotent(sync_conn, table, column,
-  col_type)` 包装，与 `organization/db.py` 的 `_ensure_org_task_columns` 同款——SAVEPOINT
-  包 ALTER + 吞 `duplicate column`/`already exists` + `inspect.get_columns` 复查列确实
-  在，若仍缺失则 re-raise。
-- **#4 / #5（FOR UPDATE + identity map）**：把 `select(model).with_for_update()` 返回 ORM
-  实体改为标量投影 `select(model.pk, model.field).with_for_update()`，绕过 identity map
-  读 live 提交值（与 `_apply_new_edges` 的上游端点读同款）。状态/水位翻转改为标量
-  `UPDATE ... WHERE pk=? AND status/read_at=?` 的 forward-only CAS——guard 在我们刚在锁下
-  读到的值上，stale 读永远不会翻转终态/IN_PROGRESS 行（status guard 拒绝），水位永远不会
-  回退（read_at guard 拒绝）。
-
-**契约同步**：
-- `engine.py` 的 `_create_static_tables` / `_ensure_message_protocol_column` /
-  `_ensure_message_meta_column` docstring 扩展说明各自修复的根因。
-- `_refresh_status_in_session` docstring 扩展说明 identity map 风险与标量投影修复。
-- `_mark_read_in_session` 的 broadcast 水位 docstring 扩展同款说明。
-- `organization/db.py` 的 `ensure_org_static_tables` 加注释说明按表逐个 verify 的根因。
-- `tools/AGENTS.md` 第 (1) 条 DDL 锁契约已在前几轮追加；本轮 verify 语义修复不改变该契约
-  的措辞，但 `_run_ddl_idempotent` 的 verify 不变式应改为「verify 单个 DDL 目标是否在」，
-  多目标的 `create_all` 由调用方拆为按目标逐个调用。
-
-**验证**：
-- `tests/unit_tests/agent_teams/organization/test_org_db.py`、`test_database.py`、
-  `test_database_concurrency.py`、`test_message_manager.py`、`test_task_manager.py`：
-  536 passed。
-- 「静态表已存在 → 再 `initialize()`」「同 session_id 并发 bind」「单条消息 mark_read 后
-  同 session 再 mark_read 同广播」等场景的语义复现脚本均与修复前行为等价（标量投影 +
-  CAS 在无竞态时与 ORM 实体 setattr 行为相同；竞态下才显现保护效果）。
-
-### 第十三轮检视：拓扑排序 + _ensure_dynamic_table_indexes ADD COLUMN 幂等 + refresh 返回 stub 实体 + rowcount 防御
-
-第十二轮修完 verify 语义 / ALTER 幂等 / FOR UPDATE identity map 后,第十三轮检视点出 4 个新问题:
-
-1. **逐表 create_all 丢失跨表拓扑排序**(`engine._create_static_tables` /
-   `organization/db.ensure_org_static_tables`):第十二轮把 `create_all(tables=[all])`
-   拆为按 `static_tables()` 迭代顺序逐个 `_run_ddl_idempotent(create_all(tables=[t]),
-   verify=has_table(t.name))`,但 `static_tables()` 返回顺序是
-   `SQLModel.metadata.tables` 的注册顺序,不是 FK 依赖拓扑顺序。`team_member` FK →
-   `team_info`,如果 `team_member` 先建,PG/MySQL 会在 `CREATE TABLE` 时因 FK 目标
-   不存在而拒绝(SQLite 延迟到 INSERT 才检查,故本地测试不会暴露)。org 表当前无 FK
-   但同款修复以保前向安全。
-
-   **修法**:在逐表迭代前用 `sqlalchemy.sql.util.sort_tables(tables)` 做拓扑排序,
-   保证 child 的 CREATE 永远在 parent 之后跑。`create_all(tables=[all])` 内部本就用
-   `sort_tables`,本修复把同款排序显式带进逐表路径。
-
-2. **`_ensure_dynamic_table_indexes` 的 ADD COLUMN 仍是裸 ALTER**(`engine.py` line
-   818-874 等 13 条):第十二轮只修了 `_ensure_message_protocol_column` /
-   `_ensure_message_meta_column` 两条 message 列迁移,task 表的 13 条 ADD COLUMN
-   (`reviewer` / `review_round` / `max_review_rounds` / `note` / `summary` /
-   `parent_task_id` / `created_by` / `resume_pending` / `revision` /
-   `observed_revision` / `parent_revision` / `change_notes`)仍是裸
-   `exec_driver_sql('ALTER TABLE ... ADD COLUMN ...')`,跨进程并发首绑仍会撞
-   `duplicate column`。
-
-   同款问题存在于 `_ensure_team_member_role_column` / `_ensure_team_member_options_column`
-   / `_ensure_team_info_capability_columns`(第十二轮 B_ 文档已备注为 follow-up)。
-
-   **修法**:全部 16 条裸 ADD COLUMN 改用 `_add_column_idempotent(sync_conn, table,
-   column, col_type)` 包装,与 `organization/db.py` 的 `_ensure_org_task_columns`
-   同款——SAVEPOINT 包 ALTER + 吞 `duplicate column`/`already exists` +
-   `inspect.get_columns` 复查列确实在。
-
-3. **`_refresh_status_in_session` 返回只手填 3 字段的模型实例**(task_dao.py:218-222):
-   第十二轮把 ORM 实体 `setattr` 翻转改为标量 UPDATE CAS,但 CAS 成功后返回的是
-   `team_task_model(task_id=tid, status=new_status, updated_at=now)` —— 只填了 3 个
-   字段,`assignee` / `team_name` / `summary` 等全为默认。调用方
-   `_handle_unblocked_tasks` → `_start_human_assigned_task_if_ready` 用
-   `task.assignee` 决定是否自动启动 HITT 任务,line 1488 `not task.assignee` 永真 →
-   HITT 自动启动逻辑失效。`task_manager.py:276` 的 `status_by_id =
-   {t.task_id: t.status for t in mutation.refreshed_tasks}` 只用 task_id+status,
-   不受影响,但 `_handle_unblocked_tasks` 这条链路确实破坏了实体契约。
-
-   **修法**:CAS 成功后在同一 FOR UPDATE 锁下 `select(team_task_model).where(task_id=tid)`
-   re-read 完整行(此时锁仍持,row 是我们刚 UPDATE 的那行,re-read 是真正 DB 读不是
-   identity map 缓存——因为前面的标量投影 `(task_id, status)` 没进 identity map)。
-   代价是每条 refreshed task 多一次 round-trip,但只在状态翻转的少数 candidate 上
-   发生,不是每条 scanned candidate 都付。
-
-4. **新的 CAS 判定用 `rowcount == 1`,与同族 `(rowcount or 0)` 不一致**(task_dao.py:218):
-   同文件 `claim_task` / `start_task` / `reassign_task` 用 `result.rowcount == 1`
-   (line 1013/1078/1133),`update_member_status` 用 `(result.rowcount or 0) == 1` 防御
-   None。审查指出 `None == 1` 是 False 会丢更新事件,改 `(rowcount or 0) == 1` 与
-   `update_member_status` 一致。
-
-   **修法**:line 218 改 `if (update_result.rowcount or 0) == 1:`。
-
-**契约同步**:
-- `engine.py` 的 `_create_static_tables` docstring 追加拓扑排序说明。
-- `organization/db.py` 的 `ensure_org_static_tables` 注释追加拓扑排序说明。
-- 3 个 migration helper(`_ensure_team_member_role_column` /
-  `_ensure_team_member_options_column` / `_ensure_team_info_capability_columns`)的
-  ADD COLUMN 改用 `_add_column_idempotent`,注释说明根因。
-- `_ensure_dynamic_table_indexes` 的 13 条 ADD COLUMN 改用 `_add_column_idempotent`。
-- `_refresh_status_in_session` docstring 追加 re-read 完整行的契约说明。
-
-**验证**:
-- `tests/unit_tests/agent_teams/`(除 coordination / cli):4474 passed, 17 skipped,
-  2 xfailed。
-- 重点覆盖:`test_database` + `test_database_concurrency` + `test_message_manager` +
-  `test_task_manager` + `organization/test_org_db`:322 passed。
-
-### 第十四轮检视:`member_model` 回写判据不同源 + `model_ref_json` DROP COLUMN 未幂等
-
-第十四轮检视点出两个建议:
-
-1. **`agent_configurator.py:694` — `member_model` 回写判据与冷恢复重新物化判据不同源**:
-   上一轮(commit `afccd38d1`)把回写判据从 blueprint `spec.model_pool` 改成已展开的
-   `ctx.team_spec.model_pool`,正确覆盖了 router / intelli_router 团队(它们的
-   blueprint `model_pool` 在 `build()` 把 `model_router` / `model_intelli_router`
-   展开成 `team_spec.model_pool` 时仍保持空)。但**冷恢复路径**(`team_agent.py:2189`
-   `if runtime_spec is not None and runtime_spec.model_pool:`)依旧检查未展开的
-   `runtime_spec.model_pool` —— 对 router / intelli_router 团队为空,跳过
-   `context.member_model` 重新物化。结果:回写为这些团队写入了 `ctx.member_model`,
-   但冷恢复跳过重新物化 —— 让一个 stale client(可能已轮换过的 endpoint/api_key)
-   跨冷恢复存活,与上一轮限制回写"仅给 pool teams、靠恢复重物化覆盖 stale 值"的初衷
-   相反。
-
-   **修法**:把 `model_router` / `model_intelli_router` → `model_pool` 的展开逻辑提取为
-   `TeamAgentSpec.effective_model_pool()`,返回 `(pool, strategy)` 后展开值,与
-   `build()` 在 `team_spec.model_pool` / `team_spec.model_pool_strategy` 上写入的同源。
-   `build()` 与 `recover_from_session` 都改用此 helper:`build()` 直接调用替代内联展开,
-   冷恢复路径改用 `runtime_spec.effective_model_pool()` 替代裸 `runtime_spec.model_pool`
-   检查 —— 两条路径从此共享同一展开源。helper 是只读的,不修改 blueprint 字段。
-
-2. **`engine.py:593` — 同一函数内 `model_ref_json` 的 DROP COLUMN 未做幂等包裹**:
-   `_ensure_team_member_options_column` 的 ADD COLUMN(`options`)在上一轮已包进
-   `_add_column_idempotent`,但同函数的 DROP COLUMN(`model_ref_json`)仍是裸
-   `exec_driver_sql("ALTER TABLE team_member DROP COLUMN model_ref_json")`。两个进程
-   并发首次 `initialize()` 同一 PG/MySQL 库时,两边顶部 inspect 都看到 `model_ref_json`
-   在 → 都跑迁移 → 都到 DROP COLUMN → DB 的 DDL 锁串行后第二个失败(SQLite
-   「no such column」/ PG「does not exist」/ MySQL「Can't DROP」)。
-
-   **修法**:新增 `_drop_column_idempotent(sync_conn, table, column)` 辅助,镜像
-   `_add_column_idempotent` 的 SAVEPOINT + DBAPIError catch + `inspect` 复查模式:吞
-   「no such column」/「does not exist」/「can't drop」/「cannot drop」类错误后用
-   `inspect.get_columns` 复查列确实已不在(若仍存在则 re-raise 不一致态)。
-   `_ensure_team_member_options_column` 的 DROP 改用此 helper 包裹。
-
-   **附带修法**:同一个迁移函数还有第二条竞态—— 顶部 inspect 抓的 `columns` 集合在
-   函数体里是 stale 的,败方到达迁移 SELECT 之前赢方可能已 DROP 了 `model_ref_json`,
-   败方 `SELECT member_name, team_name, options, model_ref_json FROM team_member`
-   会撞「no such column: model_ref_json」。修法:迁移 SELECT 前再 inspect 一次,
-   `model_ref_json` 已不在则 short-circuit 返回(对方已完成迁移)。re-inspect 与
-   SELECT 之间的窄窗由 DROP 幂等兜底—— DROP 不会因对方已 DROP 而崩。
-
-**契约同步**:
-- `openjiuwen/agent_teams/tools/AGENTS.md` 第 (1) 条 DDL 锁契约追加 `_drop_column_idempotent`
-  辅助的说明,以及 `_ensure_team_member_options_column` 迁移 SELECT 前 re-inspect 的
-  理由。
-- `TeamAgentSpec.effective_model_pool()` 的 docstring 说明其作为 `build()` 与冷恢复
-  `recover_from_session` 共享展开源的角色,以及不与
-  `AgentConfigurator` 的 `ctx.team_spec.model_pool` 检查不同源的 invariant。
-- `team_agent.py:2189` 的注释说明改用 `effective_model_pool()` 而非裸
-  `runtime_spec.model_pool` 的根因。
-
-**验证**:
-- `tests/unit_tests/agent_teams/test_database.py`:6 个新增用例
-  (`test_drop_column_idempotent_swallows_not_found_after_concurrent_drop` /
-  `test_ensure_team_member_options_column_skips_migration_when_model_ref_json_already_dropped` /
-  `test_drop_column_idempotent_mysql_skips_savepoint_and_rechecks` /
-  `test_drop_column_idempotent_mysql_reraises_when_column_still_present` /
-  `test_drop_column_idempotent_savepoint_path_reraises_when_column_still_present` +
-  既有 `test_options_migration_backfills_and_drops_legacy_model_ref_json_column`)全过。
-- `tests/unit_tests/agent_teams/models/test_allocator.py`:4 个新增 `effective_model_pool`
-  用例(plain pool / router 展开 / intelli_router 展开 / 三形态汇总)全过。
-- 广域回归:`test_database` + `test_task_manager` + `test_message_manager` +
-  `test_team_agent_coordination` + `organization/test_org_db`:388 passed, 19 skipped。
-  `test_runner_team_runtime` + `test_recovery_build_context_seed` +
-  `test_session_manager` + `test_team_agent_tools`:77 passed, 1 skipped。
-- SQLite 上 `_drop_column_idempotent` 的 SAVEPOINT 行为可直接验证;MySQL/PG 的
-  savepoint-skip + inspect 复查分支用 fake-conn 单测覆盖(同 `_add_column_idempotent`
-  的 fake-conn 测试模式)。真实 PG/MySQL 跨进程并发场景需 swarm 侧端到端复测。
-
-### 第十五轮检视:`router` 策略冷恢复漂移 + 广播水位 CAS NULL 比较 + 多行 FOR UPDATE 锁序
-
-第十五轮检视点出 3 个新建议(上一轮的两条已修复):
-
-1. **`team_agent.py:2200` — `router` 策略冷恢复重新物化 `member_model` 时丢失模型名 hint**:
-   上一轮(commit `581382a50`)的 `effective_model_pool()` 修复让 `router` / `intelli_router`
-   团队第一次进入冷恢复重新物化分支(之前它们的 blueprint `model_pool` 为空,跳过整个分支)。
-   但现有代码只处理 `intelli_router`(`allocation_name = "*"`)和 `by_model_name`(用
-   `checkpoint_name` 作 hint),`router` 落到 `else: allocator.allocate(None)`,而
-   `RouterAllocator.allocate(None)` 返回 **pool[0]**(首个声明的 model_name),丢弃了
-   checkpoint 的 model_name hint。一个 `model_router(model_names=["a","b"])` 且
-   checkpoint leader model 为 `"b"` 的团队冷恢复后,`context.member_model` 被重新物化为
-   `"a"` 的 client,而 `spec.leader.model_name` 仍是 `"b"` —— 运行期 leader 走 `"a"`、
-   持久化 spec 声明 `"b"`,与 router 按名路由的契约不一致。**这是上一轮
-   `effective_model_pool()` 修复新引入的回归。**
-
-   **修法**:把 `router` 与 `by_model_name` 同等处理(两者都是按名路由):
-   - 第一块分支从 `elif current_strategy == "by_model_name"` 扩展为
-     `elif current_strategy in ("by_model_name", "router")` —— 用 `checkpoint_name` 作
-     `resolve_member_model` 的 hint、回写 `spec.leader.model_name`、设 `resolved_model`。
-   - 第二块分配分支新增 `elif current_strategy == "router":`,调
-     `allocator.allocate(allocation_name)`(传 hint)而非 `allocator.allocate(None)`(返回
-     pool[0])。`RouterAllocator.allocate(name)` 返回该 name 的 entry 或 `None`(name 不在
-     池中),与 `by_model_name` 的 `ByModelNameAllocator.allocate(None)` 返回 `None` 异曲同工
-     ——后者靠 `resolved_model` 兜底,前者靠 `allocation` 或 `resolved_model` 兜底。
-
-2. **`message_dao.py:700` — 广播已读水位的 CAS UPDATE 可能静默更新 0 行却仍返回 True**:
-   CAS UPDATE 的 WHERE 子句 `read_at == current_read_at` 在 `current_read_at` 为 `None`
-   时生成 SQL `read_at = NULL`,而 `NULL = NULL` 在 SQL 中结果是 `NULL`(不是 `True`),
-   所以 WHERE 子句匹配 0 行、UPDATE 不生效,但函数仍返回 `True`。`read_at` 列是
-   `nullable=True` + `default=None`,所以一条由未设 `read_at` 的路径插入的 read_status 行
-   (或 legacy 行)命中此分支时,水位静默不前进。
-
-   **修法**:
-   - `current_read_at` 为 `None` 时用 `read_at.is_(None)`(SQL `IS NULL`)替代
-     `read_at == None`(SQL `= NULL`)。
-   - CAS UPDATE 后检查 `result.rowcount`,0 行时记 warning 并返回 `False`(水位未由本调用
-     前进,调用方不应计入已标记)。
-
-3. **`task_dao.py:169` — 多行 FOR UPDATE 的加锁顺序来自 set,可能引入新的死锁**:
-   `_refresh_status_in_session` 和 `_apply_new_edges` 的多行 `SELECT ... WHERE task_id IN
-   (...) FOR UPDATE` 没有 `ORDER BY`,PG/MySQL 按查询计划(scan order)加锁,两个并发调用
-   传重叠但顺序不同的 task_ids 时锁序可能相反 → 死锁。`unique_ids` / `upstream_ids` 来自
-   set 去重,迭代顺序不确定,进一步加剧问题。
-
-   **修法**:两个多行 FOR UPDATE SELECT 都加 `.order_by(team_task_model.task_id)`,
-   强制按 `task_id` 升序加锁,两个并发调用无论传入顺序如何都以同一顺序加锁,不会死锁。
-
-**契约同步**:
-- `team_agent.py:2200` 注释扩展说明 `router` 与 `by_model_name` 同等处理的根因
-  (round-14 `effective_model_pool()` 让 `router` 第一次进入此分支,旧代码的
-  `allocate(None)` 返回 pool[0] 丢弃 hint)。
-- `message_dao.py:700` 注释扩展说明 `IS NULL` vs `= NULL` 的 SQL 语义差异与 `rowcount` 检查。
-- `task_dao.py:169` / `task_dao.py:559` 注释扩展说明 `order_by(task_id)` 的死锁预防理由。
-
-**验证**:
-- `test_runner_team_runtime.py::test_team_agent_recover_from_session_router_strategy_preserves_checkpoint_model_name`:
-  构造 `model_router(model_names=["a","b"])` 且 checkpoint leader model 为 `"b"` 的场景,
-  断言冷恢复后 `context.member_model.model_name == "b"`(不是 pool[0] 的 `"a"`)。
-- `test_message_manager.py::test_mark_broadcast_message_read_advances_null_read_at`:
-  预插一条 `read_at = NULL` 的 read_status 行,标记广播已读后断言水位从 NULL 前进到真实时间戳。
-- `test_database_concurrency.py::test_refresh_status_in_session_for_update_carries_order_by`:
-  编译多行 FOR UPDATE 查询,断言 `ORDER BY` 存在(SQLite 上 FOR UPDATE 被剥离,但 ORDER BY
-  保留在编译输出里)。
-- 广域回归:`test_runner_team_runtime` + `test_message_manager` + `test_database` +
-  `test_database_concurrency` + `test_task_manager` + `test_allocator` +
-  `organization/test_org_db` + `test_team_agent_coordination`:610 passed, 19 skipped,
-  1 pre-existing failure(`test_postgresql_initialize_uses_asyncpg_engine` 的测试隔离问题,
-  stash 我的改动后同样失败,非本次引入)。
