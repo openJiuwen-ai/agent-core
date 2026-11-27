@@ -6,6 +6,7 @@ import base64
 import asyncio
 import fnmatch
 import os
+import posixpath
 import shlex
 import tempfile
 import time
@@ -50,6 +51,7 @@ from openjiuwen.core.sys_operation.sandbox.providers.base_provider import (
 )
 from openjiuwen.core.sys_operation.sandbox.gateway.gateway import SandboxEndpoint
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.logging import sys_operation_logger
 from openjiuwen.core.sys_operation.result.base_result import build_operation_error_result
 
 
@@ -212,6 +214,51 @@ class AIOFSProvider(BaseFSProvider):
             self._client = Sandbox(base_url=self.endpoint.base_url)
         return self._client
 
+    async def _target_may_exist(self, client: Any, target_path: str) -> Optional[bool]:
+        """Existence probe for overwrite=False uploads.
+
+        Returns True when the target exists, False when it does not, and
+        None when the probe itself failed (API error, unexpected shape).
+        Failures are NOT silently mapped to False: like the jiuwenbox/adx
+        providers, a probe that cannot decide must refuse the upload
+        (fail-closed) rather than risk overwriting an existing remote file.
+        Callers treat None as "refuse with a probe error".
+        """
+        parent = posixpath.dirname(target_path) or "/"
+        name = posixpath.basename(target_path)
+        if not name:
+            return False
+
+        def _probe() -> bool:
+            res = client.file.find_files(path=parent, glob=name)
+            files = getattr(getattr(res, "data", None), "files", None) or []
+            # SDK FileFindResult.files is List[str]; fall back to object
+            # entries (entry.path) defensively so a shape change degrades
+            # to None (fail-closed) instead of crashing into the except.
+            paths: list[str] = []
+            for entry in files:
+                if isinstance(entry, str):
+                    paths.append(entry)
+                else:
+                    entry_path = getattr(entry, "path", None)
+                    if isinstance(entry_path, str):
+                        paths.append(entry_path)
+                    else:
+                        raise ValueError(f"find_files returned an unreadable entry: {entry!r}")
+            return any(
+                entry == name
+                or entry.endswith("/" + name)
+                for entry in paths
+            )
+
+        try:
+            return await asyncio.to_thread(_probe)
+        except Exception as exc:
+            sys_operation_logger.warning(
+                "AIO upload existence probe failed for %s: %s", target_path, exc
+            )
+            return None
+
     async def read_file(self, path: str, mode: str = "text", **kwargs) -> ReadFileResult:
         client = await asyncio.to_thread(self._get_client)
 
@@ -268,9 +315,10 @@ class AIOFSProvider(BaseFSProvider):
                 def _download():
                     return b"".join(client.file.download_file(path=path))
 
+                # chunk_size is a transfer hint, not a read limit: the whole
+                # file is downloaded in one call, so silently truncating to
+                # chunk_size would corrupt reads for callers that pass one.
                 content = await asyncio.to_thread(_download)
-                if chunk_size and chunk_size > 0:
-                    content = content[:chunk_size]
                 return ReadFileResult(
                     code=StatusCode.SUCCESS.code,
                     message=StatusCode.SUCCESS.errmsg,
@@ -595,6 +643,18 @@ class AIOFSProvider(BaseFSProvider):
                           preserve_permissions: bool = True,
                           chunk_size: int = 0, **kwargs) -> UploadFileResult:
         client = await asyncio.to_thread(self._get_client)
+        if not overwrite:
+            exists = await self._target_may_exist(client, target_path)
+            if exists is None:
+                return _build_fs_error_result(
+                    "upload_file",
+                    f"Failed to check whether target exists, refusing to upload: {target_path}",
+                    UploadFileResult,
+                )
+            if exists:
+                return _build_fs_error_result(
+                    "upload_file", f"File already exists: {target_path}", UploadFileResult
+                )
         deadline = time.time() + max(1, int(self._timeout_seconds))
         delay = 0.5
         last: Optional[Exception] = None
@@ -631,6 +691,20 @@ class AIOFSProvider(BaseFSProvider):
                                  chunk_size: int = 1048576,
                                  **kwargs) -> AsyncIterator[UploadFileStreamResult]:
         client = await asyncio.to_thread(self._get_client)
+        if not overwrite:
+            exists = await self._target_may_exist(client, target_path)
+            if exists is None:
+                yield _build_fs_error_result(
+                    "upload_file_stream",
+                    f"Failed to check whether target exists, refusing to upload: {target_path}",
+                    UploadFileStreamResult,
+                )
+                return
+            if exists:
+                yield _build_fs_error_result(
+                    "upload_file_stream", f"File already exists: {target_path}", UploadFileStreamResult
+                )
+                return
         file_size = os.path.getsize(local_path)
         chunk_idx = 0
         with open(local_path, "rb") as fh:
@@ -1045,7 +1119,7 @@ class AIOCodeProvider(BaseCodeProvider):
         shell_provider = self._shell_provider
         shell_result = await shell_provider.execute_cmd(
             command=command,
-            cwd=".",
+            cwd=cwd or ".",
             timeout=timeout,
             environment=environment,
         )
@@ -1112,7 +1186,7 @@ class AIOCodeProvider(BaseCodeProvider):
         shell_provider = self._shell_provider
         async for shell_chunk in shell_provider.execute_cmd_stream(
                 command=command,
-                cwd=".",
+                cwd=cwd or ".",
                 timeout=timeout,
                 environment=environment,
         ):

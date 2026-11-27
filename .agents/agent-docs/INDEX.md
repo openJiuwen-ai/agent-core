@@ -504,6 +504,7 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261126_2165_jiuwenbox-windows-killpg](bugfix/openjiuwen/B_20261126_2165_jiuwenbox-windows-killpg.md) | B | jiuwenbox 本地超时清理在 Windows 上因 AttributeError 失效留下孤儿进程 | linghb | 无独立 D：单点异常类型修正,不改变任何契约,无需独立设计。 |
+| [B_20261126_2140_aio-provider-contract](bugfix/openjiuwen/B_20261126_2140_aio-provider-contract.md) | B | AIO sandbox provider 忽略 overwrite 与 cwd 契约并用 chunk_size 截断读取 | linghb | 无独立 D：对 AIO provider 与兄弟 provider 契约对齐的修复,不改变公共接口,无需独立设计。 |
 
 <a id="module-extensions-tracer_otel"></a>
 
