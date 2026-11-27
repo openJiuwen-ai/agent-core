@@ -204,6 +204,41 @@ class _CannedBackend:
         )
 
 
+class _TwoPausedReadsBackend(_CannedBackend):
+    """Gate the first two reads independently and leave any retry free to finish."""
+
+    def __init__(self, description: str, *, description_en: str | None = None):
+        localized = f"description_en: {description_en}\n" if description_en is not None else ""
+        super().__init__(f"---\ndescription: {description}\n{localized}---\n")
+        self.started = [asyncio.Event(), asyncio.Event()]
+        self.resume = [asyncio.Event(), asyncio.Event()]
+        self.first_read_finished = asyncio.Event()
+
+    async def read_file(self, path: str, **kwargs: Any):
+        index = len(self.reads)
+        result = await super().read_file(path, **kwargs)
+        if index < len(self.started):
+            self.started[index].set()
+            await self.resume[index].wait()
+            if index == 0:
+                self.first_read_finished.set()
+        return result
+
+
+def _fail_second_skill_load(rail: SkillUseRail, backend: _TwoPausedReadsBackend, monkeypatch: pytest.MonkeyPatch):
+    """Fail the producer after its read while letting the waiter's retry load the skill."""
+    load_skill = rail._load_skill
+
+    async def fail_second_load(skill_dir: Path, update_at: float):
+        is_second_read = len(backend.reads) == 1
+        skill = await load_skill(skill_dir, update_at)
+        if is_second_read:
+            raise RuntimeError("skill scan failed")
+        return skill
+
+    monkeypatch.setattr(rail, "_load_skill", fail_second_load)
+
+
 class _LocalLibraryBackend:
     """sys_operation double serving the real SKILL.md texts of a library, parking on one skill's read.
 
@@ -2712,24 +2747,29 @@ async def test_superseded_refresh_does_not_stamp_ttl_or_freeze_stale_baseline(
     assert [item["name"] for item in session_a.get_state("skill_use")["baseline_skills"]] == ["alpha", "beta"]
     assert "beta" in rail.system_prompt_builder.build()
 
-    # (b) Superseded direct before_model_call on a new session must also skip baseline & prompt writes.
+    # (b) The model callback waits for the replacement without freezing its old view.
     _write_skill(skills_root, "gamma", "Gamma skill")
     started_m1 = asyncio.Event()
     gate_m1 = asyncio.Event()
+    finished_m1_read = asyncio.Event()
     started_m2 = asyncio.Event()
     gate_m2 = asyncio.Event()
     call_count["gamma"] = 0
 
     async def _paced_gamma(skill_dir: Path, update_at: float):
-        if skill_dir.name == "gamma":
-            call_count["gamma"] += 1
-            idx = call_count["gamma"]
-            if idx == 1:
-                started_m1.set()
-                await gate_m1.wait()
-            elif idx == 2:
-                started_m2.set()
-                await gate_m2.wait()
+        if skill_dir.name != "gamma":
+            return await orig_load(skill_dir, update_at)
+        call_count["gamma"] += 1
+        idx = call_count["gamma"]
+        if idx == 1:
+            started_m1.set()
+            await gate_m1.wait()
+            loaded = await orig_load(skill_dir, update_at)
+            finished_m1_read.set()
+            return loaded
+        if idx == 2:
+            started_m2.set()
+            await gate_m2.wait()
         return await orig_load(skill_dir, update_at)
 
     monkeypatch.setattr(rail, "_load_skill", _paced_gamma)
@@ -2738,24 +2778,249 @@ async def test_superseded_refresh_does_not_stamp_ttl_or_freeze_stale_baseline(
     ctx_b = AgentCallbackContext(agent=None, inputs=ModelCallInputs(tools=[]), session=session_b)
 
     tm1 = asyncio.create_task(rail.before_model_call(ctx_b))
-    await started_m1.wait()
+    await asyncio.wait_for(started_m1.wait(), timeout=5)
     tm2 = asyncio.create_task(rail.reload_skills())
-    await started_m2.wait()
+    try:
+        await asyncio.wait_for(started_m2.wait(), timeout=5)
+        gate_m1.set()
+        await asyncio.wait_for(finished_m1_read.wait(), timeout=5)
+        assert not tm1.done(), "the model callback needs the replacement scan before it can return"
+        assert session_b.get_state("skill_use") is None
+        assert rail._last_full_refresh_ts is None
+    finally:
+        gate_m1.set()
+        gate_m2.set()
+        await asyncio.wait_for(asyncio.gather(tm1, tm2), timeout=5)
 
-    gate_m1.set()
-    await tm1
-    assert session_b.get_state("skill_use") is None
-    assert rail._last_full_refresh_ts is None
-
-    gate_m2.set()
-    await tm2
-    await rail.before_model_call(ctx_b)
     assert [item["name"] for item in session_b.get_state("skill_use")["baseline_skills"]] == [
         "alpha",
         "beta",
         "gamma",
     ]
     assert "gamma" in rail.system_prompt_builder.build()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("producer_fails", [False, True], ids=["both-requests", "producer-failed"])
+async def test_overlapping_skill_refreshes_gate_final_model_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, producer_fails: bool
+):
+    """Inspect completed requests and verify that a failed refresh stops its request."""
+    from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
+    from openjiuwen.core.single_agent import ReActAgent, ReActAgentConfig
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
+    from tests.unit_tests.fixtures.mock_llm import MockLLMModel, create_text_response
+
+    skills_root = tmp_path / "skills"
+    description = "Summarize open invoices by client"
+    _write_skill(skills_root, "invoice-parser", description)
+    backend = _TwoPausedReadsBackend(description)
+    rail = SkillUseRail(skills_dir=str(skills_root), skill_mode="all", include_tools=False)
+    rail.set_sys_operation(backend)
+    if producer_fails:
+        _fail_second_skill_load(rail, backend, monkeypatch)
+    model = MockLLMModel()
+    model.set_responses([create_text_response("Unexpected model call")])
+    agent = ReActAgent(card=AgentCard(name="concurrent-skill-model")).configure(
+        ReActAgentConfig(
+            model_config_obj=ModelRequestConfig(model="mock-model"),
+            model_client_config=ModelClientConfig(
+                client_provider="OpenAI", api_key="mock-key", api_base="https://example.com/v1", verify_ssl=False
+            ),
+            prompt_template=[{"role": "system", "content": "You are a test assistant."}],
+        )
+    )
+    monkeypatch.setattr(agent, "_get_llm", lambda: model)
+    rail.system_prompt_builder = agent.prompt_builder
+    await agent.register_callback(AgentCallbackEvent.BEFORE_MODEL_CALL, rail.before_model_call)
+    seen_requests = []
+    seen_baselines = []
+
+    async def record_final_request(ctx):
+        seen_requests.append(
+            next(message.content for message in ctx.inputs.messages if isinstance(message, SystemMessage))
+        )
+        seen_baselines.append(ctx.session.get_state("skill_use"))
+        if producer_fails and ctx.session.get_session_id() == "second-skill-call":
+            return None
+        return {"result_type": "stopped_before_model", "output": ""}
+
+    agent.set_final_request_check(record_final_request)
+    tasks = [asyncio.create_task(agent.invoke({"query": "First request", "conversation_id": "first-skill-call"}))]
+    try:
+        await asyncio.wait_for(backend.started[0].wait(), timeout=5)
+        tasks.append(
+            asyncio.create_task(agent.invoke({"query": "Second request", "conversation_id": "second-skill-call"}))
+        )
+        await asyncio.wait_for(backend.started[1].wait(), timeout=5)
+        backend.resume[0].set()
+        await asyncio.wait_for(backend.first_read_finished.wait(), timeout=5)
+        assert not seen_requests, "the first request cannot reach the final model boundary before a skill scan commits"
+    finally:
+        backend.resume[0].set()
+        backend.resume[1].set()
+        results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
+
+    assert results[0]["result_type"] == "stopped_before_model"
+    if producer_fails:
+        assert isinstance(results[1], RuntimeError)
+        assert str(results[1]) == "skill scan failed"
+        assert len(seen_requests) == 1
+    else:
+        assert results[1]["result_type"] == "stopped_before_model"
+        assert len(seen_requests) == 2
+    assert all(description in prompt for prompt in seen_requests)
+    assert all(state["baseline_skills"][0]["description"] == description for state in seen_baselines)
+    assert model.call_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", ["waiter-cancelled", "producer-cancelled", "producer-failed"])
+async def test_skill_refresh_interruption_preserves_the_other_model_callback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interruption: str
+):
+    """The remaining callback can use a live producer or start a replacement scan."""
+    from openjiuwen.core.runner.callback import AbortError
+
+    skills_root = tmp_path / "skills"
+    description = "Group invoices by customer"
+    _write_skill(skills_root, "invoice-parser", description)
+    backend = _TwoPausedReadsBackend(description)
+    rail = SkillUseRail(skills_dir=str(skills_root), skill_mode="all", include_tools=False)
+    rail.system_prompt_builder = SystemPromptBuilder()
+    rail.set_sys_operation(backend)
+    sessions = [_SessionState("first-callback"), _SessionState("second-callback")]
+    contexts = [AgentCallbackContext(agent=None, inputs=ModelCallInputs(tools=[]), session=s) for s in sessions]
+    interrupted_index = 0 if interruption == "waiter-cancelled" else 1
+    if interruption == "producer-failed":
+        _fail_second_skill_load(rail, backend, monkeypatch)
+
+    tasks = [asyncio.create_task(rail.before_model_call(contexts[0]))]
+    try:
+        await asyncio.wait_for(backend.started[0].wait(), timeout=5)
+        tasks.append(asyncio.create_task(rail.before_model_call(contexts[1])))
+        await asyncio.wait_for(backend.started[1].wait(), timeout=5)
+        backend.resume[0].set()
+        await asyncio.wait_for(backend.first_read_finished.wait(), timeout=5)
+        assert not tasks[0].done(), "the first callback is waiting for the producer"
+        if interruption == "producer-failed":
+            backend.resume[1].set()
+            with pytest.raises(AbortError) as error:
+                await asyncio.wait_for(tasks[interrupted_index], timeout=5)
+            assert isinstance(error.value.cause, RuntimeError)
+            assert str(error.value.cause) == "skill scan failed"
+        else:
+            tasks[interrupted_index].cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(tasks[interrupted_index], timeout=5)
+
+        backend.resume[1].set()
+        await asyncio.wait_for(tasks[1 - interrupted_index], timeout=5)
+    finally:
+        backend.resume[0].set()
+        backend.resume[1].set()
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
+
+    assert sessions[interrupted_index].get_state("skill_use") is None
+    surviving_baseline = sessions[1 - interrupted_index].get_state("skill_use")["baseline_skills"]
+    assert [skill["description"] for skill in surviving_baseline] == [description]
+    assert description in rail.system_prompt_builder.build()
+    assert len(backend.reads) == (2 if interrupted_index == 0 else 3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_language", [None, "en"], ids=["backend-rebind", "language-switch"])
+async def test_skill_refresh_waiter_uses_current_view_after_invalidation(tmp_path: Path, new_language: str | None):
+    """A model callback can finish with the new view while the obsolete read remains parked."""
+    skills_root = tmp_path / "skills"
+    _write_skill(skills_root, "invoice-parser", "On-disk description")
+    current_description = "Current skill description"
+    previous = _TwoPausedReadsBackend("Previous skill description", description_en=current_description)
+    current = _CannedBackend(f"---\ndescription: {current_description}\n---\n")
+    rail = SkillUseRail(skills_dir=str(skills_root), skill_mode="all", include_tools=False)
+    rail.system_prompt_builder = SystemPromptBuilder(language="cn")
+    rail.set_sys_operation(previous)
+    session = _SessionState("waiting-during-rebind")
+    ctx = AgentCallbackContext(agent=None, inputs=ModelCallInputs(tools=[]), session=session)
+
+    tasks = [asyncio.create_task(rail.before_model_call(ctx))]
+    try:
+        await asyncio.wait_for(previous.started[0].wait(), timeout=5)
+        tasks.append(asyncio.create_task(rail.reload_skills()))
+        await asyncio.wait_for(previous.started[1].wait(), timeout=5)
+        previous.resume[0].set()
+        await asyncio.wait_for(previous.first_read_finished.wait(), timeout=5)
+        assert not tasks[0].done()
+        assert session.get_state("skill_use") is None
+
+        if new_language is None:
+            rail.set_sys_operation(current)
+        else:
+            rail.system_prompt_builder = SystemPromptBuilder(language=new_language)
+            await asyncio.wait_for(rail.reload_skills(), timeout=5)
+        await asyncio.wait_for(tasks[0], timeout=5)
+        assert not tasks[1].done(), "the obsolete read is still parked"
+        state = session.get_state("skill_use")
+        assert state["language"] == (new_language or "cn")
+        assert [skill["description"] for skill in state["baseline_skills"]] == [current_description]
+    finally:
+        previous.resume[0].set()
+        previous.resume[1].set()
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
+
+    assert current_description in rail.system_prompt_builder.build()
+    assert [skill.description for skill in rail.skills] == [current_description]
+
+
+@pytest.mark.asyncio
+async def test_overlapping_model_callbacks_refresh_in_their_own_read_scope(tmp_path: Path):
+    """A pending scan in another task's filesystem scope cannot supply a model's skills."""
+    from openjiuwen.core.sys_operation.cwd import get_cwd, init_cwd
+
+    skills_root = tmp_path / "skills"
+    _write_skill(skills_root, "invoice-parser", "On-disk description")
+
+    class _ScopedBackend(_TwoPausedReadsBackend):
+        async def read_file(self, path: str, **kwargs: Any):
+            result = await super().read_file(path, **kwargs)
+            scope = Path(get_cwd()).name
+            result.data.content = f"---\ndescription: Skill from {scope}\n---\n"
+            return result
+
+    backend = _ScopedBackend("Unused description")
+    rail = SkillUseRail(skills_dir=str(skills_root), skill_mode="all", include_tools=False)
+    rail.system_prompt_builder = SystemPromptBuilder()
+    rail.set_sys_operation(backend)
+    sessions = [_SessionState("first-scope"), _SessionState("second-scope")]
+
+    async def call_in_scope(session: _SessionState):
+        root = tmp_path / session.get_session_id()
+        root.mkdir()
+        init_cwd(str(root), project_root=str(root), workspace=str(root))
+        ctx = AgentCallbackContext(agent=None, inputs=ModelCallInputs(tools=[]), session=session)
+        await rail.before_model_call(ctx)
+        return rail.system_prompt_builder.build()
+
+    tasks = [asyncio.create_task(call_in_scope(sessions[0]))]
+    try:
+        await asyncio.wait_for(backend.started[0].wait(), timeout=5)
+        tasks.append(asyncio.create_task(call_in_scope(sessions[1])))
+        await asyncio.wait_for(backend.started[1].wait(), timeout=5)
+        backend.resume[0].set()
+        first_prompt = await asyncio.wait_for(tasks[0], timeout=5)
+        assert "Skill from first-scope" in first_prompt
+        assert "Skill from second-scope" not in first_prompt
+        assert not tasks[1].done(), "the first request can retry without waiting for another filesystem scope"
+    finally:
+        backend.resume[0].set()
+        backend.resume[1].set()
+        prompts = await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
+
+    assert "Skill from second-scope" in prompts[1]
+    assert "Skill from first-scope" not in prompts[1]
+    for session in sessions:
+        baseline = session.get_state("skill_use")["baseline_skills"]
+        assert [skill["description"] for skill in baseline] == [f"Skill from {session.get_session_id()}"]
 
 
 @pytest.mark.asyncio
@@ -2852,43 +3117,23 @@ async def test_rebind_clears_prompt_section_preserves_legacy_state_and_avoids_ep
     before_atts = await att_rail.attachment_manager.collect_for_session("att-clear")
     assert any("Local extra description" in (item.content or "") for item in before_atts)
 
-    # Rebind to backend B; first bound before_model_call is superseded mid-read -> clears stale attachment!
-    started_att = asyncio.Event()
-    gate_att = asyncio.Event()
-    started_att_2 = asyncio.Event()
-    gate_att_2 = asyncio.Event()
-    att_calls = {"n": 0}
-
-    class _TwoWaveBackend:
-        def fs(self):
-            return self
-
-        async def read_file(self, path: str, **kwargs: Any):
-            if "alpha" in path:
-                att_calls["n"] += 1
-                if att_calls["n"] == 1:
-                    started_att.set()
-                    await gate_att.wait()
-                elif att_calls["n"] == 2:
-                    started_att_2.set()
-                    await gate_att_2.wait()
-            return ReadFileResult(
-                code=0,
-                message="ok",
-                data=ReadFileData(path=path, content="---\ndescription: Bound text\n---\n# s\n", mode="text"),
-            )
-
-    att_rail.set_sys_operation(_TwoWaveBackend())
+    # Rebind while a runtime attachment is present. The superseded callback clears it before waiting.
+    backend = _TwoPausedReadsBackend("Bound text")
+    att_rail.set_sys_operation(backend)
     t_cb = asyncio.create_task(att_rail.before_model_call(att_ctx))
-    await started_att.wait()
+    await asyncio.wait_for(backend.started[0].wait(), timeout=5)
     t_reload = asyncio.create_task(att_rail.reload_skills())
-    await started_att_2.wait()
-    gate_att.set()
-    await t_cb
-    after_atts = await att_rail.attachment_manager.collect_for_session("att-clear")
-    assert all("Local extra description" not in (item.content or "") for item in after_atts)
-    gate_att_2.set()
-    await t_reload
+    try:
+        await asyncio.wait_for(backend.started[1].wait(), timeout=5)
+        backend.resume[0].set()
+        await asyncio.wait_for(backend.first_read_finished.wait(), timeout=5)
+        assert not t_cb.done()
+        after_atts = await att_rail.attachment_manager.collect_for_session("att-clear")
+        assert all("Local extra description" not in (item.content or "") for item in after_atts)
+    finally:
+        backend.resume[0].set()
+        backend.resume[1].set()
+        await asyncio.wait_for(asyncio.gather(t_cb, t_reload), timeout=5)
 
     # After A -> B reconciliation, restoring persisted state into a fresh wrapper preserves baseline.
     att_rail.set_sys_operation(_CannedBackend("---\ndescription: Backend C\n---\n# s\n"))

@@ -10,6 +10,7 @@ import os
 import time
 import uuid
 from contextvars import ContextVar, Token
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -17,8 +18,10 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.llm.schema.message import UserMessage
 from openjiuwen.core.foundation.tool.base import ToolCard
+from openjiuwen.core.runner.callback import AbortError
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
+from openjiuwen.core.sys_operation.cwd import get_cwd, get_project_root, get_workspace
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.skills import (
     build_all_mode_skill_prompt,
@@ -164,6 +167,17 @@ _SCAN_LANGUAGE: ContextVar[Optional[str]] = ContextVar(
 )
 
 
+_SkillReadScope = Tuple[str, str, Optional[str]]
+
+
+@dataclass(frozen=True)
+class _SkillScan:
+    token: Tuple[int, int]
+    language: str
+    read_scope: _SkillReadScope
+    done: asyncio.Future[None]
+
+
 class SkillUseRail(DeepAgentRail):
     """Rail that manages skill prompt injection and tool registration."""
 
@@ -271,6 +285,8 @@ class SkillUseRail(DeepAgentRail):
         self._current_gen_attachment_sessions: Set[str] = set()
         # ``(generation, scan)`` of the refresh that last committed.
         self._last_committed_refresh_token: Optional[Tuple[int, int]] = None
+        self._cached_read_scope: Optional[_SkillReadScope] = None
+        self._pending_scan: Optional[_SkillScan] = None
 
         # Cache evolution experience texts per skill name.
         self._evolution_texts: Dict[str, str] = {}
@@ -308,20 +324,34 @@ class SkillUseRail(DeepAgentRail):
             while a read was awaited: nothing is stamped and the caller
             publishes nothing.
         """
-        target_lang = self._current_description_language()
-        scan = await self._prepare_skills()
-        if scan is None:
-            return None
-        await self._fetch_evolution_texts()
-        # The evolution store is awaited too, so the backend, language, or a
-        # newer scan can still change after the skills were read. Re-check
-        # before stamping, or the next model call would see an unchanged
-        # signature and skip discovery with no skills visible.
-        if not self._scan_still_current(scan, target_lang):
-            return None
-        self._stamp_committed_signature()
-        self._last_committed_refresh_token = scan
-        return scan
+        self._invalidate_if_language_changed()
+        self._scan_seq += 1
+        scan = _SkillScan(
+            token=(self._cache_generation, self._scan_seq),
+            language=self._current_description_language(),
+            read_scope=self._skill_read_scope(),
+            done=asyncio.get_running_loop().create_future(),
+        )
+        self._set_pending_scan(scan)
+        try:
+            if await self._prepare_skills(scan) is None:
+                return None
+            await self._fetch_evolution_texts()
+            if not self._scan_still_current(scan):
+                return None
+            self._stamp_committed_signature()
+            self._last_committed_refresh_token = scan.token
+            return scan.token
+        finally:
+            if self._pending_scan is scan:
+                self._set_pending_scan(None)
+
+    def _set_pending_scan(self, scan: Optional[_SkillScan]) -> None:
+        """Wake waiters when a scan finishes, is replaced, or is invalidated."""
+        previous = self._pending_scan
+        self._pending_scan = scan
+        if previous is not None:
+            previous.done.set_result(None)
 
     async def reload_skills(self) -> None:
         """Refresh managed skills immediately after skills_dir changes."""
@@ -343,6 +373,8 @@ class SkillUseRail(DeepAgentRail):
         self._attachment_needs_sync = True
         self._current_gen_attachment_sessions.clear()
         self._last_committed_refresh_token = None
+        self._cached_read_scope = None
+        self._set_pending_scan(None)
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section(SectionName.SKILLS)
 
@@ -359,20 +391,27 @@ class SkillUseRail(DeepAgentRail):
         inside ``init``. The language that produced the cache is tracked
         instead and re-checked before any cached state is reused.
         """
-        if self._cached_language is not None and self._cached_language != self._current_description_language():
+        language = self._current_description_language()
+        cached_language_changed = self._cached_language is not None and self._cached_language != language
+        pending_language_changed = self._pending_scan is not None and self._pending_scan.language != language
+        if cached_language_changed or pending_language_changed:
             self.clear_skills()
 
     def _refresh_still_current(self, generation: int, target_lang: str) -> bool:
         """Whether a refresh that started as *generation* / *target_lang* is still live."""
         return self._cache_generation == generation and self._current_description_language() == target_lang
 
-    def _scan_still_current(self, scan: Tuple[int, int], target_lang: str) -> bool:
-        """Whether the scan started as *scan* / *target_lang* is still the live one."""
-        generation, scan_seq = scan
+    @staticmethod
+    def _skill_read_scope() -> _SkillReadScope:
+        """Capture the context-dependent roots used by the filesystem."""
+        return get_cwd(), get_project_root(), get_workspace()
+
+    def _scan_still_current(self, scan: _SkillScan) -> bool:
+        """Whether this scan can still publish in its original scope."""
         return (
-            scan_seq == self._scan_seq
-            and self._cache_generation == generation
-            and self._current_description_language() == target_lang
+            scan.token == (self._cache_generation, self._scan_seq)
+            and scan.language == self._current_description_language()
+            and scan.read_scope == self._skill_read_scope()
         )
 
     def _has_current_skill_view(self) -> bool:
@@ -380,12 +419,15 @@ class SkillUseRail(DeepAgentRail):
         return (
             self._last_committed_refresh_token == (self._cache_generation, self._scan_seq)
             and self._cached_language == self._current_description_language()
+            and self._cached_read_scope == self._skill_read_scope()
         )
 
     async def _run_refresh_prompt(self, ctx: AgentCallbackContext) -> bool:
         """Run ``refresh_skill_prompt(ctx)`` and return whether *this* call committed."""
         generation = self._cache_generation
+        start_seq = self._scan_seq
         target_lang = self._current_description_language()
+        read_scope = self._skill_read_scope()
         self._visibility_conflict = False
         outcome: List[Any] = [None]
         token = _REFRESH_OUTCOME.set(outcome)
@@ -400,13 +442,15 @@ class SkillUseRail(DeepAgentRail):
         if result is False:
             return False
         if isinstance(result, tuple):
-            return self._scan_still_current(result, target_lang)
+            return result == self._last_committed_refresh_token and self._has_current_skill_view()
         # Custom override/test replaced refresh_skill_prompt without calling super().
-        if not self._refresh_still_current(generation, target_lang):
+        if not self._refresh_still_current(generation, target_lang) or self._skill_read_scope() != read_scope:
             return False
-        if self._cached_language is None:
-            self._cached_language = target_lang
-        self._last_committed_refresh_token = (generation, self._scan_seq)
+        if self._scan_seq != start_seq:
+            return self._has_current_skill_view()
+        self._cached_language = target_lang
+        self._cached_read_scope = read_scope
+        self._last_committed_refresh_token = (generation, start_seq)
         return True
 
     def set_sys_operation(self, sys_operation: Any) -> None:
@@ -481,7 +525,7 @@ class SkillUseRail(DeepAgentRail):
         if baseline is None or baseline.directory.resolve() != expected:
             raise ValueError(f"conflicts with the session baseline: {name}.")
 
-    async def _prepare_skills(self) -> Optional[Tuple[int, int]]:
+    async def _prepare_skills(self, scan: Optional[_SkillScan] = None) -> Optional[Tuple[int, int]]:
         """Refresh skills incrementally from skills_dir and apply filters.
 
         Returns:
@@ -492,23 +536,15 @@ class SkillUseRail(DeepAgentRail):
             newer scan started: nothing is published and the state is left
             for the next refresh.
         """
-        self._invalidate_if_language_changed()
+        if scan is None:
+            return await self._refresh_view()
         self._visibility_conflict = False
-        target_lang = self._current_description_language()
-        self._scan_seq += 1
-        scan = (self._cache_generation, self._scan_seq)
-
-        if not self.enable_cache:
-            self._skill_cache.clear()
-            self._skill_update_at.clear()
-            self._skill_order.clear()
-
-        refreshed = await self._refresh_skills_incrementally(scan=scan, language=target_lang)
+        refreshed = await self._refresh_skills_incrementally(scan)
         if not refreshed:
             return None
         collected = self._collect_skills_in_order()
         self.skills = self._filter_skills(collected)
-        self._cached_language = target_lang
+        self._cached_language = scan.language
 
         # Freeze the full committed signature synchronously right here — using
         # the exact discovery snapshot that produced the cache and the exact
@@ -537,25 +573,10 @@ class SkillUseRail(DeepAgentRail):
                 self._visibility_conflict = True
             else:
                 self._committed_snapshot_signature = full_sig
-        return scan
+        return scan.token
 
-    async def _refresh_skills_incrementally(
-        self,
-        scan: Optional[Tuple[int, int]] = None,
-        language: Optional[str] = None,
-    ) -> bool:
+    async def _refresh_skills_incrementally(self, scan: _SkillScan) -> bool:
         """Refresh skills by loading only new or updated SKILL.md files.
-
-        Args:
-            scan: The ``(cache generation, scan sequence)`` the caller captured
-                when the refresh started. ``clear_skills()`` bumps the
-                generation (the cache was wiped under this refresh) and every
-                ``_prepare_skills()`` bumps the sequence (a newer scan
-                superseded this one), so a scan that resumes after either
-                must not write.
-            language: The prompt language the descriptions must be localized
-                for. Every load in this scan uses it, so a language switch
-                mid-scan cannot yield a mix.
 
         Returns:
             False when the scan was superseded while a read was awaited:
@@ -563,10 +584,6 @@ class SkillUseRail(DeepAgentRail):
             otherwise, with the cache, its order and the discovery snapshot
             that produced it committed together.
         """
-        if scan is None:
-            scan = (self._cache_generation, self._scan_seq)
-        if language is None:
-            language = self._current_description_language()
         roots = self._normalize_skill_dirs(self.skills_dir)
         if not roots:
             raise ValueError("skills_dir is empty")
@@ -578,8 +595,9 @@ class SkillUseRail(DeepAgentRail):
         discovered_snapshot = self._snapshot_signature(discovered)
         # One consistent view of the cache for the whole scan: what a newer
         # scan commits meanwhile is not this scan's to reuse.
-        cache_snapshot = dict(self._skill_cache)
-        update_at_snapshot = dict(self._skill_update_at)
+        reuse_cache = self.enable_cache and self._cached_read_scope == scan.read_scope
+        cache_snapshot = dict(self._skill_cache) if reuse_cache else {}
+        update_at_snapshot = dict(self._skill_update_at) if reuse_cache else {}
 
         ordered_keys: List[str] = []
         # The next skill cache is staged and published only once
@@ -596,23 +614,24 @@ class SkillUseRail(DeepAgentRail):
             cached_update_at = update_at_snapshot.get(key)
 
             if skill is None or cached_update_at != update_at:
-                lang_token = _SCAN_LANGUAGE.set(language)
+                lang_token = _SCAN_LANGUAGE.set(scan.language)
                 try:
                     skill = await self._load_skill(item, update_at)
                 finally:
                     _SCAN_LANGUAGE.reset(lang_token)
-                if not self._scan_still_current(scan, language):
+                if not self._scan_still_current(scan):
                     return False
             staged_skills[key] = skill
             staged_update_at[key] = update_at
 
-        if not self._scan_still_current(scan, language):
+        if not self._scan_still_current(scan):
             return False
         self._skill_cache.clear()
         self._skill_cache.update(staged_skills)
         self._skill_update_at.clear()
         self._skill_update_at.update(staged_update_at)
         self._skill_order = ordered_keys
+        self._cached_read_scope = scan.read_scope
         self._committed_snapshot_signature = discovered_snapshot
         return True
 
@@ -831,7 +850,9 @@ class SkillUseRail(DeepAgentRail):
         """Fetch and cache evolution experience texts from EvolutionStore."""
         if self.evolution_store is None:
             return
-        generation = self._cache_generation
+        revision = (self._cache_generation, self._scan_seq)
+        language = self._current_description_language()
+        read_scope = self._skill_read_scope()
         skills = self.skills if skills is None else skills
         seen_names: Set[str] = set()
         for skill in skills:
@@ -847,9 +868,12 @@ class SkillUseRail(DeepAgentRail):
                     exc,
                 )
                 continue
-            if self._cache_generation != generation:
-                # The await outlasted a rebind: the text was fetched for a
-                # skill set the rail no longer holds and is obsolete.
+            if (
+                revision != (self._cache_generation, self._scan_seq)
+                or language != self._current_description_language()
+                or read_scope != self._skill_read_scope()
+            ):
+                # This fetch no longer belongs to the current skill view.
                 return
             self._evolution_texts[skill.name] = text
 
@@ -887,7 +911,14 @@ class SkillUseRail(DeepAgentRail):
         if self.system_prompt_builder is None:
             return
 
-        await self._sync_skill_prompt_and_attachment(ctx)
+        try:
+            await self._sync_skill_prompt_and_attachment(ctx, wait_for_view=True)
+        except AbortError:
+            raise
+        except Exception as exc:
+            # Ordinary callback errors are logged and the model call continues.
+            # An unusable skill view must fail this model attempt instead.
+            raise AbortError(reason=str(exc), cause=exc) from exc
 
     async def _clear_stale_runtime_skill_attachment(self, ctx: AgentCallbackContext) -> None:
         """Remove a pending rail-owned runtime attachment left over from a previous source."""
@@ -899,36 +930,59 @@ class SkillUseRail(DeepAgentRail):
         writer = manager.bind_context(ctx)
         if not writer.session_id or writer.session_id in self._current_gen_attachment_sessions:
             return
+        generation = self._cache_generation
         await writer.clear_section(self._RUNTIME_ATTACHMENT_SECTION)
-        self._current_gen_attachment_sessions.add(writer.session_id)
+        if generation == self._cache_generation:
+            self._current_gen_attachment_sessions.add(writer.session_id)
 
-    async def _sync_skill_prompt_and_attachment(self, ctx: AgentCallbackContext) -> None:
+    async def _wait_for_pending_skill_scan(self) -> None:
+        """Wait for the latest compatible scan without cancelling its producer."""
+        while (scan := self._pending_scan) is not None and self._scan_still_current(scan):
+            await asyncio.shield(scan.done)
+
+    async def _await_current_skill_view(self) -> None:
+        """Adopt a committed successor, or retry once in the caller's scope."""
+        await self._wait_for_pending_skill_scan()
+        if self._has_current_skill_view() and not self._visibility_conflict:
+            return
+        if await self._refresh_view() is not None:
+            return
+        await self._wait_for_pending_skill_scan()
+        if not self._has_current_skill_view() or self._visibility_conflict:
+            raise RuntimeError("Skill refresh did not complete in the current model call context")
+
+    async def _sync_skill_prompt_and_attachment(
+        self, ctx: AgentCallbackContext, *, wait_for_view: bool = False
+    ) -> None:
         """Refresh the stable skill section and the change-only attachment."""
         if not await self._refresh_skill_prompt_if_changed(ctx):
             await self._clear_stale_runtime_skill_attachment(ctx)
+            if not wait_for_view:
+                return
+            await self._await_current_skill_view()
+            if not self._visibility_conflict:
+                self._last_full_refresh_ts = time.monotonic()
+
+        if await self._render_skill_prompt_and_attachment(ctx) or not wait_for_view:
             return
-        # Evolution records can change without changing the Skill.md snapshot.
-        # Refresh them independently so the attachment always contains the
-        # latest experience while the system prompt remains stable.
-        # Some task-loop paths may enter model call without BEFORE_INVOKE.
-        # Establish the durable baseline at the first point where skills are used.
+        # A rebind or another scan may also land during evolution or attachment I/O.
+        await self._await_current_skill_view()
+        if not await self._render_skill_prompt_and_attachment(ctx):
+            raise RuntimeError("Skill view changed while preparing the model call")
+
+    async def _render_skill_prompt_and_attachment(self, ctx: AgentCallbackContext) -> bool:
+        """Publish the calling session's view only while its revision is current."""
+        # Task loops can reach the model boundary without BEFORE_INVOKE.
         self._ensure_session_baseline(ctx)
-        session_state = self._load_session_state(getattr(ctx, "session", None))
-        baseline_skills = (
-            self._get_session_baseline(ctx)
-            if session_state is not None
-            else list(self.skills)
-        )
-        generation = self._cache_generation
-        target_lang = self._current_description_language()
+        session = getattr(ctx, "session", None)
+        session_state = self._load_session_state(session)
+        baseline_skills = self._get_session_baseline(ctx) if session_state is not None else list(self.skills)
+        revision = self._last_committed_refresh_token
+        # Evolution records can change independently of SKILL.md.
         await self._fetch_evolution_texts([*baseline_skills, *self.skills])
-        # Another callback may have rebound the rail and rendered for the new
-        # source while this one was parked on the evolution store. The
-        # baseline captured above is then obsolete, and publishing it would
-        # replace the current prompt section with the previous source's view.
-        if not self._refresh_still_current(generation, target_lang):
+        if revision != self._last_committed_refresh_token or not self._has_current_skill_view():
             await self._clear_stale_runtime_skill_attachment(ctx)
-            return
+            return False
         query = self._extract_query_from_messages(ctx)
         skills_section = self._build_skills_section(baseline_skills, query=query)
         if skills_section is not None:
@@ -936,6 +990,7 @@ class SkillUseRail(DeepAgentRail):
         else:
             self.system_prompt_builder.remove_section(SectionName.SKILLS)
         await self._update_runtime_skill_attachment(ctx, baseline_skills)
+        return revision == self._last_committed_refresh_token and self._has_current_skill_view()
 
     def _skill_refresh_within_ttl(self) -> bool:
         """Whether the last successful directory scan is still inside the TTL.
@@ -945,9 +1000,7 @@ class SkillUseRail(DeepAgentRail):
         forces a miss: that flag means every invoke must re-read the disk, and
         a TTL hit would skip ``_prepare_skills`` entirely.
         """
-        if not self.enable_cache:
-            return False
-        if self._cached_language is not None and self._cached_language != self._current_description_language():
+        if not self.enable_cache or not self._has_current_skill_view():
             return False
         ttl = self._skill_refresh_ttl_s
         if ttl <= 0 or self._last_full_refresh_ts is None:
@@ -968,7 +1021,7 @@ class SkillUseRail(DeepAgentRail):
         if self._skill_refresh_within_ttl():
             return True
         current_signature = self._build_skills_snapshot_signature()
-        if current_signature == self._skills_snapshot_signature:
+        if self._has_current_skill_view() and current_signature == self._skills_snapshot_signature:
             return True
 
         if not await self._run_refresh_prompt(ctx):
