@@ -26,6 +26,9 @@ from openjiuwen.core.foundation.llm.utils.provider_error import summarize_provid
 from openjiuwen.core.foundation.llm.utils.request_sanitizer import clean_unicode
 from openjiuwen.core.foundation.tool import ToolInfo
 
+# Cap for provider error metadata copied into error text (e.g. OpenRouter's error.metadata.raw).
+_MAX_ERROR_METADATA_CHARS = 500
+
 
 class OpenAIAccountResponsesError(Exception):
     """Raised when Responses API data cannot be prepared or parsed."""
@@ -446,14 +449,20 @@ def raise_for_http_error(response: httpx.Response) -> None:
         payload = response.json()
     except ValueError:
         payload = None
-    message = _http_error_message(payload)
-    if not message:
+    detail = _http_error_message(payload)
+    if not detail:
         text = (response.text or "").strip()
         if text:
-            message = summarize_provider_error_text(text, status_code=response.status_code)
-    if not message:
-        message = f"OpenAI account Responses request failed with status {response.status_code}."
-    raise OpenAIAccountResponsesError(message, status_code=response.status_code, body=payload)
+            detail = summarize_provider_error_text(text, status_code=response.status_code)
+    if not detail:
+        detail = "Responses request failed without an error body."
+    # Same shape as the OpenAI SDK's errors in Chat Completions mode, so logs and
+    # text-based classifiers see the HTTP status in both API modes.
+    raise OpenAIAccountResponsesError(
+        f"Error code: {response.status_code} - {detail}",
+        status_code=response.status_code,
+        body=payload,
+    )
 
 
 def message_from_stream_chunk(chunk: Optional[AssistantMessageChunk]) -> AssistantMessage:
@@ -807,12 +816,58 @@ def _terminal_stream_chunk(
 
 
 def _stream_error_message(event: dict[str, Any]) -> str:
-    if event.get("message"):
-        return str(event["message"])
-    error = event.get("error")
-    if isinstance(error, dict) and error.get("message"):
-        return str(error["message"])
-    return "OpenAI account Responses stream failed."
+    """Message for an ``error`` / ``response.failed`` event, keeping the provider's error code.
+
+    ``error`` events carry ``code``/``message`` at the top level or under ``error``;
+    ``response.failed`` carries them under ``response.error``.
+    """
+    response = event.get("response")
+    candidates = [event, event.get("error"), response.get("error") if isinstance(response, dict) else None]
+    errors = [item for item in candidates if isinstance(item, dict)]
+    error = next((item for item in errors if item.get("message")), None)
+    message = str(error["message"]) if error else "OpenAI account Responses stream failed."
+    if error:
+        metadata = _error_metadata_summary(error)
+        if metadata:
+            message = f"{message} (metadata: {metadata})"
+    code = (error or {}).get("code") or next((item["code"] for item in errors if item.get("code")), None)
+    return f"Error code: {code} - {message}" if code else message
+
+
+def _error_metadata_summary(*sources: Any) -> Optional[str]:
+    """Bounded one-line JSON of the first provider ``metadata`` found in ``sources``.
+
+    OpenRouter keeps the upstream provider's error here (``metadata.raw``); its own
+    ``message`` is often only "Provider returned error".
+    """
+    metadata = next(
+        (source.get("metadata") for source in sources if isinstance(source, dict) and source.get("metadata")),
+        None,
+    )
+    if isinstance(metadata, dict):
+        # ``raw`` is often the upstream error body as an indented JSON string; decoding it
+        # keeps the summary readable and inside the length cap.
+        metadata = {key: _decoded_json(value) for key, value in metadata.items() if value is not None}
+    if not metadata:
+        return None
+    if isinstance(metadata, (dict, list)):
+        text = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"), default=str)
+    else:
+        text = str(metadata)
+    if len(text) > _MAX_ERROR_METADATA_CHARS:
+        overflow = len(text) - _MAX_ERROR_METADATA_CHARS
+        text = f"{text[:_MAX_ERROR_METADATA_CHARS]}... [truncated {overflow} chars]"
+    return text
+
+
+def _decoded_json(value: Any) -> Any:
+    """Return ``value`` parsed when it is a JSON object or array string, else unchanged."""
+    if not isinstance(value, str) or not value.lstrip().startswith(("{", "[")):
+        return value
+    try:
+        return json.loads(value)
+    except ValueError:
+        return value
 
 
 def _usage_from_payload(usage: Any, *, model_name: str) -> Optional[UsageMetadata]:
@@ -891,7 +946,10 @@ def _http_error_message(payload: Any) -> Optional[str]:
 
     error = payload.get("error")
     if isinstance(error, dict) and error.get("message"):
-        return str(error["message"])
+        message = str(error["message"])
+        # OpenRouter puts upstream errors in error.metadata, its own validation errors in metadata.
+        metadata = _error_metadata_summary(error, payload)
+        return f"{message} (metadata: {metadata})" if metadata else message
     if isinstance(error, str):
         return error
     if isinstance(payload.get("detail"), str):

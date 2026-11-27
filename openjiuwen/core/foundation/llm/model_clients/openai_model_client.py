@@ -444,8 +444,15 @@ class OpenAIModelClient(BaseModelClient):
         self._chat_request_fallback = RequestParameterFallback(
             model_client_config.client_provider, "OpenAI-compatible",
         )
+        # Unlike Chat mode, a refused temperature or top_p is retried even outside disabled_thinking_fallback_scope:
+        # Responses mode used to drop both, so callers that set one must keep working. max_output_tokens is not
+        # retried, as max_tokens isn't in Chat mode: dropping it would send the request with no output limit.
         self._responses_request_fallback = RequestParameterFallback(
-            model_client_config.client_provider, "OpenAI Responses", retry_without_stop=True,
+            model_client_config.client_provider,
+            "OpenAI Responses",
+            retry_without_stop=True,
+            retry_without_temperature=True,
+            retry_without_top_p=True,
         )
 
     def _use_shared_client(self) -> bool:
@@ -1289,8 +1296,8 @@ class OpenAIModelClient(BaseModelClient):
         if not final_model:
             raise build_error(StatusCode.MODEL_CONFIG_ERROR, error_msg="The model cannot be empty.")
 
-        send_sampling_params = bool(kwargs.pop("send_sampling_params", False))
-        send_max_output_tokens = bool(kwargs.pop("send_max_output_tokens", False))
+        send_sampling_params = bool(kwargs.pop("send_sampling_params", True))
+        send_max_output_tokens = bool(kwargs.pop("send_max_output_tokens", True))
 
         final_temperature = (
             (temperature if temperature is not None else self.model_config.temperature)
@@ -1302,6 +1309,10 @@ class OpenAIModelClient(BaseModelClient):
             if send_sampling_params
             else None
         )
+        # For api.openai.com keep only one of temperature/top_p, and temperature wins.
+        api_base = (self.model_client_config.api_base or "").lower()
+        if "openai.com" in api_base and final_temperature is not None and final_top_p is not None:
+            final_top_p = None
         configured_max_tokens = max_tokens if max_tokens is not None else self.model_config.max_tokens
         final_stop = stop if stop is not None else self.model_config.stop
 
@@ -1451,6 +1462,20 @@ class OpenAIModelClient(BaseModelClient):
                 StatusCode.MODEL_CALL_FAILED,
                 error_msg=f"Responses API invoke error: {_format_exception_detail(exc)}",
             ) from exc
+
+        llm_logger.info(
+            "Responses API response received.",
+            event_type=LogEventType.LLM_CALL_END,
+            model_name=body.get("model"),
+            model_provider=self.model_client_config.client_provider,
+            messages=messages,
+            tools=tools,
+            temperature=body.get("temperature"),
+            top_p=body.get("top_p"),
+            max_tokens=body.get("max_output_tokens"),
+            is_stream=False,
+            metadata={"response": str(response)},
+        )
 
         if output_parser and response.content:
             response.parser_content = await self._parse_responses_content(response.content, output_parser)

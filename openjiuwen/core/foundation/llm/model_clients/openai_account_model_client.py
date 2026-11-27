@@ -159,6 +159,20 @@ class OpenAIAccountModelClient(BaseModelClient):
             await self._emit_error(body, messages, tools, exc, is_stream=False)
             raise self._wrap_model_error(exc, "invoke") from exc
 
+        llm_logger.info(
+            "OpenAI account API response received.",
+            event_type=LogEventType.LLM_CALL_END,
+            model_name=body.get("model"),
+            model_provider=self.model_client_config.client_provider,
+            messages=messages,
+            tools=tools,
+            temperature=body.get("temperature"),
+            top_p=body.get("top_p"),
+            max_tokens=body.get("max_output_tokens"),
+            is_stream=False,
+            metadata={"response": str(response)},
+        )
+
         if output_parser and response.content:
             response.parser_content = await self._parse_content(response.content, output_parser)
 

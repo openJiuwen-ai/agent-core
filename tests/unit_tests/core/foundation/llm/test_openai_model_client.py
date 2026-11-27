@@ -1131,7 +1131,7 @@ class TestOpenAIResponsesApiKeyMode:
         assert response.usage_metadata.cache_creation_input_tokens == 1
 
     @pytest.mark.asyncio
-    async def test_invoke_does_not_send_sampling_params_by_default(self):
+    async def test_invoke_sends_sampling_params_by_default(self):
         import httpx
 
         seen_body = {}
@@ -1157,7 +1157,8 @@ class TestOpenAIResponsesApiKeyMode:
         ):
             await client.invoke("hello", temperature=0.3, top_p=0.9)
 
-        assert "temperature" not in seen_body
+        assert seen_body["temperature"] == 0.3
+        # api.openai.com takes only one of temperature/top_p.
         assert "top_p" not in seen_body
 
     @pytest.mark.asyncio

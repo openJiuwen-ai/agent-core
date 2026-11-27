@@ -65,6 +65,7 @@ from openjiuwen.harness.personal_context.file_tools import (
     make_personal_context_file_tools as _make_personal_context_file_tools,
 )
 from openjiuwen.harness.personal_context.path_safety import _extended_path
+from openjiuwen.harness.personal_context._run_token_usage import model_usage_phase
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 from openjiuwen.harness.rails import SecurityRail
 from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
@@ -1102,7 +1103,8 @@ async def _invoke_with_length_recovery(
     effective_query = query
     continuations_used = 0
     while True:
-        result = await _maybe_await(cast(Any, agent).invoke({"query": effective_query}, session=session))
+        with model_usage_phase("agent"):
+            result = await _maybe_await(cast(Any, agent).invoke({"query": effective_query}, session=session))
         if not _is_length_limited_result(result):
             return result, None
         if not _discard_length_limited_tail(agent, session_id, result):

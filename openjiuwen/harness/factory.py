@@ -237,6 +237,53 @@ class DeepAgentParts:
     extension_bus: Any = None
 
 
+def _validate_reused_local_sys_operation(
+    sys_operation_obj: SysOperation,
+    *,
+    sysop_id: str,
+    expected_work_config: LocalWorkConfig,
+) -> None:
+    """Reject a registered ``SysOperation`` whose policy differs from the one this build asked for.
+
+    ``sysop_id`` (``"{card.name}_{card.id}"``) is stable across rebuilds, so an
+    entry already registered under it is normally this agent's own earlier
+    instance and is reused as-is. It may instead belong to a sibling sharing the
+    card identity, to a host that registered its own card under that id, or to
+    the winner of a concurrent ``add_sys_operation`` race. Validating the
+    registered operation's mode and ``LocalWorkConfig`` at build time prevents
+    silently running this agent under a conflicting policy instead of
+    ``expected_work_config``.
+
+    Args:
+        sys_operation_obj: The instance found under ``sysop_id``.
+        sysop_id: Registry id the instance was looked up under.
+        expected_work_config: The ``LocalWorkConfig`` this build would register.
+
+    Raises:
+        ValueError: If the instance is not ``OperationMode.LOCAL`` or its
+            ``work_config`` differs from ``expected_work_config``.
+    """
+    remediation = (
+        "Use a distinct AgentCard.id or pass an independently owned "
+        "`sys_operation` configured with the requested policy. To reuse this "
+        "id, have its owner finish tearing down all users of the existing "
+        "registration before removing it and rebuilding."
+    )
+    mode = getattr(sys_operation_obj, "mode", None)
+    if mode != OperationMode.LOCAL:
+        raise ValueError(
+            f"SysOperation '{sysop_id}' is registered with operation mode "
+            f"'{getattr(mode, 'value', mode)}' but this agent requires "
+            f"'{OperationMode.LOCAL.value}'. {remediation}"
+        )
+    existing_work_config = getattr(sys_operation_obj, "work_config", None)
+    if existing_work_config != expected_work_config:
+        raise ValueError(
+            f"SysOperation '{sysop_id}' is registered with a conflicting LocalWorkConfig: "
+            f"found {existing_work_config!r}, expected {expected_work_config!r}. {remediation}"
+        )
+
+
 def resolve_deep_agent_parts(
     model: Model,
     *,
@@ -334,6 +381,10 @@ def resolve_deep_agent_parts(
         sys_operation_obj = None
     elif not isinstance(sys_operation, SysOperation):
         sysop_id = f"{card.name}_{card.id}"
+        expected_work_config = LocalWorkConfig(
+            shell_allowlist=None,
+            restrict_to_sandbox=restrict_to_work_dir,
+        )
         # Get-or-create: the id is stable across rebuilds (a member harness is
         # reconstructed on every team resume), and add_sys_operation is a strict
         # add that errors on a duplicate id. Resolve the existing instance first
@@ -343,15 +394,22 @@ def resolve_deep_agent_parts(
             sysop_card = SysOperationCard(
                 id=sysop_id,
                 mode=OperationMode.LOCAL,
-                work_config=LocalWorkConfig(
-                    shell_allowlist=None,
-                    restrict_to_sandbox=restrict_to_work_dir,
-                ),
+                work_config=expected_work_config,
             )
             add_result = Runner.resource_mgr.add_sys_operation(sysop_card)
             if add_result.is_err():
                 logger.error(f"add_sys_operation failed: {add_result.msg()}")
             sys_operation_obj = Runner.resource_mgr.get_sys_operation(sysop_id)
+        if sys_operation_obj is not None:
+            # Covers both the cache hit above and the post-add lookup: a
+            # concurrent caller may have registered an incompatible instance
+            # under the same id in between (add_sys_operation is a strict add,
+            # so ours is the one that gets rejected).
+            _validate_reused_local_sys_operation(
+                sys_operation_obj,
+                sysop_id=sysop_id,
+                expected_work_config=expected_work_config,
+            )
     else:
         sys_operation_obj = sys_operation
 
