@@ -286,7 +286,7 @@ def create_team_tools(
     # → identical to the pre-evolvable ``make_translator`` closure.
     cache = agent_team.workspace_cache
     t = make_translator(lang, ws_cache=cache)
-    loader = make_template_loader(cache)
+    loader = make_template_loader(cache, message_delivery_modes=agent_team.enable_message_delivery_modes)
     task_mgr = agent_team.task_manager
     msg_mgr = agent_team.message_manager
     # Variant selection is a construction-time table lookup: every tool below

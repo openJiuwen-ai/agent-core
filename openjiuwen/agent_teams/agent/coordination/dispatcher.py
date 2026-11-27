@@ -95,8 +95,19 @@ class AgentRoundController(Protocol):
         """Return whether an unresolved tool interrupt is pending."""
         ...
 
+    def active_input_snapshot(self) -> tuple[object, str] | None:
+        """Return the current round identity and a short excerpt, when available."""
+        ...
+
     async def cancel_agent(self) -> None:
         """Cancel the running agent task."""
+        ...
+
+    def leader_stop(self) -> dict | None:
+        """Explicit abort barrier; only a later direct leader message releases it."""
+        ...
+
+    def set_leader_stop(self, marker: dict | None) -> None:
         ...
 
     async def deliver_input(

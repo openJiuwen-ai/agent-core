@@ -69,6 +69,7 @@ def _backend(db, member_name: str, is_leader: bool) -> TeamBackend:
         team_name=TEAM_NAME,
         member_name=member_name,
         is_leader=is_leader,
+        enable_message_delivery_modes=True,
         db=db,
         messager=AsyncMock(spec=Messager),
     )
@@ -80,6 +81,63 @@ def _send_tool(tools):
 
 def _leader_send(db, lang: str = "cn"):
     return _send_tool(create_team_tools(role="leader", agent_team=_backend(db, LEADER_NAME, True), lang=lang))
+
+
+@pytest.mark.asyncio
+async def test_reading_newer_broadcast_preserves_old_deferred_for_same_recipient(db):
+    send = _leader_send(db)
+    old = (await send.invoke({"to": "*", "content": "Useful later"})).data["message_id"]
+    new = (await send.invoke({"to": "*", "content": "Urgent correction"})).data["message_id"]
+    import asyncio
+    await asyncio.gather(
+        db.message.save_delivery_mode(old, DEV_1, "follow_up", {"A": 1}),
+        db.message.mark_message_read(old, DEV_2),
+    )
+    await send.message_manager.mark_messages_read([await db.message.get_message(new)], DEV_1)
+    unread = await db.message.get_broadcast_messages(TEAM_NAME, DEV_1, unread_only=True)
+    assert [m.message_id for m in unread] == [old]
+    assert DEV_1 in await db.message.members_with_unread(TEAM_NAME, [DEV_1])
+    await send.message_manager.mark_messages_read([await db.message.get_message(old)], DEV_1)
+    assert DEV_1 not in await db.message.members_with_unread(TEAM_NAME, [DEV_1])
+    assert DEV_2 in await db.message.members_with_unread(TEAM_NAME, [DEV_2])
+
+
+@pytest.mark.asyncio
+async def test_unread_broadcast_queries_do_not_fetch_covered_legacy_history(db, monkeypatch):
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    send = _leader_send(db)
+    for index in range(12):
+        await send.message_manager.broadcast_message(f"Old announcement {index}")
+    deferred = (await send.invoke({"to": "*", "content": "Useful after work"})).data["message_id"]
+    latest = await send.message_manager.broadcast_message("Latest announcement")
+    await db.message.save_delivery_mode(deferred, DEV_1, "follow_up", {"A": 1})
+    await db.message.mark_message_read(latest, DEV_1)
+    execute = AsyncSession.execute
+    fetched = []
+
+    async def observe(session, statement, *args, **kwargs):
+        result = await execute(session, statement, *args, **kwargs)
+        frozen = result.freeze()
+        fetched.append(len(frozen.data))
+        return frozen()
+
+    monkeypatch.setattr(AsyncSession, "execute", observe)
+    rows = await db.message.get_broadcast_messages(TEAM_NAME, DEV_1, unread_only=True)
+    assert [row.message_id for row in rows] == [deferred]
+    assert max(fetched) <= 1
+    fetched.clear()
+    assert DEV_1 in await db.message.members_with_unread(TEAM_NAME, [DEV_1])
+    assert max(fetched) <= 1
+
+
+@pytest.mark.asyncio
+async def test_abort_and_resume_are_ordered_even_with_same_clock_tick(db, monkeypatch):
+    monkeypatch.setattr("openjiuwen.agent_teams.tools.database.message_dao.get_current_time", lambda: 100)
+    send = _leader_send(db)
+    stop = (await send.invoke({"to": DEV_1, "content": "Stop", "mode": "abort"})).data["message_id"]
+    resume = (await send.invoke({"to": DEV_1, "content": "New work", "mode": "steer"})).data["message_id"]
+    assert (await db.message.get_message(resume)).timestamp > (await db.message.get_message(stop)).timestamp
 
 
 def _member_send(db, dispatch_mode: str = "autonomous"):
@@ -359,16 +417,19 @@ async def test_direct_message_starts_idle_task_scoped_recipient(db):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_broadcast_starts_idle_task_scoped_member(db):
-    """A broadcast addresses every member, the idle task-scoped one included."""
+async def test_broadcast_does_not_start_idle_task_scoped_member(db):
+    """The tool does not wake an unstarted recipient before its own decision."""
     backend = await _idle_task_scoped_member(db, "tmp-1")
+    backend.enable_message_delivery_modes = True
     send = _send_tool(create_team_tools(role="leader", agent_team=backend, lang="cn"))
 
     result = await send.invoke({"to": "*", "content": "status, everyone"})
 
     assert result.success
     started = [call.args[0] for call in backend._on_member_started.await_args_list]
-    assert "tmp-1" in started
+    assert "tmp-1" not in started
+    rows = await db.message.get_team_messages(team_name=TEAM_NAME)
+    assert any(row.broadcast and '"receiver_routed": true' in row.meta for row in rows)
 
 
 @pytest.mark.asyncio
@@ -383,3 +444,30 @@ async def test_group_reply_cannot_disappear_in_private_user_mailbox(db, lang):
     assert await db.message.get_team_messages(team_name=TEAM_NAME) == []
     coordinated = await send.invoke({"to": DEV_2, "content": "Private coordination"})
     assert coordinated.success
+
+@pytest.mark.asyncio
+async def test_private_modes_enforce_abort_role_and_single_recipient(db):
+    member = _member_send(db)
+    rejected = await member.invoke({"to": DEV_2, "content": "Stop", "mode": "abort"})
+    assert not rejected.success and "leader" in rejected.error
+
+    leader = _leader_send(db)
+    for recipients in ({"to": "*"}, {"targets": [DEV_1, DEV_2]}, {"to": "user"}):
+        result = await leader.invoke({**recipients, "content": "Stop", "mode": "abort"})
+        assert not result.success
+
+
+@pytest.mark.asyncio
+async def test_default_off_uses_legacy_broadcast_and_rejects_control_modes(db):
+    backend = TeamBackend(TEAM_NAME, LEADER_NAME, True, db, AsyncMock(spec=Messager))
+    backend.autostart_unstarted = AsyncMock(return_value=[])
+    send = _send_tool(create_team_tools(role="leader", agent_team=backend))
+    result = await send.invoke({"to": DEV_1, "content": "stop", "mode": "abort"})
+    assert not result.success
+    assert not await db.message.get_messages(TEAM_NAME, DEV_1, unread_only=True)
+    result = await send.invoke({"to": "*", "content": "global change"})
+    assert result.success
+    backend.autostart_unstarted.assert_awaited_once()
+    import json
+    row = await db.message.get_message(result.data["message_id"])
+    assert not json.loads(row.meta or "{}").get("receiver_routed")

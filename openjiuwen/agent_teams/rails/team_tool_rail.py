@@ -144,7 +144,8 @@ class TeamToolRail(DeepAgentRail):
         if self._tools is not None:
             return
         super().init(agent)
-
+        if hasattr(agent, "merge_follow_ups"):
+            agent.merge_follow_ups = self._team_backend.enable_message_delivery_modes
         # Tool descriptions consult the team's evolved ``prompts/tool/``
         # files via the resident ``WorkspaceCache``. The cache is read off
         # the team backend (which delegates to the workspace manager) — the

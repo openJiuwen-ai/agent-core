@@ -3,10 +3,11 @@
 
 import asyncio
 
-from openjiuwen.agent_teams.agent.coordination.handlers.message import MessageHandler
+from openjiuwen.agent_teams.agent.coordination.handlers.message import MessageHandler, choose_delivery
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.group_chat.handler import context_for, conversation_message, group_metadata
 from openjiuwen.agent_teams.message_template import ExpandedMessage
+from openjiuwen.agent_teams.tools.message_manager import ACTIVE_TASKS
 from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -104,6 +105,36 @@ class GroupMessageHandler(MessageHandler):
             body = await context_for(self._infra.team_backend, self._blueprint.member_name, message)
             return ExpandedMessage(body=body, is_template=False)
         return await super()._expand(message)
+
+    async def _mailbox_delivery_mode(self, member_name, msg):
+        if not self._delivery_modes_enabled():
+            return None
+        if not msg.broadcast or member_name not in group_metadata(msg).get("mentions", ()):
+            return None
+        if not self._round.has_in_flight_round():
+            # The runtime starts immediately when idle, even for follow_up.
+            return "follow_up"
+        snapshot = self._round.active_input_snapshot()
+        manager = self._infra.task_manager
+        tasks = await manager.get_tasks_by_assignee(member_name) if manager is not None else []
+        if not self._round.has_in_flight_round():
+            return "follow_up"
+        active = [task for task in tasks if task.status in ACTIVE_TASKS]
+        mode = await choose_delivery({
+            "recipient": member_name,
+            "role_description": (getattr(getattr(self._blueprint, "card", None), "description", None) or "")[:500],
+            "sender": msg.from_member_name,
+            "message": msg.content[:2000],
+            "current_input": snapshot[1] if snapshot else "",
+            "active_tasks": [{"title": task.title[:200], "summary": task.content[:300]} for task in active[:4]],
+        }, group=True)
+        if not self._round.has_in_flight_round():
+            return "follow_up"
+        if snapshot is not None:
+            current = self._round.active_input_snapshot()
+            if current is None or current[0] is not snapshot[0]:
+                return "follow_up"
+        return mode
 
     def _format_message(self, message, *, expanded, is_human_agent):
         if message.broadcast and group_metadata(message):

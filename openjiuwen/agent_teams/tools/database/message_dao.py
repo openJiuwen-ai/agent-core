@@ -7,7 +7,7 @@ import asyncio
 import json
 from typing import TYPE_CHECKING, Iterable, List, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import JSON, cast, select, type_coerce, update, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -177,6 +177,38 @@ class MessageDao:
             row = result.scalar_one_or_none()
         return await self._hydrate_row_off_loop(row)
 
+    @staticmethod
+    def _receiver_routed_clause(session, message_model):
+        # SQLite JSON operators consume the text directly; its CAST AS JSON
+        # produces a number. Other supported dialects need a JSON cast.
+        meta = (type_coerce(message_model.meta, JSON) if session.bind.dialect.name == "sqlite"
+                else cast(message_model.meta, JSON))
+        return meta["receiver_routed"].as_boolean().is_(True)
+
+    @staticmethod
+    def _feedback_unread(meta, member_name):
+        data = json.loads(meta) if isinstance(meta, str) and meta else (meta or {})
+        if not data.get("receiver_routed") or "delivery_feedback" not in data:
+            return None
+        entry = data["delivery_feedback"].get(member_name)
+        # Keep historical withdrawn receipts terminal; no recall tool is exposed.
+        return not (entry or {}).get("handled", False) and (entry or {}).get("state") not in {
+            "submitted", "dropped", "withdrawn", "stopped", "cleared", "held", "merged",
+        }
+
+    async def save_delivery_mode(self, message_id: str, member_name: str, mode: str, target_tasks: dict) -> None:
+        """Remember only a deferred broadcast decision; read state stays in mark_read."""
+        async with self._sessions.write() as session:
+            model = _get_message_model()
+            row = (await session.execute(select(model).where(
+                model.message_id == message_id).with_for_update())).scalar_one_or_none()
+            if row is not None:
+                meta = json.loads(row.meta)
+                entry = meta.setdefault("delivery_feedback", {}).setdefault(member_name, {})
+                entry.update(mode=mode, target_tasks=target_tasks)
+                row.meta = json.dumps(meta, ensure_ascii=False)
+                await session.commit()
+
     async def create_message(
         self,
         message_id: str,
@@ -224,13 +256,16 @@ class MessageDao:
         async def _op() -> bool:
             try:
                 async with self._sessions.write() as session:
+                    latest = (await session.execute(select(func.max(message_model.timestamp)).where(
+                        message_model.team_name == team_name,
+                    ))).scalar_one_or_none() or 0
                     message = message_model(
                         message_id=message_id,
                         team_name=team_name,
                         from_member_name=from_member_name,
                         to_member_name=to_member_name,
                         content=stored_content,
-                        timestamp=get_current_time(),
+                        timestamp=max(get_current_time(), latest + 1),
                         broadcast=broadcast,
                         protocol=protocol,
                         meta=json.dumps(meta, ensure_ascii=False) if meta else None,
@@ -306,6 +341,10 @@ class MessageDao:
         async def _op() -> int:
             try:
                 async with self._sessions.write() as session:
+                    latest = (await session.execute(select(func.max(message_model.timestamp)).where(
+                        message_model.team_name == team_name,
+                    ))).scalar_one_or_none() or 0
+                    timestamp = max(now, latest + 1)
                     for (message_id, to_member_name), stored_content in zip(recipients, stored_contents):
                         session.add(
                             message_model(
@@ -314,7 +353,7 @@ class MessageDao:
                                 from_member_name=from_member_name,
                                 to_member_name=to_member_name,
                                 content=stored_content,
-                                timestamp=now,
+                                timestamp=timestamp,
                                 broadcast=False,
                                 protocol=protocol,
                                 is_read=False,
@@ -360,6 +399,13 @@ class MessageDao:
             result = await session.execute(query)
             rows = result.scalars().all()
 
+        if unread_only:
+            unread_rows = []
+            for row in rows:
+                meta = json.loads(row.meta) if row.meta else {}
+                if meta.get("delivery_feedback", {}).get(to_member_name, {}).get("state") != "merged":
+                    unread_rows.append(row)
+            rows = unread_rows
         return await self._hydrate_rows_off_loop(rows)
 
     async def get_unread_group_members(self, team_name: str) -> List[str]:
@@ -460,6 +506,25 @@ class MessageDao:
         message_model = _get_message_model()
         read_status_model = _get_message_read_status_model()
         async with self._sessions.read() as session:
+            read_result = await session.execute(
+                select(read_status_model).where(
+                    read_status_model.member_name == member_name,
+                    read_status_model.team_name == team_name,
+                )
+            )
+            read_status = read_result.scalar_one_or_none()
+            notification_model = _get_group_notification_model()
+            notified = await session.execute(
+                select(notification_model.message_id, notification_model.consumed_at).where(
+                    notification_model.team_name == team_name,
+                    notification_model.member_name == member_name,
+                )
+            )
+            # message_id -> True while any notification is pending for this member.
+            notifications: dict[str, bool] = {}
+            for item in notified.all():
+                notifications[item.message_id] = notifications.get(item.message_id, False) or item.consumed_at is None
+            pending_ids = [message_id for message_id, pending in notifications.items() if pending]
             query = select(message_model).where(
                 message_model.team_name == team_name,
                 message_model.broadcast.is_(True),
@@ -468,21 +533,15 @@ class MessageDao:
             if from_member_name is not None:
                 query = query.where(message_model.from_member_name == from_member_name)
 
+            if unread_only and read_status is not None and read_status.read_at is not None:
+                query = query.where(
+                    (message_model.timestamp > read_status.read_at)
+                    | self._receiver_routed_clause(session, message_model)
+                    | message_model.message_id.in_(pending_ids)
+                )
             query = query.order_by(message_model.timestamp)
             result = await session.execute(query)
             from openjiuwen.agent_teams.group_chat.handler import group_metadata
-
-            notification_model = _get_group_notification_model()
-            notified = await session.execute(
-                select(notification_model.message_id, notification_model.consumed_at).where(
-                    notification_model.team_name == team_name,
-                    notification_model.member_name == member_name,
-                )
-            )
-            # message_id -> True while any notification of it is still pending for this member.
-            notifications: dict[str, bool] = {}
-            for item in notified.all():
-                notifications[item.message_id] = notifications.get(item.message_id, False) or item.consumed_at is None
 
             rows = []
             # Rows addressed only through a notification ignore the broadcast watermark.
@@ -495,14 +554,6 @@ class MessageDao:
                 if addressed or (meta and row.message_id in notifications):
                     rows.append(row)
 
-            read_result = await session.execute(
-                select(read_status_model).where(
-                    read_status_model.member_name == member_name,
-                    read_status_model.team_name == team_name,
-                )
-            )
-            read_status = read_result.scalar_one_or_none()
-
         if unread_only:
             unread_rows = []
             read_at = read_status.read_at if read_status is not None else None
@@ -510,7 +561,10 @@ class MessageDao:
                 has_pending_notification = notifications.get(row.message_id)
                 after_watermark = read_at is None or row.timestamp > read_at
                 unread_by_watermark = row.message_id in by_watermark and after_watermark
-                if has_pending_notification or unread_by_watermark:
+                feedback_unread = self._feedback_unread(row.meta, member_name)
+                if has_pending_notification or (row.message_id in by_watermark and (
+                    feedback_unread if feedback_unread is not None else unread_by_watermark
+                )):
                     unread_rows.append(row)
             rows = unread_rows
         return await self._hydrate_rows_off_loop(rows)
@@ -644,14 +698,17 @@ class MessageDao:
             .exists()
         )
         stmt = (
-            select(message_model.meta, message_model.from_member_name, TeamMember.member_name, TeamMember.role)
+            select(
+                message_model.meta, message_model.from_member_name,
+                TeamMember.member_name, TeamMember.role, covered_by_watermark.label("covered"),
+            )
             .join(TeamMember, TeamMember.team_name == message_model.team_name)
             .where(
                 message_model.team_name == team_name,
                 message_model.broadcast.is_(True),
                 TeamMember.status.not_in(_UNREAD_EXEMPT_STATUSES),
                 TeamMember.role != "host_managed",
-                ~covered_by_watermark,
+                ~covered_by_watermark | self._receiver_routed_clause(session, message_model),
             )
         )
         if only is not None:
@@ -660,6 +717,9 @@ class MessageDao:
 
         pending: set[str] = set()
         for row in (await session.execute(stmt)).all():
+            unread = self._feedback_unread(row.meta, row.member_name)
+            if unread is False or (unread is None and row.covered):
+                continue
             meta = group_metadata(row)
             if meta:
                 if row.role != "passive_human" and row.member_name in meta["mentions"]:
@@ -725,6 +785,12 @@ class MessageDao:
             if not member:
                 team_logger.error("Member %s not found", member_name)
                 return False
+
+        if message.broadcast and self._feedback_unread(message.meta, member_name) is not None:
+            meta = json.loads(message.meta)
+            meta["delivery_feedback"].setdefault(member_name, {})["handled"] = True
+            message.meta = json.dumps(meta, ensure_ascii=False)
+            return True
 
         if message.broadcast:
             read_result = await session.execute(

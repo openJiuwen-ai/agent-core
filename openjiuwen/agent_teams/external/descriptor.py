@@ -110,6 +110,7 @@ class TeamJoinDescriptor(BaseModel):
     scope: Literal["operator", "member"] = "operator"
     language: str = "cn"
     dispatch_mode: Literal["autonomous", "scheduled"] = "autonomous"
+    enable_message_delivery_modes: bool = False
     enable_member_messaging: bool = False
     max_subtask_depth: int = 0
     teammate_mode: Literal["build_mode", "plan_mode"] = "build_mode"

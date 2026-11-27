@@ -141,6 +141,7 @@ class TeamBackend:
         current_model_provider: str | None = None,
         dispatch_mode: str = "autonomous",
         enable_task_verification: bool = False,
+        enable_message_delivery_modes: bool = False,
         enable_member_messaging: bool = False,
         max_subtask_depth: int = 0,
         enable_fork: bool = False,
@@ -321,6 +322,7 @@ class TeamBackend:
         self._enable_task_verification: bool = enable_task_verification
         # Peer messaging under scheduled dispatch (F_126): static spec gate,
         # read by the tool factory and the prompt builders.
+        self.enable_message_delivery_modes = enable_message_delivery_modes
         self._enable_member_messaging: bool = enable_member_messaging
         # Member subtasks under scheduled dispatch (F_128): static spec gate
         # and depth ceiling in one value.

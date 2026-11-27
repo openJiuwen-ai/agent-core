@@ -55,6 +55,7 @@ async def running_coordination(tmp_path, role):
         infra=SimpleNamespace(messager=messager, team_backend=backend, message_manager=backend.message_manager),
         state=SimpleNamespace(event_listeners=[listener]),
         is_agent_ready=lambda: True,
+        has_in_flight_round=lambda: False,
         has_pending_interrupt=lambda: False,
         deliver_input=AsyncMock(),
         auto_start_member=AsyncMock(return_value=True),

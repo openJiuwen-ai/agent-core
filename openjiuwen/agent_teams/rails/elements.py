@@ -220,7 +220,8 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
         steer_batch_size=inp.steer_batch_size,
         fork_source=inp.fork_source or None,
         # Bind the per-team workspace cache at construction.
-        loader=make_template_loader(backend.workspace_cache if backend is not None else None),
+        loader=make_template_loader(backend.workspace_cache if backend is not None else None,
+            message_delivery_modes=getattr(backend, "enable_message_delivery_modes", False) is True),
         # Same signal the tool factory gates the ``swarmflow`` tool on, so the
         # prompt that describes the mechanism and the tool that runs it appear
         # and disappear together.
@@ -348,7 +349,8 @@ def build_team_plan_mode_rail(params: dict[str, Any], context: Any) -> Any:
         language=inp.language,
         # team_plan_mode / team_plan_agent read evolved workspace values
         # through this loader.
-        loader=make_template_loader(backend.workspace_cache if backend is not None else None),
+        loader=make_template_loader(backend.workspace_cache if backend is not None else None,
+            message_delivery_modes=getattr(backend, "enable_message_delivery_modes", False) is True),
     )
 
 

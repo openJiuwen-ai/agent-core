@@ -65,8 +65,12 @@ def mailbox_handler(messages, host=None):
 
 
 @pytest.mark.asyncio
-async def test_scan_past_ordinary_mail_and_bind_approval_to_tool_id():
-    handler, mailbox, host = mailbox_handler([mail("3"), mail("2", approval=True), mail("1")])
+@pytest.mark.parametrize("mode", [None, "steer", "follow_up"])
+async def test_scan_past_ordinary_mail_and_bind_approval_to_tool_id(mode):
+    newer, approval, older = mail("3"), mail("2", approval=True), mail("1")
+    for message in (newer, approval, older):
+        message.meta = {"private_delivery_mode": mode} if mode else {}
+    handler, mailbox, host = mailbox_handler([newer, approval, older])
     await handler._process_unread_messages("worker")
     reply = host.resume_interrupt.await_args.args[0]
     assert isinstance(reply, InteractiveInput)

@@ -101,6 +101,7 @@ from openjiuwen.agent_teams.harness.snapshot_rail import (
     capture_snapshot,
 )
 from openjiuwen.agent_teams.harness.state import (
+    follow_up_context,
     ActiveRound,
     HarnessInternalState,
     HarnessState,
@@ -228,6 +229,7 @@ class NativeHarness(DeepAgent):
         self._owns_session: bool = False
         self._slow_round_log_after_seconds: float | None = parts.config.completion_timeout
         self._st = HarnessInternalState()
+        self.merge_follow_ups = False
         self._control: asyncio.Queue = asyncio.Queue()
         # Harness-private event bus; consumers subscribe via
         # ``subscribe(on_state=, on_round=)``. Metrics/logging off — these fire
@@ -755,6 +757,18 @@ class NativeHarness(DeepAgent):
         await self._control.put(_CmdSend(msg=msg, ack=ack, require_pending_interrupt=require_pending_interrupt))
         return await ack
 
+    def leader_stop(self) -> dict | None:
+        """Return the persisted explicit-stop barrier, outside rollback state."""
+        if not (self.merge_follow_ups):
+            return None
+        value = self._session.get_state("team_leader_stop") if self._session is not None else None
+        return value if isinstance(value, dict) and value else None
+
+    def set_leader_stop(self, marker: dict | None) -> None:
+        """Only the team mailbox may release this barrier for a new leader input."""
+        if self._session is not None:
+            self._session.update_state({"team_leader_stop": marker})
+
     async def abort(self, *, immediate: bool = False) -> None:
         """Abort the current round; the harness settles to IDLE.
 
@@ -1036,6 +1050,9 @@ class NativeHarness(DeepAgent):
 
     async def _on_send(self, cmd: _CmdSend) -> None:
         """Route a send according to current phase."""
+        if self.leader_stop() is not None:
+            self._ack(cmd.ack, None)
+            return
         if cmd.require_pending_interrupt:
             if cmd.ack.done():
                 return
@@ -1110,10 +1127,14 @@ class NativeHarness(DeepAgent):
             if msg.immediate and active is not None:
                 # Steer the active round via the shared steering queue that the
                 # executor drains before the next inner model call.
-                self._push_steer(
-                    msg.content,
-                    run_context=msg.run_context,
-                )
+                try:
+                    self._steer_with_follow_ups(msg)
+                except Exception as exc:
+                    # A rejected input must not terminate the running worker.
+                    logger.exception("[NativeHarness] steering admission failed; input remains retryable")
+                    if not cmd.ack.done():
+                        cmd.ack.set_exception(exc)
+                    return
             else:
                 # Keep one FIFO for all deferred inputs so different contexts
                 # cannot overtake same-context messages queued before them.
@@ -1163,6 +1184,10 @@ class NativeHarness(DeepAgent):
           otherwise the started iteration (LLM + tools) runs to completion and
           the loop exits at the following model-call boundary.
         """
+        if cmd.immediate and (self.merge_follow_ups) and self._session is not None:
+            self._drain_follow_ups_discard(self._session)
+            if self.leader_stop() is not None:
+                await self._session.commit()
         phase = self._st.phase
         if phase is HarnessState.IDLE:
             self._ack(cmd.ack, None)
@@ -1190,11 +1215,15 @@ class NativeHarness(DeepAgent):
             await self._rollback_to_snapshot(
                 active.last_iter_snapshot or active.pre_round_snapshot,
             )
+            if (self.merge_follow_ups) and self._session is not None:
+                self._drain_follow_ups_discard(self._session)
             self._reset_coordinator()
             await self._emit_round_aborted(active.round_id, "abort")
             await self._emit_round("aborted", active.round_id)
             self._st.active = None
             await self._transition(HarnessState.IDLE)
+            if self.leader_stop() is not None and self._session is not None:
+                await self._session.commit()
         else:
             # Graceful: PhaseSnapshotRail force-finishes the loop at a model-call
             # boundary; _on_round_done sees ``graceful_abort`` and goes IDLE
@@ -1282,6 +1311,9 @@ class NativeHarness(DeepAgent):
         context without appending a new user turn, and keeps that query as
         ``original_query`` so a task-plan continuation can still reuse it.
         """
+        if self.leader_stop() is not None:
+            self._ack(cmd.ack, None)
+            return
         phase = self._st.phase
         if phase is HarnessState.PAUSED:
             query = self._st.paused_query or ""
@@ -1384,7 +1416,7 @@ class NativeHarness(DeepAgent):
 
         # Graceful abort: the round finished; the user asked to stop. Drop any
         # queued follow-ups and go IDLE.
-        if was_graceful:
+        if was_graceful or self.leader_stop() is not None:
             self._drain_follow_ups_discard(session)
             await self._transition(HarnessState.IDLE)
             return
@@ -1582,6 +1614,8 @@ class NativeHarness(DeepAgent):
             The started goal round, or None when no attempt is due. The caller
             announces the round and must not go idle.
         """
+        if self.leader_stop() is not None:
+            return None
         manager = self.goal_manager
         session = self._session
         if manager is None or session is None:
@@ -1976,13 +2010,39 @@ class NativeHarness(DeepAgent):
     # Task-loop bridge helpers
     # ------------------------------------------------------------------
 
+    def _steer_with_follow_ups(self, msg):
+        # The supervisor already owns and serializes this FIFO. Keep its inputs
+        # until steering succeeds; no mailbox writes or second receipt protocol.
+        if not self.merge_follow_ups or not isinstance(msg.content, str):
+            self._push_steer(msg.content, run_context=msg.run_context)
+            return
+        if msg.run_context is None:
+            for content in self._drain_pending_follow_ups(self._session) or []:
+                self._st.pending_queue.append(InboxMessage(
+                    seq=self._st.next_seq(), content=content, immediate=False,
+                ))
+        queued = []
+        for item in self._st.pending_queue:
+            if item.run_context != msg.run_context or not isinstance(item.content, str):
+                break
+            queued.append(item)
+        if queued:
+            content = follow_up_context([item.content for item in queued], msg.content)
+            if not self._push_steer(content, run_context=msg.run_context):
+                raise RuntimeError("Steering input queue is unavailable")
+            for _ in queued:
+                self._st.pending_queue.popleft()
+            return
+        if not self._push_steer(msg.content, run_context=msg.run_context):
+            raise RuntimeError("Steering input queue is unavailable")
+
     def _push_steer(
         self,
         content: str,
         *,
         run_context: RunContext | None = None,
-    ) -> None:
-        """Push a steering message into the shared steering queue."""
+    ) -> bool:
+        """Report acceptance into the shared queue, not model consumption."""
         handler = self.event_handler
         if handler is not None and handler.interaction_queues is not None:
             handler.interaction_queues.push_steer(
@@ -1991,6 +2051,8 @@ class NativeHarness(DeepAgent):
                     run_context=run_context,
                 )
             )
+            return True
+        return False
 
     def _drain_pending_follow_ups(self, session: Session) -> list[str] | None:
         """Drain every queued follow-up as the next round's batch of inputs.
