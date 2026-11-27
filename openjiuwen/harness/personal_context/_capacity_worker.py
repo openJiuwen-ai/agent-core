@@ -17,11 +17,15 @@ def serve(startup_seconds: float) -> None:
     # Agent imports may log to stdout. Keep them off this private JSON stream.
     sys.stdout = sys.stderr
     deadline = [time.monotonic() + startup_seconds]
+    active_state = [None]
 
     def watchdog():
         while True:
             current = deadline[0]
-            if current is not None and time.monotonic() >= current:
+            publication_pending = (
+                active_state[0] is not None and _publication_waiting(active_state[0])
+            )
+            if publication_pending or (current is not None and time.monotonic() >= current):
                 # A stuck filesystem operation cannot defer its own deadline.
                 os.kill(os.getpid(), signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
             time.sleep(0.005 if current is not None else 0.05)
@@ -33,7 +37,7 @@ def serve(startup_seconds: float) -> None:
     if package_root not in sys.path:
         sys.path.append(package_root)
     from openjiuwen.harness.personal_context import context_capacity as capacity
-    from openjiuwen.harness.personal_context._capacity_commit import commit
+    from openjiuwen.harness.personal_context._capacity_commit import _publication_waiting, commit
 
     def send(message):
         output.write(json.dumps(message) + "\n")
@@ -48,6 +52,7 @@ def serve(startup_seconds: float) -> None:
             # Snapshot validation remains under the overall job budget. The
             # short watchdog applies only when entering the publication lock.
             job_deadline[0] = min(deadline, time.monotonic() + capacity.COMMIT_LOCK_SECONDS)
+            active_state[0] = Path(plan["lock"]).parent
             send({"event": "commit_started"})
 
         try:
@@ -65,12 +70,14 @@ def serve(startup_seconds: float) -> None:
         try:
             request = json.loads(line)
             deadline[0] = request["deadline"]
+            active_state[0] = Path(request["home"]) / "state"
             result = capacity.maintain_capacity(
                 Path(request["home"]), limit_bytes=request["limit_bytes"], deadline=request["deadline"],
                 commit_candidate=commit_in_process,
             )
         except Exception as exc:
             result = {"status": "failed", "reason": type(exc).__name__}
+        active_state[0] = None
         deadline[0] = None
         send({"result": result})
 
