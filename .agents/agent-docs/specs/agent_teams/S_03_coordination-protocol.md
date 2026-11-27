@@ -20,7 +20,7 @@ author_email: chengshuo5@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/coordination/` |
-| 最近一次修订日期 | 2026-11-26 |
+| 最近一次修订日期 | 2026-11-27 |
 | 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md`、`F_14_human-agent-team-event-rendering.md`、`F_65_runtime-idle-clock-stall-nudge.md`、`F_74_leader-member-activity-and-team-idle.md`、`F_81_disband-requires-explicit-intent.md`、`F_120_autonomous-completion-summary-and-note.md`、`F_121_autonomous-leader-quiet-board-events.md`、`F_129_task-revision-and-staleness.md`（调度模式 `TASK_UPDATED` 不再 steer、自主模式只触发任务修改告知；投递与指派通知记下执行者已看到的任务版本） |
 
 ## 范围 / 边界
@@ -284,7 +284,7 @@ class BaseCoordinationHandler:
 - leader 空闲、任务板非空且任务均为终态、成员均处于 settled 状态时，若未读阻塞完成，可定向恢复无活跃或启动中 runtime 的 `STOPPED` 同进程 Native 成员。该成员的未读必须全是当前 leader 的合法直达审批。
 - 仅使用原成员无在途回合时保存的精确 InMemory 快照，核对原 checkpointer 实例、Team、成员、child session 与 checkpoint agent ID，并确认原成员已退出。leader 会话换绑或释放后，旧凭据失效。
 - 恢复资格与 `STOPPED → RESTARTING` 在同一 write/session 事务中确认：先占用成员行，再核对未读直达邮件仍为已验证的 leader 审批集合，并沿用广播水位、群提及和群通知的未读规则；资格变化则回滚，不创建 runtime。事务提交结果在重复取消下仍须确定后再处理状态归属。
-- 每个成员每轮至多实际接管一次。资格失效且未接管时，仅释放本 task 仍持有的调度预约；成功接管或启动失败保留本轮尝试记录。接管成功后、READY 前到达的普通输入，继续按正常恢复收件语义处理。装载快照并完成订阅后，以 `RESTARTING → READY` 接管，再开放邮箱。暂停或停止时先关闭入口，取消并等待恢复任务退出，再回收实例。启动失败或取消只撤销本次尝试写入的状态。
+- 每个成员每轮至多实际接管一次。资格失效且未接管时，仅释放本 task 仍持有的调度预约；成功接管或启动失败保留本轮尝试记录。接管成功后、READY 前到达的普通输入，继续按正常恢复收件语义处理。装载快照并完成订阅后，以 `RESTARTING → READY` 接管，再开放邮箱。暂停或停止时先关闭入口，取消并等待恢复任务退出，再回收实例。启动失败或取消只撤销本次尝试写入的状态。 READY 写入的结果确认同样抵抗重复取消：先记录实际结果再传播取消，不继续发布 READY 状态或开放邮箱；等待写入结果可使停止等待超过外层超时预算，仅保证该结果确认窗口。
 - 收件人按原 `tool_call_id` 处理回执。确认无匹配时才消费旧回执。状态不可读、归属不明或仍有在途回合时保留未读。完成门禁和关流前审批复查继续生效。
 
 ### CoordinationKernel
