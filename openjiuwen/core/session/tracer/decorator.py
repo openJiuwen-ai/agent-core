@@ -221,10 +221,17 @@ def _make_trace_stream_wrap_handler(
             final_usage = None
             async for item in call_next(*args, **call_kwargs):
                 if invoke_type == InvokeType.LLM:
-                    now = time.monotonic()
-                    if first_chunk_at is None:
-                        first_chunk_at = now
-                    last_chunk_at = now
+                    # Only chunks that carry model output advance the timing
+                    # window (same semantics as Model.stream's timing backfill):
+                    # role-only deltas and usage-only/finish-only frames would
+                    # otherwise inflate TTFT and inter-token latency. Items
+                    # without the probe (plain messages, custom models) keep
+                    # the every-item legacy window.
+                    if not hasattr(item, "carries_output_token") or item.carries_output_token():
+                        now = time.monotonic()
+                        if first_chunk_at is None:
+                            first_chunk_at = now
+                        last_chunk_at = now
                     chunk_count += 1
                     # Usage-only final frame: keep the freshest snapshot seen.
                     if getattr(item, "usage_metadata", None) is not None:

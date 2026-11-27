@@ -42,7 +42,6 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_REQUEST_TOP_P,
     GEN_AI_RESPONSE_FINISH_REASONS,
     GEN_AI_RESPONSE_MODEL,
-    GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK,
     GEN_AI_SYSTEM,
     GEN_AI_SYSTEM_VALUE,
     GEN_AI_TOOL_CALL_ID,
@@ -51,8 +50,12 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
     OJ_GEN_AI_METADATA,
+    OJ_GEN_AI_RESPONSE_TIME_TO_FIRST_TOKEN_MS,
     OJ_GEN_AI_TRACE_NAME,
     OJ_GEN_AI_USER_ID,
+    OJ_GEN_AI_USAGE_INPUT_COST,
+    OJ_GEN_AI_USAGE_OUTPUT_COST,
+    OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_LLM_PREV_MESSAGE_COUNT,
 )
 from tests.conftest_otel import _EXPORTER, _OTEL_TRACER
@@ -606,7 +609,7 @@ class TestOtelRailEndToEnd:
                     model_name="test-model",
                     input_tokens=10,
                     output_tokens=20,
-                    first_token_time="0.42",
+                    ttft_seconds=0.42,
                     input_cost=0.1,
                     output_cost=0.2,
                     total_cost=0.3,
@@ -642,9 +645,12 @@ class TestOtelRailEndToEnd:
             assert llm_span.attributes[GEN_AI_RESPONSE_MODEL] == "test-model"
             assert llm_span.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 10
             assert llm_span.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 20
-            # Cost stays business data: usage carries it, the span must not.
-            assert "openjiuwen.gen_ai.usage.total_cost" not in llm_span.attributes
-            assert llm_span.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.42)
+            # Provider-reported costs surface on the span when positive;
+            # TTFT rides the project key in milliseconds.
+            assert llm_span.attributes[OJ_GEN_AI_USAGE_INPUT_COST] == pytest.approx(0.1)
+            assert llm_span.attributes[OJ_GEN_AI_USAGE_OUTPUT_COST] == pytest.approx(0.2)
+            assert llm_span.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == pytest.approx(0.3)
+            assert llm_span.attributes[OJ_GEN_AI_RESPONSE_TIME_TO_FIRST_TOKEN_MS] == pytest.approx(420.0)
             # Hotfix keeps the frozen gen_ai.system alongside the standard key.
             assert llm_span.attributes[GEN_AI_PROVIDER_NAME] == GEN_AI_SYSTEM_VALUE
             assert llm_span.attributes[GEN_AI_SYSTEM] == GEN_AI_SYSTEM_VALUE

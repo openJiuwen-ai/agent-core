@@ -842,3 +842,41 @@ class TestDecator:
         await wrapped.invoke([BaseMessage(role="user", content="hi")])
 
         assert results[0][2]["instance_info"]["class_name"] == "3f2b8c1e-uuid"
+
+    async def test_decorate_model_stream_framing_chunks_do_not_advance_window(self):
+        """Chunk streams: only output-bearing chunks advance the timing window
+        (PR-501 sync). A role-only delta seconds before the first content
+        chunk must not inflate TTFT; plain messages without the probe keep
+        the legacy every-item window."""
+        import asyncio
+
+        from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata
+        from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+
+        class _ChunkStreamModel:
+            def __init__(self):
+                self.config = MagicMock()
+
+            async def stream(self, messages, **kwargs):
+                # Role-only delta arrives immediately; real output 50ms later.
+                yield AssistantMessageChunk(role="assistant", content="")
+                await asyncio.sleep(0.05)
+                yield AssistantMessageChunk(
+                    content="done",
+                    usage_metadata=UsageMetadata(input_tokens=10, output_tokens=7),
+                )
+
+            async def invoke(self, messages, **kwargs):
+                return AssistantMessage(content="all-at-once")
+
+        results = []
+        mocked_model = decorate_model_with_trace(
+            _ChunkStreamModel(), self._tpot_mock_env(results)
+        )
+        consumed = [item async for item in mocked_model.stream([BaseMessage(role="user", content="hi")])]
+        assert len(consumed) == 2
+        usage = results[1][2]["outputs"]["usage_metadata"]
+        # The window advanced at the content chunk, not the role-only frame:
+        # TTFT covers the 50ms wait for real output. Legacy every-item
+        # behavior stamped the framing frame immediately and reported ~0.
+        assert usage["ttft_seconds"] >= 0.04

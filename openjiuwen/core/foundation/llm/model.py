@@ -180,6 +180,15 @@ class Model:
         # copies the context, so an id bound inside a chunk callback would be
         # gone by the time the next chunk arrives. See ``call_scope``.
         with LlmCallScope():
+            # Capture the dispatch instant before the client opens the
+            # connection: the first ``__anext__`` blocks until response
+            # headers arrive, so a timestamp taken after ``stream()`` returns
+            # would already have lost the connect + time-to-first-byte leg of
+            # TTFT. ``time.perf_counter()`` (not ``monotonic``) because these
+            # are sub-second latency measurements -- Windows' monotonic clock
+            # ticks at 64Hz and would zero short streams -- and only
+            # differences within one process are meaningful here.
+            dispatch_at = time.perf_counter()
             stream_iterable = self._client.stream(
                 messages=messages,
                 stop=stop,
@@ -198,61 +207,129 @@ class Model:
             chunk_count = 0
             effective_model_name = model or getattr(self.model_config, "model_name", None)
 
-            while True:
-                stage = "first_chunk" if chunk_count == 0 else "idle_chunk"
-                next_timeout = first_chunk_timeout if chunk_count == 0 else idle_timeout
+            # Stream timing collection (mirrors the Java CallbackIterator):
+            # first/last output-bearing chunk, first/last reasoning fragment,
+            # and the latest usage object, backfilled onto that usage when the
+            # stream ends so every downstream consumer -- ReActAgent, the
+            # tracer decorator, the observability rail -- reads the values off
+            # the response it already holds.
+            first_token_at = None
+            last_token_at = None
+            reasoning_first_at = None
+            reasoning_last_at = None
+            last_usage = None
+            latency_backfilled = False
 
-                try:
-                    if next_timeout is None:
-                        chunk = await stream_iterator.__anext__()
-                    else:
-                        chunk = await asyncio.wait_for(stream_iterator.__anext__(), timeout=next_timeout)
-                except StopAsyncIteration:
-                    break
-                except asyncio.TimeoutError as exc:
-                    close = getattr(stream_iterator, "aclose", None) or getattr(stream_iterable, "aclose", None)
-                    if callable(close):
-                        await close()
+            def _backfill_latency() -> None:
+                """Stamp TTFT, inter-token latency, total latency and reasoning
+                duration onto the last observed usage object.
 
-                    now = time.monotonic()
-                    total_elapsed_seconds = now - started_at
-                    wait_elapsed_seconds = now - (started_at if chunk_count == 0 else last_chunk_at)
-                    timeout_seconds = next_timeout if next_timeout is not None else 0
-                    model_provider = getattr(self.model_client_config, "client_provider", None)
-                    elapsed_label = "first_chunk_elapsed" if chunk_count == 0 else "idle_elapsed"
-                    error_detail = (
-                        f"stream frame timeout: stage={stage}, timeout={timeout_seconds}s, "
-                        f"chunk_count={chunk_count}, {elapsed_label}={wait_elapsed_seconds:.2f}s, "
-                        f"total_elapsed={total_elapsed_seconds:.2f}s, "
-                        f"model={effective_model_name or ''}"
-                    )
-                    from openjiuwen.core.runner.callback.events import LLMCallEvents
-                    await trigger(
-                        LLMCallEvents.LLM_CALL_ERROR,
-                        model_name=effective_model_name,
-                        model_provider=model_provider,
-                        is_stream=True,
-                        error=exc)
-                    llm_logger.error(
-                        "LLM stream timeout.",
-                        event_type=LogEventType.LLM_CALL_ERROR,
-                        model_name=effective_model_name,
-                        model_provider=model_provider,
-                        tools=tools,
-                        temperature=temperature,
-                        top_p=top_p,
-                        max_tokens=max_tokens,
-                        is_stream=True,
-                        exception=error_detail
-                    )
-                    raise build_error(
-                        StatusCode.MODEL_CALL_FAILED,
-                        error_msg=f"LLM stream timeout: {error_detail}"
-                    ) from exc
+                Usage normally arrives only on the final chunk, so the token
+                time metrics can only be computed once the stream completes.
+                Missing measurements stay ``None`` instead of being written as
+                zero: zero is itself a legitimate measurement, and conflating
+                the two would corrupt downstream aggregation.
+                """
+                nonlocal latency_backfilled
+                if latency_backfilled:
+                    return
+                latency_backfilled = True
+                end_at = time.perf_counter()
+                if last_usage is None:
+                    return
+                # Total latency covers the whole call and is measurable even
+                # when no output chunk ever arrived (an early finish with
+                # usage only), so it is not gated on first_token_at.
+                if last_usage.total_latency <= 0.0:
+                    last_usage.total_latency = round(end_at - dispatch_at, 6)
+                if (reasoning_first_at is not None and reasoning_last_at is not None
+                        and last_usage.reasoning_duration_ms is None):
+                    last_usage.reasoning_duration_ms = round(
+                        (reasoning_last_at - reasoning_first_at) * 1000, 3)
+                if first_token_at is None:
+                    return
+                if last_usage.ttft_seconds is None:
+                    last_usage.ttft_seconds = round(first_token_at - dispatch_at, 6)
+                # Denominator is the provider-reported output token count, not
+                # the chunk count: a single chunk may carry several tokens.
+                if (last_usage.inter_token_latency_ms is None
+                        and last_token_at is not None and last_token_at > first_token_at
+                        and last_usage.output_tokens > 1):
+                    last_usage.inter_token_latency_ms = round(
+                        (last_token_at - first_token_at) / (last_usage.output_tokens - 1) * 1000, 3)
 
-                chunk_count += 1
-                last_chunk_at = time.monotonic()
-                yield chunk
+            try:
+                while True:
+                    stage = "first_chunk" if chunk_count == 0 else "idle_chunk"
+                    next_timeout = first_chunk_timeout if chunk_count == 0 else idle_timeout
+
+                    try:
+                        if next_timeout is None:
+                            chunk = await stream_iterator.__anext__()
+                        else:
+                            chunk = await asyncio.wait_for(stream_iterator.__anext__(), timeout=next_timeout)
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError as exc:
+                        close = getattr(stream_iterator, "aclose", None) or getattr(stream_iterable, "aclose", None)
+                        if callable(close):
+                            await close()
+
+                        now = time.monotonic()
+                        total_elapsed_seconds = now - started_at
+                        wait_elapsed_seconds = now - (started_at if chunk_count == 0 else last_chunk_at)
+                        timeout_seconds = next_timeout if next_timeout is not None else 0
+                        model_provider = getattr(self.model_client_config, "client_provider", None)
+                        elapsed_label = "first_chunk_elapsed" if chunk_count == 0 else "idle_elapsed"
+                        error_detail = (
+                            f"stream frame timeout: stage={stage}, timeout={timeout_seconds}s, "
+                            f"chunk_count={chunk_count}, {elapsed_label}={wait_elapsed_seconds:.2f}s, "
+                            f"total_elapsed={total_elapsed_seconds:.2f}s, "
+                            f"model={effective_model_name or ''}"
+                        )
+                        from openjiuwen.core.runner.callback.events import LLMCallEvents
+                        await trigger(
+                            LLMCallEvents.LLM_CALL_ERROR,
+                            model_name=effective_model_name,
+                            model_provider=model_provider,
+                            is_stream=True,
+                            error=exc)
+                        llm_logger.error(
+                            "LLM stream timeout.",
+                            event_type=LogEventType.LLM_CALL_ERROR,
+                            model_name=effective_model_name,
+                            model_provider=model_provider,
+                            tools=tools,
+                            temperature=temperature,
+                            top_p=top_p,
+                            max_tokens=max_tokens,
+                            is_stream=True,
+                            exception=error_detail
+                        )
+                        raise build_error(
+                            StatusCode.MODEL_CALL_FAILED,
+                            error_msg=f"LLM stream timeout: {error_detail}"
+                        ) from exc
+
+                    chunk_count += 1
+                    last_chunk_at = time.monotonic()
+                    # Timing marks are stamped before the yield: a consumer
+                    # that abandons the stream mid-way still leaves the last
+                    # observed chunk accounted for via the finally backfill.
+                    if chunk.usage_metadata is not None:
+                        last_usage = chunk.usage_metadata
+                    now = time.perf_counter()
+                    if chunk.carries_output_token():
+                        if first_token_at is None:
+                            first_token_at = now
+                        last_token_at = now
+                    if chunk.reasoning_content:
+                        if reasoning_first_at is None:
+                            reasoning_first_at = now
+                        reasoning_last_at = now
+                    yield chunk
+            finally:
+                _backfill_latency()
 
     async def release(
             self,
