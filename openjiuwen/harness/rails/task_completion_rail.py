@@ -605,6 +605,9 @@ class TaskCompletionRail(DeepAgentRail):
         # apply_assessment so we do not burn an LLM call or mutate GoalRecord
         # while the frontend is still answering the interrupt.
         result = getattr(getattr(ctx, "inputs", None), "result", None)
+        if isinstance(result, dict) and result.get("stop_reason") == "cancelled":
+            logger.info("[GoalLifecycle] skip assessment on cancelled iteration")
+            return
         if isinstance(result, dict) and result.get("result_type") == "interrupt":
             logger.info(
                 "[GoalLifecycle] skip assessment on interrupt "

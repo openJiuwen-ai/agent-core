@@ -1,0 +1,758 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Post-collection byte capacity maintenance for published knowledge Markdown."""
+
+from __future__ import annotations
+
+import asyncio
+import concurrent.futures
+import contextlib
+import hashlib
+import json
+import os
+import posixpath
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from functools import partial
+from pathlib import Path
+from typing import Callable
+from urllib.parse import unquote, urlsplit
+
+from filelock import FileLock, Timeout
+
+from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.logging import logger
+from openjiuwen.harness.personal_context.context_pipeline import (
+    _DIRECTORY_DESCRIPTION_END,
+    _DIRECTORY_DESCRIPTION_START,
+    _DIRECTORY_OVERVIEW_END,
+    _DIRECTORY_OVERVIEW_START,
+    _MARKDOWN_LINK,
+    _ROOT_NAVIGATION_END,
+    _ROOT_NAVIGATION_START,
+    _assert_canonical_description_names,
+    _assert_no_symlinks,
+    _assert_path_chain_no_symlinks,
+    _atomic_write,
+    _extended_path,
+    _is_program_description,
+    _managed_block_bounds,
+    _markdown_heading,
+    _markdown_label,
+    _markdown_link_target,
+    _path_is_file,
+    _remove_tree,
+    _replace_managed_block,
+    _split_markdown_destination,
+    _walk_tree_paths,
+)
+from openjiuwen.harness.personal_context.context_usage import (
+    _load_usage, _pages, _reconcile, _save_usage, _state_path, usage_lock,
+)
+from openjiuwen.harness.personal_context.source_markdown import rewrite_markdown_prose
+from openjiuwen.harness.personal_context.context_retirement import cleanup_retired
+
+
+_CAPACITY_WORKERS: dict[Path, dict] = {}
+_CAPACITY_WORKERS_LOCK = threading.Lock()
+_COMMIT_TIMEOUT_SECONDS = 1.0
+COMMIT_LOCK_SECONDS = 0.1
+_WORKER_STARTUP_SECONDS = 15.0
+_MIN_MAINTENANCE_SECONDS = 0.01
+_DEFAULT_MAINTENANCE_SECONDS = 5.0
+
+
+def _forget_worker(home: Path, worker: dict) -> bool:
+    if not _CAPACITY_WORKERS_LOCK.acquire(blocking=False):
+        return False
+    try:
+        if _CAPACITY_WORKERS.get(home) is worker:
+            _CAPACITY_WORKERS.pop(home, None)
+        return True
+    finally:
+        _CAPACITY_WORKERS_LOCK.release()
+
+
+def _reap_worker(home: Path, worker: dict) -> concurrent.futures.Future | None:
+    """Own terminal cleanup even after the original event loop has closed."""
+    worker["closing"] = True
+    worker["io"].shutdown(wait=False, cancel_futures=True)
+    process = worker.get("process")
+    if process is None:
+        launch = worker.get("launch")
+        if launch is not None and not launch.done():
+            return None  # The creating thread still owns any late handle.
+    elif process.poll() is None:
+        try:
+            process.kill()
+        except OSError as exc:
+            logger.warning("PersonalContext capacity termination failed (%s)", type(exc).__name__)
+    completion = concurrent.futures.Future()
+    if process is not None:
+        existing = worker.setdefault("cleanup", completion)
+        if existing is not completion:
+            return existing
+
+    def finish():
+        try:
+            if process is not None:
+                while True:
+                    try:
+                        process.wait(timeout=0.1)
+                        break
+                    except subprocess.TimeoutExpired:
+                        # Retry termination off-loop after each short wait.
+                        with contextlib.suppress(OSError):
+                            process.kill()
+                for stream in (process.stdin, process.stdout):
+                    if stream is not None:
+                        with contextlib.suppress(OSError, ValueError):
+                            stream.close()
+            while not _forget_worker(home, worker):
+                time.sleep(0.01)  # A short registry collision cannot strand a dead worker.
+        except OSError as exc:
+            logger.warning("PersonalContext capacity cleanup failed (%s)", type(exc).__name__)
+        finally:
+            completion.set_result(None)
+
+    try:
+        threading.Thread(target=finish, name="pcs-capacity-cleanup", daemon=True).start()
+    except RuntimeError:
+        if process is not None and worker.get("cleanup") is completion:
+            worker.pop("cleanup", None)
+        completion.set_result(None)
+    return completion
+
+
+async def _stop_worker(home: Path, worker: dict) -> None:
+    completion = _reap_worker(home, worker)
+    if completion is not None:
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(completion)), timeout=0.1)
+    process = worker.get("process")
+    if process is not None and process.poll() is not None:
+        _forget_worker(home, worker)
+
+
+async def _start_worker(home: Path, worker: dict) -> None:
+    ready = worker["ready"]
+    succeeded = False
+    startup_deadline = time.monotonic() + _WORKER_STARTUP_SECONDS
+    try:
+        if worker["closing"]:
+            raise asyncio.CancelledError
+        launch = concurrent.futures.Future()
+        worker["launch"] = launch
+
+        def spawn():
+            if not launch.set_running_or_notify_cancel():
+                return
+            try:
+                if worker["closing"] or worker["loop"].is_closed():
+                    launch.set_result(None)
+                    return
+                process = subprocess.Popen([
+                    # A Windows venv redirector can leave its child alive on
+                    # kill. Target the interpreter with the same import paths.
+                    str(Path(sys.base_prefix) / "python.exe") if os.name == "nt" else sys.executable,
+                    "-X", "utf8", str(Path(__file__).with_name("_capacity_worker.py")),
+                    str(_WORKER_STARTUP_SECONDS), json.dumps(sys.path),
+                ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+                worker["process"] = process
+                # The creating thread owns late handles even if its async
+                # waiter was cancelled or its event loop has already closed.
+                if worker["closing"] or worker["loop"].is_closed():
+                    _reap_worker(home, worker)
+                launch.set_result(process)
+            except Exception as exc:
+                launch.set_exception(exc)
+            finally:
+                if worker["closing"] or worker["loop"].is_closed():
+                    _reap_worker(home, worker)
+
+        # Process creation itself can block inside the OS. Use one owned
+        # daemon, not the normal tools' executor or the event-loop thread.
+        thread = threading.Thread(target=spawn, name="pcs-capacity-start", daemon=True)
+        try:
+            thread.start()
+        except Exception as exc:
+            launch.set_exception(exc)
+            raise
+        # A cancelled launch can still create an OS process. Retain ownership
+        # until its handle arrives, then kill it rather than leaking a writer.
+        process = await asyncio.wait_for(
+            asyncio.shield(asyncio.wrap_future(launch)), timeout=max(0, startup_deadline - time.monotonic()),
+        )
+        if process is None:
+            raise asyncio.CancelledError
+        worker["process"] = process
+        message = await asyncio.wait_for(
+            worker["loop"].run_in_executor(worker["io"], process.stdout.readline),
+            timeout=max(0, startup_deadline - time.monotonic()),
+        )
+        if json.loads(message) != {"ready": True} or worker["closing"]:
+            raise ValueError("capacity worker did not become ready")
+        succeeded = True
+        ready.set_result({"ready": True})
+    except (Exception, asyncio.CancelledError) as exc:
+        if not ready.done():
+            ready.set_result({"ready": False, "reason": type(exc).__name__})
+    finally:
+        if not succeeded:
+            await _stop_worker(home, worker)
+
+
+def _warm_capacity_worker(home: Path) -> dict | None:
+    """Start read-only imports ahead of optional maintenance, without waiting."""
+    if not _CAPACITY_WORKERS_LOCK.acquire(blocking=False):
+        return None
+    try:
+        previous = _CAPACITY_WORKERS.get(home)
+        if previous is not None:
+            process = previous.get("process")
+            if process is not None:
+                if process.poll() is None:
+                    return previous
+            elif previous["startup"] is None or not previous["startup"].done():
+                return previous
+            launch = previous.get("launch")
+            if launch is not None and not launch.done():
+                return previous
+        loop = asyncio.get_running_loop()
+        # None is an explicit pre-start state. A foreign-thread shutdown can
+        # mark it closed before task creation; the late task must not spawn.
+        worker = {"ready": loop.create_future(), "process": None, "busy": False, "closing": False,
+                  "loop": loop, "startup": None, "launch": None,
+                  "io": concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="pcs-capacity-io")}
+        _CAPACITY_WORKERS[home] = worker
+        startup = _start_worker(home, worker)
+        try:
+            worker["startup"] = loop.create_task(startup, name="pcs-capacity-startup")
+        except Exception:
+            startup.close()
+            _CAPACITY_WORKERS.pop(home, None)
+            worker["io"].shutdown(wait=False)
+            raise
+        if worker["closing"]:
+            _cancel_worker_startup(worker)
+        return worker
+    finally:
+        _CAPACITY_WORKERS_LOCK.release()
+
+
+def _cancel_worker_startup(worker: dict) -> None:
+    def cancel():
+        if not worker["ready"].done():
+            worker["ready"].set_result({"ready": False, "reason": "CancelledError"})
+        startup = worker["startup"]
+        if startup is not None and not startup.done():
+            startup.cancel()
+
+    with contextlib.suppress(RuntimeError):
+        worker["loop"].call_soon_threadsafe(cancel)
+
+
+def _cancel_capacity_worker(home: Path, *, only_busy: bool = False) -> None:
+    """Stop owned maintenance for shutdown or normal publication priority."""
+    worker = _CAPACITY_WORKERS.get(home)
+    if worker is None:
+        return
+    if only_busy and (not worker["busy"] or worker["closing"]):
+        return
+    _reap_worker(home, worker)
+    _cancel_worker_startup(worker)
+
+
+async def _close_capacity_worker(home: Path) -> None:
+    worker = _CAPACITY_WORKERS.get(home)
+    if worker is None:
+        return
+    _cancel_capacity_worker(home)
+    await _stop_worker(home, worker)
+
+
+async def run_capacity_maintenance(
+    home: Path, *, limit_bytes: int, timeout: float, cancelled: Callable[[], bool],
+) -> dict[str, object]:
+    """Terminate the entire optional job when its preparation or commit stalls."""
+    skipped = {"status": "failed", "reason": "time_budget"}
+    # Tiny empty runs cannot cover IPC and termination. Leave a ready worker
+    # untouched for a later useful round instead of immediately killing it.
+    if timeout < _MIN_MAINTENANCE_SECONDS or cancelled():
+        return skipped
+    deadline = time.monotonic() + timeout
+    worker = _warm_capacity_worker(home)
+    if worker is None:
+        return {**skipped, "reason": "maintenance_busy"}
+    if not _CAPACITY_WORKERS_LOCK.acquire(blocking=False):
+        return {**skipped, "reason": "maintenance_busy"}
+    try:
+        if worker["busy"] or worker["closing"]:
+            return {**skipped, "reason": "maintenance_busy"}
+        worker["busy"] = True
+    finally:
+        _CAPACITY_WORKERS_LOCK.release()
+    reader = None
+    completed = False
+    warming = True
+    try:
+        # Do not spend foreground collection time waiting for optional imports.
+        # Read-only startup retains its own deadline and can serve a later run.
+        if not worker["ready"].done():
+            return skipped
+        if not worker["ready"].result()["ready"]:
+            return {**skipped, "reason": worker["ready"].result()["reason"]}
+        process = worker["process"]
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or cancelled() or worker["closing"]:
+            return skipped
+        warming = False
+        request = {"home": str(home), "limit_bytes": limit_bytes, "deadline": deadline}
+
+        def send():
+            process.stdin.write((json.dumps(request) + "\n").encode("utf-8"))
+            process.stdin.flush()
+
+        await asyncio.wait_for(worker["loop"].run_in_executor(worker["io"], send), timeout=remaining)
+        stage_deadline = deadline
+        while True:
+            remaining = stage_deadline - time.monotonic()
+            if remaining <= 0 or cancelled():
+                return skipped
+            if reader is None:
+                reader = worker["loop"].run_in_executor(worker["io"], process.stdout.readline)
+            await asyncio.wait({reader}, timeout=min(0.05, remaining))
+            if not reader.done():
+                if remaining <= 0.05:
+                    return skipped
+                continue
+            message = reader.result()
+            reader = None
+            if not message:
+                if time.monotonic() >= stage_deadline:
+                    return skipped
+                return {**skipped, "reason": "worker_exited"}
+            response = json.loads(message)
+            if response.get("event") == "commit_started":
+                stage_deadline = min(deadline, time.monotonic() + COMMIT_LOCK_SECONDS)
+            elif response.get("event") == "commit_finished":
+                stage_deadline = deadline
+            else:
+                completed = True
+                return response["result"]
+    except Exception as exc:
+        return {**skipped, "reason": type(exc).__name__}
+    finally:
+        if reader is not None:
+            reader.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reader
+        current = asyncio.current_task()
+        if not completed:
+            stopping = not warming or cancelled()
+            if current is not None and current.cancelling():
+                stopping = True
+            if stopping:
+                await _stop_worker(home, worker)
+        worker["busy"] = False
+
+
+def _cleanup_capacity_temporary(home: Path) -> None:
+    """Remove only abandoned, marked candidates inside this home's state dir."""
+    state = _state_path(home, "context_usage.json").parent
+    for path in state.glob("context-capacity-*"):
+        try:
+            _assert_no_symlinks(path)
+            marker = path / ".owner.lock"
+            if not path.is_dir() or not marker.is_file():
+                continue
+            with FileLock(marker, timeout=0):
+                pass  # A live preparer retains this lock until its cleanup.
+            shutil.rmtree(_extended_path(path))
+        except (OSError, Timeout, BaseError):
+            continue
+
+
+def _cleanup_unused_baselines(home: Path, deadline: float) -> None:
+    """Drop private arrangement copies only after their physical run has gone."""
+    if time.monotonic() >= deadline:
+        return
+    try:
+        state = _state_path(home, "context_usage.json").parent
+        # Take this snapshot first. A newly created run can only create its
+        # own unique copy after the run directory exists.
+        copies = []
+        for path in state.glob("context-baseline-*"):
+            if time.monotonic() >= deadline:
+                return
+            match = re.fullmatch(r"context-baseline-([0-9a-f]{64})-[0-9a-f]{32}(?:\.[a-z0-9_]+)?", path.name)
+            if match:
+                copies.append((path, match[1]))
+        if not copies:
+            return
+        runs = home / "workspace" / "sandboxes"
+        _assert_path_chain_no_symlinks(runs)
+        active = set()
+        try:
+            services = list(runs.iterdir())
+        except FileNotFoundError:
+            services = []
+        for service in services:
+            if time.monotonic() >= deadline:
+                return
+            _assert_path_chain_no_symlinks(service)
+            for run in service.iterdir():
+                if time.monotonic() >= deadline:
+                    return
+                relative = run.relative_to(runs).as_posix()
+                active.add(hashlib.sha256(relative.encode("utf-8")).hexdigest())
+        for path, prefix in copies:
+            if time.monotonic() >= deadline:
+                return
+            if prefix not in active:
+                try:
+                    _assert_path_chain_no_symlinks(path)
+                    _remove_tree(path)
+                except (OSError, BaseError) as exc:
+                    logger.debug("PersonalContext baseline cleanup deferred (%s)", type(exc).__name__)
+    except (OSError, BaseError) as exc:
+        logger.debug("PersonalContext run enumeration deferred (%s)", type(exc).__name__)
+
+
+def _file_signature(path: Path) -> list[int]:
+    info = _extended_path(path).stat()
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+
+
+def _commit_candidate(
+    manifest: Path, *, deadline: float, cancelled: Callable[[], bool],
+) -> dict[str, object]:
+    """Only the disposable child can mutate published knowledge during GC."""
+    from openjiuwen.harness.personal_context._capacity_commit import _publication_waiting
+
+    remaining = min(_COMMIT_TIMEOUT_SECONDS, deadline - time.monotonic())
+    skipped = {"status": "failed", "reason": "commit_time_budget", "removed": []}
+    if remaining <= 0 or cancelled():
+        return skipped
+    try:
+        state = Path(json.loads(manifest.read_text(encoding="utf-8"))["lock"]).parent
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return {"status": "failed", "reason": type(exc).__name__, "removed": []}
+    if _publication_waiting(state):
+        return skipped
+    end = min(deadline, time.monotonic() + remaining)
+    ready_path = manifest.with_suffix(".ready")
+    process = subprocess.Popen(
+        [sys.executable, str(Path(__file__).with_name("_capacity_commit.py")), str(manifest), str(end),
+         str(COMMIT_LOCK_SECONDS)],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    ready = False
+    try:
+        while True:
+            if not ready and ready_path.exists():
+                ready = True
+                end = min(end, time.monotonic() + COMMIT_LOCK_SECONDS)
+            if cancelled() or time.monotonic() >= end or _publication_waiting(state):
+                process.kill()
+                return skipped
+            try:
+                output, _ = process.communicate(timeout=min(0.005, max(0, end - time.monotonic())))
+                break
+            except subprocess.TimeoutExpired:
+                pass
+        return json.loads(output.splitlines()[-1]) if output else {**skipped, "reason": "commit_failed"}
+    finally:
+        if process.poll() is None:
+            process.kill()
+        # The process owns any maintenance write lock. Termination releases it,
+        # unlike cancelling a Python thread that can later resume an old commit.
+        try:
+            process.wait(timeout=0.1)
+        except subprocess.TimeoutExpired:
+            logger.warning("PersonalContext capacity worker termination is still pending")
+        if process.stdout is not None:
+            process.stdout.close()
+
+
+def _markdown_sizes(root: Path) -> dict[str, int]:
+    _assert_path_chain_no_symlinks(root)
+    _assert_no_symlinks(root)
+    return {
+        page.relative_to(root).as_posix(): _extended_path(page).stat().st_size
+        for page in _walk_tree_paths(root)
+        if page.suffix.casefold() == ".md" and _path_is_file(page)
+    }
+
+
+def _remove_retired_links(markdown: str, relative: str, removed: set[str]) -> str:
+    def remove_link(match):
+        split = _split_markdown_destination(match.group(1))
+        if split is None:
+            return match.group(0)
+        parsed = urlsplit(split[0])
+        if parsed.scheme or parsed.netloc:
+            return match.group(0)
+        target = posixpath.normpath(posixpath.join(posixpath.dirname(relative), unquote(parsed.path)))
+        if target not in removed:
+            return match.group(0)
+        return match.group(0)[1:].partition("](")[0]
+
+    return rewrite_markdown_prose(markdown, partial(_MARKDOWN_LINK.sub, remove_link))
+
+
+def _prepare_capacity_candidate(
+    root: Path, candidate: Path, removed: set[str], sizes: dict[str, int],
+) -> tuple[dict[str, int], set[str]]:
+    """Write only changed navigation and backlinks; never copy retained bodies."""
+    _assert_canonical_description_names(root)
+    _extended_path(candidate).mkdir(parents=True)
+    active = {Path()}
+
+    def retain_directory(directory):
+        active.update((directory, *directory.parents))
+
+    for relative in sizes.keys() - removed:
+        if not _is_program_description(relative):
+            retain_directory(Path(relative).parent)
+    # A topic containing unrelated files must not be retired with its navigation.
+    extended_root = _extended_path(root)
+    directories = set()
+    for current, _directories, files in os.walk(extended_root, followlinks=False):
+        directory = Path(current).relative_to(extended_root)
+        directories.add(directory)
+        if any(Path(name).suffix.casefold() != ".md" for name in files):
+            retain_directory(directory)
+    removed = removed | {
+        (directory / "description.md").as_posix() for directory in directories - active
+    }
+    affected = {parent for relative in removed for parent in Path(relative).parents}
+    labels = {}
+    descriptions = {}
+    replacements = {}
+
+    def replace(relative, markdown):
+        data = markdown.encode("utf-8")
+        _atomic_write(candidate / relative, data)
+        replacements[relative] = len(data)
+
+    for relative in sorted(sizes.keys() - removed):
+        original = _extended_path(root / relative).read_bytes().decode("utf-8")
+        labels[relative] = _markdown_label(_markdown_heading(original, fallback=Path(relative).stem))
+        if _is_program_description(relative):
+            descriptions[relative] = original
+            continue
+        markdown = _remove_retired_links(original, relative, removed)
+        if markdown != original:
+            replace(relative, markdown)
+
+    direct_pages = {directory: [] for directory in active}
+    child_topics = {directory: [] for directory in active}
+    for relative in sizes.keys() - removed:
+        if not _is_program_description(relative):
+            direct_pages[Path(relative).parent].append(relative)
+    for directory in active - {Path()}:
+        child_topics[directory.parent].append(directory)
+    for directory in sorted(active):
+        relative = (directory / "description.md").as_posix()
+        original = descriptions.get(relative, "")
+        heading = "PersonalContext" if directory == Path() else _markdown_label(directory.name)
+        markdown = _remove_retired_links(original, relative, removed) if original.strip() else f"# {heading}\n"
+        if directory in affected:
+            bounds = _managed_block_bounds(
+                markdown, start=_DIRECTORY_DESCRIPTION_START, end=_DIRECTORY_DESCRIPTION_END,
+            )
+            if bounds is not None:
+                begin, finish = bounds
+                markdown = markdown[:begin] + markdown[finish:]
+        rows = []
+        for child in sorted(child_topics[directory]):
+            target = (Path(child.name) / "description.md").as_posix()
+            label = labels.get((child / "description.md").as_posix(), _markdown_label(child.name))
+            rows.append(f"- [{label}]({_markdown_link_target(target)})")
+        for page in sorted(direct_pages[directory]):
+            rows.append(f"- [{labels[page]}]({_markdown_link_target(Path(page).name)})")
+        markdown = _replace_managed_block(
+            markdown, start=_ROOT_NAVIGATION_START, end=_ROOT_NAVIGATION_END,
+            body="## 目录导航\n\n" + "\n".join(rows) if rows else None, default_heading=heading,
+        )
+        if directory in affected or not original.strip():
+            # Reclamation updates structural facts, not semantic summaries or
+            # content signatures that require rereading the whole directory.
+            markdown = _replace_managed_block(
+                markdown, start=_DIRECTORY_OVERVIEW_START, end=_DIRECTORY_OVERVIEW_END,
+                body=("## 目录概览\n\n"
+                      f"- 直属页面：{len(direct_pages[directory])}\n"
+                      f"- 子目录：{len(child_topics[directory])}"), default_heading=heading,
+            )
+        if markdown != original:
+            replace(relative, markdown)
+    return replacements, removed
+
+
+def maintain_capacity(
+    home: Path, *, limit_bytes: int, cancelled: Callable[[], bool] | None = None,
+    deadline: float | None = None, commit_candidate: Callable | None = None,
+) -> dict[str, object]:
+    deadline = deadline if deadline is not None else time.monotonic() + _DEFAULT_MAINTENANCE_SECONDS
+    cancelled = cancelled or (lambda: False)
+    result = _maintain_capacity(home, limit_bytes, cancelled, deadline, commit_candidate or _commit_candidate)
+    if not cancelled():
+        _cleanup_unused_baselines(home, deadline)
+    return result
+
+
+def _maintain_capacity(
+    home: Path, limit_bytes: int, cancelled: Callable[[], bool], deadline: float, commit_candidate: Callable,
+) -> dict[str, object]:
+    """Prepare without a publication lock and try one short, optional commit.
+
+    Above the limit, select a batch toward 60% using existing file sizes. Rebuild
+    navigation once and report the resulting size without iterative fine-tuning.
+    Keep sources, cursors and retired usage records.
+    """
+    _cleanup_capacity_temporary(home)
+    root = home / "workspace" / "context"
+
+    def expired():
+        return cancelled() or time.monotonic() >= deadline
+
+    def cleanup():
+        if expired():
+            return
+        try:
+            cleanup_retired(home, seconds=min(0.02, deadline - time.monotonic()))
+        except Exception as exc:
+            logger.warning("PersonalContext retired cleanup failed (%s)", type(exc).__name__)
+
+    cleanup()
+    # Preparation never owns a lock needed by normal publication or reads.
+    # Capture the publication generation before scanning or preparing any pages.
+    try:
+        generation = _file_signature(root / "description.md")
+    except FileNotFoundError:
+        generation = None
+    sizes = _markdown_sizes(root)
+    before_bytes = sum(sizes.values())
+    result = {
+        "status": "succeeded", "limit_bytes": limit_bytes, "before_bytes": before_bytes,
+        "after_bytes": before_bytes, "removed_count": 0, "oversized_count": 0,
+    }
+    if before_bytes <= limit_bytes:
+        return result
+    if expired():
+        return {**result, "status": "over_limit", "reason": "time_budget"}
+    baseline = {relative: _file_signature(root / relative) for relative in sizes if relative != "description.md"}
+    baseline["description.md"] = generation
+    try:
+        with usage_lock(home).acquire(timeout=0):
+            value = _load_usage(home)  # Invalid current records rebuild from the page scan below.
+    except Timeout:
+        return {**result, "status": "over_limit", "reason": "usage_busy"}
+    pages = _pages(root)
+    _reconcile(value, pages)
+    target_bytes = limit_bytes * 3 // 5
+    # Avoid clearing knowledge when the root itself already exceeds the target.
+    # This is a conservative size check, not an exact minimal-navigation rebuild.
+    root_bytes = sizes.get("description.md", 0)
+    if root_bytes > target_bytes:
+        reason = "navigation_exceeds_capacity" if root_bytes > limit_bytes else "navigation_exceeds_reclaim_target"
+        return {**result, "status": "over_limit", "reason": reason}
+
+    body_paths = [path for path in sizes if not _is_program_description(path)]
+    removed = {path: "page_exceeds_capacity" for path in body_paths if sizes[path] > limit_bytes}
+    oversized_count = len(removed)
+    estimated_bytes = before_bytes - sum(sizes[path] for path in removed)
+
+    def last_used(relative):
+        record = value["pages"][relative]
+        return (max(record["created_at"], record["updated_at"], record["last_read_at"] or 0), relative)
+
+    for relative in sorted((path for path in body_paths if path not in removed), key=last_used):
+        if estimated_bytes <= target_bytes:
+            break
+        removed[relative] = "least_recently_used"
+        estimated_bytes -= sizes[relative]
+    if not removed:
+        return {**result, "status": "over_limit", "reason": "navigation_exceeds_capacity"}
+
+    state = _state_path(home, "context_usage.json").parent
+    with tempfile.TemporaryDirectory(prefix="context-capacity-", dir=state) as temporary, FileLock(
+        Path(temporary) / ".owner.lock", timeout=0,
+    ):
+        candidate = Path(temporary) / "context"
+        replacements, deleted_paths = _prepare_capacity_candidate(root, candidate, set(removed), sizes)
+        after_bytes = (before_bytes - sum(sizes.get(path, 0) for path in deleted_paths)
+                       + sum(size - sizes.get(path, 0) for path, size in replacements.items()))
+        if expired():
+            return {**result, "status": "over_limit", "reason": "time_budget"}
+        fingerprints = None
+        try:
+            fingerprints = _pages(candidate)
+        except BaseError:
+            raise
+        except Exception as exc:
+            logger.warning("PersonalContext capacity usage scan failed (%s)", type(exc).__name__)
+        try:
+            lock = usage_lock(home)
+            lock.acquire(timeout=0)
+        except Timeout:
+            return {**result, "status": "over_limit", "reason": "usage_busy"}
+        try:
+            latest = _load_usage(home)
+            _reconcile(latest, pages)
+            if any(
+                (latest["pages"][path]["last_read_at"] or 0) > (value["pages"][path]["last_read_at"] or 0)
+                for path in removed
+            ):
+                return {**result, "status": "over_limit", "reason": "usage_changed"}
+            if expired():
+                return {**result, "status": "over_limit", "reason": "time_budget"}
+            manifest = Path(temporary) / "commit.json"
+            manifest.write_text(json.dumps({
+                "root": str(root), "candidate": str(candidate),
+                "lock": str(_state_path(home, "context_update.lock")), "baseline": baseline,
+                "replace": sorted(replacements, key=lambda name: name == "description.md"),
+                "remove": sorted(deleted_paths),
+            }), encoding="utf-8")
+            outcome = commit_candidate(manifest, deadline=deadline, cancelled=cancelled)
+            cleanup()
+            actually_removed = set(outcome.get("removed", []))
+            if outcome["status"] != "succeeded":
+                result.update(
+                    status=outcome["status"],
+                    reason=outcome.get("reason", "commit_incomplete"),
+                    removed_count=len(actually_removed & set(removed)),
+                    oversized_count=sum(
+                        relative in actually_removed and reason == "page_exceeds_capacity"
+                        for relative, reason in removed.items()
+                    ),
+                )
+                return result
+            try:
+                stamp = time.time()
+                for relative, reason in removed.items():
+                    if relative in actually_removed:
+                        latest["pages"][relative].update(present=False, removed_at=stamp, removal_reason=reason)
+                # Link repair is maintenance, never a substantive update signal.
+                if fingerprints is not None:
+                    for relative, (fingerprint, _mtime) in fingerprints.items():
+                        latest["pages"][relative]["fingerprint"] = fingerprint
+                _save_usage(home, latest)
+            except BaseError:
+                raise
+            except Exception as exc:
+                logger.warning("PersonalContext capacity usage accounting failed (%s)", type(exc).__name__)
+        finally:
+            lock.release()
+        result.update(after_bytes=after_bytes, removed_count=len(removed), oversized_count=oversized_count)
+        if after_bytes > target_bytes:
+            result.update(status="over_limit", reason="navigation_exceeds_reclaim_target")
+        return result

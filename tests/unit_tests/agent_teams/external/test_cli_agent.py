@@ -272,10 +272,13 @@ async def test_reinvoke_inactivity_timeout_terminates_silent_process(monkeypatch
 async def test_reinvoke_inactivity_timeout_does_not_kill_active_process(monkeypatch):
     """A subprocess that keeps emitting output is NOT killed by inactivity.
 
-    Drives a CLI that prints a line every 0.1s for ~1.5s with a 0.5s
+    Drives a CLI that prints a line every 0.1s for ~4s with a 1.5s
     inactivity window. Because each line resets the deadline, the process runs
     to completion and exits cleanly — the gap between lines never exceeds the
     window, so the watchdog never fires.
+
+    The window is intentionally loose relative to the emit gap so loaded CI
+    (pytest-xdist) cannot false-fire on interpreter startup or drain lag.
     """
     import sys
     from unittest.mock import MagicMock
@@ -287,10 +290,10 @@ async def test_reinvoke_inactivity_timeout_does_not_kill_active_process(monkeypa
         CliAgentAdapter,
     )
 
-    # Emits 15 lines at 0.1s intervals (total ~1.5s), flushing each one.
+    # Emits 40 lines at 0.1s intervals (total ~4s), flushing each one.
     script = (
         "import sys, time\n"
-        "for i in range(15):\n"
+        "for i in range(40):\n"
         "    print(i, flush=True)\n"
         "    time.sleep(0.1)\n"
     )
@@ -308,7 +311,8 @@ async def test_reinvoke_inactivity_timeout_does_not_kill_active_process(monkeypa
         member_name="active-1",
         adapter=adapter,
         env=dict(os.environ),
-        inactivity_timeout_s=0.5,  # < total runtime, but > the 0.1s gap between lines
+        # << total ~4s runtime, >> 0.1s emit gap + CI scheduling slack
+        inactivity_timeout_s=1.5,
     )
     async for _ in runtime._drive({"query": "work"}):
         pass

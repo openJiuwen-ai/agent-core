@@ -522,6 +522,41 @@ async def test_highest_version_and_domain_projection_are_stable(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_startup_can_activate_an_explicit_install_snapshot(tmp_path):
+    root = tmp_path / "installed"
+    selected = _write(root / "selected" / "1.0.0", "selected", "a")
+    _write(root / "late" / "1.0.0", "late", "a")
+    registry, bus = await _registry(root, "a")
+    try:
+        reports = await registry.load_installed((str(selected),))
+
+        assert [item.package_id for item in reports] == ["selected"]
+        assert [item.package_id for item in registry.runtime.active_packages()] == ["selected"]
+    finally:
+        await _close(registry, bus)
+
+
+@pytest.mark.asyncio
+async def test_startup_snapshot_rejects_unmanaged_root_without_rewriting_manifest(tmp_path):
+    root = tmp_path / "installed"
+    unmanaged = _write(tmp_path / "outside" / "demo" / "1.0.0", "demo", "a")
+    manifest_path = unmanaged / "manifest.json"
+    original = manifest_path.read_bytes()
+    registry, bus = await _registry(root, "a")
+    try:
+        reports = await registry.load_installed((unmanaged,))
+
+        assert len(reports) == 1
+        assert reports[0].status == "FAILED"
+        assert reports[0].error.code == "EXTENSION_SOURCE_INVALID"
+        assert registry.runtime.active_packages() == ()
+        assert manifest_path.read_bytes() == original
+        assert "enable" not in json.loads(original)
+    finally:
+        await _close(registry, bus)
+
+
+@pytest.mark.asyncio
 async def test_failed_reload_preserves_shared_effective_version_and_domain(tmp_path):
     root = tmp_path / "installed"
     a, a_bus = await _registry(root, "a")

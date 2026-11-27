@@ -12,35 +12,36 @@ import pytest
 from openjiuwen.core.application.llm_agent.rails.memory_rail import MemoryRail
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.memory.config.config import AgentMemoryConfig
-from openjiuwen.core.single_agent import (
-    AgentCard, ReActAgentConfig, ReActAgent,
-)
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
-    ModelRequestConfig,
     ModelClientConfig,
+    ModelRequestConfig,
     ToolCall,
     ToolMessage,
 )
 from openjiuwen.core.foundation.tool import (
-    LocalFunction, ToolCard,
+    LocalFunction,
+    ToolCard,
+)
+from openjiuwen.core.memory.config.config import AgentMemoryConfig
+from openjiuwen.core.single_agent import (
+    AgentCard,
+    ReActAgent,
+    ReActAgentConfig,
 )
 from openjiuwen.core.single_agent.rail.base import (
-    AgentRail,
     AgentCallbackContext,
     AgentCallbackEvent,
+    AgentRail,
     InvokeInputs,
     ModelCallInputs,
     ToolCallInputs,
 )
-
 from tests.unit_tests.fixtures.mock_llm import (
     MockLLMModel,
     create_text_response,
     create_tool_call_response,
 )
-
 
 # ============================================================
 # Test Rails
@@ -445,7 +446,9 @@ class TestRailExceptionRetry(
         with patch.object(agent, "_get_llm", return_value=mock_llm):
             result = await agent.invoke({"query": "finish on provider failure"})
 
-        assert result == expected
+        # termination_reason is additive; the reason itself must still be pinned
+        assert {k: v for k, v in result.items() if k != "termination_reason"} == expected
+        assert result["termination_reason"] == "force_finish"
 
     async def test_on_tool_exception_can_request_retry(
         self,
@@ -1050,7 +1053,9 @@ class TestForceFinish(
         ):
             result = await agent.invoke({"query": "test"})
 
-        assert result == expected
+        # termination_reason is additive; the reason itself must still be pinned
+        assert {k: v for k, v in result.items() if k != "termination_reason"} == expected
+        assert result["termination_reason"] == "force_finish"
         # LLM should NOT have been called
         assert mock_llm.call_count == 0
 
@@ -1079,7 +1084,9 @@ class TestForceFinish(
         ):
             result = await agent.invoke({"query": "test"})
 
-        assert result == expected
+        # termination_reason is additive; the reason itself must still be pinned
+        assert {k: v for k, v in result.items() if k != "termination_reason"} == expected
+        assert result["termination_reason"] == "force_finish"
         assert not tool_executed["called"]
 
     async def test_after_tool_call_force_finish(self):
@@ -1103,7 +1110,9 @@ class TestForceFinish(
         ):
             result = await agent.invoke({"query": "test"})
 
-        assert result == expected
+        # termination_reason is additive; the reason itself must still be pinned
+        assert {k: v for k, v in result.items() if k != "termination_reason"} == expected
+        assert result["termination_reason"] == "force_finish"
         # Only one LLM call (the one that returned tool_calls)
         assert mock_llm.call_count == 1
 
@@ -1128,7 +1137,9 @@ class TestForceFinish(
         ):
             result = await agent.invoke({"query": "test"})
 
-        assert result == expected
+        # termination_reason is additive; the reason itself must still be pinned
+        assert {k: v for k, v in result.items() if k != "termination_reason"} == expected
+        assert result["termination_reason"] == "force_finish"
         # Only one LLM call (the one that returned tool_calls)
         assert mock_llm.call_count == 1
 
@@ -1211,7 +1222,7 @@ class TestForceFinish(
 
     async def test_rail_decorator_returns_force_finish_payload(self):
         """@rail decorator returns the force_finish payload instead of None."""
-        from openjiuwen.core.single_agent.rail.base import rail, AgentCallbackEvent
+        from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent, rail
 
         class Dummy:
             def __init__(self):
@@ -1239,7 +1250,7 @@ class TestForceFinish(
 
     async def test_rail_decorator_force_finish_dict_not_subscriptable(self):
         """force_finish payload (dict) is returned directly, not None causing subscript errors."""
-        from openjiuwen.core.single_agent.rail.base import rail, AgentCallbackEvent
+        from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent, rail
 
         class Dummy:
             @rail(

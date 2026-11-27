@@ -17,6 +17,9 @@ generated: true
 | [agent_evolving/trajectory](#module-agent_evolving-trajectory) |
 | [agent_evolving/ttse](#module-agent_evolving-ttse) |
 | [agent_teams](#module-agent_teams) |
+| [agent_teams/harness](#module-agent_teams-harness) |
+| [agent_teams/memory](#module-agent_teams-memory) |
+| [agent_teams/observability](#module-agent_teams-observability) |
 | [core.runner.resources_manager](#module-core-runner-resources_manager) |
 | [core.session.tracer](#module-core-session-tracer) |
 | [core/foundation/llm](#module-core-foundation-llm) |
@@ -25,7 +28,9 @@ generated: true
 | [extensions/observability](#module-extensions-observability) |
 | [extensions/tracer_otel](#module-extensions-tracer_otel) |
 | [harness](#module-harness) |
+| [harness/observability](#module-harness-observability) |
 | [harness/rails](#module-harness-rails) |
+| [harness/rails/evolution](#module-harness-rails-evolution) |
 | [harness/subagents](#module-harness-subagents) |
 | [harness/tools/browser_move](#module-harness-tools-browser_move) |
 | [harness_providers](#module-harness_providers) |
@@ -37,6 +42,7 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [F_20261112_1120_goal-assessment-isolation](F_20261112_1120_goal-assessment-isolation.md) | F | Goal 评估调用的观测隔离实施 | alan_cheng | [D-20261112-1120-goal-assessment-isolation](../designs/active/D-20261112-1120-goal-assessment-isolation/design.md) |
+| [F_20261123_1139_trajectory-sequence-store](F_20261123_1139_trajectory-sequence-store.md) | F | 演进轨迹消息序列共享 | zhangzhongteng | 无独立 D：依据用户在本次任务中提供并要求执行的方案，无独立 D 文件。 |
 
 <a id="module-agent_evolving-ttse"></a>
 
@@ -65,7 +71,7 @@ generated: true
 | [F_09_team-stream-logging](agent_teams/F_09_team-stream-logging.md) | F | Team Stream Logging | alan_cheng | 待核实 |
 | [F_100_harness-system-prompt-modes](agent_teams/F_100_harness-system-prompt-modes.md) | F | Codex / DSH 系统提示词保留与替换模式 | alan_cheng | 待核实 |
 | [F_100_swarmflow-verify-fork-progress-events](agent_teams/F_100_swarmflow-verify-fork-progress-events.md) | F | Swarmflow verify/fork 结构化进度事件（VERIFY_STARTED/COMPLETED + fork 父标识） | hwxiajing | 待核实 |
-| [F_100_team-extension-wiring](agent_teams/F_100_team-extension-wiring.md) | F | Team 扩展机制接入（契约层 + 成员侧接线） | zhanglongmin | 待核实 |
+| [F_100_team-extension-wiring](agent_teams/F_100_team-extension-wiring.md) | F | Team 扩展机制接入（契约层 + 成员侧接线） | zhanglongmin | 无独立 D：本仓未维护独立设计文档；方案与取舍记录在本文档正文中（含历次设计缩减） |
 | [F_101_portable-skills-for-external-harnesses](agent_teams/F_101_portable-skills-for-external-harnesses.md) | F | 三方 Harness 的 Portable Skills | alan_cheng | 待核实 |
 | [F_109_send-message-recipient-parameter-split](agent_teams/F_109_send-message-recipient-parameter-split.md) | F | `send_message` 收件参数分离 | alan_cheng | 待核实 |
 | [F_10_temporary-leader-clean-team-stream-end](agent_teams/F_10_temporary-leader-clean-team-stream-end.md) | F | 临时团队 leader clean_team 后确定性结束自身 stream | alan_cheng | 待核实 |
@@ -114,6 +120,9 @@ generated: true
 | [F_20261110_1851_leader-external-harness](F_20261110_1851_leader-external-harness.md) | F | Leader 三方 Harness 插拔实施与决策归档 | alan_cheng | [D-20261110-1839-leader-external-harness](../designs/active/D-20261110-1839-leader-external-harness/design.md) |
 | [F_20261110_1912_view-task-names-the-assignee-and-its-status](F_20261110_1912_view-task-names-the-assignee-and-its-status.md) | F | view_task 点名负责人及其成员状态 | alan_cheng | 无独立 D：小范围渲染与读取增强，方案在会话中与需求方确认，未单独立 D 文档 |
 | [F_20261110_1922_team-goal-mode](F_20261110_1922_team-goal-mode.md) | F | Team Leader 与成员 Goal 模式实施与决策归档 | alan_cheng | [D-20261110-1903-team-goal-mode](../designs/active/D-20261110-1903-team-goal-mode/design.md) |
+| [F_20261117_1752_host-managed-group-member](F_20261117_1752_host-managed-group-member.md) | F | 宿主管理群成员角色 | weichenhao | jiuwenclaw/D-20261116-1201-colleague-swarmchat-membership（非本仓或待定位） |
+| [F_20261121_0906_group-member-notification](F_20261121_0906_group-member-notification.md) | F | 群聊成员通知入口实施记录 | weichenhao | [D-20261121-0832-group-member-notification](../designs/proposals/D-20261121-0832-group-member-notification/design.md) |
+| [F_20261123_1059_external-member-execution-environment](F_20261123_1059_external-member-execution-environment.md) | F | 三方 harness 成员的执行环境注入 | alan_cheng | 无独立 D：无独立 D；把 F_20261104_1720 的成员执行环境扩展到三方 harness 成员，沿用既有 BuildContext 扩展点与 HarnessContext.env 协议字段。 |
 | [F_20_human-agent-mailbox-unread-flip](agent_teams/F_20_human-agent-mailbox-unread-flip.md) | F | Human-Agent Mailbox: Flip Auto-Read Off | alan_cheng | 待核实 |
 | [F_21_external-agent-access](agent_teams/F_21_external-agent-access.md) | F | External Agent Access: skill+cli / mcp Wrappers | alan_cheng | 待核实 |
 | [F_21_team-completion-auto-pause](agent_teams/F_21_team-completion-auto-pause.md) | F | Team Completion Auto-Pause | alan_cheng | 待核实 |
@@ -209,6 +218,30 @@ generated: true
 | [F_98_native-checkpoint-and-endpoint-recovery](agent_teams/F_98_native-checkpoint-and-endpoint-recovery.md) | F | NativeHarness 冷恢复与原端点重连恢复 | alan_cheng | 待核实 |
 | [F_99_dsh-composition-capabilities](agent_teams/F_99_dsh-composition-capabilities.md) | F | DSH 启动能力适配与 SDK 升级 | alan_cheng | 待核实 |
 
+<a id="module-agent_teams-harness"></a>
+
+## agent_teams/harness
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F-20261118-1150-team-document-memory](F_20261118_1150_team-document-memory.md) | F | Team 接入 Jiuwen 文档记忆 | Wang Tao | 无独立 D：依据 D-20261113-2017-jiuwen-memory-team-upgrade 及已确认的跨仓 Team 方案。 |
+
+<a id="module-agent_teams-memory"></a>
+
+## agent_teams/memory
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F-20261118-1150-team-document-memory](F_20261118_1150_team-document-memory.md) | F | Team 接入 Jiuwen 文档记忆 | Wang Tao | 无独立 D：依据 D-20261113-2017-jiuwen-memory-team-upgrade 及已确认的跨仓 Team 方案。 |
+
+<a id="module-agent_teams-observability"></a>
+
+## agent_teams/observability
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261123_1804_observability-export-gate](F_20261123_1804_observability-export-gate.md) | F | 采集需求与导出需求拆分：observability 导出闸门 | hh0205 | 无独立 D：落实 GitCode jiuwenswarm issue 4327 第 3 条（trajectory_ui 不能影响 observability 功能）的 Core 侧能力，无独立 D 文档。 |
+
 <a id="module-core-runner-resources_manager"></a>
 
 ## core.runner.resources_manager
@@ -259,6 +292,8 @@ generated: true
 | [F_20261103_0928_model-group-routed-model](F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | 无独立 D：issue |
 | [F_20261104_1638_drop-llm-span-cost-attrs](F_20261104_1638_drop-llm-span-cost-attrs.md) | F | LLM span 去掉 usage cost 属性（openjiuwen.gen_ai.usage.*_cost） | weixin_39960157 | 无独立 D：纯删减类变更（去掉一处已定属性的发射），无方案级取舍需要独立设计；键的引入背景与命名迁移见 |
 | [F_20261112_1120_goal-assessment-isolation](F_20261112_1120_goal-assessment-isolation.md) | F | Goal 评估调用的观测隔离实施 | alan_cheng | [D-20261112-1120-goal-assessment-isolation](../designs/active/D-20261112-1120-goal-assessment-isolation/design.md) |
+| [F_20261123_1139_trajectory-sequence-store](F_20261123_1139_trajectory-sequence-store.md) | F | 演进轨迹消息序列共享 | zhangzhongteng | 无独立 D：依据用户在本次任务中提供并要求执行的方案，无独立 D 文件。 |
+| [F_20261123_1804_observability-export-gate](F_20261123_1804_observability-export-gate.md) | F | 采集需求与导出需求拆分：observability 导出闸门 | hh0205 | 无独立 D：落实 GitCode jiuwenswarm issue 4327 第 3 条（trajectory_ui 不能影响 observability 功能）的 Core 侧能力，无独立 D 文档。 |
 
 <a id="module-extensions-tracer_otel"></a>
 
@@ -322,9 +357,19 @@ generated: true
 | [F_26_browser-fact-handoff-and-stream-diagnostics](harness/F_26_browser-fact-handoff-and-stream-diagnostics.md) | F | Browser fact handoff and stream diagnostics | ShowHsiang | 待核实 |
 | [F_26_prompt-attachment-event-agent-loop](harness/F_26_prompt-attachment-event-agent-loop.md) | F | Prompt Attachment Agent Loop 事件接入 | yangzequ | 待核实 |
 | [F_27_browser-local-intent-and-reader-decisions](harness/F_27_browser-local-intent-and-reader-decisions.md) | F | Browser local intent continuity and reader decisions | ShowHsiang | 待核实 |
+| [F_27_tool-registration-event-bridge](harness/F_27_tool-registration-event-bridge.md) | F | tool.register 启动工具登记桥接 | 待确认 | 待核实 |
 | [F_28_browser-source-and-local-continuity](harness/F_28_browser-source-and-local-continuity.md) | F | Browser source retention and local continuity after develop integration | ShowHsiang | 待核实 |
+| [F_28_subagent-registration-event-bridge](harness/F_28_subagent-registration-event-bridge.md) | F | agent.register 启动 SubAgent 登记桥接 | 待确认 | 待核实 |
 | [F_29_browser-shared-state-and-source-delivery](harness/F_29_browser-shared-state-and-source-delivery.md) | F | Browser shared-state lifecycle and complete retained-source delivery | ShowHsiang | 待核实 |
 | [F_30_browser-output-and-dispatch-contracts](F_30_browser-output-and-dispatch-contracts.md) | F | Browser output limits and local dispatch contracts | ShowHsiang | 无独立 D：Implements the approved multiversion analysis section 19 using existing browser contracts. |
+
+<a id="module-harness-observability"></a>
+
+## harness/observability
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261123_1804_observability-export-gate](F_20261123_1804_observability-export-gate.md) | F | 采集需求与导出需求拆分：observability 导出闸门 | hh0205 | 无独立 D：落实 GitCode jiuwenswarm issue 4327 第 3 条（trajectory_ui 不能影响 observability 功能）的 Core 侧能力，无独立 D 文档。 |
 
 <a id="module-harness-rails"></a>
 
@@ -333,6 +378,15 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [F-20261107-1700-coding-document-memory](F_20261107_1700_coding-document-memory.md) | F | Coding 文档记忆 Rail | Wang Tao | 无独立 D：依据本会话已确认的跨仓 Coding 文档记忆方案及后续交互轮次复用决定；AutoMemory 保留宿主原有开关。 |
+| [F-20261118-1150-team-document-memory](F_20261118_1150_team-document-memory.md) | F | Team 接入 Jiuwen 文档记忆 | Wang Tao | 无独立 D：依据 D-20261113-2017-jiuwen-memory-team-upgrade 及已确认的跨仓 Team 方案。 |
+
+<a id="module-harness-rails-evolution"></a>
+
+## harness/rails/evolution
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261123_1139_trajectory-sequence-store](F_20261123_1139_trajectory-sequence-store.md) | F | 演进轨迹消息序列共享 | zhangzhongteng | 无独立 D：依据用户在本次任务中提供并要求执行的方案，无独立 D 文件。 |
 
 <a id="module-harness-subagents"></a>
 

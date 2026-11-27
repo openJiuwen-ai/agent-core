@@ -11,6 +11,8 @@ from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from openjiuwen.harness.personal_context._run_token_usage_store import valid_usage_summary
+
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _PersonalContextState = Literal["CREATED", "CONFIGURED", "STARTING", "RUNNING", "STOPPING", "STOPPED", "FAILED"]
 _FetchState = Literal["STOPPED", "STARTING", "RUNNING", "STOPPING", "FAILED"]
@@ -36,6 +38,22 @@ _FETCH_RUN_PROGRESS_FIELDS = {
     "last_error",
 }
 _FETCH_RUN_RESULT_FIELDS = {"created_node_count", "updated_node_count", "no_new_content"}
+
+
+def _validate_capacity_maintenance(value: object) -> None:
+    if not isinstance(value, dict) or value.get("status") not in {"succeeded", "failed", "over_limit"}:
+        raise ValueError("invalid capacity maintenance status")
+    counts = {"limit_bytes", "before_bytes", "after_bytes", "removed_count", "oversized_count"}
+    expected = {"status", "reason"} if value["status"] == "failed" else {"status"} | counts
+    if value["status"] == "over_limit":
+        expected.add("reason")
+    if set(value) != expected:
+        raise ValueError("invalid capacity maintenance fields")
+    if "reason" in value and (not isinstance(value["reason"], str) or not 0 < len(value["reason"]) <= 128):
+        raise ValueError("invalid capacity maintenance reason")
+    for key in counts & value.keys():
+        if type(value[key]) is not int or value[key] < 0:
+            raise ValueError("invalid capacity maintenance count")
 
 
 def _json_size(value: object, *, field_name: str, max_bytes: int | None = None) -> None:
@@ -110,16 +128,22 @@ class PersonalContextStatus(BaseModel):
         value: dict[str, dict[str, object]],
     ) -> dict[str, dict[str, object]]:
         for service_id, progress in value.items():
-            if not service_id or set(progress) not in (
+            if not service_id or set(progress) - {"capacity_maintenance", "token_usage"} not in (
                 _FETCH_RUN_PROGRESS_FIELDS,
                 _FETCH_RUN_PROGRESS_FIELDS | _FETCH_RUN_RESULT_FIELDS,
             ):
                 raise ValueError("fetch run progress has an invalid shape")
+            if "capacity_maintenance" in progress:
+                _validate_capacity_maintenance(progress["capacity_maintenance"])
             if progress["service_id"] != service_id:
                 raise ValueError("fetch run progress service_id does not match its key")
             run_state = progress["run_state"]
             if run_state not in _FETCH_RUN_STATES:
                 raise ValueError("fetch run progress has an invalid run_state")
+            if "token_usage" in progress and (
+                run_state in {"idle", "running", "stopping"} or not valid_usage_summary(progress["token_usage"])
+            ):
+                raise ValueError("fetch run progress has invalid token usage")
             if "created_node_count" in progress:
                 for field in ("created_node_count", "updated_node_count"):
                     count = progress[field]

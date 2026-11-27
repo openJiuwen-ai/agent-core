@@ -26,14 +26,18 @@ from openjiuwen.core.foundation.llm.utils.provider_error import summarize_provid
 from openjiuwen.core.foundation.llm.utils.request_sanitizer import clean_unicode
 from openjiuwen.core.foundation.tool import ToolInfo
 
+# Cap for provider error metadata copied into error text (e.g. OpenRouter's error.metadata.raw).
+_MAX_ERROR_METADATA_CHARS = 500
+
 
 class OpenAIAccountResponsesError(Exception):
     """Raised when Responses API data cannot be prepared or parsed."""
 
-    def __init__(self, message: str, *, status_code: Optional[int] = None):
+    def __init__(self, message: str, *, status_code: Optional[int] = None, body: Any = None):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+        self.body = body
 
     def __str__(self) -> str:
         return self.message
@@ -90,6 +94,8 @@ def build_request_body(
     expanded = expand_nested_extra_body(extra_body)
     if expanded:
         body.update(expanded)
+    if "tool_choice" in body:
+        body["tool_choice"] = _responses_tool_choice(body["tool_choice"])
     _move_response_format_to_text(body)
     return clean_unicode(body)
 
@@ -265,6 +271,9 @@ class ResponsesStreamParser:
         self._model_name = model_name
         # Response item id -> (tool call id, arguments emitted so far).
         self._streamed_calls: dict[str, tuple[str, str]] = {}
+        # Whether a function call was emitted, so the terminal event can report
+        # ``tool_calls`` as Chat Completions does.
+        self._has_function_call = False
 
     def parse(self, event: Optional[dict[str, Any]]) -> Optional[AssistantMessageChunk]:
         """Turn one Responses SSE event into an ``AssistantMessageChunk``.
@@ -293,7 +302,12 @@ class ResponsesStreamParser:
         if event_type == "response.output_item.done":
             return self._done_output_item_chunk(event)
         if event_type in {"response.completed", "response.incomplete"}:
-            return _terminal_stream_chunk(event, event_type=event_type, model_name=self._model_name)
+            return _terminal_stream_chunk(
+                event,
+                event_type=event_type,
+                model_name=self._model_name,
+                has_tool_calls=self._has_function_call,
+            )
         if event_type in {"response.failed", "error"}:
             raise OpenAIAccountResponsesError(_stream_error_message(event))
         return None
@@ -311,6 +325,7 @@ class ResponsesStreamParser:
         initial_arguments = _json_argument_string(item.get("arguments") or "")
         tool_call.arguments = initial_arguments
         self._streamed_calls[item_id] = (tool_call.id or "", initial_arguments)
+        self._has_function_call = True
         return AssistantMessageChunk(content="", tool_calls=[tool_call], finish_reason="null")
 
     def _function_call_arguments_delta_chunk(self, event: dict[str, Any]) -> Optional[AssistantMessageChunk]:
@@ -359,6 +374,7 @@ class ResponsesStreamParser:
                 remainder = tool_call.arguments[len(emitted_arguments):]
             tool_call.name = ""
             tool_call.arguments = remainder
+        self._has_function_call = True
         return AssistantMessageChunk(
             content="",
             tool_calls=[tool_call],
@@ -429,14 +445,24 @@ def raise_for_http_error(response: httpx.Response) -> None:
     if response.status_code < 400:
         return
 
-    message = _http_error_message(response)
-    if not message:
-        body = (response.text or "").strip()
-        if body:
-            message = summarize_provider_error_text(body, status_code=response.status_code)
-    if not message:
-        message = f"OpenAI account Responses request failed with status {response.status_code}."
-    raise OpenAIAccountResponsesError(message, status_code=response.status_code)
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    detail = _http_error_message(payload)
+    if not detail:
+        text = (response.text or "").strip()
+        if text:
+            detail = summarize_provider_error_text(text, status_code=response.status_code)
+    if not detail:
+        detail = "Responses request failed without an error body."
+    # Same shape as the OpenAI SDK's errors in Chat Completions mode, so logs and
+    # text-based classifiers see the HTTP status in both API modes.
+    raise OpenAIAccountResponsesError(
+        f"Error code: {response.status_code} - {detail}",
+        status_code=response.status_code,
+        body=payload,
+    )
 
 
 def message_from_stream_chunk(chunk: Optional[AssistantMessageChunk]) -> AssistantMessage:
@@ -444,8 +470,13 @@ def message_from_stream_chunk(chunk: Optional[AssistantMessageChunk]) -> Assista
     if chunk is None:
         return AssistantMessage(content="", finish_reason="stop")
 
-    finish_reason = "tool_calls" if chunk.tool_calls else chunk.finish_reason
-    if finish_reason == "null":
+    # An explicit cause such as "length" or "content_filter" is kept even when
+    # the message has tool calls: a call cut off by the output limit has
+    # incomplete arguments.
+    finish_reason = chunk.finish_reason
+    if chunk.tool_calls and finish_reason in {"null", "stop"}:
+        finish_reason = "tool_calls"
+    elif finish_reason == "null":
         finish_reason = "stop"
 
     return AssistantMessage(
@@ -603,6 +634,19 @@ def _response_input_tool_call(tool_call: Any, *, fallback_index: int) -> dict[st
     raise OpenAIAccountResponsesError(f"Unsupported tool call type: {type(tool_call).__name__}")
 
 
+def _responses_tool_choice(tool_choice: Any) -> Any:
+    """Flatten a Chat-style named ``tool_choice`` into the Responses shape.
+
+    Chat Completions names the tool as ``{"type": "function", "function": {"name": ...}}``;
+    Responses expects ``{"type": "function", "name": ...}``. Other values are sent unchanged.
+    """
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "function" and "name" not in tool_choice:
+        name = _dict_or_empty(tool_choice.get("function")).get("name")
+        if name:
+            return {"type": "function", "name": str(name)}
+    return tool_choice
+
+
 def _tool_definition(tool: Union[ToolInfo, dict]) -> dict[str, Any]:
     if isinstance(tool, ToolInfo):
         return {
@@ -615,21 +659,34 @@ def _tool_definition(tool: Union[ToolInfo, dict]) -> dict[str, Any]:
     if isinstance(tool, dict):
         function = _dict_or_empty(tool.get("function"))
         if function:
-            return {
-                "type": "function",
-                "name": str(function.get("name") or ""),
-                "description": str(function.get("description") or ""),
-                "parameters": _schema_dict(function.get("parameters") or {}),
-            }
+            return _with_strict(
+                {
+                    "type": "function",
+                    "name": str(function.get("name") or ""),
+                    "description": str(function.get("description") or ""),
+                    "parameters": _schema_dict(function.get("parameters") or {}),
+                },
+                function.get("strict"),
+            )
         if tool.get("type") == "function" and tool.get("name"):
-            return {
-                "type": "function",
-                "name": str(tool.get("name") or ""),
-                "description": str(tool.get("description") or ""),
-                "parameters": _schema_dict(tool.get("parameters") or {}),
-            }
+            return _with_strict(
+                {
+                    "type": "function",
+                    "name": str(tool.get("name") or ""),
+                    "description": str(tool.get("description") or ""),
+                    "parameters": _schema_dict(tool.get("parameters") or {}),
+                },
+                tool.get("strict"),
+            )
 
     raise OpenAIAccountResponsesError(f"Unsupported tool schema: {tool!r}")
+
+
+def _with_strict(definition: dict[str, Any], strict: Any) -> dict[str, Any]:
+    """Keep a caller-set ``strict``: Responses treats a missing one differently from ``false``."""
+    if strict is not None:
+        definition["strict"] = strict
+    return definition
 
 
 def _schema_dict(schema: Any) -> dict[str, Any]:
@@ -727,10 +784,15 @@ def _terminal_stream_chunk(
     *,
     event_type: str,
     model_name: str,
+    has_tool_calls: bool,
 ) -> AssistantMessageChunk:
     response_payload = event.get("response")
     usage = response_payload.get("usage") if isinstance(response_payload, dict) else event.get("usage")
-    finish_reason = "length" if event_type == "response.incomplete" else "stop"
+    finish_reason = _finish_reason(
+        response_payload if isinstance(response_payload, dict) else {},
+        has_tool_calls=has_tool_calls,
+        incomplete=True if event_type == "response.incomplete" else None,
+    )
     return AssistantMessageChunk(
         content="",
         usage_metadata=_usage_from_payload(usage, model_name=model_name),
@@ -754,12 +816,58 @@ def _terminal_stream_chunk(
 
 
 def _stream_error_message(event: dict[str, Any]) -> str:
-    if event.get("message"):
-        return str(event["message"])
-    error = event.get("error")
-    if isinstance(error, dict) and error.get("message"):
-        return str(error["message"])
-    return "OpenAI account Responses stream failed."
+    """Message for an ``error`` / ``response.failed`` event, keeping the provider's error code.
+
+    ``error`` events carry ``code``/``message`` at the top level or under ``error``;
+    ``response.failed`` carries them under ``response.error``.
+    """
+    response = event.get("response")
+    candidates = [event, event.get("error"), response.get("error") if isinstance(response, dict) else None]
+    errors = [item for item in candidates if isinstance(item, dict)]
+    error = next((item for item in errors if item.get("message")), None)
+    message = str(error["message"]) if error else "OpenAI account Responses stream failed."
+    if error:
+        metadata = _error_metadata_summary(error)
+        if metadata:
+            message = f"{message} (metadata: {metadata})"
+    code = (error or {}).get("code") or next((item["code"] for item in errors if item.get("code")), None)
+    return f"Error code: {code} - {message}" if code else message
+
+
+def _error_metadata_summary(*sources: Any) -> Optional[str]:
+    """Bounded one-line JSON of the first provider ``metadata`` found in ``sources``.
+
+    OpenRouter keeps the upstream provider's error here (``metadata.raw``); its own
+    ``message`` is often only "Provider returned error".
+    """
+    metadata = next(
+        (source.get("metadata") for source in sources if isinstance(source, dict) and source.get("metadata")),
+        None,
+    )
+    if isinstance(metadata, dict):
+        # ``raw`` is often the upstream error body as an indented JSON string; decoding it
+        # keeps the summary readable and inside the length cap.
+        metadata = {key: _decoded_json(value) for key, value in metadata.items() if value is not None}
+    if not metadata:
+        return None
+    if isinstance(metadata, (dict, list)):
+        text = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"), default=str)
+    else:
+        text = str(metadata)
+    if len(text) > _MAX_ERROR_METADATA_CHARS:
+        overflow = len(text) - _MAX_ERROR_METADATA_CHARS
+        text = f"{text[:_MAX_ERROR_METADATA_CHARS]}... [truncated {overflow} chars]"
+    return text
+
+
+def _decoded_json(value: Any) -> Any:
+    """Return ``value`` parsed when it is a JSON object or array string, else unchanged."""
+    if not isinstance(value, str) or not value.lstrip().startswith(("{", "[")):
+        return value
+    try:
+        return json.loads(value)
+    except ValueError:
+        return value
 
 
 def _usage_from_payload(usage: Any, *, model_name: str) -> Optional[UsageMetadata]:
@@ -814,26 +922,34 @@ def _response_provider_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     return metadata
 
 
-def _finish_reason(payload: dict[str, Any], *, has_tool_calls: bool) -> str:
-    if has_tool_calls:
-        return "tool_calls"
-    if str(payload.get("status") or "") == "incomplete":
-        return "length"
-    return "stop"
+def _finish_reason(payload: dict[str, Any], *, has_tool_calls: bool, incomplete: Optional[bool] = None) -> str:
+    """Map a Responses outcome to the ``finish_reason`` Chat Completions reports.
+
+    An incomplete response keeps its cause even when it contains tool calls:
+    ``content_filter`` stays ``content_filter``, while ``max_output_tokens``,
+    any other reason or no reason becomes ``length``. A completed response is
+    ``tool_calls`` when it contains tool calls, otherwise ``stop``.
+    ``incomplete`` defaults to the payload's ``status``.
+    """
+    if incomplete is None:
+        incomplete = str(payload.get("status") or "") == "incomplete"
+    if incomplete:
+        details = payload.get("incomplete_details")
+        reason = details.get("reason") if isinstance(details, dict) else None
+        return "content_filter" if reason == "content_filter" else "length"
+    return "tool_calls" if has_tool_calls else "stop"
 
 
-def _http_error_message(response: httpx.Response) -> Optional[str]:
-    try:
-        payload = response.json()
-    except ValueError:
-        return None
-
+def _http_error_message(payload: Any) -> Optional[str]:
     if not isinstance(payload, dict):
         return None
 
     error = payload.get("error")
     if isinstance(error, dict) and error.get("message"):
-        return str(error["message"])
+        message = str(error["message"])
+        # OpenRouter puts upstream errors in error.metadata, its own validation errors in metadata.
+        metadata = _error_metadata_summary(error, payload)
+        return f"{message} (metadata: {metadata})" if metadata else message
     if isinstance(error, str):
         return error
     if isinstance(payload.get("detail"), str):

@@ -1144,6 +1144,110 @@ async def test_skill_rail_multi_dir_with_missing_dirs(tmp_path: Path):
     assert _sorted_skill_names(skill_rail.skills) == ["skill-a", "skill-c"]
 
 
+@pytest.mark.asyncio
+async def test_skill_rail_refresh_ttl_failure_does_not_advance_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A failing refresh must not stamp the TTL, or the whole window skips retry.
+
+    Regression: the timestamp used to be written in ``finally``, so one
+    transient ``refresh_skill_prompt`` error made subsequent ``before_invoke``
+    calls hit the cache path with stale skills until the TTL elapsed.
+    """
+    monkeypatch.setenv("SKILL_REFRESH_TTL_SECONDS", "30")
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+
+    rail = SkillUseRail(skills_dir=str(skills_root), skill_mode="all", include_tools=False)
+    session = _SessionState("session-ttl-fail")
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=session)
+
+    calls = {"n": 0}
+
+    async def _flaky_refresh(ctx):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient scan failure")
+
+    rail.refresh_skill_prompt = _flaky_refresh
+
+    with pytest.raises(RuntimeError):
+        await rail.before_invoke(ctx)
+
+    assert calls["n"] == 1
+    assert rail._last_full_refresh_ts is None
+
+    # Within the 30s window the retry must still run a real refresh instead of
+    # taking the cache path with whatever stale state the failure left behind.
+    del rail.refresh_skill_prompt
+    await rail.before_invoke(ctx)
+    assert [skill.name for skill in rail.skills] == ["invoice-parser"]
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_refresh_ttl_window_skips_scan_until_expiry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Within the TTL window before_invoke reuses the last refresh; expiry rescans."""
+    monkeypatch.setenv("SKILL_REFRESH_TTL_SECONDS", "30")
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+
+    rail = SkillUseRail(skills_dir=str(skills_root), skill_mode="all", include_tools=False)
+    session = _SessionState("session-ttl-window")
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=session)
+
+    calls = {"n": 0}
+    original_refresh = rail.refresh_skill_prompt
+
+    async def _counting_refresh(ctx):
+        calls["n"] += 1
+        await original_refresh(ctx)
+
+    rail.refresh_skill_prompt = _counting_refresh
+
+    await rail.before_invoke(ctx)
+    await rail.before_invoke(ctx)
+    assert calls["n"] == 1
+    assert [skill.name for skill in rail.skills] == ["invoice-parser"]
+
+    # Force the window open without sleeping: a stamp older than the TTL
+    # rescans. Use a relative offset so runners with short uptime still pass.
+    rail._last_full_refresh_ts = time.monotonic() - rail._skill_refresh_ttl_s - 1.0
+    await rail.before_invoke(ctx)
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_refresh_ttl_disabled_when_enable_cache_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """enable_cache=False must force a full refresh even inside the TTL window."""
+    monkeypatch.setenv("SKILL_REFRESH_TTL_SECONDS", "30")
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+
+    rail = SkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+        enable_cache=False,
+    )
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=_SessionState("session-ttl-no-cache"))
+
+    calls = {"n": 0}
+    original_refresh = rail.refresh_skill_prompt
+
+    async def _counting_refresh(ctx):
+        calls["n"] += 1
+        await original_refresh(ctx)
+
+    rail.refresh_skill_prompt = _counting_refresh
+
+    await rail.before_invoke(ctx)
+    await rail.before_invoke(ctx)
+    assert calls["n"] == 2
+
+
 def test_skill_use_rail_apply_skill_budget_no_budget():
     """When no budget is set, all skills are returned unchanged."""
     rail = SkillUseRail(skills_dir="./", skill_mode="all", include_tools=False)

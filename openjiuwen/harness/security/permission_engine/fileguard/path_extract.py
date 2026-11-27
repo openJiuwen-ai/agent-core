@@ -14,7 +14,7 @@ import re
 import shlex
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any
 
 from openjiuwen.harness.security.literal_shell import (
     is_script_interpreter,
@@ -26,6 +26,8 @@ from openjiuwen.harness.security.permission_engine.fileguard.file_tool_specs imp
     FileToolSpec,
     lookup_file_tool_specs,
 )
+from openjiuwen.harness.security.permission_engine.fileguard.shell_paths import FileAction
+from openjiuwen.harness.security.permission_engine.shell_path_context import current_shell_path_analysis
 from openjiuwen.harness.security.permission_engine.toolguard.command_canonicalize import (
     canonicalize_shell_command_for_permission,
 )
@@ -34,14 +36,13 @@ from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import 
 
 logger = logging.getLogger(__name__)
 
-FileAction = Literal["read", "write", "exec"]
-
 _SEPARATOR_RESIDUE_RE = re.compile(r"[;|&]+$")
 
 _PATH_AWARE_COMMANDS = frozenset({
     "cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat",
     "ls", "dir", "type", "del", "erase", "rd", "rmdir", "copy", "move", "md",
     "head", "tail", "more", "less", "vim", "nano", "gedit", "notepad",
+    "test", "[",
     "get-content", "gc",
     "set-content", "add-content", "out-file", "tee-object", "sc",
     "remove-item", "ri", "new-item", "ni",
@@ -65,6 +66,7 @@ _NT_CMD_SWITCH_COMMANDS = frozenset({
 
 _READ_CMDS = frozenset({
     "cat", "ls", "dir", "type", "head", "tail", "more", "less",
+    "test", "[",
     "get-content", "gc",
 })
 _WRITE_CMDS = frozenset({
@@ -80,6 +82,8 @@ _TRANSFER_CMDS = frozenset({"cp", "copy", "mv", "move"})
 _WIN_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _WIN_USERPROFILE_RE = re.compile(r"%USERPROFILE%", re.IGNORECASE)
 _WIN_HOMEDRIVE_HOMEPATH_RE = re.compile(r"%HOMEDRIVE%%HOMEPATH%", re.IGNORECASE)
+# ``$HOME`` / ``${HOME}`` as the whole token or followed by a separator; ``$HOMEDIR`` is another variable.
+_SHELL_HOME_VAR_RE = re.compile(r"^\$(?:HOME|\{HOME\})(?=$|[/\\])")
 
 
 def _is_windows_abs_text(text: str) -> bool:
@@ -142,7 +146,7 @@ def _unglue_home_hidden(path_text: str) -> str:
 
 
 def _expand_home_token(tok: str) -> str:
-    """Expand ``~`` / ``~/`` / ``~\\`` and Windows home env vars to the user home path."""
+    """Expand ``~`` / ``~/`` / ``~\\``, ``$HOME`` / ``${HOME}`` and Windows home env vars to the user home path."""
     t = tok.strip().strip('"').strip("'")
     if not t:
         return t
@@ -150,6 +154,9 @@ def _expand_home_token(tok: str) -> str:
         return str(Path.home())
     if t.startswith(("~/", "~\\", "~.")):
         return _join_home_rest(t[1:])
+    home_var = _SHELL_HOME_VAR_RE.match(t)
+    if home_var:
+        return _join_home_rest(t[home_var.end():])
     expanded = _WIN_HOMEDRIVE_HOMEPATH_RE.sub(lambda _m: Path.home().as_posix(), t)
     expanded = _WIN_USERPROFILE_RE.sub(lambda _m: Path.home().as_posix(), expanded)
     if expanded == t:
@@ -158,7 +165,7 @@ def _expand_home_token(tok: str) -> str:
 
 
 def _looks_like_redirect_target(token: str) -> bool:
-    t = token.strip().strip('"').strip("'")
+    t = _expand_home_token(token)
     if not t or _FD_ALIAS_RE.match(t):
         return False
     if t.startswith("$") or _UNEXPANDED_VAR_RE.search(t):
@@ -302,11 +309,13 @@ def _path_aware_one_segment(
 
     def _append_path_token(tok: str, idx: int, *, require_path_shape: bool) -> None:
         tok = _strip_separator_residue(tok)
-        if not tok or _UNEXPANDED_VAR_RE.search(tok):
+        if not tok:
             return
         if require_path_shape and not _looks_like_path(tok):
             return
         tok = _expand_home_token(tok)
+        if _UNEXPANDED_VAR_RE.search(tok):
+            return
         p = Path(tok)
         win_abs = _is_windows_abs_text(tok)
         if not p.is_absolute() and not (win_abs and os.name != "nt"):
@@ -359,7 +368,8 @@ def _path_aware_one_segment(
         else:
             try:
                 home = Path.home().resolve()
-                results.append((home, "read"))
+                if include_cd_reads:
+                    results.append((home, "read"))
                 new_cwd = home
             except (OSError, RuntimeError):
                 pass
@@ -514,6 +524,8 @@ def extract_accesses_native(
     tool_args: Mapping[str, Any],
     workspace: Path,
     permission_config: Mapping[str, Any] | None = None,
+    *,
+    include_cd_reads: bool = True,
 ) -> list[tuple[Path, FileAction, str]]:
     """Native 抽取：``(path, action, source)``；source 为 ``tool_arg`` / ``shlex``。"""
     out: list[tuple[Path, FileAction, str]] = []
@@ -524,6 +536,16 @@ def extract_accesses_native(
     )
 
     if is_shell_tool(tool_name, shell_tools_from_config(permission_config)):
+        analysis = current_shell_path_analysis(tool_name, tool_args)
+        if analysis is not None:
+            candidates = dict.fromkeys(
+                (entry.path, entry.action, "shell_ast")
+                for entry in analysis.accesses
+                if include_cd_reads or entry.kind == "file_io"
+            )
+            out.extend(candidates)
+            if analysis.coverage == "complete":
+                return out
         workdir = tool_args.get("workdir", "")
         try:
             workdir_resolved = (workspace / str(workdir)).resolve() if workdir else workspace
@@ -540,8 +562,16 @@ def extract_accesses_native(
                 pass
         cmd = str(tool_args.get("command", "") or tool_args.get("cmd", ""))
         literal_enabled = literal_shell_enabled(permission_config, tool_name, tool_args)
-        for p, act in extract_shell_path_accesses(cmd, workdir_resolved, skill_authorization=literal_enabled):
+        for p, act in extract_shell_path_accesses(
+            cmd, workdir_resolved, include_cd_reads=include_cd_reads, skill_authorization=literal_enabled,
+        ):
             out.append((p, act, "shlex"))
+        if analysis is not None:
+            # Compatibility rules remain a floor during partial analysis.
+            unique = {}
+            for path, action, source in out:
+                unique.setdefault((path, action), source)
+            return [(path, action, source) for (path, action), source in unique.items()]
         return out
 
     specs = _specs_for_tool(tool_name)

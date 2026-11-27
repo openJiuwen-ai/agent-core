@@ -44,7 +44,7 @@ from openjiuwen.agent_evolving.trajectory.model import (
     Trajectory,
 )
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
-from openjiuwen.agent_evolving.trajectory.spans import iter_spans, read_tool_call
+from openjiuwen.agent_evolving.trajectory.spans import iter_compact_spans, read_tool_call
 from openjiuwen.agent_evolving.trajectory.team import span_category
 from openjiuwen.agent_evolving.utils import infer_skill_from_texts, parse_top_level_frontmatter
 from openjiuwen.core.common.logging import logger
@@ -117,7 +117,7 @@ def infer_team_skill_from_trajectory(
     """
     skill_tool_payloads: list[Any] = []
     texts: list[str] = []
-    for span in iter_spans(trajectory):
+    for span in iter_compact_spans(trajectory):
         if span_category(span) != "tool":
             continue
         tool_call = read_tool_call(span)

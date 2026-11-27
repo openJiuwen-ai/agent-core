@@ -635,3 +635,18 @@ async def test_start_never_builds_a_team_for_a_non_leader():
     await kernel.start(session)
 
     backend.build_team.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_jiuwen_writes_drain_before_session_release():
+    host = _make_kernel_host()
+    events = []
+    rail = SimpleNamespace(drain=AsyncMock(side_effect=lambda: events.append("drain")))
+    host.resources.harness.find_rails = MagicMock(return_value=[rail])
+    host.session_manager.release_session.side_effect = lambda: events.append("release")
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+    await kernel.pause()
+    await kernel.stop()
+    rail.drain.assert_awaited_once()
+    assert events[0] == "drain" and "release" in events

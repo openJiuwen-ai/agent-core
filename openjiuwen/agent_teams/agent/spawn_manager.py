@@ -44,15 +44,15 @@ if TYPE_CHECKING:
     from openjiuwen.core.session.stream.base import OutputSchema
 
 
-def _template_fields(record: object) -> tuple[dict | None, ExternalCliAgentSpec | None]:
-    """Capability snapshot / external CLI config of a member spawned from an expert template."""
+def _template_fields(record: object) -> tuple[dict | None, ExternalCliAgentSpec | None, dict | None]:
+    """Read a member's capability snapshot, CLI config and template reference together."""
     template = get_member_agent_template(record)
     if template is None:
-        return None, None
+        return None, None, None
     external_cli = None
     if template.external_cli:
         external_cli = ExternalCliAgentSpec.model_validate(template.external_cli)
-    return template.snapshot, external_cli
+    return template.snapshot, external_cli, template.ref
 
 
 class SpawnManager:
@@ -105,7 +105,7 @@ class SpawnManager:
         # The recovery loop also skips it explicitly (see
         # ``RecoveryManager.recover_team``) — one guard per layer, each
         # pointing at the other, so future drift is grep-able (F_14 lesson).
-        if getattr(ctx, "role", None) == TeamRole.PASSIVE_HUMAN:
+        if getattr(ctx, "role", None) in (TeamRole.PASSIVE_HUMAN, TeamRole.HOST_MANAGED):
             team_logger.warning(
                 "[{}] refusing to spawn passive human {}; it has no runtime by design",
                 self._configurator.member_name or "?",
@@ -534,7 +534,7 @@ class SpawnManager:
                 fallback_member_model = candidates[0].to_team_model_config()
 
         permissions_override = get_member_permissions_override(teammate)
-        agent_template_spec, template_external_cli = _template_fields(teammate)
+        agent_template_spec, template_external_cli, agent_template_ref = _template_fields(teammate)
         builtin = get_member_builtin_model(teammate)
         builtin_model = (
             ExternalCliModelConfig(model=builtin.model, effort=builtin.effort) if builtin is not None else None
@@ -567,6 +567,7 @@ class SpawnManager:
             cli_agent=cli_agent,
             goal_enabled=get_member_goal(teammate),
             permissions_override=permissions_override,
+            agent_template_ref=agent_template_ref,
             agent_template_spec=agent_template_spec,
             template_external_cli=template_external_cli,
         )

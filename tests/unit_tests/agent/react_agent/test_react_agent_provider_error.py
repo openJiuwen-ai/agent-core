@@ -9,6 +9,7 @@ import pytest
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import FrameworkError
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, UsageMetadata
+from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -60,28 +61,44 @@ def test_output_limit_without_answer_raises(finish_reason, content) -> None:
     assert exc_info.value.details["output_tokens"] == 8192
 
 
-@pytest.mark.parametrize(
-    "message",
-    [
-        # Truncated answer text: the caller still gets the partial answer.
-        AssistantMessage(content="A partial answer", finish_reason="length"),
-        # A tool call was produced: the loop goes on to execute it.
-        AssistantMessage(
-            content="",
-            finish_reason="length",
-            tool_calls=[ToolCall(type="function", id="call-1", name="lookup", arguments="{}")],
-        ),
-    ],
+_PARTIAL_OUTPUT_LIMIT_MESSAGES = (
+    AssistantMessage(content="A partial answer", finish_reason="length"),
+    AssistantMessage(content="A partial answer", finish_reason="max_tokens"),
+    AssistantMessage(
+        content="",
+        finish_reason="max_tokens",
+        tool_calls=[ToolCall(type="function", id="call-1", name="lookup", arguments="{}")],
+    ),
 )
-def test_output_limit_with_answer_or_tool_call_does_not_raise(message) -> None:
+
+
+@pytest.mark.parametrize("message", _PARTIAL_OUTPUT_LIMIT_MESSAGES)
+def test_output_limit_with_partial_answer_or_tool_call_does_not_raise_without_configured_limit(message) -> None:
     ReActAgent._raise_for_model_response_error(message)
 
 
+@pytest.mark.parametrize("message", _PARTIAL_OUTPUT_LIMIT_MESSAGES)
+def test_configured_output_limit_with_partial_answer_or_tool_call_raises(message) -> None:
+    with pytest.raises(FrameworkError, match="output limit") as exc_info:
+        ReActAgent._raise_for_model_response_error(message, configured_output_limit=True)
+
+    assert exc_info.value.status is StatusCode.MODEL_CALL_FAILED
+
+
 @pytest.mark.asyncio
-async def test_invoke_does_not_return_empty_answer_when_output_limit_hit() -> None:
-    """End to end: the turn fails visibly instead of returning a 'successful' empty answer (#1809)."""
+@pytest.mark.parametrize(
+    ("content", "max_tokens"),
+    [("", None), ("A partial answer", 10)],
+)
+async def test_invoke_does_not_return_incomplete_output_when_output_limit_hit(content, max_tokens) -> None:
+    """A configured output limit must fail visibly, while empty output always fails (#1809)."""
     agent = ReActAgent(card=AgentCard(name="output-limit-test"))
-    agent.configure(ReActAgentConfig(model_name="fake"))
+    model_config = (
+        ModelRequestConfig(model_name="fake", max_tokens=max_tokens)
+        if max_tokens is not None
+        else None
+    )
+    agent.configure(ReActAgentConfig(model_name="fake", model_config_obj=model_config))
     messages = []
     context = MagicMock()
     context.get_messages.side_effect = lambda **_: list(messages)
@@ -104,7 +121,7 @@ async def test_invoke_does_not_return_empty_answer_when_output_limit_hit() -> No
     model = MagicMock()
     model.invoke = AsyncMock(
         return_value=AssistantMessage(
-            content="",
+            content=content,
             reasoning_content="Let me analyse the requirements first..." * 50,
             finish_reason="length",
             usage_metadata=UsageMetadata(input_tokens=100, output_tokens=8192, total_tokens=8292),

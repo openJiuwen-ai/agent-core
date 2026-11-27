@@ -458,6 +458,47 @@ async def test_goal_interrupt_skips_assessment() -> None:
     assert record.status is GoalStatus.ACTIVE
 
 
+@pytest.mark.asyncio
+async def test_cancelled_goal_round_does_not_block_goal() -> None:
+    """The cancellation cleanup callback must not assess a goal attempt."""
+    import asyncio
+    from openjiuwen.harness.goal.schema import GoalStatus
+
+    record = GoalRecord.create(session_id="s1", objective="ship it")
+    assessments: list[GoalAssessment] = []
+
+    class _Store:
+        def load(self):
+            return record
+
+    class _Manager:
+        def get_store(self, session_id=None):
+            return _Store()
+
+        async def apply_assessment(self, *, goal_id, revision, assessment):
+            assessments.append(assessment)
+            return record
+
+    rail = TaskCompletionRail()
+    rail.set_goal_manager(_Manager())
+    rail._is_goal_round = True
+    rail._current_goal_id = record.goal_id
+    rail._current_revision = record.revision
+    rail._current_session_id = record.session_id
+
+    inputs = SimpleNamespace(
+        result={"result_type": "error", "stop_reason": "cancelled", "error": "cancelled"},
+        run_context={"goal_id": record.goal_id, "revision": record.revision, "session_id": record.session_id},
+    )
+    ctx = AgentCallbackContext(agent=object(), inputs=inputs)
+    ctx.exception = asyncio.CancelledError()
+
+    await rail.after_task_iteration(ctx)
+
+    assert assessments == []
+    assert record.status is GoalStatus.ACTIVE
+
+
 def test_extract_goal_round_error_requires_thrown_exception() -> None:
     ctx_exc = AgentCallbackContext(agent=object(), inputs=SimpleNamespace(result=None))
     ctx_exc.exception = ValueError("token rejected")

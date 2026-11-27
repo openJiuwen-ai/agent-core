@@ -79,6 +79,48 @@ async def test_leader_spec_build_reaches_the_policy_rail() -> None:
 
 
 @pytest.mark.asyncio
+async def test_native_harness_marks_inner_react_agent_as_team_mode(tmp_path) -> None:
+    from openjiuwen.agent_teams.paths import configure_openjiuwen_home, reset_openjiuwen_home
+
+    configure_openjiuwen_home(tmp_path / "openjiuwen")
+    try:
+        bus = await _ready_bus()
+        spec = _seeded_spec(bus)
+        agent = spec.build()
+
+        assert agent.harness._native._react_agent.is_team_agent is True
+    finally:
+        reset_openjiuwen_home()
+
+
+def test_standalone_native_harness_keeps_inner_react_agent_out_of_team_mode() -> None:
+    from openjiuwen.agent_teams.harness.native_harness import NativeHarness
+    from tests.unit_tests.agent_teams.harness.fixtures import make_spec
+
+    native = NativeHarness(make_spec())
+
+    assert native._react_agent.is_team_agent is False
+
+
+@pytest.mark.asyncio
+async def test_team_mode_survives_inner_react_agent_replacement(tmp_path) -> None:
+    from openjiuwen.agent_teams.paths import configure_openjiuwen_home, reset_openjiuwen_home
+
+    configure_openjiuwen_home(tmp_path / "openjiuwen")
+    try:
+        bus = await _ready_bus()
+        spec = _seeded_spec(bus)
+        agent = spec.build()
+        native = agent.harness._native
+
+        native.set_react_agent(native._create_react_agent())
+
+        assert native._react_agent.is_team_agent is True
+    finally:
+        reset_openjiuwen_home()
+
+
+@pytest.mark.asyncio
 async def test_derive_carries_the_bus_to_inprocess_teammates() -> None:
     """inprocess_spawn configures the teammate with the leader's spec — the
     bus rides into the member factories through the per-member derive."""

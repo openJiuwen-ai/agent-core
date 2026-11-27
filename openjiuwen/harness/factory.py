@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from os import PathLike, getenv
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
@@ -15,7 +15,12 @@ from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode, SysOperation, SysOperationCard
+from openjiuwen.core.sys_operation import (
+    LocalWorkConfig,
+    OperationMode,
+    SysOperation,
+    SysOperationCard,
+)
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.prompts.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
@@ -142,6 +147,37 @@ def _inject_general_purpose_subagent(
     if has_gp:
         return effective_subagents
 
+    effective_subagents.insert(0, build_general_purpose_agent_config(
+        resolved_language=resolved_language,
+        rails=rails,
+        system_prompt=system_prompt,
+        tools=tools,
+        mcps=mcps,
+        model=model,
+        skills=skills,
+        workspace=workspace,
+        sys_operation=sys_operation,
+    ))
+    return effective_subagents
+
+
+def build_general_purpose_agent_config(
+    *,
+    resolved_language: str,
+    rails: Optional[List[AgentRail]],
+    system_prompt: Optional[str],
+    tools: Optional[List[Tool | ToolCard]],
+    mcps: Optional[List[McpServerConfig]],
+    model: Model,
+    skills: Optional[List[str]],
+    workspace: Optional[Workspace] = None,
+    sys_operation: Optional[SysOperation] = None,
+) -> SubAgentConfig:
+    """Build the standard general-purpose sub-agent configuration.
+
+    Hosts may use this public builder when they need to route the resulting
+    config through an event registration path instead of static injection.
+    """
     desc = GENERAL_PURPOSE_AGENT_DESC.get(resolved_language, GENERAL_PURPOSE_AGENT_DESC["cn"])
     # Hosts such as Swarm mount independent authorization rails on child agents.
     gp_rails = [
@@ -151,7 +187,7 @@ def _inject_general_purpose_subagent(
     if not any(isinstance(r, SysOperationRail) for r in gp_rails):
         gp_rails = [SysOperationRail(), *gp_rails]
     gp_rails = gp_rails or None
-    effective_subagents.insert(0, SubAgentConfig(
+    return SubAgentConfig(
         agent_card=AgentCard(name="general-purpose", description=desc),
         system_prompt=system_prompt or "",
         tools=list(tools or []),
@@ -162,8 +198,7 @@ def _inject_general_purpose_subagent(
         workspace=workspace,
         sys_operation=sys_operation,
         restrict_to_work_dir=False,
-    ))
-    return effective_subagents
+    )
 
 
 @dataclass
@@ -183,7 +218,13 @@ class DeepAgentParts:
             in mount order.
         tool_cards: Tool cards to register on the agent's ability manager.
         tool_instances: Concrete tool instances to register on the shared
-            resource manager so their cards become executable.
+            resource manager so their cards become executable. In event mode
+            the selected instances are queued and flushed through
+            ``tool.register``; unselected instances retain the legacy path.
+        event_tool_instances: Optional subset of ``tool_instances`` that must
+            use the event path. ``None`` means all concrete instances use the
+            event path, preserving the direct factory API's event-mode
+            behavior.
         extension_bus: Optional live EventBus used by prompt attachment events;
             it is intentionally not part of ``DeepAgentConfig``.
     """
@@ -192,7 +233,55 @@ class DeepAgentParts:
     rails: List[AgentRail]
     tool_cards: List[ToolCard]
     tool_instances: List[Tool]
+    event_tool_instances: Optional[List[Tool]] = None
     extension_bus: Any = None
+
+
+def _validate_reused_local_sys_operation(
+    sys_operation_obj: SysOperation,
+    *,
+    sysop_id: str,
+    expected_work_config: LocalWorkConfig,
+) -> None:
+    """Reject a registered ``SysOperation`` whose policy differs from the one this build asked for.
+
+    ``sysop_id`` (``"{card.name}_{card.id}"``) is stable across rebuilds, so an
+    entry already registered under it is normally this agent's own earlier
+    instance and is reused as-is. It may instead belong to a sibling sharing the
+    card identity, to a host that registered its own card under that id, or to
+    the winner of a concurrent ``add_sys_operation`` race. Validating the
+    registered operation's mode and ``LocalWorkConfig`` at build time prevents
+    silently running this agent under a conflicting policy instead of
+    ``expected_work_config``.
+
+    Args:
+        sys_operation_obj: The instance found under ``sysop_id``.
+        sysop_id: Registry id the instance was looked up under.
+        expected_work_config: The ``LocalWorkConfig`` this build would register.
+
+    Raises:
+        ValueError: If the instance is not ``OperationMode.LOCAL`` or its
+            ``work_config`` differs from ``expected_work_config``.
+    """
+    remediation = (
+        "Use a distinct AgentCard.id or pass an independently owned "
+        "`sys_operation` configured with the requested policy. To reuse this "
+        "id, have its owner finish tearing down all users of the existing "
+        "registration before removing it and rebuilding."
+    )
+    mode = getattr(sys_operation_obj, "mode", None)
+    if mode != OperationMode.LOCAL:
+        raise ValueError(
+            f"SysOperation '{sysop_id}' is registered with operation mode "
+            f"'{getattr(mode, 'value', mode)}' but this agent requires "
+            f"'{OperationMode.LOCAL.value}'. {remediation}"
+        )
+    existing_work_config = getattr(sys_operation_obj, "work_config", None)
+    if existing_work_config != expected_work_config:
+        raise ValueError(
+            f"SysOperation '{sysop_id}' is registered with a conflicting LocalWorkConfig: "
+            f"found {existing_work_config!r}, expected {expected_work_config!r}. {remediation}"
+        )
 
 
 def resolve_deep_agent_parts(
@@ -200,10 +289,14 @@ def resolve_deep_agent_parts(
     *,
     card: Optional[AgentCard] = None,
     tool_owner_id: Optional[str] = None,
+    tool_registration_mode: Literal["legacy", "event"] = "legacy",
+    subagent_registration_mode: Literal["legacy", "event"] = "legacy",
     system_prompt: Optional[str] = None,
     tools: Optional[List[Tool | ToolCard]] = None,
+    event_tool_instances: Optional[List[Tool]] = None,
     mcps: Optional[List[McpServerConfig]] = None,
     subagents: Optional[List[SubAgentConfig | DeepAgent]] = None,
+    event_subagent_configs: Optional[List[SubAgentConfig]] = None,
     rails: Optional[List[AgentRail]] = None,
     enable_task_loop: bool = False,
     enable_async_subagent: bool = False,
@@ -247,6 +340,9 @@ def resolve_deep_agent_parts(
             registered for it. Other arguments are documented on
             :func:`create_deep_agent`.
         extension_bus: Optional live EventBus for prompt attachment events.
+        event_tool_instances: Optional subset of concrete ``tools`` that uses
+            the event registration path when ``tool_registration_mode`` is
+            ``event``. ``None`` selects all concrete tools.
     """
     if card is None:
         card = AgentCard(
@@ -285,6 +381,10 @@ def resolve_deep_agent_parts(
         sys_operation_obj = None
     elif not isinstance(sys_operation, SysOperation):
         sysop_id = f"{card.name}_{card.id}"
+        expected_work_config = LocalWorkConfig(
+            shell_allowlist=None,
+            restrict_to_sandbox=restrict_to_work_dir,
+        )
         # Get-or-create: the id is stable across rebuilds (a member harness is
         # reconstructed on every team resume), and add_sys_operation is a strict
         # add that errors on a duplicate id. Resolve the existing instance first
@@ -294,15 +394,22 @@ def resolve_deep_agent_parts(
             sysop_card = SysOperationCard(
                 id=sysop_id,
                 mode=OperationMode.LOCAL,
-                work_config=LocalWorkConfig(
-                    shell_allowlist=None,
-                    restrict_to_sandbox=restrict_to_work_dir,
-                ),
+                work_config=expected_work_config,
             )
             add_result = Runner.resource_mgr.add_sys_operation(sysop_card)
             if add_result.is_err():
                 logger.error(f"add_sys_operation failed: {add_result.msg()}")
             sys_operation_obj = Runner.resource_mgr.get_sys_operation(sysop_id)
+        if sys_operation_obj is not None:
+            # Covers both the cache hit above and the post-add lookup: a
+            # concurrent caller may have registered an incompatible instance
+            # under the same id in between (add_sys_operation is a strict add,
+            # so ours is the one that gets rejected).
+            _validate_reused_local_sys_operation(
+                sys_operation_obj,
+                sysop_id=sysop_id,
+                expected_work_config=expected_work_config,
+            )
     else:
         sys_operation_obj = sys_operation
 
@@ -310,24 +417,56 @@ def resolve_deep_agent_parts(
     # general-purpose sub-agent can carry them: a spec without both makes
     # create_subagent fall back to a fresh LOCAL sys_operation, which leaves
     # this agent's sandbox behind.
-    effective_subagents = _inject_general_purpose_subagent(
-        subagents,
-        add_general_purpose_agent=add_general_purpose_agent,
-        resolved_language=resolved_language,
-        rails=rails,
-        system_prompt=system_prompt,
-        tools=tools,
-        mcps=mcps,
-        model=model,
-        skills=skills,
-        workspace=workspace_obj,
-        sys_operation=sys_operation_obj,
-    )
+    if subagent_registration_mode == "event":
+        raw_subagents = list(subagents or [])
+        if add_general_purpose_agent:
+            raw_subagents = _inject_general_purpose_subagent(
+                raw_subagents,
+                add_general_purpose_agent=True,
+                resolved_language=resolved_language,
+                rails=rails,
+                system_prompt=system_prompt,
+                tools=tools,
+                mcps=mcps,
+                model=model,
+                skills=skills,
+                workspace=workspace_obj,
+                sys_operation=sys_operation_obj,
+            )
+        if event_subagent_configs is None:
+            event_subagent_configs = [
+                item for item in raw_subagents if isinstance(item, SubAgentConfig)
+            ]
+            effective_subagents = [
+                item for item in raw_subagents if not isinstance(item, SubAgentConfig)
+            ]
+        else:
+            event_ids = {id(item) for item in event_subagent_configs}
+            effective_subagents = [
+                item for item in raw_subagents if id(item) not in event_ids
+            ]
+    else:
+        effective_subagents = _inject_general_purpose_subagent(
+            subagents,
+            add_general_purpose_agent=add_general_purpose_agent,
+            resolved_language=resolved_language,
+            rails=rails,
+            system_prompt=system_prompt,
+            tools=tools,
+            mcps=mcps,
+            model=model,
+            skills=skills,
+            workspace=workspace_obj,
+            sys_operation=sys_operation_obj,
+        )
 
     config = DeepAgentConfig(
         model=model,
         card=card,
         tool_owner_id=tool_owner_id,
+        tool_registration_mode=tool_registration_mode,
+        subagent_registration_mode=subagent_registration_mode,
+        event_subagent_configs=event_subagent_configs,
         system_prompt=system_prompt,
         enable_task_loop=enable_task_loop,
         max_iterations=max_iterations,
@@ -409,7 +548,7 @@ def resolve_deep_agent_parts(
         ),
         (TaskPlanningRail, enable_task_planning, _make_task_planning_rail),
         (SkillUseRail, bool(skills) or config.enable_skill_discovery, _make_skill_rail),
-        (SubagentRail, bool(effective_subagents),
+        (SubagentRail, bool(effective_subagents or event_subagent_configs),
          lambda: SubagentRail(
              enable_async_subagent=enable_async_subagent,
              enable_subagent_runtime=enable_subagent_runtime,
@@ -426,6 +565,7 @@ def resolve_deep_agent_parts(
         rails=all_rails,
         tool_cards=normalized_tools,
         tool_instances=tool_instances,
+        event_tool_instances=event_tool_instances,
         extension_bus=extension_bus,
     )
 
@@ -441,17 +581,39 @@ def apply_deep_agent_parts(agent: DeepAgent, parts: DeepAgentParts) -> None:
     (forward construction, no throwaway template).
     """
     agent.set_extension_bus(parts.extension_bus)
-    agent.configure(parts.config)
+    event_tool_instances = (
+        parts.tool_instances
+        if parts.event_tool_instances is None
+        else parts.event_tool_instances
+    )
+    event_tool_card_ids = {
+        tool.card.id
+        for tool in event_tool_instances
+        if isinstance(tool, Tool) and tool.card is not None
+    }
+    agent.configure(
+        parts.config,
+        defer_event_tool_registration=(
+            parts.config.tool_registration_mode == "event"
+            and getattr(agent, "deep_config", None) is not None
+        ),
+        deferred_event_tool_card_ids=event_tool_card_ids,
+    )
 
-    # Register concrete tool instances through the ability manager so the card
-    # id and the resource-manager key stay consistent and get agent-qualified
-    # (stateful) or shared by bare id (stateless). The instance cards are the
-    # same objects carried in ``parts.tool_cards`` (see ``_normalize_tools``),
-    # so track them to avoid double-adding below.
+    # Register concrete tool instances through the selected startup path. The
+    # instance cards are the same objects carried in ``parts.tool_cards`` (see
+    # ``_normalize_tools``), so track them to avoid double-adding below.
     instance_card_ids: set[int] = set()
+    event_tool_ids = {id(tool) for tool in event_tool_instances}
     if parts.tool_instances:
         for tool in parts.tool_instances:
-            agent.ability_manager.add_ability(tool.card, tool)
+            if (
+                parts.config.tool_registration_mode == "event"
+                and id(tool) in event_tool_ids
+            ):
+                agent.queue_tool_registration(tool)
+            else:
+                agent.ability_manager.add_ability(tool.card, tool)
             if tool.card is not None:
                 instance_card_ids.add(id(tool.card))
 
@@ -473,10 +635,14 @@ def create_deep_agent(
     *,
     card: Optional[AgentCard] = None,
     tool_owner_id: Optional[str] = None,
+    tool_registration_mode: Literal["legacy", "event"] = "legacy",
+    subagent_registration_mode: Literal["legacy", "event"] = "legacy",
     system_prompt: Optional[str] = None,
     tools: Optional[List[Tool | ToolCard]] = None,
+    event_tool_instances: Optional[List[Tool]] = None,
     mcps: Optional[List[McpServerConfig]] = None,
     subagents: Optional[List[SubAgentConfig | DeepAgent]] = None,
+    event_subagent_configs: Optional[List[SubAgentConfig]] = None,
     rails: Optional[List[AgentRail]] = None,
     enable_task_loop: bool = False,
     enable_async_subagent: bool = False,
@@ -520,6 +686,9 @@ def create_deep_agent(
         system_prompt: System prompt for the inner
             ReActAgent.
         tools: Tool instances or tool cards to register on the agent.
+        event_tool_instances: Optional subset of ``tools`` to register through
+            ``tool.register`` in event mode. ``None`` selects all concrete
+            instances.
         mcps: MCP server configs to register on the agent.
         subagents: Sub-agent specification or sub-agent instance,
             supports subagent using different model, tools and prompt.
@@ -571,10 +740,14 @@ def create_deep_agent(
         model,
         card=card,
         tool_owner_id=tool_owner_id,
+        tool_registration_mode=tool_registration_mode,
+        subagent_registration_mode=subagent_registration_mode,
         system_prompt=system_prompt,
         tools=tools,
+        event_tool_instances=event_tool_instances,
         mcps=mcps,
         subagents=subagents,
+        event_subagent_configs=event_subagent_configs,
         rails=rails,
         enable_task_loop=enable_task_loop,
         enable_async_subagent=enable_async_subagent,

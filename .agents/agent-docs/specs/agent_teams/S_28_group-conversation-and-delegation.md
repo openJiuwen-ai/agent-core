@@ -149,3 +149,33 @@ DB 广播行的 content 保存原文，meta 保存 type、client_message_id、se
 时间增量复用毫秒时钟，不新增序列号；同毫秒和时钟回拨不保证逐条消费。DB 写入、文件同步、事件发布与 Harness 接收不是同一事务：文件同步失败保留原文，重试修复投影；事件丢失由既有轮询读取未消费广播。Harness 投递失败不推进该条 read_at；进程在投递后、标记前退出可能导致重复投递，不承诺恰好一次。
 
 暂停或停止团队不删除公开历史。显式删除团队或会话时，沿用数据库清理并删除相应历史及 workspace 位置登记。历史不自动过期，生产者与 Agent 需要访问同一历史文件。当前同步和读取使用全量历史，适用于规模有限的群聊；没有额外缓存或后台同步服务。
+
+## 宿主管理成员
+
+TeamRole.HOST_MANAGED 的持久化值是 host_managed，表示由宿主系统执行的 AI 身份。
+TeamMemberSpec 可预置该角色，也可通过 TeamBackend.spawn_host_managed_member 动态登记。
+接口接受 member_name、display_name、desc，返回 MemberOpResult；校验名字与重复成员，写入 READY / IDLE 并发布成员事件。
+登记、启动、恢复均不创建该角色的智能体运行时，关闭直接进入 SHUTDOWN，避免等待不存在的进程。
+
+register_host_managed_inbound(member_name, callback) 独立注册或撤销通知。
+群 Leader 为被提及且非发送者自身的宿主后台投递 ConversationMessage。普通专家唤醒与消息处理独立进行。
+回调是进程内资源，运行时就绪后由宿主重建。后台通知有并发上限和超时，暂停、停止时取消等待；同步回调在线程中运行。
+同一会话中，同一消息对同一成员的进行中通知和近期成功通知在进程内去重。失败的接收者可随事件重投重试。通知超时、取消、缺失或跨进程重启时，由宿主按已持久化群消息补扫和去重。
+群消息允许该角色发言或被提及。向该角色直发、批量直发或分配团队任务时返回明确失败，成员也不能自行认领任务。该角色不进入普通智能体的启动目标，也不计入私信、普通广播或群聊广播的 core 未读接收者。
+新团队在写库前校验预置宿主管理成员的身份，注册失败时清理本次创建的团队和名册行，允许修正配置或恢复数据库后再次建团。
+此角色不继承人类成员身份或任务控制语义，也不替代宿主的请求授权、排队、审批和投递。
+
+## 成员通知
+
+关联设计：`D-20261121-0832-group-member-notification`。宿主可在公开群消息写入之后请成员响应该消息，而不修改消息的 mentions。
+`TeamBackend.notify_group_member(member_name, message_id, *, notification_id)` 仅在群聊运行时可用，返回 `GroupNotificationResult(created, duplicate)`。
+成员必须存在、未离开、角色不是 passive_human / host_managed，且不是该消息的发送者；消息必须是本团队已持久化的群聊广播。任一条件不满足抛 ValueError，不产生记录。
+notification_id 由宿主提供并作为幂等键；重复提交返回 duplicate，不产生第二条记录，但会再次发布该消息的 BROADCAST 事件，供事件丢失后重试。成功只表示通知已持久化，不表示成员已读或已回复。
+
+通知保存在每会话动态表 `group_notification_<session>`，每条带独立的 consumed_at。该表与其他会话动态表一同创建和清理。
+“群消息是否寻址到成员”的条件为：成员在 mentions 中且消息高于其 read_at，或存在对（成员, 消息）的待消费通知。待消费通知不受 read_at 影响。
+`get_unread_group_members`、`get_broadcast_messages` 与未读接收者统计都按此条件；事件回调、轮询、退出前 drain、外部收件箱和团队完成判定因此得到相同行为。
+成员成功接收该消息并标记已读时，同一事务把对应通知标为已消费；read_at 仍只在消息时间更大时前进，不会后退。
+被通知的消息早于成员 read_at 时，摘录窗口只含触发消息本身，成员按需读取 history.jsonl。
+
+core 不提供撤回入口，暂停或停止时也不清除待消费通知；成员下次运行时仍会处理。通知不设过期，不承诺恰好一次投递，边界与群聊消息相同。

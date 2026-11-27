@@ -58,6 +58,37 @@ class SequenceNode:
     depth: int
 
 
+@dataclass(frozen=True, slots=True, weakref_slot=True, eq=False)
+class MessageBody:
+    """Immutable bytes shared by every node with this content hash."""
+
+    blob_hash: str
+    content: bytes
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True, eq=False)
+class SequenceHead:
+    """A prefix that owns its body and predecessor independently of any registry."""
+
+    seq_hash: str
+    depth: int
+    message: MessageBody
+    previous: SequenceHead | None
+
+    def __deepcopy__(self, memo: dict) -> SequenceHead:
+        return self
+
+    def materialize(self) -> str:
+        """Rebuild the complete attribute from the held chain."""
+        elements: list[str] = []
+        node: SequenceHead | None = self
+        while node is not None:
+            elements.append(node.message.content.decode("utf-8"))
+            node = node.previous
+        elements.reverse()
+        return rebuild_value(elements)
+
+
 @dataclass(frozen=True, slots=True)
 class AddressedSequence:
     """One attribute value expressed as a chain, plus what it introduced.
@@ -86,7 +117,8 @@ def content_hash(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _chain_hash(previous: str | None, blob_hash: str) -> str:
+def chain_hash(previous: str | None, blob_hash: str) -> str:
+    """Address a prefix by its predecessor and latest element."""
     digest = hashlib.sha256()
     digest.update((previous or "").encode("ascii"))
     digest.update(b"\x00")
@@ -179,7 +211,7 @@ def build_sequence(key: str, value: str) -> AddressedSequence | None:
         encoded = element.encode("utf-8")
         blob_hash = content_hash(encoded)
         blobs[blob_hash] = encoded
-        seq_hash = _chain_hash(previous, blob_hash)
+        seq_hash = chain_hash(previous, blob_hash)
         nodes.append(SequenceNode(
             seq_hash=seq_hash,
             prev_hash=previous,
@@ -239,11 +271,14 @@ def addressable_attributes(payload: Any, keys: frozenset[str]) -> list[dict[str,
 
 __all__ = [
     "AddressedSequence",
+    "MessageBody",
     "SEQUENCE_REFERENCE_PREFIX",
     "SEQUENCE_REFERENCE_VERSION",
+    "SequenceHead",
     "SequenceNode",
     "addressable_attributes",
     "build_sequence",
+    "chain_hash",
     "content_hash",
     "parse_sequence_reference",
     "rebuild_value",

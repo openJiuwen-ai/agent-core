@@ -333,13 +333,21 @@ def _shell_file_access_summary(
     if not cmd:
         return ""
     from openjiuwen.harness.security.permission_engine.fileguard.path_extract import (
+        extract_accesses_native,
         extract_shell_path_accesses,
     )
 
+    from openjiuwen.harness.security.permission_engine.shell_path_context import current_shell_path_analysis
+
+    analysis = current_shell_path_analysis(tool_name, tool_args)
     try:
-        accesses = extract_shell_path_accesses(
-            cmd, _workdir(tool_args), include_cd_reads=False,
-        )
+        if analysis is None:
+            accesses = extract_shell_path_accesses(cmd, _workdir(tool_args), include_cd_reads=False)
+        else:
+            native_accesses = extract_accesses_native(
+                tool_name, tool_args, analysis.cwd, permission_config, include_cd_reads=False,
+            )
+            accesses = [(path, action) for path, action, _ in native_accesses]
     except (OSError, RuntimeError, ValueError):
         return ""
     if require_file_io:
@@ -348,7 +356,7 @@ def _shell_file_access_summary(
         ]
     if not accesses:
         return ""
-    picked = _pick_shell_access(accesses, result.external_paths or [])
+    picked = _pick_shell_access(accesses, result.external_paths or [], require_match=analysis is not None)
     if picked is None:
         return ""
     path, action = picked
@@ -380,12 +388,19 @@ def _looks_like_file_suffix(suffix: str) -> bool:
 def _pick_shell_access(
     accesses: list[tuple[Path, str]],
     external_paths: list[str],
+    *,
+    require_match: bool = False,
 ) -> tuple[Path, str] | None:
     if not accesses:
         return None
-    externals = [_path_key(item) for item in external_paths]
     candidates = accesses
-    if externals:
+    if external_paths and require_match:
+        targets = set(external_paths)
+        candidates = [item for item in accesses if item[0].as_posix() in targets]
+        if not candidates:
+            return None
+    elif external_paths:
+        externals = {_path_key(item) for item in external_paths}
         matched = [
             item for item in accesses if _path_key(item[0]) in externals
         ]

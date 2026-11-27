@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+import threading
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
 _SECTION = "personal_context"
 _SOURCE = "personal_context_rail"
 _SEARCH_TOOL_NAME = "pcs_search"
+_READ_TOOL_NAME = "pcs_read"
 _CONFIG_FILENAME = "personal_context.yaml"
 _MAX_CONFIG_BYTES = 4 * 1024 * 1024
 _MAX_DESCRIPTION_CHARS = 3000
@@ -150,7 +152,8 @@ def _render_content(
         f"- context_root: `{context_root}`\n"
         f"- description_path: `{description_path}`\n"
         f"- description_size_bytes: `{description_size_bytes}`\n"
-        "- filesystem access: 从顶层 description.md 开始，按其中相对链接继续读取。\n\n"
+        "- filesystem access: 从顶层 description.md 开始，按其中相对链接继续读取。"
+        "优先使用 pcs_read 读取相对于 context_root 的路径，以记录知识使用时间；普通文件工具和 Bash 仍可使用。\n\n"
         "## 当前上下文说明\n\n"
         f"{body}"
     )
@@ -170,15 +173,16 @@ class PersonalContextRail(DeepAgentRail):
         self._attachment_manager: PromptAttachmentManager | None = None
         self._ability_manager: AbilityManager | None = None
         self._search_tool: LocalFunction | None = None
+        self._read_tool: LocalFunction | None = None
 
     def init(self, agent: "DeepAgent") -> None:
         """Bind the agent managers and register search when Agent use is enabled."""
 
         ability_manager = getattr(agent, "ability_manager", None)
         if self._ability_manager is not ability_manager:
-            self._sync_search_tool(False)
+            self._sync_tools(False)
             self._ability_manager = ability_manager
-        self._sync_search_tool(_agent_use_enabled(self._config_path))
+        self._sync_tools(_agent_use_enabled(self._config_path))
 
         try:
             manager = getattr(agent, "prompt_attachment_manager", None)
@@ -196,7 +200,7 @@ class PersonalContextRail(DeepAgentRail):
         """Remove only our search tool and drop the bound manager references."""
 
         del agent
-        self._sync_search_tool(False)
+        self._sync_tools(False)
         self._ability_manager = None
         self._attachment_manager = None
 
@@ -207,6 +211,80 @@ class PersonalContextRail(DeepAgentRail):
             and (card is None or self._search_tool.card is card)
             and self._ability_manager.get(_SEARCH_TOOL_NAME) is self._search_tool.card
         )
+
+    def _sync_tools(self, enabled: bool) -> None:
+        self._sync_search_tool(enabled)
+        self._sync_read_tool(enabled)
+
+    def _owns_read_tool(self, card: ToolCard | None = None) -> bool:
+        return (
+            self._ability_manager is not None
+            and self._read_tool is not None
+            and (card is None or self._read_tool.card is card)
+            and self._ability_manager.get(_READ_TOOL_NAME) is self._read_tool.card
+        )
+
+    def _sync_read_tool(self, enabled: bool) -> None:
+        manager = self._ability_manager
+        if manager is None:
+            return
+        try:
+            if not self._owns_read_tool():
+                self._read_tool = None
+            if not enabled:
+                if self._read_tool is not None:
+                    manager.remove_ability(_READ_TOOL_NAME)
+                    self._read_tool = None
+                return
+            if manager.get(_READ_TOOL_NAME) is not None:
+                return
+            card = ToolCard(
+                id=_READ_TOOL_NAME, name=_READ_TOOL_NAME,
+                description=(
+                    "Read a published PersonalContext Markdown page by its path relative to context_root, "
+                    "including paths returned by pcs_search. Prefer this tool for PCS reads so successful "
+                    "body reads update last-use time for capacity eviction. Navigation reads do not renew bodies. "
+                    "Existing file tools and Bash remain allowed. Maximum page size is 2 MiB."
+                ),
+                input_params={
+                    "type": "object",
+                    "properties": {"path": {"type": "string", "description": "Relative POSIX Markdown path."}},
+                    "required": ["path"], "additionalProperties": False,
+                },
+                exposure="direct", idempotent=True,
+            )
+            tool = LocalFunction(card=card, func=partial(self._read, tool_card=card))
+            if manager.add_ability(card, tool).added:
+                self._read_tool = tool
+        except Exception as exc:
+            _warn("sync read tool", exc)
+
+    async def _read(self, path: str, *, tool_card: ToolCard) -> dict[str, object]:
+        from openjiuwen.harness.personal_context.context_usage import read_with_usage
+        from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
+
+        cancelled = threading.Event()
+
+        def allowed() -> bool:
+            return (
+                not cancelled.is_set() and _agent_use_enabled(self._config_path)
+                and self._owns_read_tool(tool_card)
+            )
+
+        try:
+            result = await asyncio.to_thread(read_with_usage, self._home, path, allowed=allowed)
+            if (
+                not await asyncio.to_thread(_agent_use_enabled, self._config_path)
+                or not self._owns_read_tool(tool_card)
+            ):
+                raise build_error(
+                    StatusCode.CONTEXT_PROACTIVE_STATE_INVALID,
+                    error_msg="PersonalContext Agent use is disabled or the read tool is detached",
+                )
+            return {"context_root": str(self._context_root), **result}
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
 
     def _sync_search_tool(self, enabled: bool) -> None:
         manager = self._ability_manager
@@ -227,8 +305,8 @@ class PersonalContextRail(DeepAgentRail):
                 name=_SEARCH_TOOL_NAME,
                 description=(
                     "Search published PersonalContext knowledge by keywords, using the same search as the graph UI. "
-                    "Returns up to 10 titles, relative paths and snippets. Join each path to context_root and use "
-                    "the existing file-reading tool to read the page. "
+                    "Returns up to 10 titles, relative paths and snippets. Prefer pcs_read with the returned path "
+                    "to read the page and record usage; existing file-reading tools remain allowed. "
                     "Supports keywords only, not source or time filters."
                 ),
                 input_params={
@@ -272,7 +350,7 @@ class PersonalContextRail(DeepAgentRail):
 
         del ctx
         enabled = await asyncio.to_thread(_agent_use_enabled, self._config_path)
-        self._sync_search_tool(enabled)
+        self._sync_tools(enabled)
 
     async def _clear_section(self, ctx: AgentCallbackContext) -> bool:
         manager = self._attachment_manager
@@ -299,15 +377,20 @@ class PersonalContextRail(DeepAgentRail):
                 writer = None
 
         owned_search = self._owns_search_tool()
+        owned_read = self._owns_read_tool()
         try:
             agent_use_enabled = await asyncio.to_thread(_agent_use_enabled, self._config_path)
         except Exception as exc:
             _warn("read runtime switch", exc)
             agent_use_enabled = False
-        self._sync_search_tool(agent_use_enabled)
-        if owned_search and not agent_use_enabled and isinstance(ctx.inputs, ModelCallInputs):
+        self._sync_tools(agent_use_enabled)
+        if not agent_use_enabled and isinstance(ctx.inputs, ModelCallInputs):
             if ctx.inputs.tools is not None:
-                ctx.inputs.tools = [tool for tool in ctx.inputs.tools if tool.name != _SEARCH_TOOL_NAME]
+                removed = (
+                    ({_SEARCH_TOOL_NAME} if owned_search else set())
+                    | ({_READ_TOOL_NAME} if owned_read else set())
+                )
+                ctx.inputs.tools = [tool for tool in ctx.inputs.tools if tool.name not in removed]
 
         if writer is None or not agent_use_enabled:
             return

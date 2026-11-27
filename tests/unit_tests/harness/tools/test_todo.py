@@ -112,9 +112,9 @@ class TestTodoTool(unittest.IsolatedAsyncioTestCase):
         )
         self.mock_fs.read_file.return_value = mock_read_result
         tool = TodoTool(MagicMock(), self.mock_operation)
-        with patch("os.path.abspath", return_value="/mock/path"), \
-             patch("os.path.isfile", return_value=True):
+        with patch("os.path.abspath", return_value="/mock/path"):
             loaded = await tool.load_todos("test_session")
+        self.mock_fs.read_file.assert_awaited_once_with("/mock/path", mode="text")
         self.assertEqual(len(loaded), 2)
         self.assertEqual(loaded[0].content, "Task 1")
         self.assertEqual(loaded[1].status, TodoStatus.PENDING)
@@ -124,9 +124,10 @@ class TestTodoTool(unittest.IsolatedAsyncioTestCase):
         self.mock_fs.read_file.return_value = MagicMock(code=1, data=None)
         tool = TodoTool(MagicMock(), self.mock_operation)
         with patch("os.path.abspath", return_value="/mock/path"), \
-             patch("os.path.isfile", return_value=True):
+             patch("os.path.isfile", return_value=False):
             with self.assertRaises(FrameworkError) as cm:
                 await tool.load_todos("test_session")
+        self.mock_fs.read_file.assert_awaited_once_with("/mock/path", mode="text")
         self.assertIn("todo tool loads failed", str(cm.exception))
 
     async def test_save_todos_success(self):

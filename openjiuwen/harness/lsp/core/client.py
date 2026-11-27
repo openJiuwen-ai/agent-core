@@ -220,6 +220,15 @@ class LSPClient:
                 while True:
                     line = await reader.readline()
                     if not line:
+                        # stdout EOF: the server process exited (crash or
+                        # kill). Report it so pending futures fail fast with
+                        # ConnectionError instead of waiting out the request
+                        # timeout. During a graceful stop() the reader can
+                        # observe EOF before it is cancelled (the exit
+                        # notification is awaited first); _on_crash checks
+                        # _is_stopping so that exit is not counted as a
+                        # crash.
+                        self._on_crash(self._process.returncode)
                         return
                     line_str = line.decode("ascii", errors="replace")
                     if line_str == "\r\n":
@@ -286,6 +295,9 @@ class LSPClient:
                     else:
                         future.set_result(message.get("result"))
                     self._pending.pop(msg_id_str, None)
+                else:
+                    # Timed-out request: drop the stale entry instead of leaking it.
+                    self._pending.pop(msg_id_str, None)
             else:
                 # Server-initiated request - schedule async handling without blocking read loop
                 asyncio.create_task(self._handle_server_request(method, msg_id, message.get("params")))
@@ -316,6 +328,8 @@ class LSPClient:
                 return
             future, _method = entry
             if future.done():
+                # Timed-out request: drop the stale entry instead of leaking it.
+                self._pending.pop(msg_id_str, None)
                 return
             # Resolve the future BEFORE removing from _pending (same rationale as above).
             if "error" in message:
@@ -379,6 +393,9 @@ class LSPClient:
                 future.set_exception(
                     LSPError(-1, f"Request timeout after {DEFAULT_REQUEST_TIMEOUT_MS}ms: {method}")
                 )
+                # Drop the entry so a late response cannot accumulate stale
+                # pending records (the response path skips done futures).
+                self._pending.pop(msg_id, None)
 
         timer = loop.call_later(DEFAULT_REQUEST_TIMEOUT_MS / 1000, on_timeout)
 
@@ -410,6 +427,13 @@ class LSPClient:
     def _on_crash(self, code: int | None) -> None:
         """Called when the subprocess exits unexpectedly (once per crash)."""
         if self._crash_reported:
+            return
+        # A graceful stop() observes EOF before the reader task is cancelled
+        # (the exit notification is awaited before the cancel), and stop()
+        # callers may not be in a STOPPING state (e.g. a failed start() is
+        # already ERROR). Do not count that exit as a crash: it would bump
+        # _crash_count and overwrite the real _last_error.
+        if self._is_stopping:
             return
         self._crash_reported = True
         self._is_initialized = False

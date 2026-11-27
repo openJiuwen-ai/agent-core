@@ -22,6 +22,14 @@ class ConversationMessage(BaseModel):
     timestamp: int
 
 
+class GroupNotificationResult(BaseModel):
+    """Outcome of asking a member to respond to a persisted group message."""
+
+    # True when this call stored the notification; it is not a delivery acknowledgement.
+    created: bool
+    duplicate: bool = False
+
+
 class ConversationAppendResult(BaseModel):
     message: ConversationMessage
     # Eligible mentioned agents, not a Harness delivery acknowledgement.

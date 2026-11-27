@@ -3,7 +3,7 @@
 `openjiuwen.core.foundation.llm` is the unified **large model invocation and management module** in openJiuwen, responsible for:
 
 - Providing `Model` as the unified entry; `client_provider` selects the OpenAI-compatible or Anthropic protocol;
-- Defining `BaseModelClient` plus `OpenAIModelClient` and `AnthropicModelClient`; legacy vendor names are aliases, see [LLM Protocol Consolidation](../../../Basic%20Functions/LLM%20Protocol%20Consolidation.md);
+- Defining `BaseModelClient` plus `OpenAIModelClient` and `AnthropicModelClient`; legacy vendor names are aliases, see [LLM Protocol Consolidation](../../../../Basic%20Functions/LLM%20Protocol%20Consolidation.md);
 - Providing `JevSystemOneClient` as a standalone lightweight client for System One typed evaluations;
 - Providing model request/client configuration (`ModelRequestConfig`, `ModelClientConfig`) and schemas for messages, streaming chunks, tool calls, etc.;
 - Providing output parser abstraction (`BaseOutputParser`) and `JsonOutputParser` implementation.

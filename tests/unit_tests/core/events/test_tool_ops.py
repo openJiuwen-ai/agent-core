@@ -49,6 +49,7 @@ def _react_agent() -> ReActAgent:
 
 def _deep_agent(react_agent: ReActAgent | None, rails: list | None = None) -> MagicMock:
     deep = MagicMock(spec=DeepAgent)
+    deep.card = react_agent.card if react_agent is not None else AgentCard(id="ops-tool-agent")
     deep.react_agent = react_agent
     deep.find_rails_by_type.return_value = rails or []
     return deep

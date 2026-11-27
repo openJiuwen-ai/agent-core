@@ -474,6 +474,54 @@ async def test_save_dumps_snapshot_when_live_lists_mutate(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("error", [PermissionError("sharing violation"), OSError("disk full")])
+async def test_save_filesystem_failure_policy(tmp_path, monkeypatch, strict, error):
+    from openjiuwen.agent_evolving.ttse import stores
+
+    path = tmp_path / "bank.json"
+    store, cfg = _make_store(tmp_path)
+    await store.add_fact("existing rule")
+    before = path.read_bytes()
+
+    def fail_replace(*args):
+        raise error
+
+    with monkeypatch.context() as context:
+        context.setattr(stores.os, "replace", fail_replace)
+        # Ordinary induction remains usable during a filesystem failure.
+        assert await store.add_fact("unrelated new fact") is True
+        if strict:
+            with pytest.raises(type(error), match=str(error)):
+                await store.save(strict=True)
+        else:
+            await store.save()
+        assert path.read_bytes() == before
+        assert not os.path.exists(f"{path}.tmp")
+
+    await store.save()
+    assert len(TTSERecordStore(cfg).facts) == 2
+
+
+@pytest.mark.asyncio
+async def test_dream_serialization_failure_does_not_acknowledge_commit(tmp_path):
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"), dream_min_hours=0, dream_min_rules=100,
+        dream_prune_enabled=False, dream_purge_tips_enabled=False,
+    )
+    store, cfg = _make_store(tmp_path, cfg=cfg)
+    await store.add_fact("existing rule")
+    before = (tmp_path / "bank.json").read_bytes()
+    store.facts[0]["blob"] = object()
+    state = DreamState(non_followup_count=50)
+    with pytest.raises(TypeError):
+        await run_dream_pass(store, cfg, llm=ScriptedLLM(lambda _: ""), model="m", state=state)
+    assert state.non_followup_count == 50
+    assert state.last_dream_at == 0
+    assert (tmp_path / "bank.json").read_bytes() == before
+
+
+@pytest.mark.asyncio
 async def test_save_swallows_non_serializable_record(tmp_path):
     """json.dump TypeError must not crash add_fact / dream persist."""
     path = tmp_path / "bank.json"
@@ -1063,7 +1111,12 @@ async def test_dream_llm_preserves_identical_record_occurrences(
 
 
 @pytest.mark.asyncio
-async def test_dream_duplicate_cluster_indices_keep_selected_occurrences(tmp_path):
+@pytest.mark.parametrize("unselected_text", [
+    "jiuwen logs are in C:/logs/jiuwen.log",
+    "JIUWEN LOGS ARE IN C:/logs/jiuwen.log",
+    "jiuwen  logs\tare in C:/logs/jiuwen.log",
+])
+async def test_dream_duplicate_cluster_indices_keep_selected_occurrences(tmp_path, unselected_text):
     text = "jiuwen logs are in C:/logs/jiuwen.log"
     cfg = TTSEConfig(
         store_path=str(tmp_path / "bank.json"), dream_min_hours=0, dream_min_rules=1,
@@ -1073,6 +1126,7 @@ async def test_dream_duplicate_cluster_indices_keep_selected_occurrences(tmp_pat
         {**_new_record(text, count=count), "category": "software-engineering-devops"}
         for count in (1, 2, 3)
     ]
+    rows[0]["text"] = unselected_text
     (tmp_path / "bank.json").write_text(
         json.dumps({"facts": rows, "tips": [], "retired": []}), encoding="utf-8",
     )
@@ -1095,6 +1149,9 @@ async def test_dream_duplicate_cluster_indices_keep_selected_occurrences(tmp_pat
     assert len(store.facts) == 2
     assert first in store.facts
     assert sorted(r["count"] for r in store.facts) == [1, 5]
+    reloaded = TTSERecordStore(cfg)
+    assert first in reloaded.facts
+    assert sorted(r["count"] for r in reloaded.facts) == [1, 5]
 
 
 @pytest.mark.asyncio
