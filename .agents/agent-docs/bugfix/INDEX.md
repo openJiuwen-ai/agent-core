@@ -16,6 +16,7 @@ generated: true
 |---|
 | [agent_teams](#module-agent_teams) |
 | [agent_teams/workflow](#module-agent_teams-workflow) |
+| [core.extension](#module-core-extension) |
 | [core/context_engine](#module-core-context_engine) |
 | [core/controller](#module-core-controller) |
 | [core/foundation/llm](#module-core-foundation-llm) |
@@ -63,6 +64,7 @@ generated: true
 | [B_20261117_1240_swarmflow-fork-round-boundary-attachment](agent_teams/B_20261117_1240_swarmflow-fork-round-boundary-attachment.md) | B | Swarmflow fork 轮数边界被运行时附件消息整体前移一轮 | chenchunzhou | [SDD-0014](../designs/active/SDD-0014-swarmflow-session-fork/design.md) |
 | [B_20261117_1626_directed-assignment-notice-dropped](agent_teams/B_20261117_1626_directed-assignment-notice-dropped.md) | B | 定向指派/改派的通知被接收端 pending 判据丢弃，新 owner 永不唤醒 | xiajing | 无独立 D：缺陷修复只改消费端投递判据，不新增契约与机制；依据见 S_03（TASK_CLAIMED 定向投递）与 jiuwenswarm 问题 |
 | [B_20261118_1142_shared-templates-name-leader-only-tools](agent_teams/B_20261118_1142_shared-templates-name-leader-only-tools.md) | B | 全员共享提示词模板点名 leader 专属工具误导 teammate | zhanglongmin | 无独立 D：日常文案修复，无独立设计文档；行为依据 F_76（提示词分层与渐进式披露）、F_122（framework 建队的 <team-policy> 投递）与 prompts/AGENTS.md 编辑规则 2。 |
+| [B_20261125_1733_team_stopped_approval_mail](agent_teams/B_20261125_1733_team_stopped_approval_mail.md) | B | 停止成员的审批回执阻塞持久化 Team 完成 | MaxMadMax | [D-20261125-1414-team-stopped-approval-recovery](../designs/active/D-20261125-1414-team-stopped-approval-recovery/design.md)<br>[D-20261126-1704-team-lifecycle-boundaries](../designs/active/D-20261126-1704-team-lifecycle-boundaries/design.md) |
 
 <a id="module-agent_teams-workflow"></a>
 
@@ -71,6 +73,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261102_1120_avatar-child-session-trace-root](agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
+
+<a id="module-core-extension"></a>
+
+## core.extension
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261125_1733_team_stopped_approval_mail](agent_teams/B_20261125_1733_team_stopped_approval_mail.md) | B | 停止成员的审批回执阻塞持久化 Team 完成 | MaxMadMax | [D-20261125-1414-team-stopped-approval-recovery](../designs/active/D-20261125-1414-team-stopped-approval-recovery/design.md)<br>[D-20261126-1704-team-lifecycle-boundaries](../designs/active/D-20261126-1704-team-lifecycle-boundaries/design.md) |
 
 <a id="module-core-context_engine"></a>
 
@@ -190,6 +200,7 @@ generated: true
 | [B_20261104_2030_cancellation-cause-lifecycle](core_runtime/B_20261104_2030_cancellation-cause-lifecycle.md) | B | 压缩取消一律误报 failed 及标记生命周期残留窗口缺陷 | CharlesWang2030 | 无独立 D：c4e52b7c 引入 cancellation cause 注册表属于常规缺陷修复，未归档独立设计；本次为对该提交检视发现的标记生命周期缺陷的后续修复，沿用注册表现有契约（TTL、非消费式 resolve、前缀继承）。 |
 | [B_20261111_2006_sandbox-shell-output](harness/B_20261111_2006_sandbox-shell-output.md) | B | 本地沙箱内回读 Shell 超长输出 | 羿寒 王 | 无独立 D：按已确认的沙箱内存储方案修复现有工具结果回读契约。 |
 | [B_20261114_1107_interactive-memory-turn](harness/B_20261114_1107_interactive-memory-turn.md) | B | 交互式中断恢复后记忆丢失修复 | robin1217 | 无独立 D：本次按对话中确认的 D3 收敛方案修复，未建立独立 D 文档；外部 F08 的 D3 是决策编号，不是设计资产标识。 |
+| [B_20261126_2055_lsp-client-crash-reporting](harness/B_20261126_2055_lsp-client-crash-reporting.md) | B | LSP 客户端 EOF 崩溃不上报、超时请求条目泄漏与 Windows 文件 URI 未编码 | linghb | 无独立 D：对 LSP 客户端通信层的三处确定性缺陷修复，不改变对外契约，无需独立设计。 |
 
 <a id="module-harness-moa"></a>
 

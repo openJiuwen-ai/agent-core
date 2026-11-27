@@ -88,6 +88,7 @@ from openjiuwen.core.session.agent_team import (
 )
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.harness_protocol.state import HarnessState
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams import extensions as team_extensions
@@ -129,7 +130,11 @@ def _member_round_in_flight(agent: object) -> bool:
     if not callable(probe):
         return False
     try:
-        return bool(probe())
+        if probe():
+            return True
+        # PAUSING can still restore an interrupt cleared by its current round.
+        harness = getattr(agent, "harness", None)
+        return getattr(harness, "state", None) is HarnessState.PAUSING
     except Exception:
         team_logger.warning("interrupt resume could not read in-flight round state", exc_info=True)
         return False
@@ -138,10 +143,9 @@ def _member_round_in_flight(agent: object) -> bool:
 def _holds_a_different_interrupt(teammate: object) -> bool:
     """Return whether ``teammate`` is paused on an interrupt this answer did not select.
 
-    Admission already resumes a member that owns the answer, including a stale
-    permission card retargeted onto the only interrupt left. A member that
-    still has some other pending interrupt is not the round that cleared this
-    card.
+    Admission already resumes a member whose pending matches the answer.
+    A member with a different pending interrupt is not the round that may
+    restore this card.
     """
     probe = getattr(teammate, "has_pending_interrupt", None)
     if not callable(probe):
@@ -176,9 +180,9 @@ def _in_flight_teammate_may_own_answer(leader: "TeamAgent") -> bool:
 def _wait_for_sibling_interrupt(leader: "TeamAgent", result: DeliverResult) -> bool:
     """Return whether this rejection is the in-flight sibling-approval race.
 
-    A confirmed id mismatch is final. Busy means the member that was asked is
-    still in its resume round. An empty pending list is retried only while a
-    teammate round may write that state back.
+    A confirmed id mismatch is final. An empty pending list is retried only
+    while a teammate round may write that state back. Neither that round nor
+    its completion proves this answer was consumed.
     """
     if result.reason == "interrupt_resume_busy":
         return True
@@ -223,6 +227,15 @@ async def _admit_interactive_input(
             return DeliverResult.failure("interrupt_resume_unavailable")
         if member_result.ok or member_result.reason != "unsupported_interactive_input":
             return member_result
+    if result.reason != "unsupported_interactive_input":
+        return result
+    if (
+        callable(getattr(leader, "has_pending_interrupt", None))
+        and not _holds_a_different_interrupt(leader)
+        and _in_flight_teammate_may_own_answer(leader)
+    ):
+        # An empty leader cannot settle ownership while a member may restore it.
+        return DeliverResult.failure("interrupt_resume_unavailable")
     return result
 
 
@@ -258,7 +271,6 @@ async def _resume_interactive_input_when_ready(
     """
     busy_deadline: float | None = None
     unowned_deadline: float | None = None
-    saw_owner_in_flight = False
     while True:
         result = await attempt()
         if result.ok:
@@ -268,22 +280,15 @@ async def _resume_interactive_input_when_ready(
             and _in_flight_teammate_may_own_answer(leader)
         )
         if owner_in_flight:
-            # The running round clears sibling interrupts, then may raise the
-            # same call again. Keep the answer until that round is idle or the
-            # deadline passes. A session-level allow often runs the siblings
-            # inside this round, so the old cards never come back.
-            saw_owner_in_flight = True
+            # The running round may restore a sibling interrupt. Waiting only
+            # bounds retries; it does not establish this answer's consumption.
             now = time.monotonic()
             if unowned_deadline is None:
                 unowned_deadline = now + _INTERRUPT_RESUME_UNOWNED_WAIT_SECONDS
             if now < unowned_deadline:
                 await asyncio.sleep(_INTERRUPT_RESUME_RETRY_DELAY_SECONDS)
                 continue
-            return DeliverResult.failure("interrupt_already_resolved")
-        if saw_owner_in_flight and result.reason == "interrupt_resume_unavailable":
-            # The round that cleared the card has gone idle and did not leave
-            # an interrupt. The approval was consumed by that round.
-            return DeliverResult.failure("interrupt_already_resolved")
+            return result
         if not _wait_for_sibling_interrupt(leader, result):
             return result
         now = time.monotonic()
@@ -709,6 +714,15 @@ class TeamRuntimeManager:
                 if member is not None:
                     await member.update_status(target)
                 return
+            from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+
+            harness = getattr(getattr(agent, "resources", None), "harness", None)
+            if isinstance(harness, TeamHarness) and harness.pending_approval_startup() is not None:
+                # A targeted restart did not become live. The leader's recovery
+                # task owns the claim and will release it after this teardown.
+                await agent.stop_coordination()
+                return
+
             team_logger.info(
                 "finalize_member: pausing team member {}; marking READY for next assignment",
                 member_name,

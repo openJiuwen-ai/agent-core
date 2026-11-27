@@ -208,8 +208,9 @@ rail，团队状态平时搭下一条外发消息的车（`CliRuntimeBase.send`�
   status 是 BUSY，本来也过不了完成判定，早退只是省一次 DB 全扫）。`is_team_completed()` 的
   三条件（任务全终态 + 成员全 settled + 无任何未读消息含广播）由 `TeamBackend` 判。
   按**上升沿**发 `TEAM_COMPLETED`，落沿自动重新武装。
-  **persistent 团队额外调 `conclude_completed_round` 结束 leader 流触发 auto-pause；
-  temporary 不调**（它靠 leader 的 `clean_team` 收尾）。
+  **persistent 团队调用 `conclude_completed_round` 复查审批后关流。** 返回 `False` 时保留流，由下一次 `POLL_TASK` 重新评估。
+  返回 `True` 时登记一次发布，kernel 在进入自动暂停收尾前等待发布结束。发布预算取总线退出超时的两倍。
+  temporary 团队直接发布完成事件，靠 leader 的 `clean_team` 收尾。
 - `rearm()`：清上升沿标志，`kernel.start` 每次调，使每个 run cycle 独立判定——一个 pause 后
   resume 的团队可以再次得出"完成"，不必先离开完成态。
 - `on_task_list_drained`：fire `_completion_callbacks`（`TeamAgent` 在 DeepAgent 建好后把

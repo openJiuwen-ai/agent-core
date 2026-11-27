@@ -155,6 +155,49 @@ async def _run(core: PersonalContext, name: str = "notes") -> dict:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["release", "prewarm", "snapshot", "arrange_path"])
+async def test_optional_capacity_fault_keeps_published_page_cursor_and_dedup(tmp_path, monkeypatch, fault):
+    from openjiuwen.harness.personal_context import context_capacity
+
+    source, home = tmp_path / "input", tmp_path / "runtime"
+    _write(source, "notes/note.md", "# Coffee\nCoffee beans need careful roasting.")
+    core = PersonalContext(home=home)
+    await core.set_configuration(_config(source))
+    await core.start_collection()
+    called = []
+    release = pipeline.release_sandbox
+
+    def fail_optional_operation(arg, *args):
+        called.append(True)
+        if fault == "release":
+            release(arg)
+        raise OSError("injected optional bookkeeping failure")
+
+    try:
+        with monkeypatch.context() as patch:
+            if fault == "arrange_path":
+                (home / "state/context_arrange.lock").mkdir(parents=True)
+                called.append(True)
+            elif fault == "release":
+                patch.setattr(pipeline, "release_sandbox", fail_optional_operation)
+            elif fault == "snapshot":
+                patch.setattr(pipeline.ContextPipelineService, "_create_context_baseline", fail_optional_operation)
+            else:
+                patch.setattr(context_capacity, "_warm_capacity_worker", fail_optional_operation)
+            first = await _run(core)
+        assert called and first["run_state"] == "succeeded"
+        pages = pipeline._context_ordinary_pages(home / "workspace/context")
+        assert any("roasting" in page.read_text(encoding="utf-8") for page in pages)
+        assert core._read_cursor("notes")
+        repeated = await _run(core)
+        assert repeated["run_state"] == "succeeded"
+        assert repeated["no_new_content"] and repeated["completed_items"] == 0
+    finally:
+        await core.stop_collection()
+        core.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_real_run_reports_committed_nodes_no_change_empty_and_updated(tmp_path):
     source, home = tmp_path / "input", tmp_path / "runtime"
     _write(source, "notes/note.md", "# Coffee\nCoffee beans need careful roasting.")
@@ -182,7 +225,7 @@ async def test_real_run_reports_committed_nodes_no_change_empty_and_updated(tmp_
         assert updated["no_new_content"] is False
         snapshot = await core.snapshot()
         assert snapshot.fetch_run_progress["notes"]["updated_node_count"] == updated["updated_node_count"]
-        assert core._read_run_history("notes")[0] == updated
+        assert core._read_run_history("notes")[0] == {key: value for key, value in updated.items() if key != "token_usage"}
     finally:
         await core.stop_collection()
 
@@ -258,7 +301,7 @@ async def test_stopping_a_real_run_keeps_counts_for_retained_publication(tmp_pat
         assert result["run_state"] == "cancelled"
         assert result["created_node_count"] == len(list((home / "workspace/context").rglob("*.md"))) > 0
         assert result["no_new_content"] is False
-        assert core._read_run_history("notes")[0] == result
+        assert core._read_run_history("notes")[0] == {key: value for key, value in result.items() if key != "token_usage"}
     finally:
         await core.stop_collection()
 

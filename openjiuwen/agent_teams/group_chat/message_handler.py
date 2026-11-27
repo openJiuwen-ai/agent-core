@@ -17,6 +17,23 @@ _MAX_HOST_NOTIFICATIONS = 32
 _HOST_NOTIFICATION_TIMEOUT = 10
 
 
+async def _finish_notification_task(task: asyncio.Future):
+    """Finish owned database I/O or its drain before propagating cancellation."""
+    cancelled = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+        except Exception:
+            break
+    if cancelled is not None:
+        if not task.cancelled():
+            task.exception()
+        raise cancelled
+    return task.result()
+
+
 class GroupMessageHandler(MessageHandler):
     """Consume group mentions with excerpts and chronological watermark updates.
 
@@ -28,6 +45,7 @@ class GroupMessageHandler(MessageHandler):
     def __init__(self, host, blueprint, infra, poll_ctrl) -> None:
         super().__init__(host, blueprint, infra, poll_ctrl)
         self._host_notifications: dict[tuple[str, str], asyncio.Task[None]] = {}
+        self._host_message_reads: set[asyncio.Task] = set()
 
     async def handles(self, event) -> bool:
         if getattr(event, "event_type", None) == TeamEvent.MEMBER_SHUTDOWN:
@@ -69,16 +87,27 @@ class GroupMessageHandler(MessageHandler):
     async def _notify_host(self, backend, message_id: str) -> None:
         try:
             async with asyncio.timeout(_HOST_NOTIFICATION_TIMEOUT):
-                row = await backend.db.message.get_message(message_id)
+                # Cancelling a SQLite read can invalidate the shared memory
+                # connection. Finish the DAO scope, including session cleanup.
+                lookup = asyncio.create_task(backend.db.message.get_message(message_id))
+                self._host_message_reads.add(lookup)
+                lookup.add_done_callback(self._host_message_reads.discard)
+                row = await _finish_notification_task(lookup)
                 if row is not None and group_metadata(row):
                     await backend.notify_host_managed_inbound(conversation_message(row, get_session_id()))
         except Exception:
             team_logger.error("Host-managed notification failed; host must retry {}", message_id, exc_info=True)
 
-    def cancel_host_notifications(self) -> None:
-        """Cancel best-effort notifications before the session is released."""
-        for task in self._host_notifications.values():
-            task.cancel()
+    async def cancel_host_notifications(self) -> None:
+        """Cancel notifications and finish framework reads before releasing the session."""
+        tasks = tuple(self._host_notifications.values())
+        current = asyncio.current_task()
+        for task in tasks:
+            if task is not current and not task.done() and not task.cancelling():
+                task.cancel()
+        reads = tuple(self._host_message_reads)
+        if reads:
+            await _finish_notification_task(asyncio.gather(*reads, return_exceptions=True))
 
     async def start_mentioned_members(self) -> None:
         """Start pending group recipients through the existing member lifecycle."""

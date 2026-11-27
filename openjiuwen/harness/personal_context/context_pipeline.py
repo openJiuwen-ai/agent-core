@@ -22,13 +22,14 @@ import stat
 import tempfile
 import threading
 import unicodedata
+import uuid
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Awaitable, Callable, Iterable, Mapping, NoReturn, Sequence, TypeVar, cast
 from urllib.parse import unquote, urlsplit, urlunsplit
 
-from filelock import Timeout
+from filelock import FileLock, Timeout
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
@@ -36,8 +37,27 @@ from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, Model,
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
 from openjiuwen.harness.personal_context.agent_support import run_personal_context_agent
+from openjiuwen.harness.personal_context._run_token_usage import (
+    RunUsage,
+    model_usage_phase,
+    note_unobserved_model_call,
+    run_usage_scope,
+)
 from openjiuwen.harness.personal_context.config import PersonalContextConfig
-from openjiuwen.harness.personal_context.context_usage import context_update_lock, publish_with_usage
+from openjiuwen.harness.personal_context.context_merge import merge_context_candidate, prepare_context_merge
+from openjiuwen.harness.personal_context.context_retirement import (
+    SandboxLease,
+    active_sandbox_ids,
+    create_run_sandbox,
+    is_run_owner_marker,
+    release_sandbox,
+    run_may_be_active,
+)
+from openjiuwen.harness.personal_context.context_usage import (
+    context_arrange_lock,
+    context_update_lock,
+    publish_with_usage,
+)
 from openjiuwen.harness.personal_context.file_tools import _ReclusterApply, _ReclusterPlan
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.path_safety import (
@@ -104,6 +124,14 @@ _MANAGED_SOURCE_MARKER = re.compile(r"(?m)^<!-- personal-context-managed-source:
 _MANAGED_SOURCE_MARKER_LIKE = re.compile(r"(?i)<!--\s*personal-context-managed-source\b[^>]*-->")
 _RELATED_START = "<!-- personal-context-related:start -->"
 _RELATED_END = "<!-- personal-context-related:end -->"
+CONTEXT_MERGE_BLOCKS = (
+    (_ROOT_NAVIGATION_START, _ROOT_NAVIGATION_END),
+    (_DIRECTORY_OVERVIEW_START, _DIRECTORY_OVERVIEW_END),
+    (_DIRECTORY_DESCRIPTION_START, _DIRECTORY_DESCRIPTION_END),
+    (_SOURCE_LINKS_START, _SOURCE_LINKS_END),
+    (_TOPIC_LINKS_START, _TOPIC_LINKS_END),
+    (_RELATED_START, _RELATED_END),
+)
 _RELATED_LIMIT = 3
 # Related-page links share the measured sparse-cosine scale (F_05): tree-wide,
 # same-topic page pairs reach p95 ~ 0.039 while cross-topic pairs stay <= ~0.012
@@ -2969,12 +2997,15 @@ async def _refresh_related_documents_hybrid(
     )
 
 
-def _description_context_targets(description: Path, *, context_root: Path) -> set[str]:
+def _context_markdown_targets(
+    page: Path, *, context_root: Path, final_context_root: Path | None = None,
+) -> set[str]:
     try:
-        markdown = _extended_path(description).read_text(encoding="utf-8")
+        markdown = _extended_path(page).read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
-        raise _pipeline_error("Context description could not be read for coverage validation") from exc
-    root = context_root.resolve()
+        raise _pipeline_error("Context page could not be read for link validation") from exc
+    root = (final_context_root or context_root).resolve()
+    logical_page = root / page.relative_to(context_root)
     targets: set[str] = set()
     for raw_target in _MARKDOWN_LINK.findall(_markdown_reference_text(markdown)):
         destination = _markdown_destination(raw_target)
@@ -2982,7 +3013,7 @@ def _description_context_targets(description: Path, *, context_root: Path) -> se
             continue
         if destination.startswith(("/", "\\")) or "\\" in destination or re.fullmatch(r"[A-Za-z]:.*", destination):
             continue
-        target = (description.parent / destination).resolve()
+        target = (logical_page.parent / destination).resolve()
         if target.is_relative_to(root):
             targets.add(target.relative_to(root).as_posix())
     return targets
@@ -3028,7 +3059,7 @@ def _validate_description_coverage(
             context_root, directory, expected, baseline_root=baseline_root, baseline=baseline,
             changed_paths=changed_paths,
         ))
-        if not expected.issubset(_description_context_targets(description, context_root=context_root)):
+        if not expected.issubset(_context_markdown_targets(description, context_root=context_root)):
             raise error("candidate description coverage is incomplete")
 
 
@@ -3053,7 +3084,7 @@ def _inherited_navigation_omissions(
         # Removing those links is a new regression, not an inherited omission.
         return set()
     previous_targets = (
-        _description_context_targets(baseline_description, context_root=baseline_root)
+        _context_markdown_targets(baseline_description, context_root=baseline_root)
         if _path_is_file(baseline_description) else set()
     )
     return {
@@ -3211,6 +3242,7 @@ def _direct_reference_targets(
             final_context_root=source_root.parent / "context",
             source_root=source_root,
             error=_pipeline_error,
+            allow_missing_body=True,
         )
         if classified is None:
             continue
@@ -3599,9 +3631,8 @@ def _split_markdown_destination(raw_target: str) -> tuple[str, str, bool] | None
 def _rewritten_markdown_destination(
     raw_target: str,
     *,
-    context_root: Path,
+    classified: tuple[str, str] | None,
     source_root: Path,
-    old_page_relative: str,
     new_page_relative: str,
     mapping: Mapping[str, str],
 ) -> str:
@@ -3611,14 +3642,6 @@ def _rewritten_markdown_destination(
     destination, title_suffix, was_bracketed = split
     plain_destination = re.split(r"[?#]", destination, maxsplit=1)[0]
     destination_suffix = destination[slice(len(plain_destination), None)]
-    classified = _classify_reference_target(
-        raw_target,
-        page_relative=PurePosixPath(old_page_relative),
-        context_root=context_root,
-        final_context_root=source_root.parent / "context",
-        source_root=source_root,
-        error=_pipeline_error,
-    )
     if classified is None:
         return raw_target
     kind, target = classified
@@ -3651,6 +3674,7 @@ def _rewrite_context_markdown_links(
                 final_context_root=source_root.parent / "context",
                 source_root=source_root,
                 error=_pipeline_error,
+                allow_missing_body=True,
             )
             if classified is not None:
                 kind, target = classified
@@ -3669,9 +3693,8 @@ def _rewrite_context_markdown_links(
                         return _markdown_label(fallback_label)
             rewritten = _rewritten_markdown_destination(
                 raw_target,
-                context_root=context_root,
+                classified=classified,
                 source_root=source_root,
-                old_page_relative=old_page_relative,
                 new_page_relative=new_page_relative,
                 mapping=mapping,
             )
@@ -4044,6 +4067,7 @@ def _page_source_metadata(
         page_relative=page.relative_to(context_root).as_posix(),
         alias_targets=alias_targets,
         cancel_requested=cancel_requested,
+        allow_missing_body=True,
     )
     return [read_source_metadata(source_root / f"{source_id}.md") for source_id in sorted(source_ids)]
 
@@ -7365,6 +7389,17 @@ def _short_reference_replacer(
     return replace
 
 
+def _missing_context_body(path: Path) -> bool:
+    if _is_program_description(path):
+        return False
+    try:
+        _extended_path(path).lstat()
+    except FileNotFoundError:
+        _assert_path_chain_no_symlinks(path)
+        return True
+    return False
+
+
 def _classify_reference_target(
     raw_target: str,
     *,
@@ -7374,6 +7409,7 @@ def _classify_reference_target(
     source_root: Path,
     error: Callable[[str], BaseError],
     validate_target: bool = True,
+    allow_missing_body: bool = False,
 ) -> tuple[str, str] | None:
     destination = _markdown_destination(raw_target)
     if destination is None:
@@ -7396,7 +7432,13 @@ def _classify_reference_target(
             return None
         candidate_target = context_root / relative
         if validate_target and (not _path_is_file(candidate_target) or _path_is_link_or_reparse(candidate_target)):
-            raise error("candidate Markdown reference target is missing")
+            if (
+                not allow_missing_body
+                or _is_program_description(page_relative)
+                or not _missing_context_body(candidate_target)
+            ):
+                raise error("candidate Markdown reference target is missing")
+            _assert_path_chain_no_symlinks(logical_page.parent / destination)
         return "context", relative.as_posix()
     if logical_target.is_relative_to(logical_source_root):
         relative = logical_target.relative_to(logical_source_root)
@@ -7420,6 +7462,7 @@ def _validate_reference_graph(
     changed_source_ids: set[str] | None = None,
     baseline_root: Path | None = None,
     baseline: Mapping[str, tuple[int, str]] | None = None,
+    baseline_path_by_candidate: Mapping[str, str] | None = None,
 ) -> None:
     """Require every Context Markdown to reach an atomic source."""
 
@@ -7442,6 +7485,7 @@ def _validate_reference_graph(
     source_edges: dict[str, set[str]] = {relative: set() for relative in pages}
     page_texts: dict[str, str] = {}
     reference_errors: dict[str, BaseError] = {}
+    missing_targets: dict[str, set[str]] = {}
     for relative, page in pages.items():
         try:
             text = _extended_path(page).read_text(encoding="utf-8")
@@ -7483,7 +7527,12 @@ def _validate_reference_graph(
             else:
                 context_edges[relative].add(target)
                 if target not in pages:
-                    reference_errors[relative] = error("candidate Markdown reference target is missing")
+                    missing_targets.setdefault(relative, set()).add(target)
+                    destination = _markdown_destination(raw_target)
+                    try:
+                        _assert_path_chain_no_symlinks(final_context_root / page_relative.parent / destination)
+                    except BaseError as exc:
+                        reference_errors[relative] = exc
 
     valid_sources: set[str] = set()
     source_errors: dict[str, BaseError] = {}
@@ -7506,9 +7555,30 @@ def _validate_reference_graph(
             break
         affected = expanded
     affected.intersection_update(pages)
+    previous_root = baseline_root or final_context_root
+    compare_previous = (
+        bool(missing_targets) and changed_paths is not None and previous_root.resolve() != context_root.resolve()
+    )
     for relative in sorted(affected):
         if relative in reference_errors:
             raise reference_errors[relative]
+        if relative in missing_targets:
+            # An edit can keep an existing broken body link. Compare edges, not
+            # just page signatures: a new edge on the same page must still fail.
+            previous_relative = (baseline_path_by_candidate or {}).get(relative, relative)
+            previous_page = previous_root / previous_relative
+            previous_targets = set()
+            if compare_previous and not _is_program_description(relative) and _path_is_file(previous_page):
+                previous_targets = _context_markdown_targets(
+                    previous_page, context_root=previous_root, final_context_root=final_context_root,
+                )
+            for target in missing_targets[relative]:
+                inherited_link = target in previous_targets and (baseline is None or target not in baseline)
+                if inherited_link and _missing_context_body(previous_root / target) and _missing_context_body(
+                    context_root / target
+                ):
+                    continue
+                raise error("candidate Markdown reference target is missing")
         for source_id in source_edges[relative]:
             if source_id in source_errors:
                 raise source_errors[source_id]
@@ -7589,6 +7659,7 @@ def _source_ids_reachable_from_page(
     page_relative: str,
     alias_targets: Mapping[str, str] | None = None,
     cancel_requested: Callable[[], bool] | None = None,
+    allow_missing_body: bool = False,
 ) -> set[str]:
     """Return atomic sources reachable from a physical or candidate Context page."""
 
@@ -7606,6 +7677,9 @@ def _source_ids_reachable_from_page(
         try:
             markdown = _extended_path(page).read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
+            missing_descendant = allow_missing_body and relative != page_relative
+            if missing_descendant and isinstance(exc, FileNotFoundError) and _missing_context_body(page):
+                continue
             raise _pipeline_error("existing Context reference graph could not be read") from exc
         markers = _MANAGED_SOURCE_MARKER.findall(markdown)
         if len(markers) > 1:
@@ -7633,6 +7707,7 @@ def _source_ids_reachable_from_page(
                 final_context_root=logical_context_root,
                 source_root=source_root,
                 error=_pipeline_error,
+                allow_missing_body=allow_missing_body,
             )
             if classified is None:
                 continue
@@ -7745,6 +7820,7 @@ class ContextPipelineService:
         progress_callback: Callable[[str, str, str, int], None] | None = None,
         profile_callback: Callable[[str, str, str], None] | None = None,
         result_callback: Callable[[str, str, dict[str, object]], None] | None = None,
+        run_usage: Mapping[tuple[str, str], RunUsage] | None = None,
     ) -> None:
         self._home = home.expanduser().resolve()
         self._config = config
@@ -7764,6 +7840,7 @@ class ContextPipelineService:
         self._progress_callback = progress_callback
         self._profile_callback = profile_callback
         self._result_callback = result_callback
+        self._run_usage = run_usage
         self._embedding: APIEmbedding | None = None
         self._embedding_cache: dict[str, tuple[float, ...]] = {}
         self._embedding_dimension: int | None = None
@@ -7796,6 +7873,8 @@ class ContextPipelineService:
             if key not in self._embedding_cache:
                 missing_by_key.setdefault(key, text)
         if missing_by_key:
+            with contextlib.suppress(Exception):
+                note_unobserved_model_call("embedding", "", getattr(self._embedding, "model_name", "") or "")
             try:
                 raw_vectors = await self._embedding.embed_documents(list(missing_by_key.values()))
             except Exception:
@@ -7923,10 +8002,14 @@ class ContextPipelineService:
                             _safe_segment(service_id, name="service_id"),
                             _safe_segment(run_id, name="run_id"),
                         )
-                event_task = asyncio.create_task(
-                    self._process_queue_item(item),
-                    name="personal-context-context-pipeline-event",
-                )
+                usage = None
+                if self._run_usage is not None and self._active_run_key is not None:
+                    usage = self._run_usage.get(self._active_run_key)
+                with run_usage_scope(usage):
+                    event_task = asyncio.create_task(
+                        self._process_queue_item(item),
+                        name="personal-context-context-pipeline-event",
+                    )
                 self._active_event_task = event_task
                 await event_task
             except asyncio.CancelledError:
@@ -7968,17 +8051,17 @@ class ContextPipelineService:
         elif tag == "finish":
             if payload is not None:
                 raise _pipeline_error("finish event payload must be None")
-            # Normal preparation also reads the published tree. Maintenance
-            # must yield throughout it, not merely during the final replacement.
-            async with context_update_lock(self._home):
-                await self._finish_run_event(safe_service, safe_run)
+            # Normal runs remain serialized; maintenance can run while the
+            # model arranges its private snapshot.
+            async with context_arrange_lock(self._home) as allow_parallel:
+                await self._finish_run_event(safe_service, safe_run, allow_parallel=allow_parallel)
         elif tag == "retain":
             if payload is not None:
                 raise _pipeline_error("retain event payload must be None")
             if (safe_service, safe_run) not in self._invalidated_run_keys:
                 self._cancelled_run_keys.discard((safe_service, safe_run))
-            async with context_update_lock(self._home):
-                await self._finish_run_event(safe_service, safe_run, retaining=True)
+            async with context_arrange_lock(self._home) as allow_parallel:
+                await self._finish_run_event(safe_service, safe_run, retaining=True, allow_parallel=allow_parallel)
         elif tag == "abort":
             if payload is not None:
                 raise _pipeline_error("abort event payload must be None")
@@ -8007,11 +8090,14 @@ class ContextPipelineService:
             try:
                 _assert_path_chain_no_symlinks(self._home / "workspace")
                 _assert_no_symlinks(self._sandboxes_root)
-                sandbox.mkdir(parents=True, exist_ok=False)
+                relative = sandbox.relative_to(self._sandboxes_root).as_posix()
+                sandbox_id = hashlib.sha256(relative.encode("utf-8")).hexdigest() + "-" + uuid.uuid4().hex
+                sandbox, lease = create_run_sandbox(self._home, sandbox_id, sandbox)
             except OSError as exc:
                 raise _publish_error("run sandbox could not be created") from exc
             state = {
                 "sandbox": sandbox,
+                "sandbox_lease": lease,
                 "batch_ids": [],
                 "batch_count": 0,
                 "provider": self._provider_for_service(service_id),
@@ -8182,6 +8268,7 @@ class ContextPipelineService:
         run_id: str,
         *,
         retaining: bool = False,
+        allow_parallel: bool = True,
     ) -> None:
         """Compile and publish all persisted batches from one run exactly once."""
 
@@ -8206,6 +8293,7 @@ class ContextPipelineService:
             await self._cleanup_run_state(key)
             raise _pipeline_error("run sandbox state is invalid")
         state["status"] = "finishing"
+        snapshot_lock = contextlib.AsyncExitStack()
         try:
             self._raise_if_publication_fenced(key)
             processed = await _cancel_safe_to_thread(self._prepare_run_finish_io, sandbox, dict(state))
@@ -8222,6 +8310,19 @@ class ContextPipelineService:
                 if logical_id in logical_sources
             }
             run_time = datetime.now(timezone.utc)
+            await snapshot_lock.enter_async_context(context_update_lock(self._home))
+            baseline_root = None
+            if allow_parallel:
+                sandbox_id, _ = cast(SandboxLease, state["sandbox_lease"])
+                try:
+                    candidate = await _cancel_safe_to_thread(self._create_context_baseline, sandbox_id)
+                    await _cancel_safe_to_thread(_copy_tree, self._context_root, candidate)
+                except OSError as error:
+                    # Keep the original serialized arrangement against the live tree.
+                    logger.warning("PersonalContext snapshot unavailable (%s)", type(error).__name__)
+                else:
+                    baseline_root = candidate
+                    await snapshot_lock.aclose()
             filesystem_profile = await self._filesystem_with_fallback(
                 processed=processed,
                 sandbox=sandbox,
@@ -8234,6 +8335,7 @@ class ContextPipelineService:
                 source_ids_by_logical_id=logical_sources,
                 run_time=run_time,
                 retaining=retaining,
+                baseline_root=baseline_root,
             )
             self._raise_if_publication_fenced(key)
             if self._progress_callback is not None:
@@ -8258,9 +8360,11 @@ class ContextPipelineService:
                 provider=provider,
                 source_ids_by_logical_id=logical_sources,
                 run_time=run_time,
+                baseline_root=baseline_root,
+                update_lock_held=baseline_root is None,
             )
             state["status"] = "published"
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, Timeout):
             if state.get("status") != "published":
                 await _cancel_safe_to_thread(self._restore_run_checkpoint, sandbox)
                 state["status"] = "processing"
@@ -8268,7 +8372,18 @@ class ContextPipelineService:
         except BaseException:
             await self._cleanup_run_state(key)
             raise
+        finally:
+            await snapshot_lock.aclose()
         await self._cleanup_run_state(key)
+
+    def _create_context_baseline(self, sandbox_id: str) -> Path:
+        """Allocate a run baseline outside all Agent-writable sandbox paths."""
+        root = self._home / "state"
+        _assert_path_chain_no_symlinks(root)
+        root.mkdir(parents=True, exist_ok=True)
+        # A cancelled attempt may leave an open file. Retain gets a fresh
+        # copy without trying to overwrite or remove the previous one.
+        return Path(tempfile.mkdtemp(prefix=f"context-baseline-{sandbox_id}.", dir=root))
 
     @staticmethod
     def _restore_run_checkpoint(sandbox: Path) -> None:
@@ -8717,6 +8832,13 @@ class ContextPipelineService:
                 discard_new_source_metadata=discard_new_source_metadata,
             )
         await _cancel_safe_to_thread(self._delete_run_sandbox, key)
+        if state is not None:
+            lease = state.pop("sandbox_lease", None)
+            if lease is not None:
+                try:
+                    release_sandbox(cast(SandboxLease, lease))
+                except Exception as error:
+                    logger.warning("PersonalContext sandbox registration cleanup deferred (%s)", type(error).__name__)
         self._run_states.pop(key, None)
         self._cancelled_run_keys.discard(key)
         self._invalidated_run_keys.discard(key)
@@ -8780,13 +8902,49 @@ class ContextPipelineService:
             return
         if not self._sandboxes_root.is_dir():
             raise _publish_error("sandbox root is not a directory")
+        # Only startup sweepers take this lock. Collection can create and
+        # release its own run while a different abandoned tree is cleaned.
+        lock_path = self._home / "state" / "context_sandbox_cleanup.lock"
+        sweep = FileLock(_extended_path(lock_path), timeout=0, thread_local=False)
+        try:
+            _assert_path_chain_no_symlinks(lock_path)
+            sweep.acquire()
+        except (BaseError, OSError):
+            return
         try:
             for service_root in list(self._sandboxes_root.iterdir()):
-                if service_root.is_symlink() or not service_root.is_dir():
+                try:
+                    service_info = service_root.lstat()
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISDIR(service_info.st_mode) or _path_is_link_or_reparse(service_root):
                     raise _publish_error("sandbox root contains an uncontrolled entry")
                 if not service_storage_segment_is_safe(service_root.name):
                     raise _publish_error("sandbox root contains an uncontrolled service path")
-                for run_root in list(service_root.iterdir()):
+                run_roots = {}
+                with contextlib.suppress(FileNotFoundError):
+                    for path in service_root.iterdir():
+                        with contextlib.suppress(FileNotFoundError):
+                            run_roots[path] = path.lstat()
+                try:
+                    active = set(active_sandbox_ids(self._home))
+                except (OSError, ValueError) as error:
+                    # Without a reliable owner list, leave these runs in place.
+                    logger.warning("PersonalContext sandbox scan deferred (%s)", type(error).__name__)
+                    continue
+                for run_root, previous in run_roots.items():
+                    try:
+                        current = run_root.lstat()
+                    except FileNotFoundError:
+                        continue
+                    if not os.path.samestat(previous, current) or previous.st_ctime_ns != current.st_ctime_ns:
+                        continue
+                    if is_run_owner_marker(run_root.name):
+                        if not run_may_be_active(self._home, run_root, active):
+                            # A staging directory is empty until the atomic rename.
+                            with contextlib.suppress(OSError):
+                                run_root.rmdir()
+                        continue
                     if run_root.is_symlink() or not run_root.is_dir():
                         raise _publish_error("service sandbox contains an uncontrolled entry")
                     if _LEGACY_AGENT_BASELINE_SEGMENT.fullmatch(run_root.name) is None:
@@ -8794,12 +8952,18 @@ class ContextPipelineService:
                         relative = run_root.resolve().relative_to(self._sandboxes_root.resolve())
                         if relative.parts != (service_root.name, run_root.name):
                             raise _publish_error("stale run path is not controlled")
+                        if run_may_be_active(self._home, run_root, active):
+                            continue
                     _assert_no_symlinks(run_root)
                     _make_tree_writable(run_root)
                     _remove_tree(run_root)
-                service_root.rmdir()
+                with contextlib.suppress(OSError):
+                    service_root.rmdir()
         except OSError as exc:
             raise _publish_error("stale run sandboxes could not be cleaned") from exc
+        finally:
+            with contextlib.suppress(OSError):
+                sweep.release()
 
     async def _process_deterministic(self, batch: FetchBatch) -> dict[str, object]:
         """Normalize one batch without consulting the configured Filesystem profile."""
@@ -8886,7 +9050,9 @@ class ContextPipelineService:
         source_ids_by_logical_id: Mapping[str, str] | None = None,
         run_time: datetime | None = None,
         retaining: bool = False,
+        baseline_root: Path | None = None,
     ) -> str:
+        baseline_root = baseline_root or self._context_root
         requested = "rules" if retaining else self._config.strategy_profile
         relocations: dict[str, str] = {}
         processed["_context_relocations"] = relocations
@@ -8913,6 +9079,11 @@ class ContextPipelineService:
                     "PersonalContext filesystem capacity_exempt_due_to_agent_fallback=true actual_profile=%s",
                     profile,
                 )
+
+        def original_page_paths() -> Mapping[str, str]:
+            if not relocations:
+                return baseline_path_by_candidate
+            return {**baseline_path_by_candidate, **{new: old for old, new in relocations.items()}}
 
         async def prepare_context_baseline(
             candidate_context: Path,
@@ -8943,7 +9114,7 @@ class ContextPipelineService:
         ) -> tuple[dict[str, tuple[int, str]], set[str]]:
             relocations.clear()
             await _cancel_safe_to_thread(_reset_filesystem_sandbox, sandbox)
-            await _cancel_safe_to_thread(_prepare_agent_candidate, self._context_root, sandbox)
+            await _cancel_safe_to_thread(_prepare_agent_candidate, baseline_root, sandbox)
             candidate_context = sandbox / "context"
             baseline, _ = await prepare_context_baseline(
                 candidate_context,
@@ -9029,7 +9200,7 @@ class ContextPipelineService:
                 await _cancel_safe_to_thread(_reset_filesystem_sandbox, sandbox)
                 await _cancel_safe_to_thread(
                     _prepare_agent_candidate,
-                    self._context_root,
+                    baseline_root,
                     sandbox,
                 )
                 context_baseline, baseline_path_by_candidate = await prepare_context_baseline(
@@ -9262,8 +9433,8 @@ class ContextPipelineService:
                             context_baseline=context_baseline,
                             materialized_baseline=materialized_baseline,
                             inputs_baseline=cast(Mapping[str, tuple[int, str]], inputs_baseline),
-                            baseline_root=self._context_root,
-                            baseline_path_by_candidate=baseline_path_by_candidate,
+                            baseline_root=baseline_root,
+                            baseline_path_by_candidate=original_page_paths(),
                             final_context_root=self._context_root,
                             source_root=self._source_meta_root,
                             alias_targets=alias_targets,
@@ -9316,7 +9487,7 @@ class ContextPipelineService:
                     sandbox / "context",
                     baseline=context_baseline,
                     changed_paths=changed_paths,
-                    baseline_root=self._context_root,
+                    baseline_root=baseline_root,
                     baseline_path_by_candidate=baseline_path_by_candidate,
                     final_context_root=self._context_root,
                     source_root=self._source_meta_root,
@@ -9338,7 +9509,7 @@ class ContextPipelineService:
                     and _processed_documents(processed)
                     and not _agent_updated_context_knowledge_page(
                         sandbox / "context",
-                        baseline_root=self._context_root,
+                        baseline_root=baseline_root,
                         baseline=context_baseline,
                     )
                 ):
@@ -9352,8 +9523,9 @@ class ContextPipelineService:
                         repairable=True,
                         changed_paths=changed_paths,
                         changed_source_ids=set(effective_source_ids.values()) | effective_deleted_source_ids,
-                        baseline_root=self._context_root,
+                        baseline_root=baseline_root,
                         baseline=context_baseline,
+                        baseline_path_by_candidate=original_page_paths(),
                     )
                 if preserve_existing_paths:
                     _validate_context_partition_integrity(
@@ -9482,7 +9654,8 @@ class ContextPipelineService:
                 start, items, message = request
                 try:
                     async with semaphore:
-                        result = await model.invoke(cast(list[BaseMessage], [message]))
+                        with model_usage_phase("semantic_enrichment"):
+                            result = await model.invoke(cast(list[BaseMessage], [message]))
                     accepted = _parse_balanced_page_semantics(
                         _model_result_text(result),
                         allowed_indices=set(range(start, start + len(items))),
@@ -9549,7 +9722,8 @@ class ContextPipelineService:
         ) -> dict[str, dict[str, str]]:
             try:
                 async with semaphore:
-                    result = await model.invoke(cast(list[BaseMessage], [message]))
+                    with model_usage_phase("directory_description"):
+                        result = await model.invoke(cast(list[BaseMessage], [message]))
                 result_text = _model_result_text(result)
                 parsed = _parse_balanced_directory_presentations(
                     result_text,
@@ -9696,6 +9870,8 @@ class ContextPipelineService:
         provider: str | None = None,
         source_ids_by_logical_id: Mapping[str, str] | None = None,
         run_time: datetime | None = None,
+        baseline_root: Path | None = None,
+        update_lock_held: bool = False,
     ) -> None:
         del batch
         async with _publication_lock(self._publish_lock):
@@ -9713,7 +9889,7 @@ class ContextPipelineService:
                 alias_targets=alias_targets,
             )
             if not candidate_prepared:
-                await _cancel_safe_to_thread(_copy_tree, self._context_root, candidate_context)
+                await _cancel_safe_to_thread(_copy_tree, baseline_root or self._context_root, candidate_context)
             candidate_context.mkdir(parents=True, exist_ok=True)
             await _cancel_safe_to_thread(_assert_no_symlinks, candidate_context)
             if not candidate_prepared:
@@ -9766,9 +9942,8 @@ class ContextPipelineService:
                     else set()
                 )
                 navigation_changed_paths.update(_changed_context_paths(candidate_context, publication_baseline))
-            before_usage = {}
             before = await _cancel_safe_to_thread(
-                _snapshot_context_nodes, self._context_root, relocations=relocations, usage=before_usage,
+                _snapshot_context_nodes, baseline_root or self._context_root, relocations=relocations,
             )
             if navigation_changed_paths is not None:
                 navigation_changed_paths.update(
@@ -9809,61 +9984,83 @@ class ContextPipelineService:
                     source_root=self._source_meta_root,
                     alias_targets=alias_targets,
                 )
-            # Measure this publication under the same lock as the commit, not
-            # across the whole fetch (other services can publish in between).
-            after_usage = {}
-            after = await _cancel_safe_to_thread(
-                _snapshot_context_nodes, candidate_context, usage=after_usage, previous=(before, before_usage),
+            merge_snapshot = (
+                await _cancel_safe_to_thread(prepare_context_merge, baseline_root, candidate_context)
+                if baseline_root is not None else None
             )
-            validation_paths = {
-                relative for relative in set(before) | set(after)
-                if before.get(relative, (None,))[0] != after.get(relative, (None,))[0]
-            }
-            await _cancel_safe_to_thread(
-                _validate_candidate,
-                candidate_context,
-                final_context_root=self._context_root,
-                source_root=self._source_meta_root,
-                max_pages_per_directory=self._config.max_pages_per_directory,
-                max_subdirectories_per_directory=self._config.max_subdirectories_per_directory,
-                capacity_exempt=capacity_exempt,
-                changed_paths=validation_paths,
-            )
-            if alias_targets is not None:
+            async with contextlib.nullcontext() if update_lock_held else context_update_lock(self._home):
+                if baseline_root is not None:
+                    await _cancel_safe_to_thread(
+                        merge_context_candidate,
+                        baseline_root,
+                        candidate_context,
+                        self._context_root,
+                        source_root=self._source_meta_root,
+                        relocations=relocations,
+                        prepared=merge_snapshot,
+                    )
+                before_usage = {}
+                before = await _cancel_safe_to_thread(
+                    _snapshot_context_nodes, self._context_root, relocations=relocations, usage=before_usage,
+                )
+                # Measure this publication under the same lock as the commit, not
+                # across the whole fetch (other services can publish in between).
+                after_usage = {}
+                after = await _cancel_safe_to_thread(
+                    _snapshot_context_nodes, candidate_context, usage=after_usage, previous=(before, before_usage),
+                )
+                validation_paths = {
+                    relative for relative in set(before) | set(after)
+                    if before.get(relative, (None,))[0] != after.get(relative, (None,))[0]
+                }
                 await _cancel_safe_to_thread(
-                    _validate_reference_graph,
+                    _validate_candidate,
                     candidate_context,
                     final_context_root=self._context_root,
                     source_root=self._source_meta_root,
-                    repairable=False,
+                    max_pages_per_directory=self._config.max_pages_per_directory,
+                    max_subdirectories_per_directory=self._config.max_subdirectories_per_directory,
+                    capacity_exempt=capacity_exempt,
                     changed_paths=validation_paths,
-                    changed_source_ids=set(effective_source_ids.values()) | effective_deleted_source_ids,
                 )
-            self._raise_if_publication_fenced((service_id, run_id))
-            if self._progress_callback is not None:
-                self._progress_callback(service_id, run_id, "committing", 97)
-            actual_profile = processed.get("actual_profile")
-            if self._profile_callback is not None and isinstance(actual_profile, str):
-                self._profile_callback(service_id, run_id, actual_profile)
-            result = _count_published_nodes(before, after, relocations=relocations)
-            committed = False
+                if alias_targets is not None:
+                    await _cancel_safe_to_thread(
+                        _validate_reference_graph,
+                        candidate_context,
+                        final_context_root=self._context_root,
+                        source_root=self._source_meta_root,
+                        repairable=False,
+                        changed_paths=validation_paths,
+                        changed_source_ids=set(effective_source_ids.values()) | effective_deleted_source_ids,
+                        baseline_path_by_candidate={target: old for old, target in relocations.items()},
+                    )
+                self._raise_if_publication_fenced((service_id, run_id))
+                if self._progress_callback is not None:
+                    self._progress_callback(service_id, run_id, "committing", 97)
+                actual_profile = processed.get("actual_profile")
+                if self._profile_callback is not None and isinstance(actual_profile, str):
+                    self._profile_callback(service_id, run_id, actual_profile)
+                result = _count_published_nodes(before, after, relocations=relocations)
+                committed = False
 
-            def commit() -> None:
-                nonlocal committed
-                publish_with_usage(self._home, candidate_context, relocations, snapshots=(before_usage, after_usage))
-                committed = True
+                def commit() -> None:
+                    nonlocal committed
+                    publish_with_usage(
+                        self._home, candidate_context, relocations, snapshots=(before_usage, after_usage),
+                    )
+                    committed = True
 
-            try:
-                await _cancel_safe_to_thread(commit)
-            finally:
-                # A cancellation can arrive while the atomic commit is in its
-                # worker thread. Report only after that worker has settled.
-                if committed:
-                    state = self._run_states.get((service_id, run_id))
-                    if state is not None:
-                        state["status"] = "published"
-                    if self._result_callback is not None:
-                        self._result_callback(service_id, run_id, result)
+                try:
+                    await _cancel_safe_to_thread(commit)
+                finally:
+                    # A cancellation can arrive while the atomic commit is in its
+                    # worker thread. Report only after that worker has settled.
+                    if committed:
+                        state = self._run_states.get((service_id, run_id))
+                        if state is not None:
+                            state["status"] = "published"
+                        if self._result_callback is not None:
+                            self._result_callback(service_id, run_id, result)
 
     def _fail_active(self, error: BaseError) -> None:
         if self._active_completion is not None and not self._active_completion.done():
@@ -10432,6 +10629,7 @@ def _validate_filesystem_agent_result(
                 changed_source_ids=deleted_source_ids,
                 baseline_root=baseline_root,
                 baseline=context_baseline,
+                baseline_path_by_candidate=baseline_path_by_candidate,
             )
     except BaseError as error:
         # Publish/path/sandbox failures are security or integrity failures;
@@ -10790,7 +10988,7 @@ def _repair_inherited_navigation(context_root: Path, *, source_ids: set[str]) ->
             elif _path_is_file(child) and child.suffix.casefold() == ".md" and child.name != "description.md":
                 expected.add(child.relative_to(context_root).as_posix())
         targets = (
-            _description_context_targets(description, context_root=context_root)
+            _context_markdown_targets(description, context_root=context_root)
             if _path_is_file(description)
             else set()
         )
@@ -11064,7 +11262,7 @@ def _validate_description_navigation(
         if page.name.casefold() != "description.md" or not _path_is_file(page):
             continue
         if page.parent not in directories and not (
-            changed_paths and _description_context_targets(page, context_root=context_root).intersection(changed_paths)
+            changed_paths and _context_markdown_targets(page, context_root=context_root).intersection(changed_paths)
         ):
             continue
         try:

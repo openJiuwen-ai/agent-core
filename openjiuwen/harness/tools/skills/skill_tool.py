@@ -409,6 +409,16 @@ class SkillTool(Tool):
 
             skill_file_content = read_file_result.data.content
 
+            # Activate only after the skill file is loaded successfully so later
+            # bash/read_file rails can attribute calls to this skill.
+            # Persist on session (not only ContextVar): tool execution contexts
+            # often do not inherit the ContextVar binding used at set time.
+            from openjiuwen.harness.rails.skills.skill_use_rail import (
+                set_current_skill_name,
+            )
+
+            set_current_skill_name(skill.name, session=kwargs.get("session"))
+
             data: Dict[str, Any] = {
                 "skill_directory": str(skill.directory),
                 "skill_content": skill_file_content,

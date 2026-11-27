@@ -101,16 +101,50 @@ async def test_only_one_approval_is_submitted_per_drain():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "reason",
-    ["interrupt_resume_busy", "interrupt_resume_unavailable", "gate_closed", "not_active"],
+    "reason, attempts",
+    [
+        ("interrupt_resume_busy", 1),
+        ("interrupt_resume_unavailable", 2),
+        ("gate_closed", 1),
+        ("not_active", 1),
+    ],
 )
-async def test_actual_non_admission_keeps_durable_reply_unread(reason):
-    handler, mailbox, host = mailbox_handler([mail("1", approval=True), mail("2", approval=True)])
+async def test_actual_non_admission_keeps_durable_reply_unread(reason, attempts):
+    handler, mailbox, host = mailbox_handler([mail("1", approval=True), mail("2"), mail("3", approval=True)])
     host.resume_interrupt.return_value = DeliverResult.failure(reason)
     await handler._process_unread_messages("worker")
     assert mailbox.read == []
-    host.resume_interrupt.assert_awaited_once()
+    assert host.resume_interrupt.await_count == attempts
     host.deliver_input.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_approval_does_not_block_the_next_card():
+    handler, mailbox, host = mailbox_handler([
+        mail("1", approval=True, tool_call_id="old-call"),
+        mail("2"),
+        mail("3", approval=True, tool_call_id="current-call"),
+    ])
+    host.resume_interrupt.side_effect = [
+        DeliverResult.failure("interrupt_resume_unavailable"),
+        DeliverResult.success(),
+        DeliverResult.failure("unsupported_interactive_input"),
+    ]
+
+    await handler._process_unread_messages("worker")
+
+    assert [list(call.args[0].user_inputs) for call in host.resume_interrupt.await_args_list] == [
+        ["old-call"], ["current-call"],
+    ]
+    assert mailbox.read == ["3"]
+    host.deliver_input.assert_not_awaited()
+
+    host.has_pending_interrupt = lambda: False
+    await handler._process_unread_messages("worker")
+
+    assert list(host.resume_interrupt.await_args.args[0].user_inputs) == ["old-call"]
+    assert mailbox.read == ["3", "1", "2"]
+    host.deliver_input.assert_awaited_once_with("2", use_steer=True)
 
 
 @pytest.mark.asyncio
@@ -204,7 +238,7 @@ async def test_approval_is_not_acknowledged_before_resume_admission(error):
 
 
 @pytest.mark.asyncio
-async def test_unavailable_after_interrupt_is_gone_consumes_the_durable_copy():
+async def test_unavailable_without_pending_keeps_the_durable_reply_unclaimed():
     host = NS(
         has_pending_interrupt=lambda: False,
         has_in_flight_round=lambda: False,
@@ -213,7 +247,8 @@ async def test_unavailable_after_interrupt_is_gone_consumes_the_durable_copy():
     )
     handler, mailbox, _ = mailbox_handler([mail("1", approval=True)], host)
     await handler._process_unread_messages("worker")
-    assert mailbox.read == ["1"]
+    assert mailbox.read == []
+    host.resume_interrupt.assert_awaited_once()
     host.deliver_input.assert_not_awaited()
 
 
