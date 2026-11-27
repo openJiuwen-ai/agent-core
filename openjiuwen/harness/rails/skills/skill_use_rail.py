@@ -937,8 +937,10 @@ class SkillUseRail(DeepAgentRail):
 
     async def _wait_for_pending_skill_scan(self) -> None:
         """Wait for the latest compatible scan without cancelling its producer."""
-        while (scan := self._pending_scan) is not None and self._scan_still_current(scan):
+        scan = self._pending_scan
+        while scan is not None and self._scan_still_current(scan):
             await asyncio.shield(scan.done)
+            scan = self._pending_scan
 
     async def _await_current_skill_view(self) -> None:
         """Adopt a committed successor, or retry once in the caller's scope."""
@@ -1204,7 +1206,11 @@ class SkillUseRail(DeepAgentRail):
         """
         self._invalidate_if_language_changed()
         if self._load_session_state(session) is None:
-            if self.sys_operation is not None and self._binding_token is not None and not self._has_current_skill_view():
+            if (
+                self.sys_operation is not None
+                and self._binding_token is not None
+                and not self._has_current_skill_view()
+            ):
                 return []
             return list(self.skills)
 
