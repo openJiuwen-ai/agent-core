@@ -27,6 +27,7 @@ from openjiuwen.core.foundation.tool.mcp.client.reconnect import (
     should_attempt_reconnect,
 )
 from openjiuwen.core.foundation.tool.mcp.client.sse_client import SseClient
+from openjiuwen.core.foundation.tool.mcp.errors import McpTimeoutError
 
 
 def _make_client() -> SseClient:
@@ -134,7 +135,7 @@ class TestSseReconnectR1R2R6:
 
         client._session = _FakeSession()
 
-        with pytest.raises(asyncio.TimeoutError):
+        with pytest.raises(McpTimeoutError):
             # No outer safety net — R2 must bound the call itself.
             await client.call_tool("t", {}, timeout=0.05)
         await _stop(client)

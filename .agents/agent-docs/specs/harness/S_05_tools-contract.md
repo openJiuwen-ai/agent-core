@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-11-12 |
+| 最近一次修订日期 | 2026-11-24 |
 | 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md`、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_21_cua-desktop-subagent、F_23_progressive-tool-discovery-metadata、F_20261104_1720_tool-execution-environment |
 
 ## 范围 / 边界
@@ -190,6 +190,11 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 13. **可执行数据不是展示文本**：URL、selector、target/generation 标识完整保留；紧凑投影
     超过容量时删除整项或省略字段，不产生貌似可执行的截断链接。滚动 transport 最长等待
     15 秒（仍受更短的任务期限约束），点击和脚本等副作用操作超时不能自动重放。
+    browser_move 的 Stdio / Streamable HTTP 覆写 client 与 core 共用
+    `McpTimeoutError` / `McpConnectionError`；原始 transport 异常保留在 `cause`。
+    内部 deadline 不得转换为普通 `RuntimeError`，调用方 `CancelledError` 不得误报为
+    MCP 超时。副作用动作的超时或已知断连均不得由 client 自动重放；retry-safe 查询沿用
+    既有有限重连策略，重试前仍须核对动作类别。
 
 14. **Browser 管理与执行分离**：browser_phase 只更新意图/读取核验，不占页面动作预算；
     逐步骤执行回执保留部分完成与未派发事实。业务验证在 llm/hybrid 中一致，见 S_18 / F_10。

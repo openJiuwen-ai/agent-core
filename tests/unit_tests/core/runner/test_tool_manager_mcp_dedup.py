@@ -17,8 +17,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
+from openjiuwen.core.common.exception.errors import BaseError, build_error
+from openjiuwen.core.foundation.tool import McpServerConfig, McpTimeoutError, McpToolCard
 from openjiuwen.core.runner.resources_manager.tool_manager import ToolMgr
 
 
@@ -159,6 +159,60 @@ async def test_add_tool_server_surfaces_connect_false_reason_as_connection_error
     # Real exception surfaced in reason, not a bare or nested-wrapped message.
     assert "TimeoutError" in err.message
     assert "handshake timed out" in err.message
+
+
+@pytest.mark.asyncio
+async def test_add_tool_server_maps_client_timeout_to_connection_error() -> None:
+    """A typed client timeout must not be downgraded to generic ADD_ERROR."""
+    mgr = ToolMgr()
+    cfg = _make_server_config(server_id="typed-timeout-srv")
+    timeout = build_error(
+        StatusCode.TOOL_MCP_EXECUTION_TIMEOUT,
+        operation="connect",
+        server_name=cfg.server_name,
+        timeout=0.1,
+        reason="handshake timed out",
+    )
+    fake_client = MagicMock()
+    fake_client.connect = AsyncMock(side_effect=timeout)
+    fake_client.disconnect = AsyncMock(return_value=True)
+
+    with patch.object(ToolMgr, "_create_client", staticmethod(lambda c: fake_client)):
+        with pytest.raises(BaseError) as exc_info:
+            await mgr.add_tool_server(cfg)
+
+    assert isinstance(timeout, McpTimeoutError)
+    assert exc_info.value.status is StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR
+    assert exc_info.value.cause is timeout
+    assert "handshake timed out" in exc_info.value.message
+    assert fake_client.disconnect.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_add_tool_server_disconnects_after_typed_list_tools_failure() -> None:
+    """A successful connection must be closed when tool discovery then fails."""
+    mgr = ToolMgr()
+    cfg = _make_server_config(server_id="list-timeout-srv")
+    timeout = build_error(
+        StatusCode.TOOL_MCP_EXECUTION_TIMEOUT,
+        operation="list_tools",
+        server_name=cfg.server_name,
+        timeout=0.1,
+        cause=TimeoutError("list tools timed out"),
+        reason="list tools timed out",
+    )
+    fake_client = MagicMock()
+    fake_client.connect = AsyncMock(return_value=True)
+    fake_client.list_tools = AsyncMock(side_effect=timeout)
+    fake_client.disconnect = AsyncMock(return_value=True)
+
+    with patch.object(ToolMgr, "_create_client", staticmethod(lambda c: fake_client)):
+        with pytest.raises(BaseError) as exc_info:
+            await mgr.add_tool_server(cfg)
+
+    assert exc_info.value.status is StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR
+    assert exc_info.value.cause is timeout
+    fake_client.disconnect.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

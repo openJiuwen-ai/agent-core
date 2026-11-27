@@ -208,7 +208,54 @@ mcp_config = McpServerConfig(
 
 ---
 
-## 5. 行业客户"最佳实践"完整 Demo
+## 5. 超时与连接异常
+
+直接持有 MCP client 的网关可以按异常类型处理超时和 transport 连接失败。`McpTimeoutError` 同时是 `McpConnectionError` 和内置 `TimeoutError` 的子类；两个异常都继承框架的 `ExecutionError`，并保留 `status`、`code` 和 `cause`。
+
+- `McpTimeoutError`（状态码 `182302`）：`connect()`、`call_tool()`、`list_tools()` 等操作超过内部 deadline。超时不代表远端一定未执行工具，副作用操作重试前必须核对状态。
+- `McpConnectionError`（状态码 `182303`）：已识别的 transport 断开、连接失败或 cancel-scope 清理失败。原始异常保存在 `cause`，可用于诊断和已有 reconnect 判定。
+- 普通非超时 `connect()` 失败仍返回 `False`。诊断原因保存在 client 的 `_last_connect_error`；只有已识别的 transport 失败会转换为 `McpConnectionError`。
+- 调用方主动 `task.cancel()` 或外层 `asyncio.wait_for()` 取消整个调用时，仍传播 `asyncio.CancelledError`，不会误报为 MCP 超时。
+
+```python
+import asyncio
+
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.tool import (
+    McpConnectionError,
+    McpServerConfig,
+    McpTimeoutError,
+)
+from openjiuwen.core.foundation.tool.mcp.client.stdio_client import StdioClient
+
+client = StdioClient(McpServerConfig(
+    server_name="weather",
+    client_type="stdio",
+    server_path="python server.py",
+))
+
+try:
+    connected = await client.connect(timeout=10.0)
+    if connected:
+        result = await client.call_tool(
+            "get_weather", {"city": "北京"}, timeout=5.0,
+        )
+except McpTimeoutError as exc:
+    # 工具可能已执行；有副作用的动作先核对状态，不盲目重试。
+    logger.warning("MCP deadline exceeded: %s", exc.cause)
+except McpConnectionError as exc:
+    # 仅按应用恢复策略处理已知 transport 失败，保留原始原因用于日志。
+    logger.warning("MCP transport failed: %s", exc.cause)
+except asyncio.CancelledError:
+    # 调用方主动取消不是网络超时，继续向上传播。
+    raise
+finally:
+    await client.disconnect()
+```
+
+完整本地 Stdio 验证入口见 `examples/mcp/timeout_error_probe.py`。它启动一个只在本机运行的 MCP server，不依赖外部服务。
+
+## 6. 行业客户"最佳实践"完整 Demo
 
 ### 场景：银行理财助手 Agent
 
@@ -282,7 +329,7 @@ asyncio.run(financial_agent_demo())
 
 ---
 
-## 6. 常见问题排查 (FAQ)
+## 7. 常见问题排查 (FAQ)
 
 ### Q1: MCP 服务器连接失败
 

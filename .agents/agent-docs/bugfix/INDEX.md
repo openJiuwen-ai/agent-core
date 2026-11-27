@@ -16,11 +16,14 @@ generated: true
 |---|
 | [agent_teams](#module-agent_teams) |
 | [agent_teams/workflow](#module-agent_teams-workflow) |
+| [core/common/exception](#module-core-common-exception) |
 | [core/context_engine](#module-core-context_engine) |
 | [core/controller](#module-core-controller) |
 | [core/foundation/llm](#module-core-foundation-llm) |
 | [core/foundation/llm/model_clients](#module-core-foundation-llm-model_clients) |
+| [core/foundation/tool/mcp](#module-core-foundation-tool-mcp) |
 | [core/runner/drunner/dmessage_queue](#module-core-runner-drunner-dmessage_queue) |
+| [core/runner/resources_manager](#module-core-runner-resources_manager) |
 | [core/session](#module-core-session) |
 | [core/session/tracer](#module-core-session-tracer) |
 | [core/single_agent](#module-core-single_agent) |
@@ -32,6 +35,7 @@ generated: true
 | [harness](#module-harness) |
 | [harness/moa](#module-harness-moa) |
 | [harness/subagents](#module-harness-subagents) |
+| [harness/tools/browser_move](#module-harness-tools-browser_move) |
 | [harness/tools/browser_move/decision](#module-harness-tools-browser_move-decision) |
 | [harness/tools/subagent](#module-harness-tools-subagent) |
 | [symphony/shared/fingerprint](#module-symphony-shared-fingerprint) |
@@ -72,6 +76,14 @@ generated: true
 |---|---|---|---|---|
 | [B_20261102_1120_avatar-child-session-trace-root](agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
 
+<a id="module-core-common-exception"></a>
+
+## core/common/exception
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261124_1230_mcp-timeout-and-connection-errors](openjiuwen/core/B_20261124_1230_mcp-timeout-and-connection-errors.md) | B | MCP 连接与调用超时异常标准化修复 | yingchen03 | [D-20261124-0140-mcp-timeout-errors](../designs/active/D-20261124-0140-mcp-timeout-errors/design.md) |
+
 <a id="module-core-context_engine"></a>
 
 ## core/context_engine
@@ -109,6 +121,14 @@ generated: true
 |---|---|---|---|---|
 | [B_20261117_1727_anthropic-output-limit-errors](openjiuwen/core/B_20261117_1727_anthropic-output-limit-errors.md) | B | 模型输出上限截断可见错误修复 | lizhiyuan | 无独立 D：用户在本轮会话确认的 Anthropic 输出上限错误处理范围，未形成独立设计文档。 |
 
+<a id="module-core-foundation-tool-mcp"></a>
+
+## core/foundation/tool/mcp
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261124_1230_mcp-timeout-and-connection-errors](openjiuwen/core/B_20261124_1230_mcp-timeout-and-connection-errors.md) | B | MCP 连接与调用超时异常标准化修复 | yingchen03 | [D-20261124-0140-mcp-timeout-errors](../designs/active/D-20261124-0140-mcp-timeout-errors/design.md) |
+
 <a id="module-core-runner-drunner-dmessage_queue"></a>
 
 ## core/runner/drunner/dmessage_queue
@@ -116,6 +136,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261103_1050_grandocean-review-feedback](core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
+
+<a id="module-core-runner-resources_manager"></a>
+
+## core/runner/resources_manager
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261124_1230_mcp-timeout-and-connection-errors](openjiuwen/core/B_20261124_1230_mcp-timeout-and-connection-errors.md) | B | MCP 连接与调用超时异常标准化修复 | yingchen03 | [D-20261124-0140-mcp-timeout-errors](../designs/active/D-20261124-0140-mcp-timeout-errors/design.md) |
 
 <a id="module-core-session"></a>
 
@@ -207,6 +235,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261102_1733_browser-pr-contract-review](harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
+
+<a id="module-harness-tools-browser_move"></a>
+
+## harness/tools/browser_move
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261124_1230_mcp-timeout-and-connection-errors](openjiuwen/core/B_20261124_1230_mcp-timeout-and-connection-errors.md) | B | MCP 连接与调用超时异常标准化修复 | yingchen03 | [D-20261124-0140-mcp-timeout-errors](../designs/active/D-20261124-0140-mcp-timeout-errors/design.md) |
 
 <a id="module-harness-tools-browser_move-decision"></a>
 

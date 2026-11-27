@@ -1,15 +1,16 @@
 #!/usr/bin/env python
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import asyncio
 import sys
 import types
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
-from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
+from openjiuwen.core.foundation.tool import McpServerConfig, McpTimeoutError, McpToolCard
 from openjiuwen.core.foundation.tool.auth.auth import ToolAuthResult
 from openjiuwen.core.foundation.tool.auth.auth_callback import AuthHeaderAndQueryProvider
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT, extract_mcp_tool_result_content
@@ -79,6 +80,120 @@ class TestStreamableHttpClient(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(captured["terminate_on_close"])
             self.assertTrue(await client.disconnect())
             self.assertTrue(http_client.is_closed)
+
+    async def test_connect_timeout_raises_typed_error_and_cleans_up(self):
+        class FakeTransportContext:
+            async def __aenter__(self):
+                return "reader", "writer", "unused"
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        class FakeClientSession:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def initialize(self):
+                await asyncio.sleep(30)
+
+        def fake_streamable_http_client(*args, **kwargs):
+            return FakeTransportContext()
+
+        fake_mcp = types.ModuleType("mcp")
+        fake_mcp.ClientSession = FakeClientSession
+        fake_mcp_client = types.ModuleType("mcp.client")
+        fake_streamable_http = types.ModuleType("mcp.client.streamable_http")
+        fake_streamable_http.streamablehttp_client = fake_streamable_http_client
+        fake_mcp_client.streamable_http = fake_streamable_http
+
+        with (
+            patch.dict(sys.modules, {
+                "mcp": fake_mcp,
+                "mcp.client": fake_mcp_client,
+                "mcp.client.streamable_http": fake_streamable_http,
+            }),
+            patch.object(Runner.callback_framework, "trigger", AsyncMock(return_value=None)),
+        ):
+            client = StreamableHttpClient("http://127.0.0.1:8930/mcp", "test-server")
+            try:
+                await client.connect(timeout=0.05)
+            except McpTimeoutError as exc:
+                self.assertEqual(exc.status.code, 182302)
+                self.assertIs(client._last_connect_error, exc)
+            else:
+                self.fail("McpTimeoutError was not raised")
+            self.assertIsNone(client._session)
+            await client.disconnect()
+
+    async def test_stale_cleanup_cancellation_resets_transport_state(self):
+        client = StreamableHttpClient("http://127.0.0.1:8930/mcp", "test-server")
+        cancelled = BaseExceptionGroup(
+            "cancelled stale cleanup",
+            [asyncio.CancelledError(), TimeoutError("teardown timed out")],
+        )
+        client._close_stale_stack = AsyncMock(side_effect=cancelled)
+        task = asyncio.current_task()
+        self.assertIsNotNone(task)
+
+        with patch.object(task, "cancelling", return_value=1):
+            with self.assertRaises(BaseExceptionGroup) as exc_info:
+                await client._do_connect(timeout=1.0)
+
+        self.assertIs(exc_info.exception, cancelled)
+        self.assertIs(client._last_connect_error, cancelled)
+        self.assertTrue(client._is_disconnected)
+        self.assertIsNone(client._session)
+
+    async def test_connect_cancellation_wins_over_mixed_teardown_timeout(self):
+        client = StreamableHttpClient("http://127.0.0.1:8930/mcp", "test-server")
+        cancelled = BaseExceptionGroup(
+            "cancelled startup",
+            [asyncio.CancelledError(), TimeoutError("teardown timed out")],
+        )
+        client._close_stale_stack = AsyncMock()
+        client._do_disconnect = AsyncMock(return_value=True)
+        exit_stack = AsyncMock()
+        failing_session = MagicMock()
+        failing_session.initialize = AsyncMock(side_effect=cancelled)
+        fake_mcp = types.ModuleType("mcp")
+        fake_mcp.ClientSession = MagicMock(return_value=failing_session)
+        fake_mcp_client = types.ModuleType("mcp.client")
+        fake_streamable_http = types.ModuleType("mcp.client.streamable_http")
+        fake_streamable_http.streamablehttp_client = MagicMock(return_value=object())
+        fake_mcp_client.streamable_http = fake_streamable_http
+        client._exit_stack = exit_stack
+        exit_stack.enter_async_context = AsyncMock(side_effect=[
+            ("reader", "writer", None),
+            failing_session,
+        ])
+        task = asyncio.current_task()
+        self.assertIsNotNone(task)
+
+        with (
+            patch.dict(sys.modules, {
+                "mcp": fake_mcp,
+                "mcp.client": fake_mcp_client,
+                "mcp.client.streamable_http": fake_streamable_http,
+            }),
+            patch.object(Runner.callback_framework, "trigger", AsyncMock(return_value=None)),
+            patch(
+                "openjiuwen.core.foundation.tool.mcp.client.streamable_http_client.AsyncExitStack",
+                return_value=exit_stack,
+            ),
+            patch.object(task, "cancelling", return_value=1),
+        ):
+            with self.assertRaises(BaseExceptionGroup) as exc_info:
+                await client._do_connect(timeout=1.0)
+
+        self.assertIs(exc_info.exception, cancelled)
+        self.assertIs(client._last_connect_error, cancelled)
+        client._do_disconnect.assert_awaited_once_with(timeout=1.0)
 
     async def test_connect_list_call_disconnect_lifecycle(self):
         call_args = {}

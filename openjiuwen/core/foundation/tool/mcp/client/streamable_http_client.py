@@ -10,12 +10,18 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
 from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig, ToolAuthResult
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT, extract_mcp_tool_result_content
-from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
+from openjiuwen.core.foundation.tool.mcp.client.mcp_client import (
+    McpClient,
+    _contains_caller_cancellation,
+    coerce_mcp_connect_error,
+    raise_mcp_operation_error,
+)
 from openjiuwen.core.foundation.tool.mcp.client.reconnect import (
     mark_reconnect_applied,
     record_reconnect_success,
     with_reconnect,
 )
+from openjiuwen.core.foundation.tool.mcp.errors import McpConnectionError
 from openjiuwen.core.runner.callback.events import ToolCallEvents
 
 
@@ -270,10 +276,10 @@ class StreamableHttpClient(McpClient):
         from mcp.client import streamable_http as streamable_http_module
 
         actual_timeout = self._resolve_timeout(timeout)
-        await self._close_stale_stack()
-        self._exit_stack = AsyncExitStack()
 
         try:
+            await self._close_stale_stack()
+            self._exit_stack = AsyncExitStack()
             from openjiuwen.core.foundation.tool.auth.auth_callback import AuthType
             from openjiuwen.core.runner import Runner
 
@@ -329,11 +335,18 @@ class StreamableHttpClient(McpClient):
                 logger.info("[StreamableHttpClient] connected to %s", self._server_path)
                 return True
         except BaseException as e:
-            if isinstance(e, (KeyboardInterrupt, asyncio.CancelledError)) \
-                and not isinstance(e, BaseExceptionGroup):
-                raise
             logger.error("[StreamableHttpClient] connection failed to %s: %r", self._server_path, e)
-            self._last_connect_error = self._coerce_connect_error(e, self._name)
+            caller_cancelled = _contains_caller_cancellation(e)
+            error = (
+                e
+                if caller_cancelled
+                else coerce_mcp_connect_error(
+                    e,
+                    server_name=self._name,
+                    timeout=actual_timeout,
+                )
+            )
+            self._last_connect_error = error
             try:
                 await self._do_disconnect(timeout=min(actual_timeout, 3.0))
             except BaseException as disc_exc:  # noqa: BLE001
@@ -341,6 +354,12 @@ class StreamableHttpClient(McpClient):
                     "[StreamableHttpClient] cleanup after connect failure failed: %r",
                     disc_exc,
                 )
+            if caller_cancelled:
+                raise
+            if isinstance(error, McpConnectionError) and isinstance(error, TimeoutError):
+                raise error from e
+            if not isinstance(e, Exception):
+                raise
             return False
 
     async def _do_disconnect(self, *, timeout: float) -> bool:
@@ -517,9 +536,11 @@ class StreamableHttpClient(McpClient):
             ]
             logger.info("Retrieved %d tools from streamable-http server", len(tools_list))
             return tools_list
-        except Exception as e:
-            logger.error("Failed to list tools via streamable-http: %s", e)
-            raise
+        except BaseException as exc:
+            logger.error("Failed to list tools via streamable-http: %s", exc)
+            raise_mcp_operation_error(
+                exc, operation="list_tools", server_name=self._name, timeout=timeout
+            )
 
     @with_reconnect
     async def call_tool(self, tool_name: str, arguments: dict, *, timeout: float = NO_TIMEOUT) -> Any:
@@ -543,9 +564,11 @@ class StreamableHttpClient(McpClient):
             )
             logger.info("Tool '%s' call completed via streamable-http", tool_name)
             return result_content
-        except Exception as e:
-            logger.error("Tool call failed via streamable-http: %s", e)
-            raise
+        except BaseException as exc:
+            logger.error("Tool call failed via streamable-http: %s", exc)
+            raise_mcp_operation_error(
+                exc, operation="call_tool", server_name=self._name, timeout=timeout
+            )
 
     async def get_tool_info(self, tool_name: str, *, timeout: float = NO_TIMEOUT) -> Optional[Any]:
         """Get specific tool info via streamable-http."""
@@ -567,9 +590,11 @@ class StreamableHttpClient(McpClient):
                 self._session.list_resources(), timeout
             )
             return response.resources
-        except Exception as e:
-            logger.error("Failed to list resources via streamable-http: %s", e)
-            raise
+        except BaseException as exc:
+            logger.error("Failed to list resources via streamable-http: %s", exc)
+            raise_mcp_operation_error(
+                exc, operation="list_resources", server_name=self._name, timeout=timeout
+            )
 
     @with_reconnect
     async def read_resource(self, uri: str, *, timeout: float = NO_TIMEOUT) -> Any:
@@ -581,9 +606,11 @@ class StreamableHttpClient(McpClient):
                 self._session.read_resource(uri), timeout
             )
             return response.contents
-        except Exception as e:
-            logger.error("Failed to read resource '%s' via streamable-http: %s", uri, e)
-            raise
+        except BaseException as exc:
+            logger.error("Failed to read resource '%s' via streamable-http: %s", uri, exc)
+            raise_mcp_operation_error(
+                exc, operation="read_resource", server_name=self._name, timeout=timeout
+            )
 
 
 mark_reconnect_applied(StreamableHttpClient)

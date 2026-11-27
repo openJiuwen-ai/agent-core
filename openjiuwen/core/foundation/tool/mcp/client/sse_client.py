@@ -7,13 +7,18 @@ from typing import Any, Callable, List, Optional
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpToolCard
 from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig, ToolAuthResult
-from openjiuwen.core.foundation.tool.mcp.base import McpServerConfig, NO_TIMEOUT, extract_mcp_tool_result_content
-from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
+from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT, McpServerConfig, extract_mcp_tool_result_content
+from openjiuwen.core.foundation.tool.mcp.client.mcp_client import (
+    McpClient,
+    coerce_mcp_connect_error,
+    raise_mcp_operation_error,
+)
 from openjiuwen.core.foundation.tool.mcp.client.reconnect import (
     mark_reconnect_applied,
     record_reconnect_success,
     with_reconnect,
 )
+from openjiuwen.core.foundation.tool.mcp.errors import McpConnectionError
 from openjiuwen.core.runner.callback.events import ToolCallEvents
 
 
@@ -190,6 +195,7 @@ class SseClient(McpClient):
 
         # Ensure a fresh exit stack for every new connection attempt.
         self._exit_stack = AsyncExitStack()
+        actual_timeout = self._resolve_timeout(timeout)
 
         try:
             from openjiuwen.core.foundation.tool.auth.auth_callback import AuthType
@@ -208,7 +214,6 @@ class SseClient(McpClient):
                 ),
             )
             self._auth_provider = self._extract_auth_provider(auth_result)
-            actual_timeout = self._resolve_timeout(timeout)
             self._client = sse_client(self._server_path, timeout=actual_timeout, auth=self._auth_provider)
             self._read, self._write = await self._exit_stack.enter_async_context(self._client)
             self._session = await self._exit_stack.enter_async_context(ClientSession(
@@ -224,14 +229,23 @@ class SseClient(McpClient):
             logger.info("[SseClient] SSE client connected successfully to %s", self._server_path)
             return True
 
-        except Exception as e:
+        except BaseException as e:
             logger.error("[SseClient] SSE connection failed to %s: %s: %r", self._server_path,
                          type(e).__name__, e)
-            self._last_connect_error = e
+            error = coerce_mcp_connect_error(
+                e,
+                server_name=self._name,
+                timeout=actual_timeout,
+            )
+            self._last_connect_error = error
             try:
                 await self._do_disconnect(timeout=NO_TIMEOUT)
-            except Exception as cleanup_exc:
+            except BaseException as cleanup_exc:
                 logger.debug("[SseClient] SSE connect cleanup failed: %r (ignored)", cleanup_exc)
+            if isinstance(error, McpConnectionError) and isinstance(error, TimeoutError):
+                raise error from e
+            if not isinstance(e, Exception):
+                raise
             return False
 
     async def _do_disconnect(self, *, timeout: float) -> bool:
@@ -425,9 +439,11 @@ class SseClient(McpClient):
             ]
             logger.info("[SseClient] Retrieved %d tools from SSE server", len(tools_list))
             return tools_list
-        except Exception as e:
-            logger.error("[SseClient] Failed to list tools via SSE: %s", e)
-            raise
+        except BaseException as exc:
+            logger.error("[SseClient] Failed to list tools via SSE: %s", exc)
+            raise_mcp_operation_error(
+                exc, operation="list_tools", server_name=self._name, timeout=timeout
+            )
 
     @with_reconnect
     async def call_tool(self, tool_name: str, arguments: dict, *, timeout: float = NO_TIMEOUT) -> Any:
@@ -451,9 +467,11 @@ class SseClient(McpClient):
             )
             logger.info("[SseClient] Tool '%s' call completed via SSE", tool_name)
             return result_content
-        except Exception as e:
-            logger.error("[SseClient] Tool '%s' call failed via SSE: %s", tool_name, e)
-            raise
+        except BaseException as exc:
+            logger.error("[SseClient] Tool '%s' call failed via SSE: %s", tool_name, exc)
+            raise_mcp_operation_error(
+                exc, operation="call_tool", server_name=self._name, timeout=timeout
+            )
 
     async def get_tool_info(self, tool_name: str, *, timeout: float = NO_TIMEOUT) -> Optional[Any]:
         """Get specific tool info via SSE"""
@@ -479,9 +497,11 @@ class SseClient(McpClient):
                 len(response.resources)
             )
             return response.resources
-        except Exception as e:
-            logger.error("[SseClient] Failed to list resources via SSE: %s", e)
-            raise
+        except BaseException as exc:
+            logger.error("[SseClient] Failed to list resources via SSE: %s", exc)
+            raise_mcp_operation_error(
+                exc, operation="list_resources", server_name=self._name, timeout=timeout
+            )
 
     @with_reconnect
     async def read_resource(self, uri: str, *, timeout: float = NO_TIMEOUT) -> Any:
@@ -495,9 +515,11 @@ class SseClient(McpClient):
             logger.info("[SseClient] Read resource '%s' via SSE (%d contents)", uri,
                         len(response.contents))
             return response.contents
-        except Exception as e:
-            logger.error("[SseClient] Failed to read resource '%s' via SSE: %s", uri, e)
-            raise
+        except BaseException as exc:
+            logger.error("[SseClient] Failed to read resource '%s' via SSE: %s", uri, exc)
+            raise_mcp_operation_error(
+                exc, operation="read_resource", server_name=self._name, timeout=timeout
+            )
 
 
 # Mark that @with_reconnect is applied, so external monkeypatches can detect and skip.

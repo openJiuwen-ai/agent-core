@@ -208,7 +208,54 @@ mcp_config = McpServerConfig(
 
 ---
 
-## 5. Complete Demo: "Best Practices" for Enterprise Customers
+## 5. Timeout and Connection Errors
+
+A gateway that holds an MCP client directly can handle deadlines and transport failures by exception type. `McpTimeoutError` inherits from both `McpConnectionError` and the built-in `TimeoutError`. Both MCP exceptions inherit from the framework's `ExecutionError` and retain `status`, `code`, and `cause`.
+
+- `McpTimeoutError` (status code `182302`): an internal deadline expired during `connect()`, `call_tool()`, `list_tools()`, or another MCP operation. A timeout does not prove that the remote tool did not run. Reconcile state before repeating an action with side effects.
+- `McpConnectionError` (status code `182303`): a recognized transport disconnect, connection failure, or cancel-scope cleanup failure. The original exception remains available as `cause` for diagnostics and the existing reconnect decision.
+- A non-timeout `connect()` failure still returns `False`. The diagnostic reason is stored in the client's `_last_connect_error`; only recognized transport failures are converted to `McpConnectionError`.
+- Explicit caller cancellation through `task.cancel()`, or cancellation of the whole operation by an outer `asyncio.wait_for()`, still propagates `asyncio.CancelledError`. It is not reported as an MCP timeout.
+
+```python
+import asyncio
+
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.tool import (
+    McpConnectionError,
+    McpServerConfig,
+    McpTimeoutError,
+)
+from openjiuwen.core.foundation.tool.mcp.client.stdio_client import StdioClient
+
+client = StdioClient(McpServerConfig(
+    server_name="weather",
+    client_type="stdio",
+    server_path="python server.py",
+))
+
+try:
+    connected = await client.connect(timeout=10.0)
+    if connected:
+        result = await client.call_tool(
+            "get_weather", {"city": "Beijing"}, timeout=5.0,
+        )
+except McpTimeoutError as exc:
+    # The tool may already have run. Reconcile state before retrying side effects.
+    logger.warning("MCP deadline exceeded: %s", exc.cause)
+except McpConnectionError as exc:
+    # Apply the application's recovery policy and retain the original reason.
+    logger.warning("MCP transport failed: %s", exc.cause)
+except asyncio.CancelledError:
+    # Caller cancellation is not a network timeout; propagate it unchanged.
+    raise
+finally:
+    await client.disconnect()
+```
+
+See `examples/mcp/timeout_error_probe.py` for a complete local Stdio verification entry point. It starts an MCP server on the local machine and requires no external service.
+
+## 6. Complete Demo: "Best Practices" for Enterprise Customers
 
 ### Scenario: Banking Financial Advisory Agent
 
@@ -282,7 +329,7 @@ asyncio.run(financial_agent_demo())
 
 ---
 
-## 6. Troubleshooting FAQ
+## 7. Troubleshooting FAQ
 
 ### Q1: MCP Server Connection Failure
 

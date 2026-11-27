@@ -33,6 +33,8 @@ def _get_exception_class_registry() -> Dict[str, Type]:
         "SessionError": _errors.SessionError,
         "SysOperationError": _errors.SysOperationError,
         "ToolchainError": _errors.ToolchainError,
+        "McpConnectionError": _errors.McpConnectionError,
+        "McpTimeoutError": _errors.McpTimeoutError,
         "ContextError": _errors.ContextError,
         "RunnerError": _errors.RunnerError,
         "CryptError": _errors.CryptError,
@@ -83,6 +85,8 @@ RANGE_RULES = [
 # Manual overrides expressed as names to avoid failing import when some legacy names are absent.
 _MANUAL_OVERRIDES_RAW = {
     "CONTROLLER_INVOKE_LLM_FAILED": "FrameworkError",
+    "TOOL_MCP_EXECUTION_TIMEOUT": "McpTimeoutError",
+    "TOOL_MCP_CONNECTION_ERROR": "McpConnectionError",
     "TOOL_EXECUTION_ERROR": "ToolError",
     "TOOL_NOT_FOUND_ERROR": "ValidationError",
     "AGENT_TEAM_EXECUTION_ERROR": "AgentError",

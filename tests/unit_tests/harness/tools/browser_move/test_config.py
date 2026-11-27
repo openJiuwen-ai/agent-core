@@ -10,10 +10,14 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from openjiuwen.core.foundation.tool import McpServerConfig
+import pytest
+
+from openjiuwen.core.foundation.tool import McpConnectionError, McpServerConfig, McpTimeoutError
+from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
 from openjiuwen.harness.tools.browser_move.clients.streamable_http_client import (
     BrowserMoveStreamableHttpClient,
 )
@@ -376,7 +380,7 @@ def test_browser_move_streamable_http_client_cleans_up_timed_out_retry() -> None
         attempts += 1
         await self._exit_stack.enter_async_context(TaskBoundTransport())
         if attempts == 1:
-            await asyncio.Event().wait()
+            raise TimeoutError("connection deadline exceeded")
         return True
 
     async def check_retries():
@@ -384,13 +388,153 @@ def test_browser_move_streamable_http_client_cleans_up_timed_out_retry() -> None
             "openjiuwen.harness.tools.browser_move.clients.streamable_http_client.StreamableHttpClient.connect",
             new=fake_core_connect,
         ):
-            assert await client.connect(retry_times=2, timeout=1.0)
-            assert attempts == 2
+            try:
+                await client.connect(retry_times=2, timeout=1.0)
+            except McpTimeoutError as exc:
+                assert isinstance(exc.cause, TimeoutError)
+            else:
+                raise AssertionError("expected McpTimeoutError")
+            assert attempts == 1
             assert len(closed) == 1
             assert await client.disconnect()
-            assert len(closed) == 2
+            assert len(closed) == 1
 
     _run(check_retries())
+
+
+def test_browser_move_streamable_http_connect_preserves_caller_cancellation() -> None:
+    client = BrowserMoveStreamableHttpClient("http://127.0.0.1:8940/mcp")
+    started = asyncio.Event()
+
+    async def fake_core_connect(self, *, timeout):
+        started.set()
+        await asyncio.Event().wait()
+        return True
+
+    async def check_cancellation():
+        with patch(
+            "openjiuwen.harness.tools.browser_move.clients.streamable_http_client.StreamableHttpClient.connect",
+            new=fake_core_connect,
+        ):
+            task = asyncio.create_task(client.connect(timeout=30.0))
+            await started.wait()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("caller cancellation was converted")
+
+    _run(check_cancellation())
+
+
+def test_browser_move_streamable_http_no_timeout_preserves_unbounded_operations() -> None:
+    client = BrowserMoveStreamableHttpClient("http://127.0.0.1:8940/mcp")
+    client._session = MagicMock()
+    client._session.list_tools = AsyncMock(return_value=SimpleNamespace(tools=[]))
+    client._session.call_tool = AsyncMock(return_value=SimpleNamespace(content=[]))
+
+    async def check_deadlines():
+        with patch(
+            "openjiuwen.harness.tools.browser_move.clients.streamable_http_client.asyncio.timeout"
+        ) as deadline:
+            deadline.return_value.__aenter__.return_value = None
+            deadline.return_value.__aexit__.return_value = None
+            await client.list_tools(timeout=NO_TIMEOUT)
+            await client.call_tool("browser_snapshot", {}, timeout=NO_TIMEOUT)
+
+        assert [call.args for call in deadline.call_args_list] == [(None,), (None,)]
+
+    _run(check_deadlines())
+
+
+def test_browser_move_streamable_http_timeout_does_not_replay_unsafe_action() -> None:
+    client = BrowserMoveStreamableHttpClient("http://127.0.0.1:8940/mcp")
+
+    async def hanging_call(tool_name, arguments):
+        await asyncio.Event().wait()
+
+    client._session = MagicMock()
+    client._session.call_tool = AsyncMock(side_effect=hanging_call)
+    client._reconnect = AsyncMock(return_value=True)
+
+    async def check_timeout():
+        try:
+            await client.call_tool("browser_click", {}, timeout=0.05)
+        except McpTimeoutError as exc:
+            assert exc.code == 182302
+            assert isinstance(exc.cause, TimeoutError)
+        else:
+            raise AssertionError("expected McpTimeoutError")
+        client._session.call_tool.assert_awaited_once()
+        client._reconnect.assert_not_awaited()
+
+    _run(check_timeout())
+
+
+@pytest.mark.parametrize("tool_name", ["browser_click", "browser_mouse_wheel", "browser_run_code_unsafe"])
+def test_browser_move_streamable_http_disconnect_does_not_replay_unsafe_action(tool_name: str) -> None:
+    client = BrowserMoveStreamableHttpClient("http://127.0.0.1:8940/mcp")
+    cause = RuntimeError("connection closed")
+    client._session = MagicMock()
+    client._session.call_tool = AsyncMock(side_effect=cause)
+    client._reconnect = AsyncMock(return_value=True)
+
+    async def check_disconnect():
+        try:
+            await client.call_tool(tool_name, {})
+        except McpConnectionError as exc:
+            assert not isinstance(exc, McpTimeoutError)
+            assert exc.cause is cause
+        else:
+            raise AssertionError("expected typed transport failure")
+        client._session.call_tool.assert_awaited_once()
+        client._reconnect.assert_not_awaited()
+
+    _run(check_disconnect())
+
+
+def test_browser_move_streamable_http_disconnect_allows_retry_safe_reconnect() -> None:
+    client = BrowserMoveStreamableHttpClient("http://127.0.0.1:8940/mcp")
+    client._session = MagicMock()
+    client._session.call_tool = AsyncMock(side_effect=RuntimeError("connection closed"))
+
+    async def reconnect(*, timeout):
+        client._session = MagicMock()
+        client._session.call_tool = AsyncMock(return_value=MagicMock(content=[]))
+        return True
+
+    client._reconnect = AsyncMock(side_effect=reconnect)
+
+    async def check_reconnect():
+        assert await client.call_tool("browser_snapshot", {}) is None
+        client._reconnect.assert_awaited_once()
+
+    _run(check_reconnect())
+
+
+def test_browser_move_streamable_http_list_tools_applies_timeout() -> None:
+    client = BrowserMoveStreamableHttpClient("http://127.0.0.1:8940/mcp")
+
+    async def hanging_list_tools():
+        await asyncio.Event().wait()
+
+    client._session = MagicMock()
+    client._session.list_tools = AsyncMock(side_effect=hanging_list_tools)
+    client._reconnect = AsyncMock(return_value=True)
+
+    async def check_timeout():
+        try:
+            await client.list_tools(timeout=0.05)
+        except McpTimeoutError as exc:
+            assert exc.params["operation"] == "list_tools"
+        else:
+            raise AssertionError("expected McpTimeoutError")
+        client._session.list_tools.assert_awaited_once()
+        client._reconnect.assert_not_awaited()
+
+    _run(check_timeout())
 
 
 def test_execute_wrapper_raises_timeout_error() -> None:

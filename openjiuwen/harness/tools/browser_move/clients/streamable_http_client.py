@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
+from openjiuwen.core.foundation.tool.mcp.client.mcp_client import raise_mcp_operation_error
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
     browser_agent_log_info,
     browser_agent_log_warning,
@@ -76,10 +77,20 @@ class BrowserMoveStreamableHttpClient(StreamableHttpClient):
                     f"Streamable HTTP connection failed to {self._server_path} "
                     f"(attempt {attempt}/{attempts}): {self._last_connect_error}"
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError as e:
                 logger.error(
                     f"Streamable HTTP connection timed out after {actual_timeout:.1f}s "
                     f"(attempt {attempt}/{attempts}): {self._server_path}"
+                )
+                try:
+                    await self.disconnect(timeout=timeout)
+                except BaseException as cleanup_error:
+                    logger.debug("Streamable HTTP connect cleanup failed: %r", cleanup_error)
+                raise_mcp_operation_error(
+                    e,
+                    operation="connect",
+                    server_name=self._name,
+                    timeout=actual_timeout,
                 )
             except Exception as e:
                 logger.error(
@@ -114,9 +125,16 @@ class BrowserMoveStreamableHttpClient(StreamableHttpClient):
             if not connected:
                 raise RuntimeError("Not connected to Streamable HTTP server")
 
+        effective_timeout = self._resolve_timeout(timeout)
+        operation_timeout = (
+            float(timeout)
+            if isinstance(timeout, (int, float)) and timeout > 0
+            else None
+        )
         for attempt in range(2):
             try:
-                tools_response = await self._session.list_tools()
+                async with asyncio.timeout(operation_timeout):
+                    tools_response = await self._session.list_tools()
                 tools_list = [
                     McpToolCard(
                         name=tool.name,
@@ -128,14 +146,19 @@ class BrowserMoveStreamableHttpClient(StreamableHttpClient):
                 ]
                 logger.info(f"Retrieved {len(tools_list)} tools from Streamable HTTP server")
                 return tools_list
-            except Exception as e:
-                if attempt == 0 and self._is_retryable_transport_error(e):
+            except BaseException as e:
+                if attempt == 0 and not isinstance(e, TimeoutError) and self._is_retryable_transport_error(e):
                     logger.warning(f"Streamable HTTP list_tools retry after reconnect: {e}")
-                    connected = await self._reconnect(timeout=timeout)
+                    connected = await self._reconnect(timeout=effective_timeout)
                     if connected:
                         continue
                 logger.error(f"Failed to list tools via Streamable HTTP: {e}")
-                raise
+                raise_mcp_operation_error(
+                    e,
+                    operation="list_tools",
+                    server_name=self._name,
+                    timeout=effective_timeout,
+                )
 
     async def call_tool(self, tool_name: str, arguments: dict, *, timeout: float = NO_TIMEOUT) -> Any:
         """Call tool via Streamable HTTP, with auto-reconnect on transport errors."""
@@ -144,13 +167,24 @@ class BrowserMoveStreamableHttpClient(StreamableHttpClient):
             if not connected:
                 raise RuntimeError("Not connected to Streamable HTTP server")
 
+        effective_timeout = self._resolve_timeout(timeout)
+        action = tool_name.rsplit("browser_", 1)[-1]
+        operation_timeout = (
+            float(timeout)
+            if isinstance(timeout, (int, float)) and timeout > 0
+            else None
+        )
+        if operation_timeout is not None and action in {"mouse_wheel", "scroll"}:
+            operation_timeout = min(operation_timeout, 15.0)
+        retry_safe = action in {"snapshot", "find", "console_messages", "network_requests"}
         for attempt in range(2):
             try:
                 browser_agent_log_info(
                     f"Calling tool '{tool_name}' via Streamable HTTP with arguments_summary: "
                     f"{summarize_tool_arguments_for_log(tool_name, arguments)}"
                 )
-                tool_result = await self._session.call_tool(tool_name, arguments=arguments)
+                async with asyncio.timeout(operation_timeout):
+                    tool_result = await self._session.call_tool(tool_name, arguments=arguments)
                 result_content = None
                 if tool_result.content and len(tool_result.content) > 0:
                     chunks = []
@@ -181,16 +215,32 @@ class BrowserMoveStreamableHttpClient(StreamableHttpClient):
                         result_content = "\n".join(chunks)
                 browser_agent_log_info(f"Tool '{tool_name}' call completed via Streamable HTTP")
                 return result_content
-            except Exception as e:
-                if attempt == 0 and self._is_retryable_transport_error(e):
+            except BaseException as e:
+                is_timeout = isinstance(e, TimeoutError) or (
+                    isinstance(e, BaseExceptionGroup)
+                    and any(isinstance(item, TimeoutError) for item in e.exceptions)
+                )
+                if is_timeout and not retry_safe:
+                    raise_mcp_operation_error(
+                        e,
+                        operation="call_tool",
+                        server_name=self._name,
+                        timeout=effective_timeout,
+                    )
+                if attempt == 0 and retry_safe and self._is_retryable_transport_error(e):
                     browser_agent_log_warning(
                         f"Streamable HTTP tool call '{tool_name}' retry after reconnect: {e}"
                     )
-                    connected = await self._reconnect(timeout=timeout)
+                    connected = await self._reconnect(timeout=effective_timeout)
                     if connected:
                         continue
                 logger.error(f"Tool call failed via Streamable HTTP: {e}")
-                raise
+                raise_mcp_operation_error(
+                    e,
+                    operation="call_tool",
+                    server_name=self._name,
+                    timeout=effective_timeout,
+                )
 
     async def get_tool_info(self, tool_name: str, *, timeout: float = NO_TIMEOUT) -> Optional[Any]:
         """Get specific tool info via Streamable HTTP."""

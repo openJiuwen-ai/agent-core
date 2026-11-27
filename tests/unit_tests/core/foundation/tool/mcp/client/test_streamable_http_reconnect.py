@@ -20,6 +20,7 @@ from openjiuwen.core.foundation.tool.mcp.client.reconnect import (
 from openjiuwen.core.foundation.tool.mcp.client.streamable_http_client import (
     StreamableHttpClient,
 )
+from openjiuwen.core.foundation.tool.mcp.errors import McpConnectionError
 
 SESSION_TERMINATED = McpError(ErrorData(code=32600, message="Session terminated"))
 CONNECTION_CLOSED = McpError(ErrorData(code=-32000, message="Connection closed"))
@@ -186,8 +187,9 @@ async def test_backoff_blocks_repeat_auto_attempts(monkeypatch: Any) -> None:
     client._do_connect = _connect
     client._do_disconnect = _disconnect
 
-    with pytest.raises(McpError):
+    with pytest.raises(McpConnectionError) as exc_info:
         await client.call_tool("t", {})
+    assert isinstance(exc_info.value.cause, McpError)
     assert state["connects"] == 1
     assert client._reconnect_failure_count == 1
     assert client._reconnect_cooldown_until > 0

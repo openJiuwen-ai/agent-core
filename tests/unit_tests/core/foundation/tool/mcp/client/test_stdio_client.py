@@ -8,7 +8,7 @@ import types
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from openjiuwen.core.foundation.tool import McpServerConfig
+from openjiuwen.core.foundation.tool import McpServerConfig, McpTimeoutError
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
 from openjiuwen.core.foundation.tool.mcp.client.stdio_client import StdioClient
 
@@ -43,6 +43,42 @@ class _ConnectedSession(_HangingSession):
         return None
 
 
+class _HangingExitStack:
+    def __init__(self):
+        self.entered = asyncio.Event()
+
+    async def aclose(self):
+        self.entered.set()
+        await asyncio.Event().wait()
+
+
+class _RetryableExitStack:
+    def __init__(self):
+        self.calls = 0
+
+    async def aclose(self):
+        self.calls += 1
+        if self.calls == 1:
+            await asyncio.Event().wait()
+
+
+class _WatchdogRaceExitStack:
+    def __init__(self):
+        self.entered = asyncio.Event()
+
+    async def aclose(self):
+        self.entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await asyncio.Event().wait()
+
+
+class _CancelScopeExitStack:
+    async def aclose(self):
+        raise RuntimeError("Attempted to exit cancel scope in a different task")
+
+
 def _config() -> McpServerConfig:
     return McpServerConfig(
         server_name="mubu",
@@ -72,7 +108,8 @@ class TestStdioClientTimeouts(unittest.IsolatedAsyncioTestCase):
             patch.object(client, "_resolve_timeout", lambda timeout: 0.05),
             patch.object(client, "disconnect", new=disconnect),
         ):
-            self.assertFalse(await client.connect())
+            with self.assertRaises(McpTimeoutError):
+                await client.connect()
         self.assertEqual(disconnect.await_count, 1)
         self.assertIsInstance(client._last_connect_error, TimeoutError)
 
@@ -113,6 +150,78 @@ class TestStdioClientTimeouts(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(TimeoutError):
                 await client.list_tools()
         await client.disconnect()
+
+    async def test_disconnect_times_out_without_caller_cancellation(self):
+        client = StdioClient(_config())
+        stack = _HangingExitStack()
+        client._exit_stack = stack
+
+        result = await client.disconnect(timeout=0.05)
+
+        self.assertFalse(result)
+        self.assertTrue(stack.entered.is_set())
+        self.assertFalse(client._is_disconnected)
+        self.assertIsNotNone(client._exit_stack)
+
+    async def test_disconnect_watchdog_preserves_preexisting_cancellation_count(self):
+        client = StdioClient(_config())
+        client._exit_stack = _HangingExitStack()
+        task = asyncio.current_task()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.sleep(0)
+        cancelling_at_start = task.cancelling()
+
+        result = await client.disconnect(timeout=0.05)
+
+        self.assertFalse(result)
+        self.assertEqual(task.cancelling(), cancelling_at_start)
+
+    async def test_disconnect_reraises_cancellation_after_watchdog_fires(self):
+        client = StdioClient(_config())
+        stack = _WatchdogRaceExitStack()
+        client._exit_stack = stack
+        task = asyncio.create_task(client.disconnect(timeout=0.05))
+        await stack.entered.wait()
+        await asyncio.sleep(0.1)
+
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+    async def test_disconnect_reraises_caller_cancellation(self):
+        client = StdioClient(_config())
+        stack = _HangingExitStack()
+        client._exit_stack = stack
+        task = asyncio.create_task(client.disconnect(timeout=30.0))
+        await stack.entered.wait()
+
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+    async def test_disconnect_does_not_reenter_failed_transport_context(self):
+        client = StdioClient(_config())
+        client._exit_stack = _CancelScopeExitStack()
+        transport = AsyncMock()
+        client._client = transport
+
+        result = await client.disconnect(timeout=1.0)
+
+        self.assertFalse(result)
+        transport.__aexit__.assert_not_awaited()
+        self.assertFalse(client._is_disconnected)
+
+    async def test_failed_disconnect_can_be_retried_on_same_task(self):
+        client = StdioClient(_config())
+        stack = _RetryableExitStack()
+        client._exit_stack = stack
+
+        self.assertFalse(await client.disconnect(timeout=0.05))
+        self.assertFalse(client._is_disconnected)
+        self.assertTrue(await client.disconnect(timeout=1.0))
+        self.assertEqual(stack.calls, 2)
+        self.assertTrue(client._is_disconnected)
 
     def test_resolve_timeout_prefers_config_then_60s(self):
         client = StdioClient(_config())

@@ -19,6 +19,7 @@ from openjiuwen.core.foundation.tool.mcp.base import (
     McpToolCard, McpServerConfig, McpToolResult,
 )
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
+from openjiuwen.core.foundation.tool.mcp.errors import McpConnectionError, McpTimeoutError
 from openjiuwen.core.foundation.tool.mcp.client.playwright_client import PlaywrightClient
 from openjiuwen.core.foundation.tool.mcp.client.sse_client import SseClient
 from openjiuwen.core.foundation.tool.mcp.client.stdio_client import StdioClient
@@ -58,6 +59,8 @@ __all__ = [
     "McpToolCard",
     "McpServerConfig",
     "McpToolResult",
+    "McpConnectionError",
+    "McpTimeoutError",
     # mcp client
     "McpClient",
     "SseClient",
