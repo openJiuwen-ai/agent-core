@@ -332,7 +332,14 @@ Call MCP tool.
 
 **Returns**:
 
-**Output**, dictionary containing results `{"result": ...}`.
+**Output**, dictionary containing results `{"result": ...}`. When an MCP server reports a
+tool-level failure inside a successful RPC via `isError`, the dictionary additionally carries
+`"is_error": true`, so callers can tell "the tool ran" apart from "the tool ran and failed":
+
+```python
+{"result": "..."}                    # success
+{"result": "...", "is_error": True}  # tool-level failure (MCP CallToolResult.isError)
+```
 
 **Example**:
 

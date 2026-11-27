@@ -332,7 +332,14 @@ async def invoke(inputs: Input, **kwargs) -> Output
 
 **返回**：
 
-**Output**，包含结果的字典 `{"result": ...}`。
+**Output**，包含结果的字典 `{"result": ...}`。当 MCP 服务在成功的 RPC 里用 `isError`
+声明工具级失败时，额外带 `"is_error": true`，调用方可据此区分"工具执行成功"与
+"工具执行失败"：
+
+```python
+{"result": "..."}                    # 成功
+{"result": "...", "is_error": True}  # 工具级失败（MCP CallToolResult.isError）
+```
 
 **样例**：
 

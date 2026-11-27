@@ -23,6 +23,20 @@ from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMg
 from openjiuwen.core.runner.resources_manager.tool_manager import ToolMgr
 
 
+def _meta_call_tool(call_tool_mock):
+    """Route the client's meta entry point through a plain ``call_tool`` mock.
+
+    ``MCPTool`` prefers ``call_tool_with_meta`` for clients that define it next
+    to ``call_tool`` (all four built-in transports do), so the wiring tests have
+    to intercept that entry point; the assertion stays on the plain payload.
+    """
+
+    async def call_tool_with_meta(self, tool_name, arguments, **kwargs):
+        return await call_tool_mock(tool_name=tool_name, arguments=arguments, **kwargs), False
+
+    return call_tool_with_meta
+
+
 def _streamable_client_patches(*, mock_tools, call_tool_mock):
     """Patch MCP streamable client methods used by ResourceMgr.add_mcp_server.
 
@@ -42,6 +56,7 @@ def _streamable_client_patches(*, mock_tools, call_tool_mock):
         patch.object(StreamableHttpClient, "disconnect", AsyncMock(return_value=True)),
         patch.object(StreamableHttpClient, "list_tools", AsyncMock(return_value=mock_tools)),
         patch.object(StreamableHttpClient, "call_tool", call_tool_mock),
+        patch.object(StreamableHttpClient, "call_tool_with_meta", _meta_call_tool(call_tool_mock)),
         patch.object(ToolMgr, "StreamableHttpClient", StreamableHttpClient, create=True),
         patch.dict(
             registry._factories,

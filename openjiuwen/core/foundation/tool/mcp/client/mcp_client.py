@@ -32,6 +32,16 @@ class McpClient(BaseClient):
     async def call_tool(self, tool_name, arguments: dict, *, timeout: float = NO_TIMEOUT) -> Any:
         pass
 
+    async def call_tool_with_meta(
+        self, tool_name, arguments: dict, *, timeout: float = NO_TIMEOUT
+    ) -> tuple[Any, bool]:
+        """``call_tool`` plus the MCP ``isError`` flag.
+
+        Concrete clients that can see ``CallToolResult.isError`` override this;
+        the default keeps third-party/custom clients working unchanged.
+        """
+        return await self.call_tool(tool_name, arguments, timeout=timeout), False
+
     @abstractmethod
     async def get_tool_info(self, tool_name: str, *, timeout: float = NO_TIMEOUT) -> Optional[Any]:
         pass

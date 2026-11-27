@@ -31,6 +31,18 @@ def _non_text_content_summary(item: Any) -> Any:
     return str(item)
 
 
+def extract_mcp_tool_result(tool_result: Any) -> tuple[Any, bool]:
+    """Return ``(content, is_error)`` from an MCP CallToolResult.
+
+    The MCP spec lets a server report a tool-level failure with a *successful*
+    RPC by setting ``isError`` on the result. Keeping that flag next to the
+    content is what lets callers distinguish "tool ran and failed" from "tool
+    ran and succeeded"; before this helper the flag was dropped here, so every
+    downstream layer saw a plain success string.
+    """
+    return extract_mcp_tool_result_content(tool_result), bool(getattr(tool_result, "isError", False))
+
+
 def extract_mcp_tool_result_content(tool_result: Any) -> Any:
     """Return a compact value from an MCP CallToolResult.
 
@@ -119,9 +131,43 @@ class MCPTool(Tool):
                     tool_name=self.card.name, tool_id=self.card.id,
                     formatted_inputs=arguments)
 
-            result = await self._mcp_client.call_tool(tool_name=self._card.name, arguments=arguments)
+            result, is_error = await self._call_mcp_client(tool_name=self._card.name, arguments=arguments)
+            if is_error:
+                # Keep the payload under ``result`` (existing consumers) and add
+                # the MCP failure flag the harness / stream layer reads.
+                return {"result": result, "is_error": True}
             return {"result": result}
 
         except Exception as e:
             raise build_error(StatusCode.TOOL_MCP_EXECUTION_ERROR, cause=e, reason=str(e), method="invoke",
                               card=self._card)
+
+    async def _call_mcp_client(self, *, tool_name: str, arguments: Dict[str, Any]) -> tuple[Any, bool]:
+        """Call the client and surface a tool-level ``isError`` to the caller.
+
+        ``call_tool_with_meta`` is optional: custom / third-party clients only
+        implement the historical ``call_tool`` contract. Those keep the old
+        behaviour instead of failing here.
+
+        A subclass that overrides ``call_tool`` alone (the browser-move clients
+        add reconnect / multi-content extraction there) must keep running its
+        own code: an inherited ``call_tool_with_meta`` would bypass it. So the
+        meta variant is only trusted when it is defined next to the effective
+        ``call_tool``.
+        """
+        call_with_meta = getattr(self._mcp_client, "call_tool_with_meta", None)
+        if callable(call_with_meta) and _meta_pairs_with_call_tool(self._mcp_client):
+            return await call_with_meta(tool_name=tool_name, arguments=arguments)
+        result = await self._mcp_client.call_tool(tool_name=tool_name, arguments=arguments)
+        return result, False
+
+
+def _meta_pairs_with_call_tool(client: Any) -> bool:
+    """Whether ``call_tool_with_meta`` and ``call_tool`` come from the same class."""
+    mro = type(client).__mro__
+    meta_owner = next((klass for klass in mro if "call_tool_with_meta" in vars(klass)), None)
+    if meta_owner is None:
+        return False
+    call_owner = next((klass for klass in mro if "call_tool" in vars(klass)), None)
+    # Nothing to bypass when the client only speaks the meta API.
+    return call_owner is None or meta_owner is call_owner

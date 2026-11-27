@@ -6,7 +6,11 @@ from typing import Any, List, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpToolCard
-from openjiuwen.core.foundation.tool.mcp.base import McpServerConfig, NO_TIMEOUT, extract_mcp_tool_result_content
+from openjiuwen.core.foundation.tool.mcp.base import (
+    McpServerConfig,
+    NO_TIMEOUT,
+    extract_mcp_tool_result,
+)
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 
 
@@ -102,15 +106,27 @@ class PlaywrightClient(McpClient):
 
     async def call_tool(self, tool_name: str, arguments: dict, *, timeout: float = NO_TIMEOUT) -> Any:
         """Call browser tool"""
+        result, _ = await self._call_tool_with_meta(tool_name, arguments, timeout=timeout)
+        return result
+
+    async def call_tool_with_meta(
+        self, tool_name: str, arguments: dict, *, timeout: float = NO_TIMEOUT
+    ) -> tuple[Any, bool]:
+        """Call browser tool, keeping the MCP ``isError`` flag."""
+        return await self._call_tool_with_meta(tool_name, arguments, timeout=timeout)
+
+    async def _call_tool_with_meta(
+        self, tool_name: str, arguments: dict, *, timeout: float = NO_TIMEOUT
+    ) -> tuple[Any, bool]:
         if not self._session:
             raise RuntimeError("Not connected to Playwright server")
 
         try:
             logger.info(f"Calling browser tool '{tool_name}' with arguments: {arguments}")
             tool_result = await self._session.call_tool(tool_name, arguments=arguments)
-            result_content = extract_mcp_tool_result_content(tool_result)
-            logger.info(f"Browser tool '{tool_name}' call completed")
-            return result_content
+            result_content, is_error = extract_mcp_tool_result(tool_result)
+            logger.info(f"Browser tool '{tool_name}' call completed is_error={is_error}")
+            return result_content, is_error
         except Exception as e:
             logger.error(f"Browser tool call failed: {e}")
             raise

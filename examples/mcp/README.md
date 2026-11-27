@@ -201,6 +201,8 @@ client = SseClient(McpServerConfig(
 await client.connect()
 tool_cards = await client.list_tools()
 result = await client.call_tool("add", {"a": 7, "b": 3})
+# Need the MCP tool-level failure flag? Use the meta variant:
+# content, is_error = await client.call_tool_with_meta("add", {"a": 7, "b": 3})
 await client.disconnect()
 ```
 
