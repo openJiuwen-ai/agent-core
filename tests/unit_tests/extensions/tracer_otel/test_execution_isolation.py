@@ -512,3 +512,71 @@ async def test_trigger_routes_to_subclass_execution_handler():
     roots = _spans_by_name("WF")
     assert len(roots) == 2
     assert len({s.context.trace_id for s in roots}) == 2
+
+
+async def _complete_execution(handler, execution_id: str, session_id: str, token: str):
+    await handler.on_call_start(
+        invoke_id="wf",
+        parent_node_id="",
+        metadata=_root_metadata(execution_id),
+        session_id=session_id,
+        execution_id=execution_id,
+        trace_id=f"trace-{token}",
+    )
+    await handler.on_call_done(
+        invoke_id="wf",
+        outputs={"root": token},
+        execution_id=execution_id,
+        trace_id=f"trace-{token}",
+    )
+
+
+async def test_execution_handlers_are_bounded_by_lru():
+    handler = _handler()
+    handler._max_execution_handlers = 3
+
+    for index in range(4):
+        await _complete_execution(handler, f"exec-{index}", f"sess-{index}", str(index))
+
+    assert list(handler._exec_handlers) == ["exec-1", "exec-2", "exec-3"]
+
+
+async def test_live_execution_handler_is_not_evicted():
+    handler = _handler()
+    handler._max_execution_handlers = 2
+
+    # exec-A stays live: its root span never finishes.
+    await handler.on_call_start(
+        invoke_id="wf",
+        parent_node_id="",
+        metadata=_root_metadata("exec-A"),
+        session_id="sess-A",
+        execution_id="exec-A",
+        trace_id="trace-A",
+    )
+    for token in ("B", "C", "D"):
+        await _complete_execution(handler, f"exec-{token}", f"sess-{token}", token)
+
+    assert "exec-A" in handler._exec_handlers
+    assert len(handler._exec_handlers) <= 2
+    assert "exec-B" not in handler._exec_handlers
+    assert "exec-C" not in handler._exec_handlers
+
+
+async def test_evicted_handler_releases_cached_root_context():
+    handler = _handler()
+    handler._max_execution_handlers = 1
+
+    await _complete_execution(handler, "exec-A", "sess-A", "A")
+    evicted = handler._exec_handlers["exec-A"]
+    assert evicted._cached_root_ctx is not None
+
+    await _complete_execution(handler, "exec-B", "sess-B", "B")
+
+    assert "exec-A" not in handler._exec_handlers
+    assert evicted._cached_root_ctx is None
+    assert evicted._cached_trace_id is None
+    assert not evicted._span_manager.has_spans()
+    assert evicted._deferred_end_starts == {}
+    assert evicted._layer_root_spans == {}
+    assert evicted._component_spans == {}

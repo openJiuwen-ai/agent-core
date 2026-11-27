@@ -1178,6 +1178,10 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     this instance's flat state for direct callers and backward compatibility.
     """
 
+    # Upper bound for execution-scoped child handlers retained on the root.
+    # Overridable per instance/subclass for configuration and tests.
+    _MAX_EXECUTION_HANDLERS: int = 128
+
     def __init__(self, otel_tracer: trace.Tracer, config: OtelTracerConfig, trace_id: str | None = None):
         super().__init__()
         self._otel_tracer = otel_tracer
@@ -1211,11 +1215,15 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         # Events carrying an execution id are routed to a child handler that
         # owns independent copies of every state field above; the root keeps
         # its flat state for unscoped direct callers.
-        # TODO(#2432): children are not evicted yet; eviction must preserve
-        # multi-round trace continuity (cached root context), so it needs an
-        # explicit lifecycle contract rather than a plain TTL.
+        # Child handlers are kept in LRU order and bounded by
+        # _max_execution_handlers: successful runs leave an idle child that
+        # still holds _cached_root_ctx (the ended root span and its attribute
+        # payloads), so unbounded retention would be a memory regression even
+        # without interruptions. Live executions are never evicted; TTL and
+        # forced cleanup for stuck runs remain in #2432.
         self._parent_handler: OtelWorkflowHandler | None = None
         self._exec_handlers: dict[str, OtelWorkflowHandler] = {}
+        self._max_execution_handlers = self._MAX_EXECUTION_HANDLERS
 
     # --- helper: execution-scoped routing ---
 
@@ -1262,22 +1270,73 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             return self
 
         target = self._exec_handlers.get(key)
-        if target is None:
-            target = self._new_execution_handler(trace_id)
-            target._parent_handler = self
-            # Only bind the session observed on this event: inheriting the
-            # root's _session_id would leak another request's binding.
-            if session_id is not None:
-                target.set_session_id(session_id)
+        if target is not None:
+            # Refresh LRU order (dict preserves insertion order).
+            self._exec_handlers.pop(key, None)
             self._exec_handlers[key] = target
-            session_logger.debug("otel: execution-scoped workflow handler created: %s", key)
+            if trace_id and trace_id != target._trace_id:
+                target.set_trace_id(trace_id)
+            if session_id is not None and session_id != target._session_id:
+                target.set_session_id(session_id)
             return target
 
-        if trace_id and trace_id != target._trace_id:
-            target.set_trace_id(trace_id)
-        if session_id is not None and session_id != target._session_id:
+        self._evict_idle_execution_handlers()
+        target = self._new_execution_handler(trace_id)
+        target._parent_handler = self
+        # Only bind the session observed on this event: inheriting the
+        # root's _session_id would leak another request's binding.
+        if session_id is not None:
             target.set_session_id(session_id)
+        self._exec_handlers[key] = target
+        session_logger.debug("otel: execution-scoped workflow handler created: %s", key)
         return target
+
+    def _evict_idle_execution_handlers(self) -> None:
+        """Keep the execution-handler cache bounded (success-path retention).
+
+        An idle child still holds ``_cached_root_ctx``, which references the
+        ended root span and its serialized attribute payloads. Without
+        eviction the root handler grows with cumulative sessions even when
+        every run completes. Live executions are skipped here; TTL/forced
+        cleanup for stuck runs remains in #2432.
+        """
+        limit = max(1, int(self._max_execution_handlers))
+        for key in list(self._exec_handlers):
+            if len(self._exec_handlers) < limit:
+                return
+            child = self._exec_handlers[key]
+            if not child._is_idle():
+                continue
+            child._discard_execution_state()
+            self._exec_handlers.pop(key, None)
+            session_logger.debug("otel: evicted idle execution handler: %s", key)
+
+    def _is_idle(self) -> bool:
+        """Whether this execution handler retains no in-flight or buffered state."""
+        return (
+            self._parent_handler is not None
+            and not self._layer_root_spans
+            and not self._component_spans
+            and not self._deferred_end_starts
+            and not self._exec_handlers
+            and not self._span_manager.has_spans()
+        )
+
+    def _discard_execution_state(self) -> None:
+        """Release every resource retained by an evicted execution handler."""
+        self._cleanup_stale_spans()
+        for state in self._span_manager.discard_all():
+            try:
+                state.span.end()
+            except Exception:  # noqa: BLE001 - already-ended spans are fine
+                pass
+            self._detach_state(state)
+        pending = getattr(self, "_unhandled_errors", None)
+        if isinstance(pending, dict):
+            pending.clear()
+        self._cached_root_ctx = None
+        self._cached_trace_id = None
+        self._cached_session_id = None
 
     # --- helper: resolve parent context for a new span ---
 
