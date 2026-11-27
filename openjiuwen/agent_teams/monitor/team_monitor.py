@@ -56,13 +56,13 @@ class TeamMonitor:
     """
 
     def __init__(
-        self,
-        team_name: str,
-        session_id: str,
-        db: TeamDatabase,
-        team_agent: TeamAgent,
-        *,
-        hide_dm: bool = False,
+            self,
+            team_name: str,
+            session_id: str,
+            db: TeamDatabase,
+            team_agent: TeamAgent,
+            *,
+            hide_dm: bool = False,
     ) -> None:
         """Initialize the monitor.
 
@@ -192,6 +192,31 @@ class TeamMonitor:
             tasks = await self._db.task.get_team_tasks(self._team_name, status=status)
         return [TaskInfo.from_internal(t) for t in tasks]
 
+    async def get_snapshot(
+            self,
+    ) -> tuple[TeamInfo | None, list[MemberInfo], list[TaskInfo]] | None:
+        """团队信息 + 全量成员 + 全量任务：单读连接一次取齐。
+
+        客户端快照（ws 刷新端点 / 卡死看门狗 45s 巡检 / 流末补发）原先
+        经 ``get_members`` + ``get_team_info`` + ``get_tasks`` 串行 3 次
+        checkout；合并后 1 次，且三视图出自同一读事务快照（不再可能
+        "成员是旧瞬间、任务是新瞬间"）。
+
+        Returns:
+            ``(TeamInfo|None, members, tasks)``；探针重试耗尽返回 ``None``
+            ——调用方按"快照不可得"处理（既有"任一读异常→整体 None"契约）。
+        """
+        with self._bound_session():
+            probe = await self._db.fetch_team_snapshot_probe(self._team_name)
+        if probe is None:
+            return None
+        team, members, tasks = probe
+        return (
+            TeamInfo.from_internal(team) if team is not None else None,
+            [MemberInfo.from_internal(m) for m in members],
+            [TaskInfo.from_internal(t) for t in tasks],
+        )
+
     async def get_task(self, task_id: str) -> TaskInfo | None:
         """Query a single task by ID.
 
@@ -208,10 +233,10 @@ class TeamMonitor:
         return TaskInfo.from_internal(task)
 
     async def get_messages(
-        self,
-        *,
-        to_member_name: str | None = None,
-        from_member_name: str | None = None,
+            self,
+            *,
+            to_member_name: str | None = None,
+            from_member_name: str | None = None,
     ) -> list[MessageInfo]:
         """Query mailbox messages.
 
@@ -344,9 +369,9 @@ class TeamMonitor:
 
 
 def create_monitor(
-    team_agent: TeamAgent,
-    *,
-    hide_dm: bool = False,
+        team_agent: TeamAgent,
+        *,
+        hide_dm: bool = False,
 ) -> TeamMonitor:
     """Create a TeamMonitor bound to a leader TeamAgent.
 
