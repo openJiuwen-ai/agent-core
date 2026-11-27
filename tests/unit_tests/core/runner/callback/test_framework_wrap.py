@@ -614,3 +614,82 @@ async def test_disabled_handler_skipped(framework):
 
     result = await func()
     assert result == "from_func"
+
+
+# ===========================================================================
+# aclose cascade through the wrap chain (issue #2426)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_static_chain_cascades_aclose_into_handler():
+    """Caller-side aclose must finalize the handler's generator inside the
+    aclose call itself, not defer it to the asyncio asyncgen hooks (GC
+    timing, a different contextvars context)."""
+    finalized = []
+
+    async def handler(call_next, *args, **kwargs):
+        try:
+            async for item in call_next(*args, **kwargs):
+                yield item
+        finally:
+            finalized.append("handler")
+
+    @create_wrap_decorator(handler)
+    async def stream():
+        yield 1
+        yield 2
+
+    agen = stream()
+    assert await agen.__anext__() == 1
+    await agen.aclose()
+    assert finalized == ["handler"]
+
+
+@pytest.mark.asyncio
+async def test_event_chain_cascades_aclose_into_handler(framework):
+    """Same contract through the event-based chain (dynamic handler lookup):
+    the handler's finally runs before aclose() returns. Deeper levels the
+    closer does not pass through (the handler's own async-for body) may
+    still be hook-finalized — every framework layer is closed now."""
+    order = []
+
+    @framework.on_wrap("abandon")
+    async def handler(call_next, *args, **kwargs):
+        try:
+            async for item in call_next(*args, **kwargs):
+                yield item
+        finally:
+            order.append("handler")
+
+    @framework.wrap("abandon")
+    async def stream():
+        try:
+            yield 1
+            yield 2
+        finally:
+            order.append("source")
+
+    agen = stream()
+    assert await agen.__anext__() == 1
+    await agen.aclose()
+    order.append("aclose-done")
+    assert order.index("handler") < order.index("aclose-done")
+
+
+@pytest.mark.asyncio
+async def test_event_chain_without_handlers_closes_cleanly(framework):
+    """The no-handler branch of gen_wrapper drives the inner generator
+    through aclosing as well: abandoning the wrapped stream closes it
+    without raising, and the generator is done afterwards."""
+
+    @framework.wrap("nohandler-stream")
+    async def stream():
+        yield 1
+        yield 2
+
+    agen = stream()
+    assert await agen.__anext__() == 1
+    await agen.aclose()
+    with pytest.raises(StopAsyncIteration):
+        await agen.__anext__()
