@@ -722,6 +722,12 @@ class OtelAgentHandler(TraceExtAgentHandler):
                     # sends, so the completion payload carries real content.
                     response = _unwrap_llm_payload(outputs)
                     _, messages = _standard_messages(response, default_role="assistant")
+                    # A message carries all its content in "parts" (text or
+                    # tool_call); an entry with none carries no information —
+                    # the cancellation compensation payload {"outputs": None}
+                    # normalizes to exactly one such shell. Per GenAI
+                    # convention, no output means no output-messages key.
+                    messages = [m for m in messages if m.get("parts")]
                     if messages:
                         state.span.set_attribute(
                             GEN_AI_OUTPUT_MESSAGES,
