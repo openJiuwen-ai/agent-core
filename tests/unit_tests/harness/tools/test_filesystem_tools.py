@@ -1210,22 +1210,67 @@ async def test_edit_file_tool_rejects_ipynb(sys_op, temp_dir):
     assert "NotebookEdit" in res.error
 
 
+def test_edit_file_tool_desanitize_preserves_entities_and_expands_tokens():
+    # HTML entities are legitimate source-code literals and must survive verbatim.
+    assert (
+        EditFileTool._desanitize("&#39; &amp; &quot; &lt; &gt;")
+        == "&#39; &amp; &quot; &lt; &gt;"
+    )
+    # Reserved XML abbreviations are still expanded.
+    assert EditFileTool._desanitize("<fnr>") == "<function_results>"
+    assert EditFileTool._desanitize("<n>x</n>") == "<name>x</name>"
+
+
 @pytest.mark.asyncio
-async def test_edit_file_tool_html_desanitization(sys_op, temp_dir):
-    write_tool = WriteFileTool(sys_op)
+async def test_edit_file_tool_preserves_html_entities_in_new_string(sys_op, temp_dir):
     read_tool = ReadFileTool(sys_op)
     edit_tool = EditFileTool(sys_op)
-    file_path = os.path.join(temp_dir, "entities.txt")
-    await write_tool.invoke({"file_path": file_path, "content": "a < b && c > d"})
-    await read_tool.invoke({"file_path": file_path})
+    file_path = os.path.join(temp_dir, "esc.js")
 
-    # Pass HTML-escaped old_string (as the model might receive from XML tool calling)
+    # An anti-XSS helper: its source legitimately contains &amp; / &lt; / &gt; /
+    # &quot; / &#39; as string data. edit_file must not decode them on write.
+    entity_line = (
+        "  '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;'"
+    )
+    new_string = (
+        "const esc = (s) => String(s ?? '').replace(/[&<>\"']/g, (c) => ({\n"
+        + entity_line + "\n"
+        "}[c]));\n"
+    )
     res = await edit_tool.invoke({
         "file_path": file_path,
-        "old_string": "a &lt; b &amp;&amp; c &gt; d",
-        "new_string": "x",
+        "old_string": "",
+        "new_string": new_string,
     })
     assert res.success is True
+    assert res.data.get("created") is True
+
+    with open(file_path, "r", encoding="utf-8") as fh:
+        disk = fh.read()
+    for entity in ("&#39;", "&amp;", "&quot;", "&lt;", "&gt;"):
+        assert entity in disk
+    # The corrupted form ("'":''' ) must never appear.
+    assert "'''" not in disk
+
+    # New-file creation bypasses _desanitize, so the assertions above would pass
+    # even if the edit branch still decoded entities. Cover the edit path: read
+    # the existing file, then replace a line carrying entities with one that also
+    # carries them and assert the on-disk bytes are unchanged.
+    await read_tool.invoke({"file_path": file_path})
+    edit_res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": entity_line,
+        "new_string": entity_line + " // entities kept verbatim",
+    })
+    assert edit_res.success is True
+    assert edit_res.data["replacements"] == 1
+
+    with open(file_path, "r", encoding="utf-8") as fh:
+        disk = fh.read()
+    assert "// entities kept verbatim" in disk
+    for entity in ("&#39;", "&amp;", "&quot;", "&lt;", "&gt;"):
+        assert entity in disk
+    assert "'''" not in disk
 
 
 @pytest.mark.asyncio
