@@ -25,23 +25,42 @@ class TracerAgentUtils:
 
     @staticmethod
     async def trace_retriever_start(
-        session, query: Optional[str] = None, instance_name: str = ""
+        session,
+        query: Optional[str] = None,
+        instance_name: str = "",
+        *,
+        top_k: Optional[int] = None,
+        data_source_id: Optional[str] = None,
     ) -> Optional[TraceAgentSpan]:
         """Emit on_retriever_start for a knowledge search beginning now.
 
         The returned span must be passed back to trace_retriever_end /
         trace_retriever_error.  Returns None when tracing is unavailable so
         callers can skip the matching end event.
+
+        *top_k* and *data_source_id*, when provided, are forwarded to the
+        event inputs so handlers can enrich the retrieval span (the OTel
+        handler reads ``top_k`` and ``data_source_id`` from inputs).  With
+        neither given the wire is unchanged from the query-only form.
         """
         tracer = session.tracer() if session is not None else None
         if tracer is None or not tracer.agent_handler_valid():
             return None
+        inputs: Optional[dict] = None
+        if query is not None or top_k is not None or data_source_id is not None:
+            inputs = {}
+            if query is not None:
+                inputs["query"] = query
+            if top_k is not None:
+                inputs["top_k"] = top_k
+            if data_source_id is not None:
+                inputs["data_source_id"] = data_source_id
         span = tracer.tracer_agent_span_manager.create_agent_span(None)
         await tracer.trigger(
             TracerHandlerName.TRACE_AGENT.value,
             "on_retriever_start",
             span=span,
-            inputs={"query": query} if query is not None else None,
+            inputs=inputs,
             instance_info={
                 "class_name": instance_name or "retrieval",
                 "type": InvokeType.RETRIEVER.value,
