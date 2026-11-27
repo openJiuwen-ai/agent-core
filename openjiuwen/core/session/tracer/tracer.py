@@ -186,6 +186,11 @@ class Tracer:
             return
 
         if handler_class_name == TracerHandlerName.TRACER_WORKFLOW.value:
+            # 每事件携带权威 trace_id：全局注册的 handler 是进程级单例，
+            # Tracer.init() 会覆写其 _trace_id；handler 必须按事件取，
+            # 避免并发请求把 span 写进别人的 trace。内置与扩展 handler
+            # 的事件方法均以 **kwargs 接收，忽略该字段。
+            kwargs.setdefault("trace_id", self._trace_id)
             # 1. Built-in trace_schema handler: O(1) lookup by concatenated key
             trace_schema_dict = self._workflow_handlers.get(TracerHandlerName.TRACER_WORKFLOW.value, {})
             lookup_key = handler_class_name

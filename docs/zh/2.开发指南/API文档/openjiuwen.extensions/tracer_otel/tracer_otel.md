@@ -118,6 +118,7 @@ class openjiuwen.extensions.tracer_otel.OtelWorkflowHandler(
 - LLM 组件节点使用 `SpanKind.CLIENT`；其余组件使用 `SpanKind.INTERNAL`。
 - 通过 `parent_node_id` + 内部 `_component_spans` / `_layer_root_spans` 映射构建工作流 span 的父子链，支持嵌套子工作流。
 - 每个 span 在 `on_call_done` 与 `on_invoke` 错误路径都会写入 `end_time` / `elapsed_time`。
+- 并发执行隔离（#2430）：workflow span 状态按 `execution_id` 分区。事件携带 `execution_id`（由会话继承，缺失时回退 `session_id`）时使用独立执行级状态，避免同一 workflow 并发执行互相覆盖 trace / span / 输出；无 `execution_id` 的直接调用事件保持原有扁平行为。宿主并发执行同一 workflow 时，建议通过 `create_workflow_session(execution_id=...)` / `create_agent_session(execution_id=...)` 传入每次执行唯一的 ID。
 
 **参数**：
 

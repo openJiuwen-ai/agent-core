@@ -37,7 +37,8 @@ class Session:
                  stream_writer_manager: StreamWriterManager | None = None,
                  close_stream_on_post_run: bool = True,
                  source_metadata: dict[str, Any] | None = None,
-                 parent_session_id: str | None = None):
+                 parent_session_id: str | None = None,
+                 execution_id: str | None = None):
         if session_id is None:
             session_id = str(uuid.uuid4())
         self._session_id = session_id
@@ -49,6 +50,7 @@ class Session:
             config=config,
             card=card,
             stream_writer_manager=stream_writer_manager,
+            execution_id=execution_id,
         )
         self._card = card
         self._pre_run_done = False
@@ -65,6 +67,10 @@ class Session:
 
     def get_session_id(self) -> str:
         return self._session_id
+
+    def get_execution_id(self) -> str | None:
+        """执行实例 ID（宿主传入，内嵌 workflow 继承同值）。"""
+        return self._inner.get_execution_id()
 
     def get_parent_session_id(self) -> str | None:
         """Return the optional product Session that owns this child Session."""
@@ -240,7 +246,11 @@ class Session:
         await self._inner.checkpointer().post_agent_execute(self._inner)
 
     def create_workflow_session(self) -> WorkflowSession:
-        return WorkflowSession(parent=self._inner, session_id=self.get_session_id())
+        return WorkflowSession(
+            parent=self._inner,
+            session_id=self.get_session_id(),
+            execution_id=self.get_execution_id(),
+        )
 
     async def interact(self, value):
         if self._interaction is None:
@@ -280,6 +290,7 @@ def create_agent_session(session_id: str = None,
                          stream_writer_manager: StreamWriterManager | None = None,
                          source_metadata: dict[str, Any] | None = None,
                          parent_session_id: str | None = None,
+                         execution_id: str | None = None,
                          **kwargs) -> Session:
     close_stream_on_post_run = kwargs.get("close_stream_on_post_run", True)
     session = Session(
@@ -290,5 +301,6 @@ def create_agent_session(session_id: str = None,
         close_stream_on_post_run=close_stream_on_post_run,
         source_metadata=source_metadata,
         parent_session_id=parent_session_id,
+        execution_id=execution_id,
     )
     return session

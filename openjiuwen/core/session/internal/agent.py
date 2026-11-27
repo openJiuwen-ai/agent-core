@@ -30,8 +30,10 @@ class AgentSession(BaseSession):
             card=None,
             stream_writer_manager: StreamWriterManager | None = None,
             *,
-            trace_id: str = None):
+            trace_id: str = None,
+            execution_id: str | None = None):
         self._session_id = session_id
+        self._execution_id = execution_id
         self._config = config
         self._state = StateCollection()
         self._stream_writer_manager = (
@@ -67,6 +69,14 @@ class AgentSession(BaseSession):
 
     def session_id(self) -> str:
         return self._session_id
+
+    def get_execution_id(self) -> str | None:
+        """执行实例 ID（宿主传入，内嵌 workflow / 子会话继承同值）。"""
+        return self._execution_id
+
+    def execution_id(self) -> str | None:
+        """兼容别名（保留给统一探测的调用方）。"""
+        return self.get_execution_id()
 
     def checkpointer(self) -> Checkpointer:
         return self._checkpointer

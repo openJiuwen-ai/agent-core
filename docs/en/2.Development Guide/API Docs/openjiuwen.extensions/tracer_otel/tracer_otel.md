@@ -118,6 +118,7 @@ Workflow-dimension OTel handler, inheriting from `TraceExtWorkflowHandler`. Conv
 - LLM component nodes use `SpanKind.CLIENT`; all other components use `SpanKind.INTERNAL`.
 - Parent-child relationships between workflow spans are built from `parent_node_id` plus the internal `_component_spans` / `_layer_root_spans` mappings, and support nested sub-workflows.
 - Every span receives `end_time` / `elapsed_time` attributes on both the `on_call_done` path and the `on_invoke` error path.
+- Execution isolation (#2430): workflow span state is partitioned by `execution_id`. Events carrying an `execution_id` (inherited from the session, falling back to `session_id`) use independent per-execution state so concurrent runs of the same workflow do not overwrite each other's trace / spans / outputs; direct-call events without an `execution_id` keep the legacy flat behavior. When running the same workflow concurrently, pass a unique per-execution ID via `create_workflow_session(execution_id=...)` / `create_agent_session(execution_id=...)`.
 
 **Parameters**:
 

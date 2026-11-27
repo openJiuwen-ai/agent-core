@@ -66,8 +66,14 @@ async def execute_single_component(
 ):
     # 1. Create WorkflowSession
     _env_scope = session.get_env_scope() if hasattr(session, "get_env_scope") else {}
+    _exec_getter = getattr(session, "get_execution_id", None)
+    try:
+        _execution_id = _exec_getter() if callable(_exec_getter) else None
+    except Exception:  # noqa: BLE001 - 旧会话无该能力时视为未提供
+        _execution_id = None
     workflow_session = WorkflowSession(
         workflow_id=component_id, parent=None, session_id=session.get_session_id(),
+        execution_id=_execution_id,
         workspace_id=_env_scope.get("workspace_id"),
         environment_id=_env_scope.get("environment_id"),
         project_id=_env_scope.get("project_id"),

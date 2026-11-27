@@ -26,6 +26,37 @@ def _env_scope_metadata(session) -> dict:
             if scope.get(key)}
 
 
+def _read_session_value(session, names: tuple[str, ...]) -> Optional[str]:
+    """读取会话上的第一个非空值（旧会话缺少能力时视为未提供）。"""
+    for name in names:
+        getter = getattr(session, name, None)
+        if not callable(getter):
+            continue
+        try:
+            value = getter()
+        except Exception:  # noqa: BLE001 - 旧会话无该能力时视为未提供
+            value = None
+        if value:
+            return str(value)
+    return None
+
+
+def _execution_id(session) -> Optional[str]:
+    """宿主传入的执行实例 ID；缺失返回 None（不伪造）。"""
+    return _read_session_value(session, ("get_execution_id", "execution_id"))
+
+
+def _execution_scope(session) -> str:
+    """OTel workflow handler 的执行隔离路由键（issue #2430）。
+
+    优先 execution_id（执行实例维度，同一 trace 内可区分多次执行），
+    缺失时回退 session_id 作为兼容下限；仅用于 handler 内部状态分区，
+    不写入 metadata / Span 属性，不改变内置 trace_schema 的
+    executionId == traceId 语义。
+    """
+    return _execution_id(session) or _read_session_value(session, ("session_id", "get_session_id")) or ""
+
+
 class TracerWorkflowUtils:
     @staticmethod
     def _get_workflow_metadata(session) -> dict:
@@ -70,16 +101,16 @@ class TracerWorkflowUtils:
         metadata = TracerWorkflowUtils._get_workflow_metadata(session)
         # 执行级 execution_id（宿主传入，子工作流继承同值）：写入根 Span 属性，
         # 每次执行唯一且与 SSE executionId / X-Execution-Id 对齐（issue #1753）
-        _exec_getter = getattr(session, "get_execution_id", None) or getattr(session, "execution_id", None)
-        execution_id = _exec_getter() if callable(_exec_getter) else None
+        execution_id = _execution_id(session)
         if execution_id:
-            metadata["execution_id"] = str(execution_id)
+            metadata["execution_id"] = execution_id
         await tracer.trigger(TracerHandlerName.TRACER_WORKFLOW.value, event_name="on_call_start",
                              invoke_id=session.workflow_id(),
                              parent_node_id='',
                              metadata=metadata,
                              inputs=inputs,
                              session_id=session.session_id(),
+                             execution_id=_execution_scope(session),
                              need_send=True)
 
     @staticmethod
@@ -97,6 +128,7 @@ class TracerWorkflowUtils:
                              parent_node_id=parent_id,
                              source_ids=source_ids,
                              session_id=session.session_id(),
+                             execution_id=_execution_scope(session),
                              metadata=metadata)
 
     @staticmethod
@@ -111,6 +143,7 @@ class TracerWorkflowUtils:
                              parent_node_id=parent_id,
                              inputs=inputs,
                              need_send=send,
+                             execution_id=_execution_scope(session),
                              component_metadata=TracerWorkflowUtils._get_component_metadata(session))
 
     @staticmethod
@@ -126,6 +159,7 @@ class TracerWorkflowUtils:
                              invoke_id=executable_id,
                              parent_node_id=parent_id,
                              need_send=send,
+                             execution_id=_execution_scope(session),
                              chunk=dict(chunk))
 
     @staticmethod
@@ -138,6 +172,7 @@ class TracerWorkflowUtils:
         await tracer.trigger(TracerHandlerName.TRACER_WORKFLOW.value, "on_post_invoke",
                              invoke_id=executable_id,
                              parent_node_id=parent_id,
+                             execution_id=_execution_scope(session),
                              outputs=outputs)
 
     @staticmethod
@@ -152,6 +187,7 @@ class TracerWorkflowUtils:
         await tracer.trigger(TracerHandlerName.TRACER_WORKFLOW.value, "on_post_stream",
                              invoke_id=executable_id,
                              parent_node_id=parent_id,
+                             execution_id=_execution_scope(session),
                              chunk=dict(chunk))
 
     @staticmethod
@@ -169,7 +205,8 @@ class TracerWorkflowUtils:
             return
         await tracer.trigger(TracerHandlerName.TRACER_WORKFLOW.value, "on_call_finalize",
                              invoke_id=session.executable_id(),
-                             parent_node_id=session.parent_id())
+                             parent_node_id=session.parent_id(),
+                             execution_id=_execution_scope(session))
 
     @staticmethod
     async def trace_workflow_done(session, outputs: Optional[dict]):
@@ -182,6 +219,7 @@ class TracerWorkflowUtils:
                              invoke_id=executable_id,
                              parent_node_id=parent_id,
                              outputs=outputs,
+                             execution_id=_execution_scope(session),
                              metadata=TracerWorkflowUtils._get_workflow_metadata(session))
 
     @staticmethod
@@ -193,7 +231,8 @@ class TracerWorkflowUtils:
         parent_id = session.parent_id()
         await tracer.trigger(TracerHandlerName.TRACER_WORKFLOW.value, "on_call_done",
                              invoke_id=executable_id,
-                             parent_node_id=parent_id)
+                             parent_node_id=parent_id,
+                             execution_id=_execution_scope(session))
         state = session.state()
         loop_id = state.get_global(LOOP_ID)
         if loop_id is None:
@@ -210,6 +249,7 @@ class TracerWorkflowUtils:
         await tracer.trigger(TracerHandlerName.TRACER_WORKFLOW.value, "on_invoke",
                              invoke_id=invoke_id,
                              parent_node_id=parent_id,
+                             execution_id=_execution_scope(session),
                              on_invoke_data=data)
 
     @staticmethod
@@ -224,6 +264,7 @@ class TracerWorkflowUtils:
         await session.tracer().trigger(TracerHandlerName.TRACER_WORKFLOW.value, "on_invoke",
                                        invoke_id=invoke_id,
                                        parent_node_id=parent_id,
+                                       execution_id=_execution_scope(session),
                                        exception=error)
 
     @staticmethod
@@ -238,4 +279,5 @@ class TracerWorkflowUtils:
                              parent_node_id=parent_id,
                              inputs=inputs,
                              need_send=send,
+                             execution_id=_execution_scope(session),
                              component_metadata=TracerWorkflowUtils._get_component_metadata(session))
