@@ -142,6 +142,54 @@ def _add_column_idempotent(sync_conn, table: str, column: str, col_type: str) ->
             raise
 
 
+def _drop_column_idempotent(sync_conn, table: str, column: str) -> None:
+    """Drop a column, tolerating a concurrent drop by another process.
+
+    Mirror of :func:`_add_column_idempotent` for the DROP path: the
+    check-then-ALTER pattern is not atomic across processes, so two
+    processes can both see the column present and both issue
+    ``ALTER TABLE ... DROP COLUMN``. The DB's own DDL lock serialises the
+    two ALTERs, but the second one fails:
+
+    - SQLite: ``OperationalError`` "no such column: ...".
+    - PostgreSQL: ``ProgrammingError`` (SQLSTATE 42703) "column ... does
+      not exist". PG also puts the transaction into an aborted state after
+      the failed statement, so the outer ``session.commit()`` would later
+      raise ``InFailedSQLTransaction``.
+    - MySQL: ``OperationalError`` (1091) "Can't DROP ...; check that
+      column/key exists".
+
+    On SQLite / PostgreSQL the ALTER is wrapped in a SAVEPOINT
+    (``begin_nested``) so the outer transaction stays committable when the
+    not-found error is swallowed. On MySQL the SAVEPOINT is skipped (DDL
+    implicitly commits, destroying any active savepoint).
+
+    On **both** paths the column's absence is re-checked via ``inspect``
+    after a swallowed not-found error; if the column is somehow still
+    present, the helper re-raises rather than silently leaving the column
+    in place. The error-message match covers the per-backend wording above;
+    any DDL error whose message does not look like a not-found is always
+    re-raised.
+    """
+    use_savepoint = sync_conn.dialect.name != "mysql"
+    try:
+        if use_savepoint:
+            with sync_conn.begin_nested():
+                sync_conn.exec_driver_sql(f"ALTER TABLE {table} DROP COLUMN {column}")
+        else:
+            sync_conn.exec_driver_sql(f"ALTER TABLE {table} DROP COLUMN {column}")
+    except DBAPIError as exc:
+        msg = str(exc).lower()
+        if not any(
+            marker in msg
+            for marker in ("no such column", "does not exist", "can't drop", "cannot drop")
+        ):
+            raise
+        inspector = inspect(sync_conn)
+        if column in {col["name"] for col in inspector.get_columns(table)}:
+            raise
+
+
 def _run_ddl_idempotent(
     sync_conn,
     ddl: Callable[[], None],
@@ -582,7 +630,20 @@ def _ensure_team_member_role_column(sync_conn) -> None:
 
 
 def _ensure_team_member_options_column(sync_conn) -> None:
-    """Ensure TeamMember.options exists, backfill it, and drop legacy columns."""
+    """Ensure TeamMember.options exists, backfill it, and drop legacy columns.
+
+    The legacy ``model_ref_json`` column is migrated into the unified
+    ``options`` JSON (see ``merge_legacy_member_options``) and then dropped.
+    The DROP is wrapped in :func:`_drop_column_idempotent` and the
+    migration block is gated by a fresh ``inspect`` re-check: two processes
+    concurrently initialising the same PG/MySQL database can both pass the
+    top-of-function ``model_ref_json in columns`` check (captured before any
+    ALTER) and race the migration. Without the re-check + idempotent DROP,
+    the loser of the race crashes — either its ``SELECT ... model_ref_json``
+    hits "no such column" (the winner already dropped it), or its own DROP
+    hits "no such column" / "does not exist" / "can't drop" (issue #115
+    review round 14, sibling of the round-11 ``create_all`` TOCTOU).
+    """
     inspector = inspect(sync_conn)
     if "team_member" not in inspector.get_table_names():
         return
@@ -597,6 +658,18 @@ def _ensure_team_member_options_column(sync_conn) -> None:
         return
 
     from openjiuwen.agent_teams.tools.member_options import merge_legacy_member_options
+
+    # Re-inspect right before the legacy-column migration: another process
+    # may have completed this migration (and dropped model_ref_json) between
+    # the top-of-function inspect and now. Without this re-check the
+    # SELECT below crashes with "no such column: model_ref_json" when two
+    # processes race the migration (issue #115 review round 14). The narrow
+    # window between this re-check and the SELECT is closed at the DROP
+    # below by ``_drop_column_idempotent``.
+    if "model_ref_json" not in {
+        col["name"] for col in inspect(sync_conn).get_columns("team_member")
+    }:
+        return
 
     rows = sync_conn.exec_driver_sql(
         "SELECT member_name, team_name, options, model_ref_json FROM team_member"
@@ -613,7 +686,14 @@ def _ensure_team_member_options_column(sync_conn) -> None:
             (merged, row["member_name"], row["team_name"]),
         )
 
-    sync_conn.exec_driver_sql("ALTER TABLE team_member DROP COLUMN model_ref_json")
+    # Wrapped in _drop_column_idempotent for cross-process TOCTOU (issue
+    # #115 review round 14): two processes that both saw model_ref_json
+    # present in the top-of-function inspect both reach this DROP; the DB's
+    # DDL lock serialises the two ALTERs but the second fails with
+    # "no such column" / "does not exist" / "can't drop" (SQLite / PG /
+    # MySQL). The helper swallows the not-found error after re-checking via
+    # ``inspect`` that the column is in fact gone.
+    _drop_column_idempotent(sync_conn, "team_member", "model_ref_json")
     team_logger.info("Migrated legacy team_member table: dropped model_ref_json column")
 
 

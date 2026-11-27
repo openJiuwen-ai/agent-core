@@ -29,6 +29,7 @@ from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
 )
 from openjiuwen.agent_teams.tools.database.engine import (
+    _drop_column_idempotent,
     _ensure_dynamic_table_indexes,
     _ensure_team_member_options_column,
 )
@@ -146,6 +147,215 @@ class TestTeamDatabaseInit:
             assert options.model_ref.model_index == 1
         finally:
             engine.dispose()
+
+    @pytest.mark.level0
+    def test_drop_column_idempotent_swallows_not_found_after_concurrent_drop(self):
+        """_drop_column_idempotent catches "no such column" errors on all backends.
+
+        Direct unit test for the helper that mirrors
+        ``test_add_column_idempotent_swallows_duplicate_column`` for the DROP
+        path: pre-create a table with the target column, drop the column
+        (simulating the winner of a concurrent race), then call
+        ``_drop_column_idempotent``. It must not raise and must not poison
+        the surrounding transaction (issue #115 review round 14).
+        """
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    "CREATE TABLE idempotent_drop_test (id INTEGER PRIMARY KEY, marker TEXT)"
+                )
+                # Winner of the race already dropped the column.
+                conn.exec_driver_sql("ALTER TABLE idempotent_drop_test DROP COLUMN marker")
+                # Loser reaches the DROP after the winner committed; the helper
+                # must swallow the "no such column" error.
+                _drop_column_idempotent(conn, "idempotent_drop_test", "marker")
+                # Surrounding transaction must still be committable (implicit
+                # commit at block exit). A follow-up write proves the
+                # transaction is alive.
+                conn.exec_driver_sql("INSERT INTO idempotent_drop_test (id) VALUES (1)")
+
+            with engine.connect() as conn:
+                rows = conn.exec_driver_sql(
+                    "SELECT id FROM idempotent_drop_test WHERE id = 1"
+                )
+                assert rows.fetchone()[0] == 1
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level0
+    def test_ensure_team_member_options_column_skips_migration_when_model_ref_json_already_dropped(self):
+        """The migration re-inspects right before the legacy-column SELECT.
+
+        Two concurrent processes both pass the top-of-function
+        ``model_ref_json in columns`` check (captured before any ALTER), then
+        race the migration. The winner completes SELECT/UPDATE/DROP; the
+        loser reaches the SELECT after the winner's DROP committed. Without
+        the re-inspect the loser's SELECT crashes with "no such column:
+        model_ref_json" (issue #115 review round 14).
+
+        Simulate by dropping ``model_ref_json`` before invoking the
+        migration helper: the re-inspect must short-circuit and the helper
+        must return without raising. Compare to the bare-SELECT behaviour
+        which would crash.
+        """
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_member (
+                        member_name TEXT NOT NULL,
+                        team_name TEXT NOT NULL,
+                        options TEXT,
+                        model_ref_json TEXT,
+                        PRIMARY KEY (member_name, team_name)
+                    )
+                    """
+                )
+                # Another process already finished the migration: dropped
+                # model_ref_json and backfilled options.
+                conn.exec_driver_sql("ALTER TABLE team_member DROP COLUMN model_ref_json")
+                # Stale top-of-function inspect still sees model_ref_json
+                # (simulated by the helper being called after the column is
+                # already gone). The re-inspect must short-circuit.
+                _ensure_team_member_options_column(conn)
+                columns = {col["name"] for col in inspect(conn).get_columns("team_member")}
+
+            assert "model_ref_json" not in columns
+            assert "options" in columns
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level0
+    def test_drop_column_idempotent_mysql_skips_savepoint_and_rechecks(self):
+        """On MySQL _drop_column_idempotent does not wrap the ALTER in a
+        SAVEPOINT — DDL implicitly commits *whether the DDL succeeds or
+        fails*, so the savepoint is destroyed before ``begin_nested`` can
+        roll back to it. The helper instead runs the ALTER bare and, when a
+        not-found error is swallowed, follows it with an ``inspect``
+        re-check that confirms the column is actually gone (the implicit
+        commit makes the post-ALTER state the ground truth).
+
+        Mirrors ``test_add_column_idempotent_mysql_skips_savepoint_and_rechecks``
+        for the DROP path.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from sqlalchemy.exc import OperationalError
+
+        from openjiuwen.agent_teams.tools.database import engine as engine_module
+
+        fake_conn = MagicMock()
+        fake_conn.dialect.name = "mysql"
+
+        # The ALTER raises a not-found error (the column was dropped by a
+        # concurrent process). The helper must swallow this on the MySQL path.
+        fake_conn.exec_driver_sql.side_effect = OperationalError(
+            "ALTER TABLE t DROP COLUMN c",
+            {},
+            Exception("Can't DROP 'c'; check that column/key exists"),
+        )
+
+        # begin_nested must NOT be called on the MySQL path.
+        fake_conn.begin_nested.side_effect = AssertionError(
+            "MySQL path must not call begin_nested"
+        )
+
+        # inspect(sync_conn).get_columns(table) reports the column is gone,
+        # confirming a concurrent process dropped it; the re-check passes
+        # and the helper returns without re-raising.
+        fake_inspector = MagicMock()
+        fake_inspector.get_columns.return_value = [{"name": "other"}]
+
+        with patch.object(engine_module, "inspect", return_value=fake_inspector):
+            _drop_column_idempotent(fake_conn, "t", "c")
+
+        fake_conn.begin_nested.assert_not_called()
+        fake_conn.exec_driver_sql.assert_called_once()
+        fake_inspector.get_columns.assert_called_once_with("t")
+
+    @pytest.mark.level0
+    def test_drop_column_idempotent_mysql_reraises_when_column_still_present(self):
+        """On MySQL, if the not-found error is swallowed but the ``inspect``
+        re-check finds the column still present (an inconsistent state — the
+        column should have been dropped by a concurrent process), the helper
+        re-raises rather than silently leaving the column in place.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from sqlalchemy.exc import OperationalError
+
+        from openjiuwen.agent_teams.tools.database import engine as engine_module
+
+        fake_conn = MagicMock()
+        fake_conn.dialect.name = "mysql"
+
+        fake_conn.exec_driver_sql.side_effect = OperationalError(
+            "ALTER TABLE t DROP COLUMN c",
+            {},
+            Exception("Can't DROP 'c'; check that column/key exists"),
+        )
+
+        # inspect reports the column IS still present — inconsistent with the
+        # "Can't DROP" error. The helper must surface this.
+        fake_inspector = MagicMock()
+        fake_inspector.get_columns.return_value = [{"name": "c"}, {"name": "other"}]
+
+        with patch.object(engine_module, "inspect", return_value=fake_inspector):
+            with pytest.raises(OperationalError):
+                _drop_column_idempotent(fake_conn, "t", "c")
+
+        fake_conn.begin_nested.assert_not_called()
+        fake_inspector.get_columns.assert_called_once_with("t")
+
+    @pytest.mark.level0
+    def test_drop_column_idempotent_savepoint_path_reraises_when_column_still_present(self):
+        """On the savepoint path (SQLite / PG), if the not-found error is
+        swallowed but the ``inspect`` re-check finds the column still present
+        (an inconsistent state — the column should have been dropped by a
+        concurrent process), the helper re-raises rather than silently
+        leaving the column in place.
+
+        Mirrors ``test_add_column_idempotent_savepoint_path_reraises_when_column_still_missing``
+        for the DROP path. Drives the savepoint branch with a hand-rolled
+        fake connection.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from sqlalchemy.exc import OperationalError
+
+        from openjiuwen.agent_teams.tools.database import engine as engine_module
+
+        fake_conn = MagicMock()
+        fake_conn.dialect.name = "sqlite"
+
+        fake_conn.exec_driver_sql.side_effect = OperationalError(
+            "ALTER TABLE t DROP COLUMN c",
+            {},
+            Exception("no such column: c"),
+        )
+
+        class _FakeSavepoint:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False  # propagate to outer except (see _add_column test)
+
+        fake_conn.begin_nested.return_value = _FakeSavepoint()
+
+        # inspect reports the column IS still present — inconsistent with the
+        # "no such column" error. The helper must surface this.
+        fake_inspector = MagicMock()
+        fake_inspector.get_columns.return_value = [{"name": "c"}, {"name": "other"}]
+
+        with patch.object(engine_module, "inspect", return_value=fake_inspector):
+            with pytest.raises(OperationalError):
+                _drop_column_idempotent(fake_conn, "t", "c")
+
+        fake_conn.begin_nested.assert_called_once()
+        fake_inspector.get_columns.assert_called_once_with("t")
 
     @pytest.mark.level0
     def test_task_migration_adds_reviewer_and_folds_legacy_statuses(self):

@@ -13,6 +13,8 @@ files:
 - openjiuwen/agent_teams/tools/database/engine.py
 - openjiuwen/agent_teams/organization/db.py
 - openjiuwen/agent_teams/tools/AGENTS.md
+- openjiuwen/agent_teams/schema/blueprint.py
+- openjiuwen/agent_teams/agent/team_agent.py
 - tests/unit_tests/agent_teams/test_database.py
 - tests/unit_tests/agent_teams/test_db_sessions_watchdog.py
 - tests/unit_tests/agent_teams/organization/test_org_db.py
@@ -624,3 +626,75 @@ COLUMN`），同款 TOCTOU 命中后第二个进程会撞 `duplicate column`。�
   2 xfailed。
 - 重点覆盖:`test_database` + `test_database_concurrency` + `test_message_manager` +
   `test_task_manager` + `organization/test_org_db`:322 passed。
+
+### 第十四轮检视:`member_model` 回写判据不同源 + `model_ref_json` DROP COLUMN 未幂等
+
+第十四轮检视点出两个建议:
+
+1. **`agent_configurator.py:694` — `member_model` 回写判据与冷恢复重新物化判据不同源**:
+   上一轮(commit `afccd38d1`)把回写判据从 blueprint `spec.model_pool` 改成已展开的
+   `ctx.team_spec.model_pool`,正确覆盖了 router / intelli_router 团队(它们的
+   blueprint `model_pool` 在 `build()` 把 `model_router` / `model_intelli_router`
+   展开成 `team_spec.model_pool` 时仍保持空)。但**冷恢复路径**(`team_agent.py:2189`
+   `if runtime_spec is not None and runtime_spec.model_pool:`)依旧检查未展开的
+   `runtime_spec.model_pool` —— 对 router / intelli_router 团队为空,跳过
+   `context.member_model` 重新物化。结果:回写为这些团队写入了 `ctx.member_model`,
+   但冷恢复跳过重新物化 —— 让一个 stale client(可能已轮换过的 endpoint/api_key)
+   跨冷恢复存活,与上一轮限制回写"仅给 pool teams、靠恢复重物化覆盖 stale 值"的初衷
+   相反。
+
+   **修法**:把 `model_router` / `model_intelli_router` → `model_pool` 的展开逻辑提取为
+   `TeamAgentSpec.effective_model_pool()`,返回 `(pool, strategy)` 后展开值,与
+   `build()` 在 `team_spec.model_pool` / `team_spec.model_pool_strategy` 上写入的同源。
+   `build()` 与 `recover_from_session` 都改用此 helper:`build()` 直接调用替代内联展开,
+   冷恢复路径改用 `runtime_spec.effective_model_pool()` 替代裸 `runtime_spec.model_pool`
+   检查 —— 两条路径从此共享同一展开源。helper 是只读的,不修改 blueprint 字段。
+
+2. **`engine.py:593` — 同一函数内 `model_ref_json` 的 DROP COLUMN 未做幂等包裹**:
+   `_ensure_team_member_options_column` 的 ADD COLUMN(`options`)在上一轮已包进
+   `_add_column_idempotent`,但同函数的 DROP COLUMN(`model_ref_json`)仍是裸
+   `exec_driver_sql("ALTER TABLE team_member DROP COLUMN model_ref_json")`。两个进程
+   并发首次 `initialize()` 同一 PG/MySQL 库时,两边顶部 inspect 都看到 `model_ref_json`
+   在 → 都跑迁移 → 都到 DROP COLUMN → DB 的 DDL 锁串行后第二个失败(SQLite
+   「no such column」/ PG「does not exist」/ MySQL「Can't DROP」)。
+
+   **修法**:新增 `_drop_column_idempotent(sync_conn, table, column)` 辅助,镜像
+   `_add_column_idempotent` 的 SAVEPOINT + DBAPIError catch + `inspect` 复查模式:吞
+   「no such column」/「does not exist」/「can't drop」/「cannot drop」类错误后用
+   `inspect.get_columns` 复查列确实已不在(若仍存在则 re-raise 不一致态)。
+   `_ensure_team_member_options_column` 的 DROP 改用此 helper 包裹。
+
+   **附带修法**:同一个迁移函数还有第二条竞态—— 顶部 inspect 抓的 `columns` 集合在
+   函数体里是 stale 的,败方到达迁移 SELECT 之前赢方可能已 DROP 了 `model_ref_json`,
+   败方 `SELECT member_name, team_name, options, model_ref_json FROM team_member`
+   会撞「no such column: model_ref_json」。修法:迁移 SELECT 前再 inspect 一次,
+   `model_ref_json` 已不在则 short-circuit 返回(对方已完成迁移)。re-inspect 与
+   SELECT 之间的窄窗由 DROP 幂等兜底—— DROP 不会因对方已 DROP 而崩。
+
+**契约同步**:
+- `openjiuwen/agent_teams/tools/AGENTS.md` 第 (1) 条 DDL 锁契约追加 `_drop_column_idempotent`
+  辅助的说明,以及 `_ensure_team_member_options_column` 迁移 SELECT 前 re-inspect 的
+  理由。
+- `TeamAgentSpec.effective_model_pool()` 的 docstring 说明其作为 `build()` 与冷恢复
+  `recover_from_session` 共享展开源的角色,以及不与
+  `AgentConfigurator` 的 `ctx.team_spec.model_pool` 检查不同源的 invariant。
+- `team_agent.py:2189` 的注释说明改用 `effective_model_pool()` 而非裸
+  `runtime_spec.model_pool` 的根因。
+
+**验证**:
+- `tests/unit_tests/agent_teams/test_database.py`:6 个新增用例
+  (`test_drop_column_idempotent_swallows_not_found_after_concurrent_drop` /
+  `test_ensure_team_member_options_column_skips_migration_when_model_ref_json_already_dropped` /
+  `test_drop_column_idempotent_mysql_skips_savepoint_and_rechecks` /
+  `test_drop_column_idempotent_mysql_reraises_when_column_still_present` /
+  `test_drop_column_idempotent_savepoint_path_reraises_when_column_still_present` +
+  既有 `test_options_migration_backfills_and_drops_legacy_model_ref_json_column`)全过。
+- `tests/unit_tests/agent_teams/models/test_allocator.py`:4 个新增 `effective_model_pool`
+  用例(plain pool / router 展开 / intelli_router 展开 / 三形态汇总)全过。
+- 广域回归:`test_database` + `test_task_manager` + `test_message_manager` +
+  `test_team_agent_coordination` + `organization/test_org_db`:388 passed, 19 skipped。
+  `test_runner_team_runtime` + `test_recovery_build_context_seed` +
+  `test_session_manager` + `test_team_agent_tools`:77 passed, 1 skipped。
+- SQLite 上 `_drop_column_idempotent` 的 SAVEPOINT 行为可直接验证;MySQL/PG 的
+  savepoint-skip + inspect 复查分支用 fake-conn 单测覆盖(同 `_add_column_idempotent`
+  的 fake-conn 测试模式)。真实 PG/MySQL 跨进程并发场景需 swarm 侧端到端复测。

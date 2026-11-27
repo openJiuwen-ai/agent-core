@@ -2186,9 +2186,23 @@ class TeamAgent(BaseAgent):
         # Without this merge a cold recovery silently rebuilt the old
         # by-model-name allocator even though the UI had selected a model
         # group for the current request.
-        if runtime_spec is not None and runtime_spec.model_pool:
-            current_pool = list(runtime_spec.model_pool)
-            current_strategy = runtime_spec.model_pool_strategy
+        #
+        # Use the *expanded* pool via ``effective_model_pool`` rather than the
+        # raw ``runtime_spec.model_pool`` so router / intelli_router teams
+        # (whose ``runtime_spec.model_pool`` is empty until ``build()``
+        # expands the convenience inputs into ``team_spec.model_pool``) also
+        # re-materialize ``context.member_model``. Without this the write-back
+        # path in ``AgentConfigurator`` (which checks the already-expanded
+        # ``ctx.team_spec.model_pool``) writes ``ctx.member_model`` for
+        # exactly those teams, but the recovery path skips re-materialization
+        # — letting a stale client survive a host-side credential rotation
+        # (issue #115 review round 14, sibling of 现象 5).
+        if runtime_spec is not None:
+            current_pool, current_strategy = runtime_spec.effective_model_pool()
+        else:
+            current_pool: list = []
+            current_strategy = spec.model_pool_strategy
+        if current_pool:
             if context.team_spec is None:
                 raise ValueError(f"No team spec found for '{team_name}' recovery")
             context.team_spec = context.team_spec.model_copy(

@@ -76,6 +76,14 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
   tables=static_tables())`（`verify = all(t.name in has_table_names for t in static_tables())`）。
   **`_add_column_idempotent` / `_run_ddl_idempotent` 住在 `tools/database/engine.py`，
   `organization/db.py` re-export 它们**（同一份原语服务 per-session 动态表 DDL 与 org 静态表 DDL）。
+  **同款原语也覆盖 `DROP COLUMN`**：`_drop_column_idempotent`（同文件，未 re-export——目前仅
+  `_ensure_team_member_options_column` 一处使用）镜像 `_add_column_idempotent` 的 SAVEPOINT +
+  DBAPIError catch + `inspect` 复查模式，跨进程吞「no such column」/「does not exist」/
+  「can't drop」（SQLite / PG / MySQL）错误。`_ensure_team_member_options_column` 的 legacy
+  `model_ref_json` 迁移除了包 DROP 幂等，**还在迁移 SELECT 前 re-inspect** —— 顶部 inspect 抓的
+  `columns` 集合是 stale 的，两个进程并发迁移时败方的 SELECT 会撞「no such column:
+  model_ref_json」（赢方已 DROP）。re-inspect 让败方 short-circuit，DROP 幂等再兜底 re-inspect
+  与 DROP 之间窄窗（issue #115 review round 14）。
   **两条路径吞错后均复查 DDL 目标是否真存在**（savepoint 路径靠回滚恢复
   事务状态 + `verify` / `inspect` 复查；MySQL 路径无 savepoint，复查直接读隐式提交后的
   ground truth）——若目标仍缺失，re-raise 不一致态，不静默吞掉。
