@@ -16,6 +16,7 @@ generated: true
 |---|
 | [agent_teams](#module-agent_teams) |
 | [agent_teams/workflow](#module-agent_teams-workflow) |
+| [core](#module-core) |
 | [core.extension](#module-core-extension) |
 | [core/context_engine](#module-core-context_engine) |
 | [core/controller](#module-core-controller) |
@@ -73,6 +74,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261102_1120_avatar-child-session-trace-root](agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
+
+<a id="module-core"></a>
+
+## core
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261126_2215_log-rollover-truncate-guard](core_runtime/B_20261126_2215_log-rollover-truncate-guard.md) | B | 日志滚动备份复制失败仍截断活动文件造成日志段丢失 | linghb | 无独立 D：单点数据安全修复,不改变契约与公开接口,无需独立设计。 |
 
 <a id="module-core-extension"></a>
 
