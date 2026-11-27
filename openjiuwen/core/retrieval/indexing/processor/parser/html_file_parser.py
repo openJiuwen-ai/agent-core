@@ -49,14 +49,14 @@ def _extract_title(soup: BeautifulSoup) -> str:
     if title_tag:
         # <title> is RCDATA per the HTML spec: markup inside it is literal
         # text. html.parser keeps it as-is ('<b>Nested</b>' in .string),
-        # while lxml parses nested tags (title.string becomes None). Use
-        # get_text() for parser independence and strip residual markup so
-        # the extracted title is plain text under either parser.
-        raw = title_tag.get_text()
-        if not raw.strip():
-            return ""
-        cleaned = re.sub(r"<[^>]+>", "", raw).strip()
-        return cleaned
+        # while lxml parses nested tags into children (title.string is
+        # None, get_text() yields the inner text). Use get_text() so the
+        # extraction works under either parser: nested titles yield their
+        # plain text via lxml, and html.parser's literal RCDATA text is
+        # kept verbatim (including angle brackets that are part of the
+        # title, which a markup-stripping regex would corrupt).
+        raw = title_tag.get_text().strip()
+        return raw
     return ""
 
 

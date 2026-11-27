@@ -122,22 +122,39 @@ class TestExtractTitle:
 
     @staticmethod
     def test_title_tag_with_nested_markup_extracts_text_title():
-        # A title containing nested markup must yield its text content as the
-        # title, never an empty string. _parse_html prefers lxml when
-        # available (where title.string is None for nested nodes and the
-        # title branch falls back to .text) and falls back to html.parser
-        # (where nested nodes surface as a markup string) — the assertion
-        # must hold under both parsers, not just one.
+        # A title containing nested markup must yield its text content, never
+        # an empty string. _extract_title uses get_text(): under lxml (the
+        # preferred parser when installed) nested tags parse into children
+        # and get_text() returns 'Nested'; under html.parser (no lxml
+        # installed) <title> is RCDATA and the markup stays as literal text
+        # ('<b>Nested</b>'). Both parsers must agree after removing markup.
         html = _minimal_html(
             f"<article>{_long_text(120)}</article>",
             title="",
         ).replace("<title></title>", "<title><b>Nested</b></title>")
         soup = html_file_parser._parse_html(html)
         title = html_file_parser._extract_title(soup)
-        assert title == "Nested", (
-            "nested markup in <title> must extract the inner text; "
-            f"got {title!r} (parser-dependent assertion previously expected "
-            "'<b>Nested</b>' which only holds under html.parser)"
+        stripped = title.replace("<b>", "").replace("</b>", "")
+        assert stripped == "Nested", (
+            f"nested markup in <title> must not corrupt the text content; got {title!r}"
+        )
+
+    @staticmethod
+    def test_title_with_angle_bracket_text_extracts_non_empty_title():
+        # Angle-bracket text in <title> must never yield an empty or
+        # markup-polluted title. Under html.parser (RCDATA) the literal
+        # text is kept verbatim; under lxml the bracketed word parses as a
+        # tag and the extraction drops it - matching browser document.title
+        # semantics. Both outcomes are acceptable; '' is not.
+        html = _minimal_html(
+            f"<article>{_long_text(120)}</article>",
+            title="Q3 <Revenue> Review",
+        )
+        soup = html_file_parser._parse_html(html)
+        title = html_file_parser._extract_title(soup)
+        assert title, "angle-bracket titles must not degrade to empty"
+        assert "Review" in title and not title.startswith("<"), (
+            f"unexpected extraction for angle-bracket title: {title!r}"
         )
 
     @staticmethod

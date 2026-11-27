@@ -198,9 +198,26 @@ async def test_local_and_aio_providers_coexist():
     """Verify that 'local' and 'aio' providers can coexist in SandboxRegistry."""
     from openjiuwen.core.sys_operation.sandbox.sandbox_registry import SandboxRegistry
 
+    # 'aio' providers live in the extensions package; importing the module
+    # runs the @SandboxRegistry.provider decorators. Without this the test
+    # only passed when some other test in the session had imported them.
+    import openjiuwen.extensions.sys_operation.sandbox.providers  # noqa: F401
+
     local_fs = SandboxRegistry.get_provider_cls("local", "fs")
     aio_fs = SandboxRegistry.get_provider_cls("aio", "fs")
 
-    assert local_fs is not aio_fs
-    assert local_fs.__name__ == "LocalFSProvider"
-    assert aio_fs.__name__ in ("AIOFSProvider", "MockFSProvider")
+    try:
+        assert local_fs is not aio_fs
+        assert local_fs.__name__ == "LocalFSProvider"
+        assert aio_fs is not None, (
+            "aio provider must be registered; the extensions providers module "
+            "needs to be imported for the @SandboxRegistry.provider decorators to run"
+        )
+        assert aio_fs.__name__ in ("AIOFSProvider", "MockFSProvider")
+    finally:
+        # The registration is process-global state this test introduces;
+        # clean it up so later tests do not observe aio providers that were
+        # never registered in their own scope (test-ordering independence
+        # works both ways).
+        for op_type in ("fs", "shell", "code"):
+            SandboxRegistry.unregister_provider("aio", op_type)
