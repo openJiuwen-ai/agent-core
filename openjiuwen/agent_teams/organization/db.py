@@ -71,7 +71,8 @@ def ensure_org_static_tables(sync_conn) -> None:
     # enforce FK target existence at CREATE TABLE time (issue #115 review
     # round 14). Org tables currently have no FK constraints, but the sort
     # is kept for parity with ``_create_static_tables`` and forward-safety.
-    from sqlalchemy.sql.util import sort_tables
+    # Imported from the canonical documented path ``sqlalchemy.sql.ddl``.
+    from sqlalchemy.sql.ddl import sort_tables
 
     for table in sort_tables(org_static_tables()):
         _run_ddl_idempotent(

@@ -570,7 +570,7 @@ def _create_static_tables(sync_conn) -> None:
       ``tables=[one_table]`` argument scopes each call to exactly one table.
 
     The tables are processed in SQLAlchemy's topological sort order
-    (``sqlalchemy.sort_tables``), so a child table's ``CREATE`` never runs
+    (``sqlalchemy.sql.ddl.sort_tables``), so a child table's ``CREATE`` never runs
     before its FK target exists. ``create_all(tables=[all])`` does this
     internally, but per-table wrapping would otherwise use the
     ``SQLModel.metadata.tables`` dict iteration order — which is the model
@@ -579,7 +579,11 @@ def _create_static_tables(sync_conn) -> None:
     ``INSERT``), so an out-of-order per-table create would fail on the
     child before the parent exists (issue #115 review round 14).
     """
-    from sqlalchemy.sql.util import sort_tables
+    # ``sort_tables`` is defined in ``sqlalchemy.sql.ddl`` (its documented
+    # location) and re-exported from ``sqlalchemy.sql.util`` for backward
+    # compatibility. Import from the canonical documented path so the
+    # dependency tracks the public surface (issue #115 review follow-up).
+    from sqlalchemy.sql.ddl import sort_tables
 
     for table in sort_tables(static_tables()):
         _run_ddl_idempotent(

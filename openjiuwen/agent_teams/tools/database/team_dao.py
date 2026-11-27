@@ -9,7 +9,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current_time
-from openjiuwen.agent_teams.tools.models import Team
+from openjiuwen.agent_teams.tools.models import Team, TeamMember
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -90,6 +90,20 @@ class TeamDao:
         row yields ``rowcount == 0`` and we return ``False`` instead of
         clobbering a re-created team.
 
+        Child rows (``team_member``) carry an ``ondelete=CASCADE`` FK, so the
+        database removes them in the same statement whenever FK enforcement
+        is on (``PRAGMA foreign_keys=ON`` on SQLite, always on for PG/MySQL).
+        We additionally issue an explicit ``DELETE FROM team_member`` after
+        the team row delete so cleanup does not silently rely on the FK
+        cascade firing — a legacy SQLite file or a connection that lost the
+        PRAGMA would otherwise leave orphan members pointing at a team that
+        no longer exists. The extra DELETE is a no-op when the cascade
+        already removed the rows in the same statement (issue #115 review
+        follow-up). Per-session dynamic tables (``team_task_*``,
+        ``team_message_*``, ...) are torn down by ``_drop_cur_session_tables``
+        / ``force_delete_team_session`` and rely on the same FK cascade for
+        cross-session rows.
+
         Returns:
             ``True`` if a row was deleted, ``False`` when the team did
             not exist. Callers that treat "missing" as success can map
@@ -103,6 +117,13 @@ class TeamDao:
             if not deleted:
                 team_logger.debug("Team %s not found for deletion", team_name)
                 return False
+            # Explicitly remove team_member rows so cleanup does not depend
+            # solely on the FK ondelete=CASCADE firing (PRAGMA foreign_keys
+            # may be off on a legacy SQLite connection). No-op when the
+            # cascade already removed them in the same statement.
+            await session.execute(
+                delete(TeamMember).where(TeamMember.team_name == team_name)
+            )
             await session.commit()
             team_logger.info("Team %s deleted", team_name)
             return True

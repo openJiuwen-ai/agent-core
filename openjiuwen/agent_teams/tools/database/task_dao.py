@@ -1874,9 +1874,30 @@ class TaskDao:
         backend, so a concurrent caller that already deleted (or moved) the
         row yields ``rowcount == 0`` and we return ``False`` instead of
         re-reading a stale row and re-issuing a delete.
+
+        The dependency-edge table carries ``ondelete=CASCADE`` FKs on both
+        ``task_id`` and ``depends_on_task_id``, so deleting the row removes
+        its incoming and outgoing edges in the same statement. A downstream
+        task that was ``BLOCKED`` solely by this task is not automatically
+        refreshed, though — its status stays ``BLOCKED`` until
+        ``_refresh_status_in_session`` runs. We capture the downstream ids
+        before the delete (the edges are gone afterwards) and refresh them
+        once the edges have been cascaded away, so a deleted dependency
+        unblocks its dependents instead of stranding them in ``BLOCKED``
+        forever (issue #115 review follow-up).
         """
         team_task_model = _get_task_model()
+        task_dependency_model = _get_task_dependency_model()
         async with self._sessions.write() as session:
+            # Capture downstream ids before the FK cascade removes the
+            # outgoing edges — after the delete we can no longer read them.
+            downstream_result = await session.execute(
+                select(task_dependency_model.task_id)
+                .where(task_dependency_model.depends_on_task_id == task_id)
+                .distinct()
+            )
+            downstream_ids = {row[0] for row in downstream_result.all()}
+
             result = await session.execute(
                 delete(team_task_model).where(team_task_model.task_id == task_id)
             )
@@ -1884,6 +1905,17 @@ class TaskDao:
             if not deleted:
                 team_logger.debug("Task %s not found for deletion", task_id)
                 return False
+
+            if downstream_ids:
+                refreshed = await _refresh_status_in_session(
+                    session, downstream_ids, get_current_time()
+                )
+                if refreshed:
+                    team_logger.info(
+                        "Refreshed %d dependent task(s) after deleting %s",
+                        len(refreshed),
+                        task_id,
+                    )
             await session.commit()
             team_logger.info("Task %s deleted", task_id)
             return True

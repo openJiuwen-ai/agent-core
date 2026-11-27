@@ -2332,6 +2332,83 @@ class TestCascadeDelete:
         task = await db.task.get_task("task16")
         assert task is None
 
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_delete_task_unblocks_downstream(self, db):
+        """Deleting an upstream task refreshes dependent tasks so they are
+        not stranded in BLOCKED forever (issue #115 review follow-up).
+
+        The dependency edges are removed by the FK ondelete=CASCADE when the
+        upstream row is deleted, but a downstream task that was BLOCKED solely
+        by the deleted task is not automatically refreshed — without the
+        explicit ``_refresh_status_in_session`` call it would stay BLOCKED
+        even though it no longer has any unresolved dependency.
+        """
+        await db.team.create_team(
+            team_name="team_del_task",
+            display_name="Team Del Task",
+            leader_member_name="leader_del_task",
+        )
+        await db.task.create_task(
+            task_id="upstream_del",
+            team_name="team_del_task",
+            title="Upstream",
+            content="Content",
+            status="pending",
+        )
+        await db.task.create_task(
+            task_id="downstream_del",
+            team_name="team_del_task",
+            title="Downstream",
+            content="Content",
+            status="pending",
+        )
+        # downstream depends on upstream -> downstream becomes BLOCKED.
+        result = await db.task.mutate_dependency_graph(
+            team_name="team_del_task",
+            add_edges=[("downstream_del", "upstream_del")],
+        )
+        assert result.ok
+
+        downstream = await db.task.get_task("downstream_del")
+        assert downstream.status == "blocked"
+
+        deleted = await db.task.delete_task("upstream_del")
+        assert deleted is True
+
+        # The downstream task should be unblocked now that its only
+        # dependency was removed, and the upstream task should be gone.
+        downstream = await db.task.get_task("downstream_del")
+        assert downstream is not None
+        assert downstream.status == "pending", (
+            f"downstream should be PENDING after upstream delete, got {downstream.status}"
+        )
+        assert await db.task.get_task("upstream_del") is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_delete_task_missing_returns_false_no_refresh(self, db):
+        """Deleting a non-existent task returns False without touching rows."""
+        await db.team.create_team(
+            team_name="team_del_missing",
+            display_name="Team Del Missing",
+            leader_member_name="leader_del_missing",
+        )
+        await db.task.create_task(
+            task_id="survivor",
+            team_name="team_del_missing",
+            title="Survivor",
+            content="Content",
+            status="pending",
+        )
+
+        deleted = await db.task.delete_task("nonexistent_del")
+        assert deleted is False
+
+        survivor = await db.task.get_task("survivor")
+        assert survivor is not None
+        assert survivor.status == "pending"
+
 
 class TestVerifyAndFixTaskConsistency:
     """Test verify_and_fix_task_consistency for data consistency recovery"""
