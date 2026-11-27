@@ -23,6 +23,7 @@ generated: true
 | [core/foundation/llm/model_clients](#module-core-foundation-llm-model_clients) |
 | [core/runner/drunner/dmessage_queue](#module-core-runner-drunner-dmessage_queue) |
 | [core/session](#module-core-session) |
+| [core/session/checkpointer](#module-core-session-checkpointer) |
 | [core/session/tracer](#module-core-session-tracer) |
 | [core/single_agent](#module-core-single_agent) |
 | [core/sys_operation](#module-core-sys_operation) |
@@ -134,6 +135,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261103_1050_grandocean-review-feedback](core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
+
+<a id="module-core-session-checkpointer"></a>
+
+## core/session/checkpointer
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261127_1537_pymilvus-dead-import](core_runtime/B_20261127_1537_pymilvus-dead-import.md) | B | 删除 inmemory checkpointer 的未使用 pymilvus 导入 | Huazijiayou | 无独立 D：单行未使用导入删除，无独立设计文档。 |
 
 <a id="module-core-session-tracer"></a>
 
