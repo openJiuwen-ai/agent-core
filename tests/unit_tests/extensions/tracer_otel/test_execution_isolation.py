@@ -580,3 +580,62 @@ async def test_evicted_handler_releases_cached_root_context():
     assert evicted._deferred_end_starts == {}
     assert evicted._layer_root_spans == {}
     assert evicted._component_spans == {}
+
+
+async def test_new_trace_id_clears_pending_deferred_stash_when_idle():
+    """A new trace on an idle execution must drop the previous round's stash.
+
+    A deferred end-node begin creates no span (it only stashes the payload),
+    so _has_live_spans() is false after the root finishes. Without the
+    cleanup, the next round's on_call_done would materialize the stale
+    inputs/timestamp under the new root (issue #2430 cross-round mixing).
+    """
+    handler = _handler()
+
+    await handler.on_call_start(
+        invoke_id="wf",
+        parent_node_id="",
+        metadata=_root_metadata("exec-A"),
+        session_id="sess-A",
+        execution_id="exec-A",
+        trace_id="trace-1",
+    )
+    await handler.on_call_done(
+        invoke_id="wf",
+        outputs={"round": 1},
+        execution_id="exec-A",
+        trace_id="trace-1",
+    )
+
+    # Deferred end node begins: no span is created, only a stash entry.
+    await handler.on_call_start(
+        invoke_id="end1",
+        parent_node_id="",
+        metadata={
+            "workflow_id": "wf",
+            "component_id": "end1",
+            "component_name": "end1",
+            "component_type": "End",
+            "defer_span_start": True,
+        },
+        session_id="sess-A",
+        execution_id="exec-A",
+        trace_id="trace-1",
+    )
+    child = handler._exec_handlers["exec-A"]
+    assert "end1" in child._deferred_end_starts
+
+    # Next round with a new trace_id: the execution is idle, so the stale
+    # stash must be dropped before the new root is created.
+    await handler.on_call_start(
+        invoke_id="wf",
+        parent_node_id="",
+        metadata=_root_metadata("exec-A"),
+        session_id="sess-A",
+        execution_id="exec-A",
+        trace_id="trace-2",
+    )
+
+    assert child._deferred_end_starts == {}
+    assert child._cached_trace_id == "trace-2"
+    assert child._span_manager.get("wf") is not None
