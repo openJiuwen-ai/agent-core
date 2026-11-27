@@ -159,3 +159,65 @@ class TestTracerAgentUtilsRetrieval:
         assert await TracerAgentUtils.trace_retriever_start(None, query="q") is None
         await TracerAgentUtils.trace_retriever_end(None, None)
         await TracerAgentUtils.trace_retriever_error(None, None, RuntimeError("x"))
+
+    async def test_retriever_start_forwards_top_k_and_data_source_id(self):
+        """Issue #2427: the helper must be able to produce the inputs form the
+        OTel handler consumes (top_k / data_source_id ride the event inputs)."""
+        handler = RetrieverRecorderHandler()
+        TracerHandlerRegistry.register_handler("recorder_agent", handler)
+        try:
+            tracer = Tracer(session_id="sess-topk")
+            tracer.init()
+            session = _FakeSession(tracer)
+
+            span = await TracerAgentUtils.trace_retriever_start(
+                session,
+                query="什么是九问",
+                instance_name="kb",
+                top_k=5,
+                data_source_id="kb-7",
+            )
+            assert span is not None
+            start_kwargs = handler.events[0][1]
+            assert start_kwargs["inputs"] == {
+                "query": "什么是九问",
+                "top_k": 5,
+                "data_source_id": "kb-7",
+            }
+            assert start_kwargs["instance_info"]["class_name"] == "kb"
+        finally:
+            TracerHandlerRegistry.unregister_handler("recorder_agent")
+
+    async def test_retriever_start_without_new_params_keeps_wire(self):
+        """Omitting the new keyword-only params must leave the inputs wire
+        byte-identical to the pre-extension helper."""
+        handler = RetrieverRecorderHandler()
+        TracerHandlerRegistry.register_handler("recorder_agent", handler)
+        try:
+            tracer = Tracer(session_id="sess-wire")
+            tracer.init()
+            session = _FakeSession(tracer)
+
+            await TracerAgentUtils.trace_retriever_start(session, query="q")
+            await TracerAgentUtils.trace_retriever_start(session)
+
+            assert handler.events[0][1]["inputs"] == {"query": "q"}
+            assert handler.events[1][1]["inputs"] is None
+        finally:
+            TracerHandlerRegistry.unregister_handler("recorder_agent")
+
+    async def test_retriever_start_top_k_without_query(self):
+        """top_k alone (no query text) must still produce inputs instead of
+        collapsing to None — retrieval dashboards key on it."""
+        handler = RetrieverRecorderHandler()
+        TracerHandlerRegistry.register_handler("recorder_agent", handler)
+        try:
+            tracer = Tracer(session_id="sess-topk-only")
+            tracer.init()
+            session = _FakeSession(tracer)
+
+            await TracerAgentUtils.trace_retriever_start(session, top_k=3)
+
+            assert handler.events[0][1]["inputs"] == {"top_k": 3}
+        finally:
+            TracerHandlerRegistry.unregister_handler("recorder_agent")
