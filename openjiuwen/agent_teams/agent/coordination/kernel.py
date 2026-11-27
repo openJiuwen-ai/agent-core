@@ -311,13 +311,21 @@ class CoordinationKernel:
         claim = asyncio.create_task(member.db.member.try_transition_member_status(
             member.member_name, member.team_name, MemberStatus.RESTARTING, MemberStatus.READY,
         ))
+        # Confirm ownership before propagating even repeated cancellation so
+        # teardown can undo READY if the write committed during cancellation.
+        cancelled = None
+        while not claim.done():
+            try:
+                await asyncio.shield(claim)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+            except Exception:
+                break
         try:
-            binding.ready_written = await asyncio.shield(claim)
-        except asyncio.CancelledError:
-            # Record whether this child wrote READY so its owner can undo it
-            # after teardown, even if SQLite committed during cancellation.
-            binding.ready_written = await claim
-            raise
+            binding.ready_written = claim.result()
+        finally:
+            if cancelled is not None:
+                raise cancelled
         if not binding.ready_written:
             raise RuntimeError("Member approval recovery lost its restart claim")
         await member.publish_status_changed(MemberStatus.RESTARTING, MemberStatus.READY)

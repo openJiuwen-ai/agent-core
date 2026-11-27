@@ -2,7 +2,7 @@
 """Recovery of approval mail addressed to a stopped native team member."""
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from uuid import uuid4
 
 import pytest
@@ -361,19 +361,30 @@ async def test_failed_transport_start_keeps_approval_and_never_marks_ready(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_stop_rolls_back_ready_written_during_cancelled_startup(tmp_path, monkeypatch):
-    async with stopped_worker(tmp_path, monkeypatch) as (leader, backend, manager, _, _, tool):
+@pytest.mark.parametrize("memory_db", [False, True], ids=["file_db", "memory_db"])
+@pytest.mark.parametrize("outcome,cancel_count", [
+    ("ready", 1), ("ready", 2), ("ready", 3), ("false", 0), ("false", 2), ("error", 0), ("error", 2),
+])
+async def test_ready_claim_completion_and_cancellation_cleanup(tmp_path, monkeypatch, memory_db, outcome, cancel_count):
+    async with stopped_worker(tmp_path, monkeypatch, memory_db=memory_db) as (leader, backend, manager, _, _, tool):
         dao_type = type(backend.db.member)
         transition = dao_type.try_transition_member_status
         ready_written = asyncio.Event()
         finish_ready = asyncio.Event()
+        claims = []
 
         async def delay_ready_result(self, member, team, expected, target):
-            result = await transition(self, member, team, expected, target)
-            if member == "worker" and (expected, target) == (MemberStatus.RESTARTING, MemberStatus.READY):
-                assert result
+            is_ready = member == "worker" and (expected, target) == (MemberStatus.RESTARTING, MemberStatus.READY)
+            result = False if is_ready and outcome != "ready" else await transition(self, member, team, expected, target)
+            if is_ready:
+                assert result == (outcome == "ready")
+                claims.append(asyncio.current_task())
                 ready_written.set()
                 await finish_ready.wait()
+                if outcome == "error":
+                    raise RuntimeError("READY write failed")
+                if outcome == "false":
+                    await self.update_member_status(member, team, MemberStatus.SHUTDOWN.value)
             return result
 
         monkeypatch.setattr(dao_type, "try_transition_member_status", delay_ready_result)
@@ -382,19 +393,43 @@ async def test_stop_rolls_back_ready_written_during_cancelled_startup(tmp_path, 
 
         await asyncio.wait_for(ready_written.wait(), 2)
         handle = manager.spawned_handles["worker"]
-        assert (await backend.get_member("worker")).status == MemberStatus.READY.value
+        status = MemberStatus.READY if outcome == "ready" else MemberStatus.RESTARTING
+        assert (await backend.get_member("worker")).status == status.value
         assert not handle.agent_ref._coordination.is_running
-        stop = asyncio.create_task(leader.stop_coordination())
+        stop = asyncio.create_task(leader.stop_coordination()) if cancel_count else None
+        waiter = stop if cancel_count else asyncio.gather(*manager.recovery_tasks)
         try:
             async with asyncio.timeout(2):
-                while not handle._task.cancelling():
-                    await asyncio.sleep(0.01)
+                while cancel_count and not handle._task.cancelling():
+                    await asyncio.sleep(0)
+                if cancel_count > 1:
+                    waiter = asyncio.create_task(asyncio.wait_for(stop, 0.01))
+                    while handle._task.cancelling() < 2:
+                        await asyncio.sleep(0)
+                for _ in range(2, cancel_count):
+                    stop.cancel()
+                    await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert not claims[0].done() and not handle.approval_checkpoint.ready_written
+            assert not handle.agent_ref._coordination.is_running
         finally:
             finish_ready.set()
-            await asyncio.wait_for(stop, 2)
+            done, _ = await asyncio.wait((waiter,), timeout=2)
+            assert done, "Startup cleanup did not finish after releasing the READY result"
+            with suppress(asyncio.TimeoutError):
+                await waiter
 
+        if cancel_count:
+            assert handle._task.cancelled()
+        else:
+            expected_error = "READY write failed" if outcome == "error" else "lost its restart claim"
+            error = handle._task.exception()
+            assert isinstance(error, RuntimeError) and expected_error in str(error)
+        assert handle.approval_checkpoint.ready_written == (outcome == "ready") and not claims[0].cancelled()
+        assert not handle.approval_checkpoint.startup.done() and not manager.recovery_tasks
         assert not manager.spawned_handles and not handle.is_alive
-        assert (await backend.get_member("worker")).status == MemberStatus.STOPPED.value
+        status = MemberStatus.SHUTDOWN if outcome == "false" else MemberStatus.STOPPED
+        assert (await backend.get_member("worker")).status == status.value
         assert len(await backend.message_manager.get_messages(to_member_name="worker", unread_only=True)) == 1
         assert tool.calls == 0
 
