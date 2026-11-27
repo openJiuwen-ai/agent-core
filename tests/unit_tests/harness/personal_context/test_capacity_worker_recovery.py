@@ -15,6 +15,7 @@ from filelock import FileLock
 
 from openjiuwen.harness.personal_context import context_capacity as capacity
 from openjiuwen.harness.personal_context import context_pipeline as pipeline
+from openjiuwen.harness.personal_context import context_retirement as retirement
 from openjiuwen.harness.personal_context import context_usage as usage
 from tests.unit_tests.harness.personal_context.capacity_worker_helpers import inject_worker, ready_worker, until
 
@@ -141,8 +142,15 @@ async def test_startup_can_be_cancelled_or_closed_and_retried(tmp_path, monkeypa
     entered = tmp_path / "startup-entered"
     real_launch = subprocess.Popen
     script = tmp_path / "slow_start.py"
-    script.write_text(f"from pathlib import Path\nimport time, os\nPath({str(entered)!r}).write_text(str(os.getpid()))\ntime.sleep(60)\n",
-                      encoding="utf-8")
+    script.write_text(
+        "from pathlib import Path\nimport time, os\n"
+        f"entered = Path({str(entered)!r})\n"
+        "pending = entered.with_suffix('.tmp')\n"
+        "pending.write_text(str(os.getpid()))\n"
+        "pending.replace(entered)\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
     def launch(args, **kwargs):
         return real_launch([args[0], "-X", "utf8", str(script)], **kwargs)
     with monkeypatch.context() as patcher:
@@ -397,10 +405,103 @@ async def test_real_preparer_keeps_new_publications_and_recent_reads(tmp_path, m
             assert "Old" in usage.read_with_usage(tmp_path, "old.md", allowed=lambda: True)["markdown"]
         release.touch()
         result = await task
-        assert result["reason"] == ("context_changed" if change == "publication" else "usage_changed"), result
-        assert result["removed_count"] == 0 and (root / "old.md").exists()
+        assert result["reason"] == ("worker_exited" if change == "publication" else "usage_changed"), result
+        assert result.get("removed_count", 0) == 0 and (root / "old.md").exists()
     finally:
         release.touch()
+        await capacity._close_capacity_worker(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_foreign_publication_priority_stops_blocked_cleanup_and_next_round_reclaims(tmp_path, monkeypatch):
+    root = _tree(tmp_path)
+    (root / "discard.md").write_text("Retired before maintenance", encoding="utf-8")
+    receipt = retirement.retire_page(tmp_path, "discard.md")
+    entered = tmp_path / "cleanup-held-update"
+    with monkeypatch.context() as patcher:
+        inject_worker(patcher, tmp_path,
+                      f"retired = Path({receipt['record_path']!r}).parent\n"
+                      "original_scandir = os.scandir\n"
+                      "def scan(path='.'):\n"
+                      "    if path == retired:\n"
+                      f"        Path({str(entered)!r}).touch()\n"
+                      "        time.sleep(60)\n"
+                      "    return original_scandir(path)\n"
+                      "os.scandir = scan")
+        worker = await ready_worker(tmp_path)
+        task = asyncio.create_task(capacity.run_capacity_maintenance(
+            tmp_path, limit_bytes=6000, timeout=3, cancelled=lambda: False,
+        ))
+        try:
+            await until(entered.exists)
+            # A publisher in another process cannot see this process's worker
+            # registry. Disable only local cancellation to test the file signal.
+            patcher.setattr(capacity, "_cancel_capacity_worker", lambda *_args, **_kwargs: None)
+            started = time.monotonic()
+            async with usage.context_update_lock(tmp_path):
+                (root / "hot.md").write_text("# Hot\nNew publication survives\n" + "b" * 3000, encoding="utf-8")
+            assert time.monotonic() - started < 0.5
+            result = await asyncio.wait_for(task, 0.5)
+            assert result["reason"] == "worker_exited", result
+            assert worker["process"].poll() is not None
+            assert (root / "old.md").exists()
+            assert os.path.exists(receipt["body_path"])
+            old_pid = worker["process"].pid
+        finally:
+            await capacity._stop_worker(tmp_path, worker)
+    new_pid = await _recover_and_reclaim(tmp_path)
+    assert new_pid != old_pid
+    assert not os.path.exists(receipt["record_path"])
+    assert not os.path.exists(receipt["body_path"])
+    assert "New publication survives" in (root / "hot.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_publication_priority_preserves_idle_prewarmed_worker(tmp_path):
+    _tree(tmp_path)
+    worker = await ready_worker(tmp_path)
+    try:
+        async with usage.context_update_lock(tmp_path):
+            await asyncio.sleep(0.08)
+            assert worker["process"].poll() is None
+            assert capacity._CAPACITY_WORKERS[tmp_path] is worker
+        assert await _recover_and_reclaim(tmp_path) == worker["process"].pid
+    finally:
+        await capacity._close_capacity_worker(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_registration_proceeds_during_blocked_foreign_owner_cleanup(tmp_path, monkeypatch):
+    _tree(tmp_path)
+    stale = retirement._lease_path(tmp_path, "stale-sandbox").with_suffix(".owner")
+    stale.parent.mkdir(parents=True)
+    stale.write_text("8193527", encoding="ascii")
+    entered = tmp_path / "registry-cleanup-held"
+    inject_worker(monkeypatch, tmp_path,
+                  "from openjiuwen.harness.personal_context import context_retirement as retirement\n"
+                  "def blocked(*args):\n"
+                  f"    Path({str(entered)!r}).touch()\n"
+                  "    time.sleep(60)\n"
+                  "retirement._pid_is_alive = blocked")
+    worker = await ready_worker(tmp_path)
+    task = asyncio.create_task(capacity.run_capacity_maintenance(
+        tmp_path, limit_bytes=6000, timeout=3, cancelled=lambda: False,
+    ))
+    lease = None
+    try:
+        await until(entered.exists)
+        began = time.monotonic()
+        lease = retirement.register_sandbox(tmp_path)
+        assert time.monotonic() - began < 0.5
+        assert retirement.is_sandbox_active(tmp_path, lease[0])
+        assert not task.done()
+        async with usage.context_update_lock(tmp_path):
+            pass
+        assert (await asyncio.wait_for(task, 0.5))["reason"] == "worker_exited"
+        assert worker["process"].poll() is not None
+    finally:
+        if lease is not None:
+            retirement.release_sandbox(lease)
         await capacity._close_capacity_worker(tmp_path)
 
 

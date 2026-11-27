@@ -18,6 +18,7 @@ import os
 import re
 import stat
 import tempfile
+import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -30,6 +31,13 @@ from uuid import uuid4
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
+from openjiuwen.harness.personal_context._run_token_usage import RunUsage, run_usage_scope, summarize_run_usage
+from openjiuwen.harness.personal_context._run_token_usage_store import (
+    delete_run_usage,
+    read_usage_summaries,
+    save_run_usage,
+    submit_usage_io,
+)
 from openjiuwen.harness.personal_context.config import PersonalContextConfig, PersonalContextFetchServiceConfig
 from openjiuwen.harness.personal_context.context_graph import (
     build_context_graph,
@@ -466,6 +474,7 @@ class PersonalContext:
         self._fetch_run_identity: dict[str, dict[str, object]] = {}
         self._fetch_run_profile: dict[str, str] = {}
         self._fetch_run_results: dict[str, dict[str, object]] = {}
+        self._fetch_run_usage: dict[tuple[str, str], RunUsage] = {}
         self._fetch_stop_phases: dict[str, str] = {}
         self._invalidated_fetch_runs: set[tuple[str, str]] = set()
         self._query_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pc-query")
@@ -551,6 +560,8 @@ class PersonalContext:
             self._invalidated_fetch_runs = set()
             self._last_error = None
             self._state = "CONFIGURED"
+        for service_id in history:
+            self._load_run_token_usage(service_id)
 
     async def _required_authorization_scopes(self, provider: str) -> tuple[str, ...]:
         if provider != "feishu":
@@ -1022,6 +1033,7 @@ class PersonalContext:
                 progress_callback=report_pipeline_phase,
                 profile_callback=report_pipeline_profile,
                 result_callback=report_pipeline_result,
+                run_usage=self._fetch_run_usage,
             )
             await pipeline.start()
             self._pipeline_service = pipeline
@@ -1185,6 +1197,7 @@ class PersonalContext:
             if pipeline is not None:
                 pipeline.replace_configuration(updated)
             should_start = updated.collection_enabled and self._state == "RUNNING" and service.enabled
+        self._load_run_token_usage(safe_id)
         if should_start:
             await self.start_fetch_service(safe_id)
 
@@ -2105,7 +2118,8 @@ class PersonalContext:
         temporary: Path | None = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            encoded = json.dumps({"schema_version": 4, "runs": records}, ensure_ascii=False).encode("utf-8")
+            history = [{key: value for key, value in record.items() if key != "token_usage"} for record in records]
+            encoded = json.dumps({"schema_version": 4, "runs": history}, ensure_ascii=False).encode("utf-8")
             if len(encoded) > 128 * 1024:
                 raise ValueError("history exceeds size limit")
             with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
@@ -2124,6 +2138,13 @@ class PersonalContext:
     def remove_fetch_run_history(self, service_id: str) -> list[dict[str, object]]:
         """Remove one service's terminal records, returning a rollback snapshot."""
         records = self._read_run_history(service_id)
+        summaries = {
+            entry["run_id"]: entry["token_usage"]
+            for entry in self._fetch_run_history.get(service_id, []) if "token_usage" in entry
+        }
+        for record in records:
+            if record["run_id"] in summaries:
+                record["token_usage"] = summaries[record["run_id"]]
         self._run_history_path(service_id).unlink(missing_ok=True)
         self._fetch_run_history.pop(service_id, None)
         self._fetch_run_identity.pop(service_id, None)
@@ -2132,6 +2153,37 @@ class PersonalContext:
     def restore_fetch_run_history(self, service_id: str, records: list[dict[str, object]]) -> None:
         self._write_run_history(service_id, records)
         self._fetch_run_history[service_id] = deepcopy(records)
+        self._load_run_token_usage(service_id)
+
+    def _load_run_token_usage(self, service_id: str) -> None:
+        if not self._fetch_run_history.get(service_id):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        def merge(summaries: dict[str, object]) -> None:
+            records = self._fetch_run_history.get(service_id)
+            if records is None:
+                return
+            merged = []
+            for record in records:
+                summary = summaries.get(cast(str, record["run_id"]))
+                merged.append({**record, "token_usage": summary}
+                              if summary is not None and "token_usage" not in record else record)
+            self._fetch_run_history[service_id] = merged
+
+        def load(deadline: float) -> None:
+            summaries = read_usage_summaries(self._home, service_id)
+            if summaries and time.monotonic() < deadline:
+                loop.call_soon_threadsafe(merge, summaries)
+
+        submit_usage_io(load)
+
+    def _discard_run_token_usage(self, service_id: str) -> None:
+        """Schedule removal after the Host's service deletion is committed."""
+        submit_usage_io(functools.partial(delete_run_usage, self._home, service_id), cleanup=True)
 
     async def _run_fetch_once(
         self,
@@ -2160,14 +2212,17 @@ class PersonalContext:
             item_errors=cast(list[dict[str, object]], previous_progress.get("item_errors", [])),
             omitted_item_errors=cast(int, previous_progress.get("omitted_item_errors", 0)),
         )
+        usage: RunUsage = {}
+        self._fetch_run_usage[(service_id, run_id)] = usage
         try:
-            await self._execute_fetch_once(
-                service_id,
-                provider,
-                stop_event=stop_event,
-                run_id=run_id,
-                retry_quarantined=retry_quarantined,
-            )
+            with run_usage_scope(usage, "provider"):
+                await self._execute_fetch_once(
+                    service_id,
+                    provider,
+                    stop_event=stop_event,
+                    run_id=run_id,
+                    retry_quarantined=retry_quarantined,
+                )
         except asyncio.CancelledError:
             if self._fetch_run_progress[service_id]["run_state"] in {"running", "stopping"}:
                 current = self._fetch_run_progress[service_id]
@@ -2197,6 +2252,7 @@ class PersonalContext:
                     self._fetch_stop_phases[service_id] = "history_write"
                 await self._retain_fetch_run(service_id)
             finally:
+                self._fetch_run_usage.pop((service_id, run_id), None)
                 self._fetch_stop_phases.pop(service_id, None)
                 self._invalidated_fetch_runs.discard((service_id, run_id))
 
@@ -2237,22 +2293,31 @@ class PersonalContext:
         if result is not None:
             progress.update(result)
             progress["no_new_content"] = result["no_new_content"] is True and progress["run_state"] == "succeeded"
+        run_id = cast(str, identity["run_id"])
+        usage = self._fetch_run_usage.pop((service_id, run_id), {})
+        usage_snapshot = None
+        with contextlib.suppress(Exception):
+            usage_snapshot = summarize_run_usage(usage)
+            progress["token_usage"] = usage_snapshot[0]
         record = {**progress, **identity}
         actual_profile = self._fetch_run_profile.pop(service_id, None)
         if actual_profile is not None:
             record["actual_profile"] = actual_profile
-        retained = [record] + [
+        previous = [
             entry for entry in self._fetch_run_history.get(service_id, []) if entry["run_id"] != identity["run_id"]
         ]
-        self._fetch_run_history[service_id] = retained[:5]
-        writer = asyncio.create_task(asyncio.to_thread(self._write_run_history, service_id, retained[:5]))
+        retained = [record, *previous[:4]]
+        self._fetch_run_history[service_id] = retained
+        writer = asyncio.create_task(asyncio.to_thread(self._write_run_history, service_id, retained))
         try:
             await asyncio.shield(writer)
             if (service_id, cast(str, identity["run_id"])) in self._invalidated_fetch_runs:
                 latest = self._fetch_run_progress.get(service_id)
                 if latest is not None and latest.get("run_state") == "failed" and record.get("run_state") != "failed":
                     retained[0] = {**record, **latest}
-                    self._fetch_run_history[service_id] = retained[:5]
+                    # An optional history load may have finished during the write.
+                    current_history = self._fetch_run_history.get(service_id, retained)
+                    self._fetch_run_history[service_id] = [retained[0], *current_history[1:]]
                     corrected = asyncio.create_task(
                         asyncio.to_thread(self._write_run_history, service_id, retained[:5])
                     )
@@ -2266,6 +2331,13 @@ class PersonalContext:
             raise
         finally:
             self._fetch_run_identity.pop(service_id, None)
+            writer_finished = writer.done() and not writer.cancelled()
+            if usage_snapshot is not None and writer_finished and writer.exception() is None:
+                summary, groups = usage_snapshot
+                retained_ids = tuple(cast(str, entry["run_id"]) for entry in retained)
+                submit_usage_io(functools.partial(
+                    save_run_usage, self._home, service_id, run_id, retained_ids, summary, groups,
+                ))
 
     async def _execute_fetch_once(
         self,
@@ -2277,9 +2349,12 @@ class PersonalContext:
         retry_quarantined: bool = False,
     ) -> None:
         normal_started = asyncio.get_running_loop().time()
-        from openjiuwen.harness.personal_context.context_capacity import _warm_capacity_worker
+        try:
+            from openjiuwen.harness.personal_context.context_capacity import _warm_capacity_worker
 
-        _warm_capacity_worker(self._home)
+            _warm_capacity_worker(self._home)
+        except Exception as exc:
+            logger.warning("PersonalContext optional capacity prewarm failed (%s)", type(exc).__name__)
         config = self._service_config(service_id)
         old_cursor = self._read_cursor(service_id)
         run_started_at = datetime.now(UTC)

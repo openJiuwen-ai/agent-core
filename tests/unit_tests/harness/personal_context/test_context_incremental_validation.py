@@ -105,6 +105,80 @@ def test_unrelated_old_reference_error_does_not_expand_from_changed_root(tmp_pat
     assert old_page.read_text(encoding="utf-8") == "# Old page\n[Already missing](missing.md)\n"
 
 
+@pytest.mark.level1
+@pytest.mark.parametrize("case", ["retained", "moved", "new_edge", "deleted_target", "no_source", "missing_source", "escape"])
+def test_touched_body_can_inherit_only_an_existing_missing_context_edge(tmp_path, case):
+    live, _, _ = _tree(tmp_path)
+    page = live / "new/new.md"
+    with page.open("a", encoding="utf-8") as handle:
+        handle.write("\n[Previous topic](gone.md)\n")
+    if case == "deleted_target":
+        (page.parent / "gone.md").write_text("# Existing target\n", encoding="utf-8")
+    root = tmp_path / "sandbox/context"
+    shutil.copytree(live, root)
+    page = root / "new/new.md"
+    if case == "deleted_target":
+        (page.parent / "gone.md").unlink()
+    if case == "no_source":
+        page.write_text("# Old link only\n[Previous topic](gone.md)\n", encoding="utf-8")
+    missing_source = "src_" + "f" * 32
+    extra = {
+        "new_edge": "[Other missing page](fresh.md)",
+        "missing_source": f"[Invalid source](../../source-meta/{missing_source}.md)",
+        "escape": "[Outside](../../../outside.md)",
+    }.get(case, "New information.")
+    if case != "deleted_target":
+        with page.open("a", encoding="utf-8") as handle:
+            handle.write(extra + "\n")
+    changed = {"new/gone.md"} if case == "deleted_target" else {"new/new.md"}
+    previous_paths = {}
+    if case == "moved":
+        page.rename(page.with_name("renamed.md"))
+        (root / "new/description.md").write_text("# New\n[New](renamed.md)\n", encoding="utf-8")
+        previous_paths["new/renamed.md"] = "new/new.md"
+        changed.update({"new/description.md", "new/renamed.md"})
+    expected = {
+        "new_edge": "reference target is missing",
+        "deleted_target": "reference target is missing",
+        "no_source": "without an atomic source",
+        "missing_source": "source",
+        "escape": "leaves the allowed roots",
+    }
+    for repairable in (True, False):
+        def validate():
+            pipeline._validate_reference_graph(
+                root, final_context_root=live, source_root=live.parent / "source-meta",
+                repairable=repairable, changed_paths=changed,
+                baseline_root=live if repairable else None,
+                baseline_path_by_candidate=previous_paths,
+            )
+        if case in {"retained", "moved"}:
+            validate()
+        else:
+            with pytest.raises(BaseError, match=expected[case]):
+                validate()
+
+
+@pytest.mark.level0
+def test_historical_missing_body_is_skipped_only_while_reading_sources(tmp_path):
+    root, _, new_source = _tree(tmp_path)
+    page = root / "new/new.md"
+    with page.open("a", encoding="utf-8") as handle:
+        handle.write("[Already missing](gone.md)\n")
+    assert len(pipeline._page_source_metadata(
+        page, context_root=root, source_root=root.parent / "source-meta", alias_targets=None,
+    )) == 1
+    with pytest.raises(BaseError, match="reference target is missing"):
+        pipeline._source_ids_reachable_from_page(
+            root, page_relative="new/new.md", source_root=root.parent / "source-meta",
+        )
+    (root.parent / f"source-meta/{new_source}.md").unlink()
+    with pytest.raises(BaseError, match="source"):
+        pipeline._page_source_metadata(
+            page, context_root=root, source_root=root.parent / "source-meta", alias_targets=None,
+        )
+
+
 @pytest.mark.level0
 def test_inherited_navigation_is_repaired_before_agent_baseline(tmp_path):
     root, old_source, _ = _tree(tmp_path)
@@ -222,6 +296,8 @@ def test_agent_new_page_does_not_inherit_unrelated_old_omission_in_same_director
 @pytest.mark.parametrize("profile", ["rules", "balanced", "agent"])
 async def test_touched_inherited_navigation_is_repaired_without_renewing_body(tmp_path, monkeypatch, profile):
     root, old_source, _ = _tree(tmp_path)
+    with (root / "old/orphan.md").open("a", encoding="utf-8") as handle:
+        handle.write("\n[Retired topic](gone.md)\n")
     usage.read_with_usage(tmp_path, "old/orphan.md", allowed=lambda: True)
     record = usage._load_usage(tmp_path)["pages"]["old/orphan.md"].copy()
     expected_fingerprint = usage._fingerprint(root, "old/orphan.md", {})
@@ -277,6 +353,7 @@ async def test_touched_inherited_navigation_is_repaired_without_renewing_body(tm
         assert observed_profiles == [profile]
         assert observed_agent == ([True] if profile == "agent" else [])
         assert "orphan.md" in (root / "old/description.md").read_text(encoding="utf-8")
+        assert "[Retired topic](gone.md)" in (root / "old/orphan.md").read_text(encoding="utf-8")
         assert usage._fingerprint(root, "old/orphan.md", {}) == expected_fingerprint
         current = usage._load_usage(tmp_path)["pages"]["old/orphan.md"]
         assert {key: current[key] for key in ("created_at", "updated_at", "last_read_at")} == {
