@@ -71,6 +71,35 @@ def test_model_and_execution_metadata_share_the_same_provider() -> None:
 
 
 @pytest.mark.parametrize(
+    ("tool_name", "language", "rules"),
+    [
+        ("bash", "cn", (
+            "用 glob 查找文件",
+            "用 grep 定位文本",
+            "同一份日志或 CSV 的多项统计",
+            "同一条消息中发出",
+        )),
+        ("bash", "en", (
+            "Use glob to find files",
+            "grep to locate text",
+            "statistics from the same log or CSV",
+            "independent tool calls in the same message",
+        )),
+        ("read_file", "cn", ("已知位置", "offset/limit", "用 grep 定位", "只回读待核对的部分")),
+        ("read_file", "en", ("known ranges", "offset/limit", "use grep to locate", "only the parts being checked")),
+        ("edit_file", "cn", ("目标片段及必要上下文", "检查改动范围和影响", "确认变更与本次编辑无关")),
+        ("edit_file", "en", ("target text and necessary context", "scope and impact", "unrelated to the edit")),
+    ],
+)
+def test_file_workflow_tools_expose_localized_usage_rules(
+    tool_name: str, language: str, rules: tuple[str, ...],
+) -> None:
+    card = build_tool_card(tool_name, f"test-{tool_name}", language=language)
+    for rule in rules:
+        assert rule in card.description
+
+
+@pytest.mark.parametrize(
     ("language", "rules"),
     [
         ("en", (
