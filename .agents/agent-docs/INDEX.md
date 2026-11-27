@@ -29,6 +29,7 @@ generated: true
 | [core/controller](#module-core-controller) |
 | [core/foundation/llm](#module-core-foundation-llm) |
 | [core/foundation/llm/model_clients](#module-core-foundation-llm-model_clients) |
+| [core/runner/callback](#module-core-runner-callback) |
 | [core/runner/drunner/dmessage_queue](#module-core-runner-drunner-dmessage_queue) |
 | [core/session](#module-core-session) |
 | [core/session/tracer](#module-core-session-tracer) |
@@ -426,6 +427,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261117_1727_anthropic-output-limit-errors](bugfix/openjiuwen/core/B_20261117_1727_anthropic-output-limit-errors.md) | B | 模型输出上限截断可见错误修复 | lizhiyuan | 无独立 D：用户在本轮会话确认的 Anthropic 输出上限错误处理范围，未形成独立设计文档。 |
+
+<a id="module-core-runner-callback"></a>
+
+## core/runner/callback
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261127_2030_trigger-parallel-session-injection](bugfix/openjiuwen/core/B_20261127_2030_trigger-parallel-session-injection.md) | B | trigger_parallel 回调会话注入串用修复 | zhangzj | 无独立 D：对既有 AsyncCallbackFramework 契约的小范围实现缺陷修复，未形成独立设计文档。 |
 
 <a id="module-core-runner-drunner-dmessage_queue"></a>
 
