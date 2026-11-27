@@ -767,6 +767,52 @@ class TestDecator:
         # Usage seen before abandonment travels with the closing event.
         assert end_payload["usage_metadata"]["input_tokens"] == 10
 
+    async def test_decorate_model_stream_abandoned_fires_end_through_chain(self):
+        """Issue #2426: chain-level companion to the handler-level test above.
+
+        The framework wrap chain now cascades aclose (gen_wrapper and each
+        gen_link drive their inner generator through contextlib.aclosing),
+        so a caller-side aclose finalizes the trace handler synchronously —
+        inside the aclose call, in the caller's contextvars context, with no
+        asyncgen-hook deferral. This is the path production takes
+        (get_model / get_tool decorate the stream entry); the test above
+        pins the handler's own finally contract in isolation.
+        """
+        from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata
+
+        class _StreamModel:
+            def __init__(self):
+                self.config = MagicMock()
+
+            async def stream(self, messages, **kwargs):
+                yield AssistantMessage(
+                    content="chain-partial-1",
+                    usage_metadata=UsageMetadata(input_tokens=10, output_tokens=5),
+                )
+                yield AssistantMessage(content="chain-partial-2")
+                yield AssistantMessage(content="never-reaches-caller")
+
+            async def invoke(self, messages, **kwargs):
+                raise AssertionError("abandonment test must not hit invoke")
+
+        results = []
+        mocked_model = decorate_model_with_trace(
+            _StreamModel(), self._tpot_mock_env(results)
+        )
+
+        agen = mocked_model.stream([BaseMessage(role="user", content="hi")])
+        first = await agen.__anext__()
+        assert first.content == "chain-partial-1"
+        await agen.aclose()
+
+        # Synchronous finalization: the end event fired inside aclose(), no
+        # gc.collect() / event-loop drain round-trip needed.
+        events = [r[1] for r in results]
+        assert events == ["on_llm_start", "on_llm_end"]
+        end_payload = results[1][2]["outputs"]
+        assert [m.content for m in end_payload["outputs"]] == ["chain-partial-1"]
+        assert end_payload["usage_metadata"]["input_tokens"] == 10
+
     async def test_decorate_model_invoke_cancelled_fires_end(self):
         """CancelledError bypasses except Exception; the finally compensation
         must still close the span instead of leaving it half open, and the

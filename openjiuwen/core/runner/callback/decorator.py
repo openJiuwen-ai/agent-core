@@ -23,6 +23,7 @@ transformation for both regular functions and generators.
 """
 
 import inspect
+from contextlib import aclosing
 from functools import lru_cache, wraps
 from typing import (
     Any,
@@ -1062,8 +1063,13 @@ def _build_wrap_chain_gen(
 
         def _make_gen_link(handler: WrapHandler, n: Callable) -> Callable:
             async def gen_link(*a: Any, **kw: Any) -> Any:
-                async for item in handler(n, *a, **kw):
-                    yield item
+                # aclose of this generator must cascade into the handler's
+                # generator: a bare ``async for`` leaves it to the asyncio
+                # asyncgen hooks (GC timing, a different contextvars
+                # context), deferring the handler's finally block.
+                async with aclosing(handler(n, *a, **kw)) as source:
+                    async for item in source:
+                        yield item
 
             return gen_link
 
@@ -1120,12 +1126,20 @@ def _make_wrap_decorator(
         @wraps(func)
         async def gen_wrapper(*args: Any, **kwargs: Any) -> Any:
             handlers = get_handlers()
+            # Both branches cascade aclose into the inner chain so an
+            # abandoned stream (consumer-side aclose / break) finalizes the
+            # handlers synchronously here, in the caller's contextvars
+            # context, instead of via the asyncio asyncgen hooks.
             if not handlers:
-                async for item in _inner_gen(*args, **kwargs):
-                    yield item
+                async with aclosing(_inner_gen(*args, **kwargs)) as source:
+                    async for item in source:
+                        yield item
                 return
-            async for item in _build_wrap_chain_gen(_inner_gen, handlers)(*args, **kwargs):
-                yield item
+            async with aclosing(
+                _build_wrap_chain_gen(_inner_gen, handlers)(*args, **kwargs)
+            ) as source:
+                async for item in source:
+                    yield item
 
         return gen_wrapper  # type: ignore[return-value]
 
