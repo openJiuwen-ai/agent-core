@@ -399,6 +399,17 @@ def _adx_create_body(extra: dict[str, Any], executor: str) -> dict[str, Any]:
         "memory": int(extra.get("memory", DEFAULT_DOCKER_MEMORY)),
         "idleTimeoutSeconds": _idle_timeout_seconds(extra),
     }
+    idle_action = _idle_action(extra)
+    body["idleAction"] = idle_action
+    if idle_action == "pause":
+        if body["runtime"] == "conch":
+            raise ValueError("ADX tool idle_action=pause is not supported by the conch runtime")
+        if body["idleTimeoutSeconds"] <= 0:
+            raise ValueError("ADX tool idle_action=pause requires a positive idle_timeout")
+        options = _pause_options(extra)
+        if options is not None:
+            body["pauseOptions"] = options
+    body["failover"] = _failover_flag(extra)
     cwd = extra.get("workdir") or rootfs_fields.get("workdir")
     if cwd:
         body["cwd"] = cwd
@@ -439,6 +450,73 @@ def _idle_timeout_seconds(extra: dict[str, Any]) -> int:
     if idle_timeout < 0:
         return 0
     return idle_timeout
+
+
+_IDLE_ACTIONS = ("delete", "pause")
+_PAUSE_STORAGE = ("configured", "local", "shared")
+_PAUSE_FIELDS = frozenset({"retention", "timeoutSeconds", "storage"})
+
+
+def _idle_action(extra: dict[str, Any]) -> str:
+    value = extra.get("idle_action")
+    if value is None:
+        return "delete"
+    if not isinstance(value, str) or value not in _IDLE_ACTIONS:
+        raise ValueError("ADX tool idle_action must be delete or pause")
+    return value
+
+
+def _pause_options(extra: dict[str, Any]) -> Optional[dict[str, Any]]:
+    value = extra.get("pause_policy")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("ADX tool pause_policy must be a mapping")
+    unknown = sorted(set(value) - _PAUSE_FIELDS)
+    if unknown:
+        raise ValueError("ADX tool pause_policy has unsupported fields: " + ", ".join(unknown))
+    retention = value.get("retention")
+    if not isinstance(retention, dict):
+        raise ValueError("ADX tool pause_policy.retention is required")
+    kind = retention.get("kind")
+    if kind == "forever" and set(retention) == {"kind"}:
+        mapped: dict[str, Any] = {"kind": "forever"}
+    elif kind == "ttl" and set(retention) == {"kind", "ttlSeconds"}:
+        ttl = retention["ttlSeconds"]
+        if isinstance(ttl, bool) or not isinstance(ttl, int) or ttl <= 0:
+            raise ValueError("ADX tool pause_policy.retention.ttlSeconds must be a positive integer")
+        mapped = {"kind": "ttl", "ttlSeconds": ttl}
+    else:
+        raise ValueError("ADX tool pause_policy.retention requires kind forever or ttl with ttlSeconds")
+    timeout = value.get("timeoutSeconds", 300)
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 3600:
+        raise ValueError("ADX tool pause_policy.timeoutSeconds must be between 1 and 3600")
+    storage = value.get("storage", "configured")
+    if storage not in _PAUSE_STORAGE:
+        raise ValueError("ADX tool pause_policy.storage must be configured, local or shared")
+    return {"retention": mapped, "timeoutSeconds": timeout, "storage": storage}
+
+
+def _failover_flag(extra: dict[str, Any]) -> bool:
+    value = extra.get("failover", False)
+    if not isinstance(value, bool):
+        raise ValueError("ADX tool failover must be a boolean")
+    return value
+
+
+def _lifecycle_signature(extra: dict[str, Any]) -> str:
+    action = _idle_action(extra)
+    if action == "delete":
+        return ""
+    lifecycle: dict[str, Any] = {"idle_action": action}
+    if extra.get("idle_timeout") is not None:
+        lifecycle["idle_timeout"] = extra["idle_timeout"]
+    if extra.get("pause_policy") is not None:
+        lifecycle["pause_policy"] = extra["pause_policy"]
+    if _failover_flag(extra):
+        lifecycle["failover"] = True
+    payload = json.dumps(lifecycle, sort_keys=True, separators=(",", ":"))
+    return "|lifecycle=" + hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _exec_args(
@@ -670,6 +748,7 @@ class _AdxProviderMixin:
         rootfs = _local_rootfs(self._launcher_extra_params())
         if rootfs is not None:
             key += "|rootfs=" + hashlib.sha256(rootfs["path"].encode()).hexdigest()
+        key += _lifecycle_signature(self._launcher_extra_params())
         return key
 
     @classmethod
