@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import (
     TYPE_CHECKING,
@@ -18,6 +19,7 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.agent_teams.harness.team_harness import TeamHarness
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -29,6 +31,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.coordination.dispatcher import EventDispatcher
     from openjiuwen.agent_teams.agent.scheduling import TeamScheduler
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+    from openjiuwen.agent_teams.harness.team_harness import _MemberApprovalCheckpoint
 
 
 class CoordinationKernel:
@@ -252,7 +255,10 @@ class CoordinationKernel:
         # team-idle edge, so it must be evaluated against the roster the
         # database actually holds. No-op for every other role.
         await host.seed_member_registry()
-        await host.update_status(MemberStatus.READY)
+        harness = resources.harness
+        approval_startup = harness.pending_approval_startup() if isinstance(harness, TeamHarness) else None
+        if approval_startup is None:
+            await host.update_status(MemberStatus.READY)
         # Re-base the idle clock before the poll timers come back. A member
         # that was already idle when the team paused keeps its idle stamp
         # while the monotonic clock runs through the entire pause window, and
@@ -265,7 +271,8 @@ class CoordinationKernel:
         if not self._event_bus.is_running:
             if self._dispatcher is None:
                 raise RuntimeError("CoordinationKernel.start() requires setup() before start()")
-            await self._event_bus.start(wake_callback=self._build_wake_callback())
+            if approval_startup is None:
+                await self._event_bus.start(wake_callback=self._build_wake_callback())
         if infra.messager:
             team_name = host.team_name
             if team_name and not self._subscribed_topics:
@@ -283,16 +290,49 @@ class CoordinationKernel:
         if self._scheduler is not None and team_row_present:
             await self._scheduler.activate()
         self._lifecycle_state = "running"
+        if host.role == TeamRole.LEADER:
+            host.spawn_manager.arm_approval_recovery()
         # Warm / cold resume: a lifecycle pause left this member's round
         # suspended at a clean boundary. Now that the session, stream and
         # event bus are back, continue it in place instead of idling until a
         # new message arrives. Runs last, once the kernel is fully live, and
         # is a no-op when there is nothing suspended to resume.
         await self.resume_paused_round()
+        if approval_startup is not None:
+            await self._complete_approval_startup(harness, approval_startup)
         if host.role == TeamRole.LEADER:
             # Everything a consumer needs before interacting has completed
             # by this point, so publish it on the stream (no-op without one).
             host.stream_controller.emit_team_recovered()
+
+    async def _complete_approval_startup(self, harness: TeamHarness, binding: _MemberApprovalCheckpoint) -> None:
+        """Take over the restart claim only after the member can read its mailbox."""
+        member = self._host.team_member
+        claim = asyncio.create_task(member.db.member.try_transition_member_status(
+            member.member_name, member.team_name, MemberStatus.RESTARTING, MemberStatus.READY,
+        ))
+        # Confirm ownership before propagating even repeated cancellation so
+        # teardown can undo READY if the write committed during cancellation.
+        cancelled = None
+        while not claim.done():
+            try:
+                await asyncio.shield(claim)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+            except Exception:
+                break
+        try:
+            binding.ready_written = claim.result()
+        finally:
+            if cancelled is not None:
+                raise cancelled
+        if not binding.ready_written:
+            raise RuntimeError("Member approval recovery lost its restart claim")
+        await member.publish_status_changed(MemberStatus.RESTARTING, MemberStatus.READY)
+        # Transport can enqueue during startup, but it must not dispatch to
+        # the restored harness before this runtime owns the restart claim.
+        await self._event_bus.start(wake_callback=self._build_wake_callback())
+        harness.confirm_approval_startup()
 
     def _build_wake_callback(self):
         """Compose the bus wake callback: coordination first, scheduler second.
@@ -333,6 +373,14 @@ class CoordinationKernel:
         if self._lifecycle_state != "running":
             return
         host = self._host
+        if host.role == TeamRole.LEADER:
+            host.spawn_manager.disarm_approval_recovery()
+        if self._dispatcher is not None:
+            bus_was_running = self.is_running
+            await self._dispatcher.team_completion.wait_for_completion_publish()
+            # An explicit stop can cancel the publish before finishing teardown.
+            if self._lifecycle_state != "running" or (bus_was_running and not self.is_running):
+                return
         team_logger.info("[{}] coordination pausing (persistent)", host.member_name or "?")
         if self._scheduler is not None:
             self._scheduler.deactivate()
@@ -352,6 +400,7 @@ class CoordinationKernel:
 
         await drain_jiuwen_team_memory(host)
         if host.role == TeamRole.LEADER:
+            await host.spawn_manager.cancel_approval_recovery_tasks()
             paused_teammates = tuple(host.spawn_manager.spawned_handles)
             await self._mark_live_teammates(MemberStatus.PAUSED)
             await host.spawn_manager.cancel_recovery_tasks()
@@ -385,7 +434,7 @@ class CoordinationKernel:
         if self._event_bus:
             await self._event_bus.stop()
         if self._dispatcher is not None:
-            self._dispatcher.group_message.cancel_host_notifications()
+            await self._dispatcher.group_message.cancel_host_notifications()
         self.close_stream()
         host.session_manager.release_session()
         # team_member status update is owned by ``TeamRuntimeManager.finalize_member``
@@ -548,11 +597,15 @@ class CoordinationKernel:
         original Team stop path.
         """
         # Idempotent: terminal state. Pause -> stop is allowed (resources
-        # still need close), running -> stop is the normal path, idle/stopped
-        # are no-ops.
-        if self._lifecycle_state in ("idle", "stopped"):
-            return
+        # still need close), running -> stop is the normal path. An interrupted
+        # approval restore can leave resources to dispose before reaching running.
         host = self._host
+        harness = host.resources.harness
+        failed_approval_startup = isinstance(harness, TeamHarness) and harness.pending_approval_startup() is not None
+        if self._lifecycle_state == "stopped" or (self._lifecycle_state == "idle" and not failed_approval_startup):
+            return
+        if host.role == TeamRole.LEADER:
+            host.spawn_manager.disarm_approval_recovery()
         team_logger.info("[{}] coordination stopping", host.member_name or "?")
         if self._scheduler is not None:
             self._scheduler.deactivate()
@@ -575,6 +628,7 @@ class CoordinationKernel:
 
             await drain_jiuwen_team_memory(host)
         if host.role == TeamRole.LEADER:
+            await host.spawn_manager.cancel_approval_recovery_tasks()
             # Mirror of the pause path: mark every spawned teammate so the
             # persistence layer captures why the runtime went away. STOPPED
             # is a non-disbanding teardown — ``recover_team`` re-spawns from
@@ -589,7 +643,7 @@ class CoordinationKernel:
         if self._event_bus is not None:
             await self._event_bus.stop()
         if self._dispatcher is not None:
-            self._dispatcher.group_message.cancel_host_notifications()
+            await self._dispatcher.group_message.cancel_host_notifications()
         self.close_stream()
         # Permanent teardown (not round-end): stop the native and drop its
         # process-global sys_operation so a stopped/discarded member does not

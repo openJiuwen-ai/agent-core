@@ -24,9 +24,11 @@ so the periodic idle tick is the reliable leader-idle hook.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Awaitable, Callable, ClassVar
 
 from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
+from openjiuwen.agent_teams.agent.coordination import event_bus
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventMessage,
     InnerEventType,
@@ -69,6 +71,8 @@ class TeamCompletionHandler(BaseCoordinationHandler):
         # single-leader state — a leader restart re-arms it, and a re-emitted
         # event is harmless since consumers treat the event as at-least-once.
         self._team_completed_emitted = False
+        self._completion_publish_done = asyncio.Event()
+        self._completion_publish_done.set()
         # Callbacks fired on TASK_LIST_DRAINED. Populated once after the
         # DeepAgent is built (TeamAgent._register_team_completion_callbacks)
         # — e.g. TeamSkillRail.notify_team_completed. Empty on members that
@@ -92,6 +96,10 @@ class TeamCompletionHandler(BaseCoordinationHandler):
         to leave and re-enter the completed state.
         """
         self._team_completed_emitted = False
+
+    async def wait_for_completion_publish(self) -> None:
+        """Wait for the current persistent completion publish attempt, if any."""
+        await self._completion_publish_done.wait()
 
     async def on_poll_task(self, event: InnerEventMessage) -> None:
         """Leader-idle tick: evaluate the three completion conditions.
@@ -120,6 +128,9 @@ class TeamCompletionHandler(BaseCoordinationHandler):
         if snapshot is None:
             # Falling edge: re-arm so the next rising edge emits again.
             self._team_completed_emitted = False
+            recover = getattr(self._lifecycle, "recover_stopped_approval_members", None)
+            if self._blueprint.lifecycle == "persistent" and callable(recover):
+                await recover()
             return
         if self._team_completed_emitted:
             return
@@ -132,17 +143,34 @@ class TeamCompletionHandler(BaseCoordinationHandler):
             return
 
         await self._finalize_non_contributing_worktrees("team completion")
-        await self._publish_team_completed(team_backend.team_name, snapshot)
-        self._team_completed_emitted = True
-
         # Persistent teams auto-pause on completion: close the leader stream
         # so the Runner finally drives finalize -> pause. Temporary teams are
         # torn down by their leader via clean_team, not here.
         if self._blueprint.lifecycle == "persistent":
-            await self._lifecycle.conclude_completed_round(
+            concluded = await self._lifecycle.conclude_completed_round(
                 snapshot.member_count,
                 snapshot.task_count,
             )
+            if not concluded:
+                return
+            # Record the publish before the stream reader can start auto-pause.
+            self._team_completed_emitted = True
+            self._completion_publish_done.clear()
+            timeout = 2 * event_bus.EVENT_BUS_STOP_TIMEOUT_SECONDS
+            try:
+                async with asyncio.timeout(timeout):
+                    await self._publish_team_completed(team_backend.team_name, snapshot)
+            except TimeoutError:
+                team_logger.warning(
+                    "Publishing TEAM_COMPLETED for team {} timed out after {}s",
+                    team_backend.team_name,
+                    timeout,
+                )
+            finally:
+                self._completion_publish_done.set()
+            return
+        await self._publish_team_completed(team_backend.team_name, snapshot)
+        self._team_completed_emitted = True
 
     async def _publish_team_completed(self, team_name: str, snapshot: TeamCompletionSnapshot) -> None:
         """Publish TEAM_COMPLETED on the team topic; log on failure."""
@@ -192,7 +220,10 @@ class TeamCompletionHandler(BaseCoordinationHandler):
                 team_logger.error("task list drained callback failed: {}", e, exc_info=True)
 
     async def _finalize_non_contributing_worktrees(self, reason: str) -> None:
-        """Best-effort cleanup of current-session worktrees with no branch commits."""
+        """Best-effort cleanup of temporary-team worktrees with no branch commits."""
+        if self._blueprint.lifecycle == "persistent":
+            # Persistent members can reuse their worktrees across runs.
+            return
         try:
             await self._lifecycle.finalize_non_contributing_worktrees()
         except Exception as e:
