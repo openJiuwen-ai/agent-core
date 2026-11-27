@@ -1126,10 +1126,13 @@ def _make_wrap_decorator(
         @wraps(func)
         async def gen_wrapper(*args: Any, **kwargs: Any) -> Any:
             handlers = get_handlers()
-            # Both branches cascade aclose into the inner chain so an
-            # abandoned stream (consumer-side aclose / break) finalizes the
-            # handlers synchronously here, in the caller's contextvars
-            # context, instead of via the asyncio asyncgen hooks.
+            # Both branches cascade aclose into the inner chain so a
+            # consumer-side aclose() finalizes the handlers synchronously
+            # here, in the caller's contextvars context, instead of via the
+            # asyncio asyncgen hooks. A bare break without aclose still
+            # defers to those hooks at GC time — but the whole chain then
+            # unwinds inside this one aclosing: a single hook-driven
+            # aclose, not one per chained generator.
             if not handlers:
                 async with aclosing(_inner_gen(*args, **kwargs)) as source:
                     async for item in source:
