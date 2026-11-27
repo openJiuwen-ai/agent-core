@@ -121,14 +121,24 @@ class TestExtractTitle:
         assert html_file_parser._extract_title(soup) == "OnlyTitle"
 
     @staticmethod
-    def test_title_tag_with_nested_markup_uses_string_repr_under_html_parser():
-        # html.parser may expose markup in title_tag.string for nested tags; cover the title branch.
+    def test_title_tag_with_nested_markup_extracts_text_title():
+        # A title containing nested markup must yield its text content as the
+        # title, never an empty string. _parse_html prefers lxml when
+        # available (where title.string is None for nested nodes and the
+        # title branch falls back to .text) and falls back to html.parser
+        # (where nested nodes surface as a markup string) — the assertion
+        # must hold under both parsers, not just one.
         html = _minimal_html(
             f"<article>{_long_text(120)}</article>",
             title="",
         ).replace("<title></title>", "<title><b>Nested</b></title>")
         soup = html_file_parser._parse_html(html)
-        assert html_file_parser._extract_title(soup) == "<b>Nested</b>"
+        title = html_file_parser._extract_title(soup)
+        assert title == "Nested", (
+            "nested markup in <title> must extract the inner text; "
+            f"got {title!r} (parser-dependent assertion previously expected "
+            "'<b>Nested</b>' which only holds under html.parser)"
+        )
 
     @staticmethod
     def test_no_title_returns_empty_string():
