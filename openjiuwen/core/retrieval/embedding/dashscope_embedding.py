@@ -146,7 +146,11 @@ class DashscopeEmbedding(APIEmbedding):
         indices = list(range(0, len(non_empty), bsz))
         callback_obj = kwargs.get("callback_cls", BaseCallback)(seq=indices)
 
-        async with aiohttp.ClientSession(connector=self.aio_connector) as session:
+        # connector_owner=False only applies to the instance-shared connector:
+        # with aio_connector=None the session builds its own connector and
+        # must stay its owner, or each call leaks that self-built connector.
+        session_kwargs = {"connector_owner": False} if self.aio_connector is not None else {}
+        async with aiohttp.ClientSession(connector=self.aio_connector, **session_kwargs) as session:
 
             async def process_batch(i: int) -> list[list[float]]:
                 """Process a single batch with semaphore for concurrency control."""
@@ -203,7 +207,8 @@ class DashscopeEmbedding(APIEmbedding):
                 StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
                 error_msg="input provided for multimodal embedding is not a MultimodalDocument",
             )
-        async with aiohttp.ClientSession(connector=self.aio_connector) as session:
+        session_kwargs = {"connector_owner": False} if self.aio_connector is not None else {}
+        async with aiohttp.ClientSession(connector=self.aio_connector, **session_kwargs) as session:
             embeddings = await self._get_embeddings([doc.dashscope_input], session=session, **kwargs)
             return embeddings[0]
 
