@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/rails/` |
-| 最近一次修订日期 | 2026-11-24 |
+| 最近一次修订日期 | 2026-11-27 |
 | 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_21_cua-desktop-subagent.md`、`F_22_cli-jiuwen-memory-rail-mount-and-switch.md` |
 
 ## 范围 / 边界
@@ -298,3 +298,26 @@ class BaseSecurityRail(AgentRail):
 含可信真人来源的成功回合可触发回写。宿主标记的原文和已接受的 `ask_user` 答复属于真人来源，问题正文属于 Agent 上下文。匹配卡片选项时，来源额外提供已选项说明和问题，上送的证据正文仍是用户答复。异常、取消、暂停中的回合和纯内部对话不触发人机回写。
 
 子任务验收可触发回写。验收以任务 ID、任务修订号和评审轮次去重。任务提交与成功执行回复可精确关联时一起提交，验收可等待该轮的最后回复，任务状态流转和通知照常进行。没有实质交付文本时跳过抽取。回合退出时清理活动交付记录，包括所有者解绑和来源处理异常。退出排空已提交写入，最后一个 owner 退出后释放缓存和 Provider。
+
+## JiuwenMemoryRail 的卸载清理
+
+`uninit(agent)` 同步移除所属工具、提示词与轮次缓存，并立即将 Rail 标记为未初始化。
+有运行中事件循环时，Provider 清理由该循环的后台 Task 执行，Rail 保存任务引用，
+不得在循环线程内同步等待 Future；无运行中循环时使用 `asyncio.run()` 完成同一清理流程。
+同一挂载周期内重复卸载只调度一次清理。会话末抽取开关及卸载前的初始化状态在调度前捕获，
+先执行可选 `on_session_end`，再关闭 Provider；关闭保留 10 秒超时与异常日志。
+`await wait_closed()` 等待已调度的清理流程结束；尚未调度时直接返回，可以重复等待。
+宿主须在结束事件循环或复用 Provider 前调用它；`uninit()`/`unregister_rail()` 返回不代表
+异步清理完成。取消等待者不会取消清理任务，但宿主仍需保持循环运行并再次等待收尾。
+`init()` 在旧清理仍进行时抛出 `RuntimeError`，且不改变工具、提示词或挂载状态；
+宿主先 `await wait_closed()`，再重新挂载。同一实例不允许跨周期并发清理，单任务引用足够。
+不同 Rail 共用同一 Provider 时，由宿主保证旧 Rail 收尾后再交给新 Rail。
+
+```python
+await agent.unregister_rail(rail)
+await rail.wait_closed()
+# 此后可以结束事件循环，或重新挂载/复用 Provider。
+```
+
+这只约束 Work 的 JiuwenMemoryRail，不改变通用 Rail 接口或 Coding/Team 的关闭契约。
+宿主自身对后台写入和 Provider 的等待仍可能产生实际耗时，不能把非阻塞卸载等同于瞬时释放。

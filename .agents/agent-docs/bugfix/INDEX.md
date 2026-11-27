@@ -31,6 +31,7 @@ generated: true
 | [extensions/tracer_otel](#module-extensions-tracer_otel) |
 | [harness](#module-harness) |
 | [harness/moa](#module-harness-moa) |
+| [harness/rails/memory](#module-harness-rails-memory) |
 | [harness/subagents](#module-harness-subagents) |
 | [harness/tools/browser_move/decision](#module-harness-tools-browser_move-decision) |
 | [harness/tools/subagent](#module-harness-tools-subagent) |
@@ -198,6 +199,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261117_1727_anthropic-output-limit-errors](openjiuwen/core/B_20261117_1727_anthropic-output-limit-errors.md) | B | 模型输出上限截断可见错误修复 | lizhiyuan | 无独立 D：用户在本轮会话确认的 Anthropic 输出上限错误处理范围，未形成独立设计文档。 |
+
+<a id="module-harness-rails-memory"></a>
+
+## harness/rails/memory
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261127_1458_jiuwen-memory-uninit-event-loop](harness/B_20261127_1458_jiuwen-memory-uninit-event-loop.md) | B | JiuwenMemoryRail 卸载阻塞事件循环修复 | Wang Tao | 无独立 D：按已确认的最小方案修复卸载实现，补充 Work Rail 的等待收尾入口，不改变通用生命周期机制。 |
 
 <a id="module-harness-subagents"></a>
 

@@ -13,8 +13,8 @@ provider 由宿主注入——典型为 agent-memory 适配包的
 ``agent-memory:jiuwen_memory_adapter/jiuwenswarm/jiuwen_memory_rail_design.md`` §6.1.2）：
 
 1. **``on_session_end`` 接线**：基线从不调用 ``provider.on_session_end``（ABC 方法成
-   死代码）。本 rail 在 ``uninit`` 撤销前（``session_end_extract=True`` 时）触发批量
-   EXTRACT，并暴露 ``end_session()`` 供宿主在会话正常关闭时显式调用。缺省
+   死代码）。本 rail 在 ``uninit`` 时（``session_end_extract=True`` 时）调度批量
+   EXTRACT，运行中事件循环内不阻塞等待清理；并暴露 ``end_session()`` 供宿主在会话正常关闭时显式调用。缺省
    ``False``：``sync_turn`` 已用 ``infer=true`` 同步抽取，会话末再跑一次批量 EXTRACT
    是重复的 LLM 开销；仅当 sync 改为原文存储（infer=false）时才需要打开。
 2. **可用性预检**：``init`` 时调 ``provider.is_available()``，不可用则 warning 一条
@@ -113,6 +113,8 @@ class JiuwenMemoryRail(DeepAgentRail):
         self._prefetch_invoke_id: Optional[int] = None
         # Serialized sync_turn + circuit breaker
         self._sync_task: Optional[asyncio.Task] = None
+        self._shutdown_task: asyncio.Task | None = None
+        self._shutdown_started = False
         self._sync_consecutive_failures: int = 0
         self._sync_breaker_until: float = 0.0
         # Project resolved from the current invoke context; injected into
@@ -126,7 +128,11 @@ class JiuwenMemoryRail(DeepAgentRail):
         )
 
     def init(self, agent) -> None:
+        if self._shutdown_task is not None and not self._shutdown_task.done():
+            raise RuntimeError("JiuwenMemoryRail is closing; await wait_closed() before init()")
         super().init(agent)
+        self._shutdown_task = None
+        self._shutdown_started = False
         # 保存 agent 引用，供工具调用时现读 project 坐标（见 _tool_func 注入逻辑，
         # 不依赖 before_invoke 缓存的 _current_project）。
         self._agent = agent
@@ -180,39 +186,47 @@ class JiuwenMemoryRail(DeepAgentRail):
             self.system_prompt_builder = None
         self.attachment_manager = None
 
-        # 差异 1：撤销前触发会话末批量 EXTRACT（可选；provider 内部自捕获异常）。
-        async def _session_end_if_enabled() -> None:
-            if self._session_end_extract and self._initialized:
+        # Capture the extraction decision before returning control to the loop.
+        extract_on_close = self._session_end_extract and self._initialized
+        self._initialized = False
+        if self._shutdown_started:
+            return
+        self._shutdown_started = True
+
+        async def _shutdown_with_timeout() -> None:
+            if extract_on_close:
                 try:
                     await self._provider.on_session_end([])
                 except Exception as exc:
                     logger.warning(f"[JiuwenMemoryRail] on_session_end failed: {exc}")
+            try:
+                await asyncio.wait_for(self._provider.shutdown(), timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.warning("[JiuwenMemoryRail] provider shutdown timed out")
+            except Exception as exc:
+                logger.warning(f"[JiuwenMemoryRail] provider shutdown error: {exc}")
 
-        # Async shutdown via LspRail pattern
         try:
             loop = asyncio.get_running_loop()
-
-            async def _shutdown_with_timeout():
-                await _session_end_if_enabled()
-                try:
-                    await asyncio.wait_for(self._provider.shutdown(), timeout=10.0)
-                except asyncio.TimeoutError:
-                    logger.warning("[JiuwenMemoryRail] provider shutdown timed out")
-                except Exception as e:
-                    logger.warning(f"[JiuwenMemoryRail] provider shutdown error: {e}")
-
-            future = asyncio.run_coroutine_threadsafe(_shutdown_with_timeout(), loop)
-            future.result(timeout=15.0)
         except RuntimeError:
             try:
-                asyncio.run(_session_end_if_enabled())
-                asyncio.run(self._provider.shutdown())
+                asyncio.run(_shutdown_with_timeout())
             except Exception as exc:
                 logger.warning(f"[JiuwenMemoryRail] shutdown failed: {exc}")
-        except Exception as exc:
-            logger.warning(f"[JiuwenMemoryRail] shutdown failed: {exc}")
+        else:
+            # The loop must keep running to execute shutdown; never wait on a
+            # concurrent Future from its own event-loop thread.
+            self._shutdown_task = loop.create_task(_shutdown_with_timeout())
 
-        self._initialized = False
+    async def wait_closed(self) -> None:
+        """Wait for scheduled cleanup before loop exit or provider reuse.
+
+        Call after uninit() or agent.unregister_rail(). Cancelling this waiter
+        does not cancel cleanup; the host must keep the loop alive to finish it.
+        """
+        task = self._shutdown_task
+        if task is not None:
+            await asyncio.shield(task)
 
     async def end_session(self, messages=None) -> None:
         """会话正常关闭时由宿主显式调用的批量 EXTRACT 入口（差异 1）。
