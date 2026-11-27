@@ -87,6 +87,35 @@ async def test_skill_use_rail_clears_on_after_invoke():
 
 
 @pytest.mark.asyncio
+async def test_skill_use_rail_clears_on_skill_complete():
+    """skill_complete mid-invoke must drop attribution before later tools."""
+    from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
+
+    session = _FakeSession()
+    set_current_skill_name("writer", session=session)
+    rail = SkillUseRail(skills_dir="/tmp/unused-skills", include_tools=False)
+
+    await rail.after_tool_call(
+        AgentCallbackContext(
+            agent=SimpleNamespace(),
+            inputs=ToolCallInputs(tool_name="bash", tool_args={}),
+            session=session,
+        )
+    )
+    assert get_current_skill_name(session) == "writer"
+
+    await rail.after_tool_call(
+        AgentCallbackContext(
+            agent=SimpleNamespace(),
+            inputs=ToolCallInputs(tool_name="skill_complete", tool_args={}),
+            session=session,
+        )
+    )
+    assert get_current_skill_name() is None
+    assert get_current_skill_name(session) is None
+
+
+@pytest.mark.asyncio
 async def test_skill_tool_success_sets_name(tmp_path, monkeypatch):
     from openjiuwen.core.single_agent.skills.skill_manager import Skill
     from openjiuwen.harness.tools.skills.skill_tool import SkillTool

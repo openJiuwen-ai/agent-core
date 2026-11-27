@@ -28,6 +28,9 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails._multimodal import (
     build_read_image_multimodal_resolver,
 )
+from openjiuwen.harness.rails.skills.skill_lifecycle_events import (
+    is_skill_complete_call,
+)
 from openjiuwen.harness.skills.mount import SkillRootMount, split_skill_front_matter
 from openjiuwen.harness.tools import BashTool, ReadFileTool, ListSkillTool, SkillTool
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
@@ -35,7 +38,7 @@ from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 # Per-task skill name for tool-call attribution.
 # ContextVar is a same-task fast path; session state is the cross-tool source of
 # truth (tool execution contexts often do not inherit the ContextVar binding).
-# Set only after skill_tool succeeds; cleared at end of invoke.
+# Set only after skill_tool succeeds; cleared on skill_complete and at end of invoke.
 _current_skill_name: ContextVar[Optional[str]] = ContextVar(
     "current_skill_name",
     default=None,
@@ -589,6 +592,19 @@ class SkillUseRail(DeepAgentRail):
         if evo_text:
             desc = f"{desc}\n  演进经验:\n{evo_text}"
         return desc
+
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Clear skill attribution when the model ends the skill via skill_complete.
+
+        Aligns with skill_authorization_rail: skill_complete means the skill is
+        over, so later tools in the same invoke must not keep the old source_skill.
+        after_invoke still clears as a cross-turn safety net.
+        """
+        inputs = getattr(ctx, "inputs", None)
+        tool_name = str(getattr(inputs, "tool_name", "") or "")
+        if not is_skill_complete_call(tool_name):
+            return
+        clear_current_skill_name(session=getattr(ctx, "session", None))
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         """Drop skill activation at the end of an invoke to avoid cross-turn bleed."""
