@@ -110,6 +110,7 @@ generated: true
 | [B_20261110_2112_anthropic-disabled-thinking-fallback](core_runtime/B_20261110_2112_anthropic-disabled-thinking-fallback.md) | B | Anthropic Messages 支持图谱关闭思考失败后的回退 | lin-xiaoyu | 无独立 D：补齐已有请求级关闭思考回退在 Anthropic 非流式调用中的接入。 |
 | [B_20261116_1636_glm53-flash-reasoning-levels](core_runtime/B_20261116_1636_glm53-flash-reasoning-levels.md) | B | GLM-5.3-Flash 推理强度与禁用编码修复 | lizhiyuan | 无独立 D：用户已确认继续采用端点/模型族静态能力表；本次仅补齐既有 Zhipu 配置的一个模型族，无独立设计。 |
 | [B_20261116_1708_symphony-temperature-fallback](core_runtime/B_20261116_1708_symphony-temperature-fallback.md) | B | Symphony 构图在模型拒绝温度参数后恢复 | lin-xiaoyu | 无独立 D：按已确认的发布线补丁方案扩展已有请求参数回退。 |
+| [B_20261127_1537_tool-call-object-arguments](core_runtime/B_20261127_1537_tool-call-object-arguments.md) | B | 兼容对象形式的 tool_calls.arguments | Huazijiayou | 无独立 D：单字段输入兼容修复，无独立设计文档。 |
 
 <a id="module-core-foundation-llm-model_clients"></a>
 
