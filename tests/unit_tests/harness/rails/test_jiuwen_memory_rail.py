@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -156,7 +158,7 @@ def make_ctx(query=None, result=None, run_kind=None) -> MockCallbackContext:
 
 
 # --------------------------------------------------------------------------- #
-# init / uninit（同步测试：uninit 走 asyncio.run 回退分支）
+# init / uninit / wait_closed
 # --------------------------------------------------------------------------- #
 
 
@@ -247,6 +249,169 @@ class TestInitUninit:
         rail.uninit(agent)
         assert provider.session_end_calls == []
         assert provider.shutdown_called
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("extract", [False, True])
+    async def test_uninit_on_running_loop_is_nonblocking_and_closes_once(self, extract):
+        agent = MockAgent()
+        provider = MockMemoryProvider()
+        provider.shutdown = AsyncMock()
+        rail = JiuwenMemoryRail(provider, session_end_extract=extract)
+        rail.init(agent)
+        rail._initialized = True
+        heartbeat = asyncio.Event()
+        asyncio.get_running_loop().call_soon(heartbeat.set)
+
+        started = time.monotonic()
+        rail.uninit(agent)
+        rail.uninit(agent)
+        elapsed = time.monotonic() - started
+        await asyncio.wait_for(heartbeat.wait(), timeout=1.0)
+        await asyncio.wait_for(rail.wait_closed(), timeout=1.0)
+        rail.uninit(agent)
+
+        assert elapsed < 1.0, "uninit must not block the event-loop thread"
+        assert provider.shutdown.await_count == 1
+        assert provider.session_end_calls == ([[]] if extract else [])
+        assert not rail._initialized
+        assert agent.ability_manager.names() == set()
+        assert agent.system_prompt_builder.removed_sections
+
+    @pytest.mark.asyncio
+    async def test_uninit_returns_while_provider_shutdown_is_pending(self):
+        agent = MockAgent()
+        provider = MockMemoryProvider()
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def shutdown():
+            started.set()
+            await release.wait()
+            provider.shutdown_called = True
+
+        provider.shutdown = shutdown
+        rail = JiuwenMemoryRail(provider)
+        rail.init(agent)
+        rail.uninit(agent)
+        try:
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            assert not rail._shutdown_task.done()
+            assert not provider.shutdown_called
+            cleanup = rail._shutdown_task
+            with pytest.raises(RuntimeError, match="wait_closed"):
+                rail.init(agent)
+            assert rail._shutdown_task is cleanup
+            assert rail._shutdown_started
+            assert rail.system_prompt_builder is None
+            assert agent.ability_manager.names() == set()
+        finally:
+            release.set()
+            await asyncio.wait_for(rail.wait_closed(), timeout=1.0)
+        assert provider.shutdown_called
+
+        rail.init(agent)
+        await rail.before_invoke(make_ctx(query="hello"))
+        assert rail._initialized
+        assert provider.initialize_kwargs is not None
+        rail.uninit(agent)
+        await asyncio.wait_for(rail.wait_closed(), timeout=1.0)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure", [RuntimeError("close failed"), asyncio.TimeoutError()])
+    async def test_uninit_background_shutdown_errors_are_handled(self, failure, monkeypatch):
+        agent = MockAgent()
+        provider = MockMemoryProvider()
+        provider.on_session_end = AsyncMock(side_effect=RuntimeError("extract failed"))
+        provider.shutdown = AsyncMock(side_effect=failure)
+        warnings = []
+        monkeypatch.setattr(
+            "openjiuwen.harness.rails.memory.jiuwen_memory_rail.logger.warning",
+            lambda message: warnings.append(message),
+        )
+        rail = JiuwenMemoryRail(provider, session_end_extract=True)
+        rail.init(agent)
+        rail._initialized = True
+        rail.uninit(agent)
+        await asyncio.wait_for(rail.wait_closed(), timeout=1.0)
+
+        provider.on_session_end.assert_awaited_once_with([])
+        provider.shutdown.assert_awaited_once()
+        assert any("on_session_end failed" in message for message in warnings)
+        assert any("shutdown" in message for message in warnings)
+
+    @pytest.mark.parametrize("extract", [False, True])
+    def test_wait_closed_finishes_cleanup_before_loop_exit(self, extract):
+        agent = MockAgent()
+        provider = MockMemoryProvider()
+        completed = []
+
+        async def extract_session(_messages):
+            await asyncio.sleep(0)
+            completed.append("extract")
+
+        async def shutdown():
+            await asyncio.sleep(0)
+            completed.append("shutdown")
+
+        provider.on_session_end = extract_session
+        provider.shutdown = shutdown
+        rail = JiuwenMemoryRail(provider, session_end_extract=extract)
+
+        async def close_before_exit():
+            await rail.wait_closed()  # No scheduled cleanup yet.
+            rail.init(agent)
+            rail._initialized = True
+            rail.uninit(agent)
+            await asyncio.wait_for(rail.wait_closed(), timeout=1.0)
+            await rail.wait_closed()  # Repeated waits do not repeat cleanup.
+
+        asyncio.run(close_before_exit())
+        assert completed == (["extract", "shutdown"] if extract else ["shutdown"])
+        assert rail._shutdown_task.done()
+        assert not rail._shutdown_task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_waiter_does_not_cancel_cleanup(self):
+        agent = MockAgent()
+        provider = MockMemoryProvider()
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def shutdown():
+            started.set()
+            await release.wait()
+            provider.shutdown_called = True
+
+        provider.shutdown = shutdown
+        rail = JiuwenMemoryRail(provider)
+        rail.init(agent)
+        rail.uninit(agent)
+        waiter = asyncio.create_task(rail.wait_closed())
+        try:
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+            assert not rail._shutdown_task.done()
+        finally:
+            release.set()
+            await asyncio.wait_for(rail.wait_closed(), timeout=1.0)
+        assert provider.shutdown_called
+
+    def test_repeated_uninit_without_loop_closes_once_per_mount(self):
+        agent = MockAgent()
+        provider = MockMemoryProvider()
+        provider.shutdown = AsyncMock()
+        rail = JiuwenMemoryRail(provider)
+        rail.init(agent)
+        rail.uninit(agent)
+        rail.uninit(agent)
+        provider.shutdown.assert_awaited_once()
+        asyncio.run(rail.wait_closed())
+
+        rail.init(agent)
+        rail.uninit(agent)
+        assert provider.shutdown.await_count == 2
 
 
 # --------------------------------------------------------------------------- #

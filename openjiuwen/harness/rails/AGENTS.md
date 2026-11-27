@@ -214,6 +214,14 @@ skill 的真实名字拼出可用的那条调用。
 - **工具**：rail 只负责注册/过滤/拦截，工具本身在 `openjiuwen/harness/tools/`。
 
 
+## Work JiuwenMemoryRail 的卸载
+
+`JiuwenMemoryRail.uninit()` 同步解除工具与提示词挂载，异步资源清理不能在事件循环线程中
+同步等待 Future；保留清理任务引用及会话末抽取条件，同一挂载周期只调度一次。
+无运行中事件循环时同步完成清理。宿主结束循环或复用 Provider 前须 `await wait_closed()`；
+取消等待者不取消清理任务。旧清理未完成时 `init()` 拒绝重新挂载，不改变挂载状态。
+契约见 S_04，回归见 `test_jiuwen_memory_rail.py`。
+
 ## Coding 文档记忆的共享状态
 
 `memory/jiuwen_memory_coding_rail.py` 只依赖 MemoryProvider，不直接构造内核。共享实例的工具、提示词、召回缓存必须按 Agent 保存，并识别内层 ReActAgent 的模型回调。最后使用者退出后排空写入再关闭；uninit 不在运行中的事件循环里同步等 Future。宿主整体替换时等待 aclose。Coding 工具注册失败撤回本 owner 的部分注册；单项清理失败不得阻断其余清理及 Provider 关闭。跨 Rail 的上下文解析使用 JiuwenMemoryRail 公共辅助入口，接口契约见 S_04。

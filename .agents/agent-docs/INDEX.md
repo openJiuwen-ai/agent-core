@@ -43,6 +43,7 @@ generated: true
 | [harness/observability](#module-harness-observability) |
 | [harness/rails](#module-harness-rails) |
 | [harness/rails/evolution](#module-harness-rails-evolution) |
+| [harness/rails/memory](#module-harness-rails-memory) |
 | [harness/subagents](#module-harness-subagents) |
 | [harness/tools/browser_move](#module-harness-tools-browser_move) |
 | [harness/tools/browser_move/decision](#module-harness-tools-browser_move-decision) |
@@ -627,6 +628,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [F_20261123_1139_trajectory-sequence-store](features/F_20261123_1139_trajectory-sequence-store.md) | F | 演进轨迹消息序列共享 | zhangzhongteng | 无独立 D：依据用户在本次任务中提供并要求执行的方案，无独立 D 文件。 |
+
+<a id="module-harness-rails-memory"></a>
+
+## harness/rails/memory
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261127_1458_jiuwen-memory-uninit-event-loop](bugfix/harness/B_20261127_1458_jiuwen-memory-uninit-event-loop.md) | B | JiuwenMemoryRail 卸载阻塞事件循环修复 | Wang Tao | 无独立 D：按已确认的最小方案修复卸载实现，补充 Work Rail 的等待收尾入口，不改变通用生命周期机制。 |
 
 <a id="module-harness-subagents"></a>
 
