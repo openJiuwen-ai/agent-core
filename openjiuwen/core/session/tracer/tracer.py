@@ -199,12 +199,29 @@ class Tracer:
             builtin_handler = trace_schema_dict.get(lookup_key)
             if builtin_handler and hasattr(builtin_handler, event_name):
                 await getattr(builtin_handler, event_name)(**kwargs)
-            # 2. Extension workflow handlers: invoke directly
+            # 2. Extension workflow handlers: invoke directly. Routing to an
+            # execution-scoped handler (OtelWorkflowHandler, issue #2430) must
+            # happen here at the dispatch entry: subclasses may override an
+            # event method without calling super(), so a parent-class
+            # decorator alone cannot reach those overrides.
             for name, handler in self._workflow_handlers.items():
                 if name == TracerHandlerName.TRACER_WORKFLOW.value:
                     continue
-                if handler is not None and hasattr(handler, event_name):
-                    await getattr(handler, event_name)(**kwargs)
+                if handler is None or not hasattr(handler, event_name):
+                    continue
+                target = handler
+                resolver = getattr(handler, "resolve_event_handler", None)
+                if callable(resolver):
+                    try:
+                        target = resolver(event_name, **kwargs) or handler
+                    except Exception as exc:  # noqa: BLE001 - tracing must not break business flow
+                        session_logger.warning(
+                            "Tracer extension handler route failed: %s", exc
+                        )
+                        target = handler
+                    if not hasattr(target, event_name):
+                        target = handler
+                await getattr(target, event_name)(**kwargs)
             return
 
         session_logger.warning(

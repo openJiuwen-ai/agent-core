@@ -1220,7 +1220,27 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     # --- helper: execution-scoped routing ---
 
     def _new_execution_handler(self, trace_id: str | None) -> "OtelWorkflowHandler":
-        return OtelWorkflowHandler(self._otel_tracer, self._config, trace_id=trace_id or self._trace_id)
+        # Preserve downstream subclasses (e.g. studio's business_error handler)
+        # so their overrides run on the execution-scoped instance too. A
+        # subclass with an incompatible constructor can override this hook or
+        # accept the router's fallback to the root handler.
+        handler_cls = type(self)
+        return handler_cls(self._otel_tracer, self._config, trace_id=trace_id or self._trace_id)
+
+    def resolve_event_handler(self, event_name: str, **kwargs) -> "OtelWorkflowHandler":
+        """Return the handler that must receive this workflow event.
+
+        Called by ``Tracer.trigger`` before dispatching extension events. It
+        runs on the registered root instance and must happen at the dispatch
+        entry: subclasses may override an event method without calling
+        ``super()`` (studio's ``on_call_done`` does), so a parent-class
+        decorator alone cannot route those overrides.
+        """
+        return self._route_for_event(
+            kwargs.get("execution_id"),
+            trace_id=kwargs.get("trace_id"),
+            session_id=kwargs.get("session_id"),
+        )
 
     def _route_for_event(
         self,

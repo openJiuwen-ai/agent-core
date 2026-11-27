@@ -15,7 +15,8 @@ import pytest
 from opentelemetry import trace
 
 from openjiuwen.core.session.tracer.data import NodeStatus
-from openjiuwen.core.session.tracer.tracer import TracerHandlerRegistry
+from openjiuwen.core.session.tracer.handler import TracerHandlerName
+from openjiuwen.core.session.tracer.tracer import Tracer, TracerHandlerRegistry
 from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
 from openjiuwen.extensions.tracer_otel.handler import OtelWorkflowHandler
 from openjiuwen.extensions.tracer_otel.semconv import (
@@ -26,6 +27,8 @@ from openjiuwen.extensions.tracer_otel.semconv import (
 from tests.conftest_otel import _EXPORTER, _OTEL_TRACER
 
 pytestmark = pytest.mark.asyncio
+
+_EVENT = TracerHandlerName.TRACER_WORKFLOW.value
 
 
 @pytest.fixture(autouse=True)
@@ -447,3 +450,65 @@ async def test_child_handler_shares_tracer_and_config_but_not_state():
     assert child._span_manager is not handler._span_manager
     assert child._trace_id == "trace-A"
     assert child._session_id == "sess-A"
+
+
+class _SubclassedWorkflowHandler(OtelWorkflowHandler):
+    """Mimics studio's subclass: overrides on_call_done without calling super()."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.done_calls: list[tuple[str, str | None]] = []
+
+    async def on_call_done(self, invoke_id, outputs=None, **kwargs):
+        self.done_calls.append((invoke_id, kwargs.get("execution_id")))
+        state = self._span_manager.pop(invoke_id)
+        if state is not None:
+            state.span.end()
+            self._detach_state(state)
+
+
+async def test_trigger_routes_to_subclass_execution_handler():
+    """Dispatch must route to a subclass child (studio compatibility).
+
+    Subclasses may override on_call_done without calling super(); routing at
+    Tracer.trigger is the only way such overrides reach execution-scoped state.
+    """
+    handler = _SubclassedWorkflowHandler(_OTEL_TRACER, OtelTracerConfig(redaction_enabled=False))
+    TracerHandlerRegistry.register_handler("studio_like_workflow", handler)
+    tracer_a = Tracer(session_id="sess-A", trace_id="trace-A")
+    tracer_a.init()
+    tracer_b = Tracer(session_id="sess-B", trace_id="trace-B")
+    tracer_b.init()
+
+    for tracer, execution_id, session_id, token in (
+        (tracer_a, "exec-A", "sess-A", "A"),
+        (tracer_b, "exec-B", "sess-B", "B"),
+    ):
+        await tracer.trigger(
+            _EVENT,
+            "on_call_start",
+            invoke_id="wf",
+            parent_node_id="",
+            metadata=_root_metadata(execution_id),
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        await tracer.trigger(
+            _EVENT,
+            "on_call_done",
+            invoke_id="wf",
+            outputs={"root": token},
+            execution_id=execution_id,
+        )
+
+    # The root instance must never run the subclass override; each execution's
+    # child owns both its state and its override invocation.
+    assert handler.done_calls == []
+    for execution_id in ("exec-A", "exec-B"):
+        child = handler._exec_handlers[execution_id]
+        assert isinstance(child, _SubclassedWorkflowHandler)
+        assert child.done_calls == [("wf", execution_id)]
+
+    roots = _spans_by_name("WF")
+    assert len(roots) == 2
+    assert len({s.context.trace_id for s in roots}) == 2
