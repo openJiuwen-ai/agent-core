@@ -1500,7 +1500,12 @@ class TaskDao:
                 )
                 .values(status=status, updated_at=now)
             )
-            if cas_result.rowcount == 0:
+            # ``(rowcount or 0)`` guards a backend that returns None for
+            # rowcount (mirrors _refresh_status_in_session /
+            # _terminate_task_in_session in this same batch): ``None == 0``
+            # is False, so a None result would bypass the lost-race path and
+            # read as "CAS applied", silently clobbering the concurrent write.
+            if (cas_result.rowcount or 0) == 0:
                 team_logger.warning(
                     "Task %s status changed concurrently; CAS update skipped",
                     task_id,
@@ -1875,6 +1880,25 @@ class TaskDao:
         row yields ``rowcount == 0`` and we return ``False`` instead of
         re-reading a stale row and re-issuing a delete.
 
+        Before the DELETE, the target task row is locked with
+        ``SELECT ... FOR UPDATE`` (scalar projection, bypassing the identity
+        map) so a concurrent ``mutate_dependency_graph`` /
+        ``_apply_new_edges`` — which also takes the upstream task row lock
+        before inserting a new edge — sees the row either pre-delete (then
+        waits for our FOR UPDATE) or post-delete (then its existence check
+        fails and the edge is rejected). Without this lock, on PG/MySQL
+        (where ``DbSessions.write()`` skips the process-level write lock)
+        a downstream-capturing plain SELECT + DELETE could interleave with
+        an ``add_edges`` that inserts a new edge to the about-to-be-deleted
+        task: ``add_edges`` reads the upstream as PENDING under its FOR UPDATE
+        and inserts the edge, then our DELETE cascades that edge away, and
+        the new downstream is stranded in ``BLOCKED`` with no edge to
+        refresh against. The FOR UPDATE closes that window by serialising
+        the delete against edge insertion in the same lock ordering as
+        ``_apply_new_edges`` (upstream task -> dep rows -> downstream task).
+        On SQLite the process-wide write lock already serialises the two,
+        so the row lock is stripped by the dialect there.
+
         The dependency-edge table carries ``ondelete=CASCADE`` FKs on both
         ``task_id`` and ``depends_on_task_id``, so deleting the row removes
         its incoming and outgoing edges in the same statement. A downstream
@@ -1889,6 +1913,23 @@ class TaskDao:
         team_task_model = _get_task_model()
         task_dependency_model = _get_task_dependency_model()
         async with self._sessions.write() as session:
+            # Lock the target task row before reading its downstream edges,
+            # so a concurrent _apply_new_edges (which FOR UPDATEs the
+            # upstream task before inserting an edge) cannot slip a new edge
+            # in between our downstream SELECT and our DELETE. Scalar
+            # projection (task_id only) bypasses the identity map and reads
+            # the live committed state under the lock, mirroring
+            # _apply_new_edges' upstream read. order_by is unnecessary here:
+            # a single PK row is locked.
+            lock_result = await session.execute(
+                select(team_task_model.task_id)
+                .where(team_task_model.task_id == task_id)
+                .with_for_update()
+            )
+            if lock_result.scalar_one_or_none() is None:
+                team_logger.debug("Task %s not found for deletion", task_id)
+                return False
+
             # Capture downstream ids before the FK cascade removes the
             # outgoing edges — after the delete we can no longer read them.
             downstream_result = await session.execute(
