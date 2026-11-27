@@ -1809,13 +1809,12 @@ class UpdateTaskTool(TeamTool):
             revision_info = await self._revision_info(task, result.data or {})
 
         # Assign task to member. When the task is already owned by a
-        # different member, treat this as a leader-driven reassignment: the
-        # assignee is swapped in place and the status is preserved, so an
-        # assigned-but-not-yet-started task (the scheduled mode's resting
-        # state) stays waiting for its owner rather than being started or
-        # released. The former assignee is told via a targeted TASK_REVOKED
-        # event (not a member-wide cancel), so only this one task moves — its
-        # other claims and in-flight round survive. Same-member is idempotent.
+        # different member, treat this as a leader-driven reassignment: live
+        # owners keep status; departed owners with an IN_PROGRESS task take
+        # the directed-pending path (pending + new assignee) so a not-yet-
+        # ready replacement still sees the work on startup survey and idle
+        # teammates cannot race the claimable pool. The former assignee is
+        # told via TASK_REVOKED; same-member is idempotent.
         if assignee:
             # One active task per member: reject before any state change so a
             # rejected assign never disturbs the current owner or this task.

@@ -44,8 +44,10 @@ from openjiuwen.agent_teams.schema.events import (
     TeamTopic,
 )
 from openjiuwen.agent_teams.schema.status import (
+    MEMBER_DEPARTED_STATUSES,
     TASK_TRANSITIONS,
     MemberMode,
+    MemberStatus,
     TaskStatus,
     is_valid_transition,
 )
@@ -1964,17 +1966,22 @@ class TeamTaskManager:
     async def reassign(self, task_id: str, new_assignee: str) -> TaskOpResult:
         """Hand an owned task from its current owner to another member.
 
-        Atomic assignee swap — **the task keeps whatever status it had** and
-        never bounces through PENDING, so no spurious ``TASK_RELEASED`` wakes
-        idle teammates and there is no claimable-pool window to race into.
-        Works across ``TASK_REASSIGNABLE_STATUSES``: an assigned-but-not-yet-
-        started task (``PENDING`` / ``BLOCKED`` — the scheduled mode's resting
-        state) is in fact the cheapest thing to hand over, since no reasoning
-        is in flight to discard. Fires exactly two targeted events:
-        ``TASK_REVOKED`` tells the former owner to steer off the now-foreign
-        task, ``TASK_CLAIMED`` tells the new owner it is theirs. The former
-        owner's other claims and in-flight round stay intact — this touches
-        only the one task.
+        Live-owner path: atomic assignee swap — **the task keeps whatever
+        status it had** and never bounces through PENDING, so no spurious
+        ``TASK_RELEASED`` wakes idle teammates and there is no claimable-pool
+        window to race into.
+
+        Departed-owner path (``SHUTDOWN_REQUESTED`` / ``SHUTDOWN``): an
+        ``IN_PROGRESS`` task is redirected to ``PENDING`` *with*
+        ``new_assignee`` already set. Keeping the assignee closes the public
+        claimable-pool race; landing on ``PENDING`` makes the new owner's
+        startup board survey see the work even if the transient
+        ``TASK_CLAIMED`` event was published before its runtime was up.
+
+        Works across ``TASK_REASSIGNABLE_STATUSES``. Fires exactly two
+        targeted events: ``TASK_REVOKED`` for the former owner,
+        ``TASK_CLAIMED`` for the new owner (never ``TASK_RELEASED`` on either
+        path — the task stays owned throughout).
 
         The new member is validated *before* the swap so a bad target never
         disturbs the task.
@@ -2008,12 +2015,31 @@ class TeamTaskManager:
                 "wait for the subtasks to finish, or cancel them first"
             )
 
-        swapped = await self.db.task.reassign_task(task_id, old_assignee, new_assignee)
-        if not swapped:
-            return TaskOpResult.fail(
-                f"Task {task_id} could not be reassigned; it is either no longer held by "
-                f"{old_assignee}, or its status ({task.status}) does not allow handing it over"
+        if (
+            task.status == TaskStatus.IN_PROGRESS.value
+            and await self._owner_is_departed(old_assignee)
+        ):
+            redirected = await self.db.task.redirect_working_task_to_pending(
+                task_id, old_assignee, new_assignee
             )
+            if not redirected:
+                return TaskOpResult.fail(
+                    f"Task {task_id} could not be redirected to pending under {new_assignee}; "
+                    f"it is either no longer held by {old_assignee}, or not in_progress"
+                )
+            team_logger.info(
+                "Task %s handed from departed %s to %s as directed pending",
+                task_id,
+                old_assignee,
+                new_assignee,
+            )
+        else:
+            swapped = await self.db.task.reassign_task(task_id, old_assignee, new_assignee)
+            if not swapped:
+                return TaskOpResult.fail(
+                    f"Task {task_id} could not be reassigned; it is either no longer held by "
+                    f"{old_assignee}, or its status ({task.status}) does not allow handing it over"
+                )
 
         await self._publish_task_event(
             TaskRevokedEvent(team_name=self.team_name, task_id=task_id, member_name=old_assignee),
@@ -2024,6 +2050,22 @@ class TeamTaskManager:
             error_label=f"Task claimed event for {task_id} (to {new_assignee})",
         )
         return TaskOpResult.success()
+
+    async def _owner_is_departed(self, member_name: str) -> bool:
+        """Whether ``member_name`` has been released by the leader (shutdown)."""
+        status = await self.db.member.get_member_status(self.team_name, member_name)
+        if not status:
+            # Missing roster row: treat as gone so the task is not left on a ghost.
+            return True
+        try:
+            member_status = MemberStatus(status)
+        except ValueError:
+            try:
+                # Some fixtures / legacy rows used upper-case labels.
+                member_status = MemberStatus(str(status).lower())
+            except ValueError:
+                return False
+        return member_status in MEMBER_DEPARTED_STATUSES
 
     async def approve_plan(
         self,

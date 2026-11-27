@@ -1633,6 +1633,11 @@ class TeamBackend:
 
         # Publish shutdown event (for cross-process notification to member)
         await self._publish_member_shutdown(member_name, force, target_status)
+        # Ownership of active tasks is intentionally left alone: a subsequent
+        # leader reassign from a departed owner takes the directed-pending
+        # path (pending + new assignee) so the replacement is not raced by the
+        # claimable pool. Bare reset into the pool remains an explicit
+        # leader/cancel_member choice when there is no designated replacement.
         team_logger.info(f"Shutdown request sent to member {member_name}")
         return MemberOpResult.success()
 
