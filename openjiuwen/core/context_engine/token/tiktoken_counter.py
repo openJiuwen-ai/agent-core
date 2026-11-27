@@ -1,11 +1,15 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+import hashlib
 import json
+import os
+import tempfile
 import threading
+import time
 from typing import List, Optional
 
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import context_engine_logger
 from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text, sanitize_value_for_text
 from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.context_engine.token.encode_guard import CountCache, count_with_guard, estimate_tokens
@@ -21,8 +25,40 @@ from openjiuwen.core.foundation.tool import ToolInfo
 #: Serializes first-use loads of tiktoken encodings. The very first
 #: ``tiktoken.get_encoding`` in a process downloads the BPE vocabulary file
 #: over HTTPS through a blocking ``requests.get`` without timeout, which can
-#: stall for tens of seconds; the lock keeps concurrent loaders single-flight.
+#: stall **forever** on silently black-holed networks (E-1125: requests hang
+#: 2h until the relay watchdog kills them). The lock keeps concurrent loaders
+#: single-flight, and every waiter takes it with a timeout so a stuck holder
+#: degrades callers to character-based estimation instead of hanging them.
 _ENCODING_LOAD_LOCK = threading.Lock()
+
+#: How long ``__init__``/warm-up may wait for the load lock before falling
+#: back. The holder's critical section is bounded by ``_ensure_vocab_cached``
+#: (download timeout + local read), so a healthy first load fits comfortably.
+_ENCODING_LOAD_TIMEOUT_S = 20.0
+
+#: (connect, read) timeout for the pre-flight vocabulary download. tiktoken's
+#: internal ``requests.get`` has no timeout and cannot be configured, so we
+#: download the vocab ourselves into its cache and let ``get_encoding`` hit
+#: the cache instead of the network.
+_VOCAB_DOWNLOAD_TIMEOUT_S = (5.0, 10.0)
+
+#: After a failed vocab load, skip retrying for this long (process-wide) so
+#: each new session does not re-pay the lock/download timeout on networks
+#: where the vocab source is unreachable.
+_VOCAB_COOLDOWN_S = 300.0
+
+#: Monotonic deadline until which vocab loads are skipped (negative cache).
+#: 0.0 means "no known failure". GIL makes float read/write atomic enough for
+#: this advisory state; races only cause a redundant download or a skipped
+#: retry, both benign.
+_vocab_unavailable_until = 0.0
+
+#: Vocab blob URLs for the encodings this module actually uses. Keys mirror
+#: ``TiktokenCounter._MODEL2ENC`` values plus the default encoding.
+_VOCAB_URLS = {
+    "cl100k_base": "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken",
+    "o200k_base": "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken",
+}
 
 #: Background warm-up thread handle (see :func:`start_background_warm_up`).
 _warm_up_thread: Optional[threading.Thread] = None
@@ -32,21 +68,103 @@ _warm_up_lock = threading.Lock()
 _DEFAULT_ENCODING_NAME = "cl100k_base"
 
 
+def _vocab_cooldown_active() -> bool:
+    return time.monotonic() < _vocab_unavailable_until
+
+
+def _note_vocab_failure(reason: str) -> None:
+    """Enter (or confirm) the cooldown window; log once per window."""
+    global _vocab_unavailable_until
+    now = time.monotonic()
+    if _vocab_unavailable_until <= now:
+        # Routed through context_engine_logger: the generic `logger` has no
+        # file mapping in the SDK logging bootstrap, which made earlier
+        # fallback warnings invisible in sidecar logs.
+        context_engine_logger.warning(
+            "tiktoken vocabulary load failed (%s); falling back to character-based "
+            "token estimation for %ss before retrying",
+            reason,
+            int(_VOCAB_COOLDOWN_S),
+        )
+    _vocab_unavailable_until = now + _VOCAB_COOLDOWN_S
+
+
+def _note_vocab_success() -> None:
+    global _vocab_unavailable_until
+    _vocab_unavailable_until = 0.0
+
+
+def _vocab_cache_dir() -> Optional[str]:
+    """Mirror ``tiktoken.load.read_file_cached``'s cache-dir resolution so the
+    prefill lands exactly where ``get_encoding`` will look it up:
+    TIKTOKEN_CACHE_DIR -> DATA_GYM_CACHE_DIR -> <tempdir>/data-gym-cache.
+    An empty string means "caching disabled" in tiktoken; no prefill then
+    (the bounded lock still protects other waiters in that setup)."""
+    if "TIKTOKEN_CACHE_DIR" in os.environ:
+        cache_dir = os.environ["TIKTOKEN_CACHE_DIR"]
+    elif "DATA_GYM_CACHE_DIR" in os.environ:
+        cache_dir = os.environ["DATA_GYM_CACHE_DIR"]
+    else:
+        cache_dir = os.path.join(tempfile.gettempdir(), "data-gym-cache")
+    if cache_dir == "":
+        return None
+    return cache_dir
+
+
+def _ensure_vocab_cached(encoding_name: str) -> None:
+    """Pre-download the BPE vocab with a timeout into tiktoken's cache.
+
+    After this succeeds, ``tiktoken.get_encoding`` finds the vocab locally and
+    never touches the network, so its unbounded internal ``requests.get``
+    becomes unreachable. Unknown encodings are left to tiktoken (callers are
+    still protected by the load-lock timeout). Raises on download failure so
+    callers take their fallback path.
+    """
+    url = _VOCAB_URLS.get(encoding_name)
+    if url is None:
+        return
+    cache_dir = _vocab_cache_dir()
+    if cache_dir is None:
+        return
+    cache_path = os.path.join(cache_dir, hashlib.sha1(url.encode()).hexdigest())
+    if os.path.exists(cache_path):
+        return
+    import requests
+
+    resp = requests.get(url, timeout=_VOCAB_DOWNLOAD_TIMEOUT_S)
+    resp.raise_for_status()
+    os.makedirs(cache_dir, exist_ok=True)
+    tmp_path = f"{cache_path}.{os.getpid()}.tmp"
+    with open(tmp_path, "wb") as f:
+        f.write(resp.content)
+    os.replace(tmp_path, cache_path)
+
+
 def warm_up_default_encoding() -> None:
     """Load the default tiktoken encoding in the caller's thread.
 
     Intended to run on a background thread: the first load in a process may
     download the vocabulary synchronously, and doing that on the event loop
-    stalls every WebSocket/heartbeat on it. Failures are swallowed so the
-    warm-up can never break startup; the first real use simply retries.
+    stalls every WebSocket/heartbeat on it. Failures never break startup; the
+    cooldown negative-cache keeps later sessions from re-paying the timeout,
+    and the first real use retries after the cooldown window.
     """
+    if _vocab_cooldown_active():
+        return
     try:
         import tiktoken
 
-        with _ENCODING_LOAD_LOCK:
+        if not _ENCODING_LOAD_LOCK.acquire(timeout=_ENCODING_LOAD_TIMEOUT_S):
+            _note_vocab_failure("warmup_lock_timeout")
+            return
+        try:
+            _ensure_vocab_cached(_DEFAULT_ENCODING_NAME)
             tiktoken.get_encoding(_DEFAULT_ENCODING_NAME)
-    except Exception:
-        logger.debug("tiktoken encoding warm-up failed; first use will retry", exc_info=True)
+        finally:
+            _ENCODING_LOAD_LOCK.release()
+        _note_vocab_success()
+    except Exception as exc:
+        _note_vocab_failure(f"warmup_failed:{type(exc).__name__}")
 
 
 def start_background_warm_up() -> None:
@@ -121,26 +239,51 @@ class TiktokenCounter(TokenCounter):
         self.measurement_fallback_reason = fallback_reason
         self.measurement_fallback_tokenizer_model = fallback_tokenizer_model
         try:
+            if _vocab_cooldown_active():
+                raise RuntimeError("tiktoken vocab unavailable (recent failure cooldown)")
+
             import tiktoken
 
             # Share the warm-up lock so concurrent first loads (including
             # non-default encodings like o200k_base) stay single-flight and
             # do not block the event loop with parallel vocabulary downloads.
-            with _ENCODING_LOAD_LOCK:
+            # The acquire is bounded: a stuck holder (e.g. a black-holed
+            # download) degrades us to char estimation instead of hanging.
+            if not _ENCODING_LOAD_LOCK.acquire(timeout=_ENCODING_LOAD_TIMEOUT_S):
+                _note_vocab_failure("init_lock_timeout")
+                raise RuntimeError(f"encoding load lock not acquired within {_ENCODING_LOAD_TIMEOUT_S}s")
+            try:
+                # Resolve the encoding name first and preflight its vocab on
+                # every branch. ``encoding_for_model`` internally calls
+                # ``get_encoding``, whose unbounded ``requests.get`` would run
+                # on this very lock-holding thread (the bounded acquire only
+                # protects waiters), so no branch may reach tiktoken's
+                # downloader directly.
                 if model in self._MODEL2ENC:
-                    self._enc = tiktoken.get_encoding(self._MODEL2ENC[model])
+                    enc_name = self._MODEL2ENC[model]
                 else:
                     try:
-                        self._enc = tiktoken.encoding_for_model(model)
+                        enc_name = tiktoken.encoding_name_for_model(model)
                     except KeyError:
-                        self._enc = tiktoken.get_encoding(default_encoding)
+                        enc_name = default_encoding
                         if source_override is None:
                             self.measurement_source = "tiktoken_fallback"
                         if self.measurement_fallback_reason is None:
                             self.measurement_fallback_reason = "model_not_registered"
+                _ensure_vocab_cached(enc_name)
+                self._enc = tiktoken.get_encoding(enc_name)
+            finally:
+                _ENCODING_LOAD_LOCK.release()
             self.measurement_tokenizer = getattr(self._enc, "name", default_encoding)
             self._fallback_warning_printed = False
-        except Exception:
+            _note_vocab_success()
+        except Exception as exc:
+            # Any load failure (cooldown, lock timeout, download error) must
+            # never propagate: construction runs on the request path and a
+            # raise here would hang/break the session exactly like the hang
+            # this guard exists to prevent.
+            if not _vocab_cooldown_active():
+                _note_vocab_failure(f"init_failed:{type(exc).__name__}")
             self._enc = None
             self.measurement_source = "string_length_fallback"
             self.measurement_tokenizer = "unicode_codepoints"
@@ -160,7 +303,9 @@ class TiktokenCounter(TokenCounter):
         if self._enc is None:
             if not self._fallback_warning_printed:
                 self._fallback_warning_printed = True
-                logger.warning("Tiktoken initialization failed, using the character-based token estimate.")
+                context_engine_logger.warning(
+                    "Tiktoken initialization failed, using the character-based token estimate."
+                )
             return estimate_tokens(text)
         try:
             count = count_with_guard(
@@ -171,7 +316,7 @@ class TiktokenCounter(TokenCounter):
         except UnicodeEncodeError:
             # Deliberately uncached: this estimate must not be replayed as an exact
             # count, and the attribution below belongs to this count only.
-            logger.warning(
+            context_engine_logger.warning(
                 f"Tiktoken encoding failed for text (len={len(text)}), using the character-based token estimate."
             )
             self.measurement_source = "string_length_fallback"
