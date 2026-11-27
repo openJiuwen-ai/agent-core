@@ -47,21 +47,6 @@ sys.modules.setdefault("dashscope.api_entities.dashscope_response", dashscope_re
 sys.modules.setdefault("dashscope.common", dashscope_common_module)
 sys.modules.setdefault("dashscope.common.constants", dashscope_constants_module)
 
-
-def _mock_is_successful(*args, **kwargs):
-    return True
-
-
-pymilvus_module = types.ModuleType("pymilvus")
-pymilvus_client_module = types.ModuleType("pymilvus.client")
-pymilvus_utils_module = types.ModuleType("pymilvus.client.utils")
-pymilvus_utils_module.is_successful = _mock_is_successful
-pymilvus_client_module.utils = pymilvus_utils_module
-pymilvus_module.client = pymilvus_client_module
-sys.modules.setdefault("pymilvus", pymilvus_module)
-sys.modules.setdefault("pymilvus.client", pymilvus_client_module)
-sys.modules.setdefault("pymilvus.client.utils", pymilvus_utils_module)
-
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.context_engine import ContextEngineConfig
 from openjiuwen.core.context_engine.context.context import SessionModelContext
