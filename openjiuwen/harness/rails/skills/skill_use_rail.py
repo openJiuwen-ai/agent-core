@@ -253,12 +253,9 @@ class SkillUseRail(DeepAgentRail):
         # write its stale result back.
         self._cached_language: Optional[str] = None
         self._cache_generation: int = 0
-        # Monotonic counter & opaque in-process token bumped only when
-        # ``set_sys_operation`` switches from one bound backend to another on
-        # this rail instance. Persisted on session reconciliation so wrapper
-        # recreation across turns never rewrites the baseline a second time
-        # while retaining zero session references in memory on the rail.
-        self._binding_epoch: int = 0
+        # Distinguish this rail's first bind (which may restore a session)
+        # from a later bind, even when the rail was unbound in between.
+        self._has_bound_sys_operation = False
         self._binding_token: Optional[str] = None
         # Scans are numbered as well: an older scan that resumes after a
         # newer one started must not commit over the newer result even when
@@ -323,6 +320,7 @@ class SkillUseRail(DeepAgentRail):
         if not self._scan_still_current(scan, target_lang):
             return None
         self._stamp_committed_signature()
+        self._last_committed_refresh_token = scan
         return scan
 
     async def reload_skills(self) -> None:
@@ -377,6 +375,13 @@ class SkillUseRail(DeepAgentRail):
             and self._current_description_language() == target_lang
         )
 
+    def _has_current_skill_view(self) -> bool:
+        """A scan that only started or partially completed is not a usable view."""
+        return (
+            self._last_committed_refresh_token == (self._cache_generation, self._scan_seq)
+            and self._cached_language == self._current_description_language()
+        )
+
     async def _run_refresh_prompt(self, ctx: AgentCallbackContext) -> bool:
         """Run ``refresh_skill_prompt(ctx)`` and return whether *this* call committed."""
         generation = self._cache_generation
@@ -401,6 +406,7 @@ class SkillUseRail(DeepAgentRail):
             return False
         if self._cached_language is None:
             self._cached_language = target_lang
+        self._last_committed_refresh_token = (generation, self._scan_seq)
         return True
 
     def set_sys_operation(self, sys_operation: Any) -> None:
@@ -413,9 +419,10 @@ class SkillUseRail(DeepAgentRail):
         changed = sys_operation is not prev_operation
         super().set_sys_operation(sys_operation)
         if changed:
-            if prev_operation is not None and sys_operation is not None:
-                self._binding_epoch += 1
-                self._binding_token = uuid.uuid4().hex
+            if sys_operation is not None:
+                if self._has_bound_sys_operation:
+                    self._binding_token = uuid.uuid4().hex
+                self._has_bound_sys_operation = True
             self.clear_skills()
 
     def mount_skill_root(self, directory: str | Path) -> SkillRootMount:
@@ -793,12 +800,8 @@ class SkillUseRail(DeepAgentRail):
         _ = ctx
         committed = await self._refresh_view()
         slot = _REFRESH_OUTCOME.get()
-        if committed is not None:
-            self._last_committed_refresh_token = committed
-            if slot is not None:
-                slot[0] = committed
-        elif slot is not None:
-            slot[0] = False
+        if slot is not None:
+            slot[0] = committed if committed is not None else False
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Prepare skills before invoke.
@@ -1148,9 +1151,13 @@ class SkillUseRail(DeepAgentRail):
         """
         self._invalidate_if_language_changed()
         if self._load_session_state(session) is None:
+            if self.sys_operation is not None and self._binding_token is not None and not self._has_current_skill_view():
+                return []
             return list(self.skills)
 
-        merged = list(self._reconcile_session_baseline(session) or [])
+        merged = self._reconcile_session_baseline(session)
+        if merged is None:
+            return []
         known_names = {skill.name for skill in merged}
         merged.extend(skill for skill in self.skills if skill.name not in known_names)
         return merged
@@ -1162,13 +1169,15 @@ class SkillUseRail(DeepAgentRail):
           overwrites an already-bound or legacy persisted session.
         - Once a ``sys_operation`` is bound, a ``provisional=True`` baseline is
           replaced by the bound backend's committed view.
-        - When ``set_sys_operation`` explicitly switches one bound backend to
-          another on this live rail instance (``_binding_token`` is set), each
-          session is reconciled once to the newly bound backend and records the
-          token in session state so wrapper recreation across turns preserves
-          the baseline without retaining session objects on the rail.
+        - A later bind on this rail instance (including after an unbind)
+          replaces each session's baseline once the current view commits.
+          The session records the token so recreating its wrapper does not
+          reconcile the same binding twice.
         - A prompt-language switch re-localizes descriptions in place while
           preserving baseline skill membership and order.
+
+        Returns None if there is no baseline to reconcile or if it is waiting
+        for the current binding to commit.
         """
         self._invalidate_if_language_changed()
         state = self._load_session_state(session)
@@ -1191,13 +1200,9 @@ class SkillUseRail(DeepAgentRail):
         )
 
         if provisional_promoted or live_rebound:
-            if self._cached_language is not None:
-                self._save_session_baseline(
-                    session,
-                    self.skills,
-                    provisional=self.sys_operation is None,
-                    language=self._cached_language,
-                )
+            if not self._has_current_skill_view():
+                return None
+            self._save_session_baseline(session, self.skills, provisional=False)
             return list(self.skills)
 
         if (
@@ -1240,7 +1245,7 @@ class SkillUseRail(DeepAgentRail):
         if self._load_session_state(session) is None:
             # Only a rail that has committed a view may establish a baseline:
             # a cleared, not yet refreshed rail must not freeze [].
-            if self._cached_language is not None:
+            if self._has_current_skill_view():
                 self._save_session_baseline(session, self.skills)
             return
         self._reconcile_session_baseline(session)
