@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import base64
+import difflib
 import hashlib
 import html
 import io
@@ -2057,6 +2058,91 @@ class EditFileTool(Tool):
     # Static helpers
     # ------------------------------------------------------------------
 
+    _APPLIED_EDIT_SIMILARITY_THRESHOLD: float = 0.6
+    _APPLIED_EDIT_SIMILARITY_MAX_CHARS: int = 4000
+    _APPLIED_EDIT_MAX_LINE_HINTS: int = 3
+
+    @staticmethod
+    def _normalize_for_similarity(value: str) -> str:
+        """Drop per-line indentation and blank lines so layout-only diffs do not skew similarity."""
+        lines = (line.strip() for line in value.strip().splitlines())
+        return "\n".join(line for line in lines if line)
+
+    @classmethod
+    def _looks_like_applied_edit(cls, old_clean: str, new_clean: str) -> bool:
+        """Guess whether new_string is the post-edit form of old_string.
+
+        A re-sent edit leaves old_string absent while new_string is present, and the
+        two texts stay similar. Requiring similarity keeps an unrelated occurrence of
+        a generic new_string (``pass``, ``return None``, ...) from being mistaken for
+        this edit, which would otherwise make the model skip a change never made.
+        Very large blocks skip the check: similarity is quadratic, and skipping only
+        drops the hint.
+        """
+        old_norm = cls._normalize_for_similarity(old_clean)
+        new_norm = cls._normalize_for_similarity(new_clean)
+        if not old_norm or not new_norm:
+            return False
+        if max(len(old_norm), len(new_norm)) > cls._APPLIED_EDIT_SIMILARITY_MAX_CHARS:
+            return False
+        ratio = difflib.SequenceMatcher(None, old_norm, new_norm, autojunk=False).ratio()
+        return ratio >= cls._APPLIED_EDIT_SIMILARITY_THRESHOLD
+
+    @classmethod
+    def _occurrence_lines(cls, content: str, needle: str) -> Tuple[List[int], int]:
+        """Return the first few 1-based line numbers of needle plus its total count."""
+        total = content.count(needle)
+        lines: List[int] = []
+        start = 0
+        while len(lines) < cls._APPLIED_EDIT_MAX_LINE_HINTS:
+            index = content.find(needle, start)
+            if index < 0:
+                break
+            lines.append(content.count("\n", 0, index) + 1)
+            start = index + len(needle)
+        return lines, total
+
+    @classmethod
+    def _old_string_not_found_error(
+        cls,
+        file_path: str,
+        old_clean: str,
+        new_clean: str,
+        content_lf: str,
+        where: str = "old_string",
+    ) -> str:
+        """Build the "not found" error, hinting when the edit looks already applied.
+
+        old_string is gone but a similar new_string is present: the edit was most
+        likely applied by an earlier call (e.g. the model re-sent a successful edit),
+        so say so and ask the model to confirm instead of retrying blindly. The hint
+        stays advisory: an unapplied edit must still be reachable by fixing
+        old_string. Skip when new_string is empty or a substring of old_string
+        (shrinking/deleting edits), where its presence proves nothing. Shared by
+        subclasses (e.g. FlashEditFileTool).
+        """
+        base = f"{where} not found in '{file_path}'"
+        # A variant-matched edit is written back with the file's quote style, so a
+        # retry's new_string differs byte-for-byte. Compare quote-insensitively;
+        # the substitution is 1:1, so offsets and line numbers stay valid.
+        new_norm = cls._normalize_quotes(new_clean)
+        old_norm = cls._normalize_quotes(old_clean)
+        content_norm = cls._normalize_quotes(content_lf)
+        new_present_elsewhere = new_norm and new_norm not in old_norm and new_norm in content_norm
+        if not new_present_elsewhere or not cls._looks_like_applied_edit(old_clean, new_clean):
+            return f"{base}."
+        lines, total = cls._occurrence_lines(content_norm, new_norm)
+        if total == 1:
+            location = f"at line {lines[0]}"
+        else:
+            hint_lines = ", ".join(str(line_no) for line_no in lines)
+            location = f"at {total} places (first lines: {hint_lines})"
+        return (
+            f"{base}, but new_string already exists {location}. "
+            "It looks like this edit was already applied by an earlier call. "
+            "Verify with read_file; if the change is missing, correct old_string and retry."
+        )
+
     # Mirrors TS DESANITIZATIONS table in FileEditTool/utils.ts.
     # Claude cannot output certain XML tokens (they're sanitized by the API), so it
     # emits compressed abbreviations that the Edit tool must reverse.
@@ -2449,7 +2535,9 @@ class EditFileTool(Tool):
             if variant is None:
                 return ToolOutput(
                     success=False,
-                    error=f"old_string not found in '{file_path}'.",
+                    error=self._old_string_not_found_error(
+                        file_path, old_str_clean, new_str_clean, content_lf
+                    ),
                 )
             match_str = variant
             new_str_clean = self._preserve_quote_style(old_str_clean, match_str, new_str_clean)

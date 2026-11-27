@@ -525,6 +525,145 @@ async def test_edit_file(sys_op, temp_dir):
     assert "Hell0 Google" in read_res.data.content
 
 
+async def _prepare_edit_file(sys_op, temp_dir, name, content):
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, name)
+    await write_tool.invoke({"file_path": file_path, "content": content})
+    await read_tool.invoke({"file_path": file_path})
+    return file_path
+
+
+@pytest.mark.asyncio
+async def test_edit_retry_after_applied_hints_already_applied(sys_op, temp_dir):
+    # OA.05000060: the model re-sent an edit that had already succeeded; the bare
+    # "old_string not found" gave it no clue the edit was in place, so it looped.
+    content = "line one\n    wrapLabel(row, likes, 16, GRAY, 380, 30, 70, -44);\nline three\n"
+    file_path = await _prepare_edit_file(sys_op, temp_dir, "applied.ts", content)
+    edit_tool = EditFileTool(sys_op)
+    inputs = {
+        "file_path": file_path,
+        "old_string": "    wrapLabel(row, likes, 16, GRAY, 380, 30, 70, -44);",
+        "new_string": "    wrapLabel(row, likes, 16, 380, 30, GRAY, 70, -44);",
+        "replace_all": False,
+    }
+
+    first = await edit_tool.invoke(dict(inputs))
+    assert first.success is True
+
+    retry = await edit_tool.invoke(dict(inputs))
+    assert retry.success is False
+    assert retry.error.startswith("old_string not found in ")
+    assert "already exists at line 2" in retry.error
+    assert "already applied" in retry.error
+
+
+@pytest.mark.asyncio
+async def test_edit_retry_after_quote_variant_hints_already_applied(sys_op, temp_dir):
+    # The first edit only matched a quote variant, so the file now holds the
+    # quote-preserved new_string while the retry sends the original quotes.
+    # The hint must survive that byte-level difference.
+    content = "wrapLabel(‘旅行人’, 17);\n"
+    file_path = await _prepare_edit_file(sys_op, temp_dir, "quotes.ts", content)
+    edit_tool = EditFileTool(sys_op)
+    inputs = {
+        "file_path": file_path,
+        "old_string": "wrapLabel('旅行人', 17);",
+        "new_string": "wrapLabel('旅人', 17);",
+        "replace_all": False,
+    }
+
+    first = await edit_tool.invoke(dict(inputs))
+    assert first.success is True
+
+    retry = await edit_tool.invoke(dict(inputs))
+    assert retry.success is False
+    assert "already exists at line 1" in retry.error
+    assert "already applied" in retry.error
+
+
+@pytest.mark.asyncio
+async def test_edit_old_and_new_missing_keeps_original_error(sys_op, temp_dir):
+    file_path = await _prepare_edit_file(sys_op, temp_dir, "missing.txt", "alpha\nbeta\n")
+    edit_tool = EditFileTool(sys_op)
+
+    res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "gamma",
+        "new_string": "delta",
+    })
+    assert res.success is False
+    assert res.error == f"old_string not found in '{file_path}'."
+
+
+@pytest.mark.asyncio
+async def test_edit_deletion_retry_no_false_hint(sys_op, temp_dir):
+    # new_string is a substring of old_string (shrinking edit): its presence in the
+    # file proves nothing, so the "already applied" hint must not fire.
+    file_path = await _prepare_edit_file(sys_op, temp_dir, "shrink.txt", "keep this\nfoo bar\n")
+    edit_tool = EditFileTool(sys_op)
+
+    res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "keep this extra",
+        "new_string": "keep this",
+    })
+    assert res.success is False
+    assert res.error == f"old_string not found in '{file_path}'."
+
+
+@pytest.mark.asyncio
+async def test_edit_empty_new_string_no_hint(sys_op, temp_dir):
+    file_path = await _prepare_edit_file(sys_op, temp_dir, "empty_new.txt", "alpha\nbeta\n")
+    edit_tool = EditFileTool(sys_op)
+
+    res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "gamma",
+        "new_string": "",
+    })
+    assert res.success is False
+    assert res.error == f"old_string not found in '{file_path}'."
+
+
+@pytest.mark.asyncio
+async def test_edit_misspelled_old_string_with_existing_new_string_no_hint(sys_op, temp_dir):
+    # old_string is misspelled while new_string is a generic snippet that already
+    # exists elsewhere in the file. That proves nothing about this edit, so the
+    # "already applied" hint must not fire and the model must be free to retry.
+    file_path = await _prepare_edit_file(
+        sys_op, temp_dir, "generic_new.py",
+        "def run():\n    return None\n",
+    )
+    edit_tool = EditFileTool(sys_op)
+
+    res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "    raise RuntimeError('not implemented yet')",
+        "new_string": "return None",
+    })
+    assert res.success is False
+    assert res.error == f"old_string not found in '{file_path}'."
+
+
+@pytest.mark.asyncio
+async def test_edit_applied_hint_reports_multiple_occurrences(sys_op, temp_dir):
+    # new_string shows up more than once: reporting only the first line would point
+    # the model at an unrelated occurrence, so all leading hits are listed.
+    file_path = await _prepare_edit_file(sys_op, temp_dir, "multi.txt", "x = 1\nx = 1\n")
+    edit_tool = EditFileTool(sys_op)
+
+    res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "x = 2",
+        "new_string": "x = 1",
+    })
+    assert res.success is False
+    assert res.error.startswith("old_string not found in ")
+    assert "already exists at 2 places (first lines: 1, 2)" in res.error
+    assert "already applied" in res.error
+
+
 @pytest.mark.asyncio
 async def test_glob_and_ls(sys_op, temp_dir):
     write_tool = WriteFileTool(sys_op)
