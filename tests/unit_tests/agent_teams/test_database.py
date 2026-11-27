@@ -2093,6 +2093,156 @@ class TestMessageOperations:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
+    async def test_fetch_mailbox_probe_matches_separate_reads(self, db):
+        """邮箱探针与四次独立读结果一致：状态/角色同行走、直信未读按
+        is_read、广播未读按 MessageReadStatus 水位、自发广播剔除。"""
+        token = set_session_id("session_id")
+        try:
+            await db.team.create_team(
+                team_name="team-mb", display_name="MB", leader_member_name="leader-mb"
+            )
+            card = AgentCard(name="DevAgent").model_dump_json()
+            await db.member.create_member(
+                member_name="dev-mb", team_name="team-mb", display_name="Dev MB",
+                agent_card=card, status="ready",
+            )
+            await db.member.create_member(
+                member_name="hum-mb", team_name="team-mb", display_name="Human MB",
+                agent_card=card, status="ready", role="human_agent",
+            )
+            await db.message.create_message(
+                message_id="m-d-unread", team_name="team-mb", from_member_name="leader-mb",
+                to_member_name="dev-mb", content="hi", broadcast=False,
+            )
+            await db.message.create_message(
+                message_id="m-d-read", team_name="team-mb", from_member_name="leader-mb",
+                to_member_name="dev-mb", content="old", broadcast=False,
+            )
+            await db.message.create_message(
+                message_id="m-b-unread", team_name="team-mb", from_member_name="leader-mb",
+                content="all", broadcast=True,
+            )
+            await db.message.create_message(
+                message_id="m-self", team_name="team-mb", from_member_name="dev-mb",
+                content="self bc", broadcast=True,
+            )
+
+            checkout_count = 0
+            original_read = db._sessions.read
+
+            def counting_read():
+                nonlocal checkout_count
+                checkout_count += 1
+                return original_read()
+
+            # —— 阶段一：无任何已读标记
+            db._sessions.read = counting_read
+            try:
+                probe = await db.fetch_mailbox_probe("team-mb", "dev-mb")
+            finally:
+                db._sessions.read = original_read
+            assert checkout_count == 1  # 单连接取齐
+            assert probe is not None
+            status, is_human, direct, broadcasts = probe
+            assert status == await db.member.get_member_status("team-mb", "dev-mb")
+            assert is_human is (await db.member.is_human_agent("team-mb", "dev-mb"))
+            assert [m.message_id for m in direct] == [
+                m.message_id for m in await db.message.get_messages(
+                    team_name="team-mb", to_member_name="dev-mb", unread_only=True,
+                )
+            ]
+            assert [m.message_id for m in broadcasts] == [
+                m.message_id for m in await db.message.get_broadcast_messages(
+                    team_name="team-mb", member_name="dev-mb", unread_only=True,
+                )
+            ]
+            assert "m-self" not in [m.message_id for m in broadcasts]
+
+            # —— 阶段二：标读后（直信 is_read + 广播水位）
+            await db.message.mark_messages_read(["m-d-read", "m-b-unread"], "dev-mb")
+            probe = await db.fetch_mailbox_probe("team-mb", "dev-mb")
+            assert probe is not None
+            _, _, direct, broadcasts = probe
+            assert "m-d-read" not in [m.message_id for m in direct]
+            assert broadcasts == []
+
+            # —— 角色行区分
+            probe_hum = await db.fetch_mailbox_probe("team-mb", "hum-mb")
+            assert probe_hum is not None and probe_hum[1] is True
+        finally:
+            reset_session_id(token)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_fetch_team_snapshot_probe_matches_separate_reads(self, db):
+        """快照探针与三读一致，且单连接取齐（team_info/成员/任务）。"""
+        token = set_session_id("session_id")
+        try:
+            await db.team.create_team(
+                team_name="team-snap", display_name="Snap", leader_member_name="leader-snap"
+            )
+            card = AgentCard(name="DevAgent").model_dump_json()
+            await db.member.create_member(
+                member_name="dev-snap", team_name="team-snap", display_name="Dev Snap",
+                agent_card=card, status="ready",
+            )
+            await db.task.create_task(
+                task_id="t-snap-1", team_name="team-snap", title="A", content="c",
+                status="in_progress",
+            )
+            await db.task.create_task(
+                task_id="t-snap-2", team_name="team-snap", title="B", content="c",
+                status="pending",
+            )
+
+            checkout_count = 0
+            original_read = db._sessions.read
+
+            def counting_read():
+                nonlocal checkout_count
+                checkout_count += 1
+                return original_read()
+
+            db._sessions.read = counting_read
+            try:
+                probe = await db.fetch_team_snapshot_probe("team-snap")
+            finally:
+                db._sessions.read = original_read
+            assert checkout_count == 1
+            assert probe is not None
+            team, members, tasks = probe
+            expected_team = await db.team.get_team("team-snap")
+            assert team is not None and team.team_name == expected_team.team_name
+            assert {m.member_name for m in members} == {
+                m.member_name for m in await db.member.get_team_members("team-snap")
+            }
+            assert {t.task_id for t in tasks} == {
+                t.task_id for t in await db.task.get_team_tasks("team-snap")
+            }
+            assert {t.task_id for t in tasks} == {"t-snap-1", "t-snap-2"}
+        finally:
+            reset_session_id(token)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_mailbox_and_snapshot_probes_return_none_after_retry_exhaustion(self, db, monkeypatch):
+        """瞬时错误重试耗尽后两个新探针均返回 None（调用方按不可得处理）。"""
+        from sqlalchemy.exc import OperationalError as _OperationalError
+
+        def failing_read():
+            raise _OperationalError("SELECT 1", {}, Exception("database is locked"))
+
+        monkeypatch.setattr(db._sessions, "read", failing_read)
+        monkeypatch.setattr(
+            "openjiuwen.agent_teams.tools.database.engine.asyncio.sleep",
+            AsyncMock(),
+        )
+
+        assert await db.fetch_mailbox_probe("team-x", "m1") is None
+        assert await db.fetch_team_snapshot_probe("team-x") is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_messages_for_member(self, db):
         """Test getting messages for a specific member"""
         set_session_id("session_id")  # 夹具绑定对用例体不可见（pytest-asyncio Context 隔离），体内绑定
