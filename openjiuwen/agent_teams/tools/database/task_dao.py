@@ -1298,7 +1298,18 @@ class TaskDao:
             return task
 
     async def update_task_status(self, task_id: str, status: str) -> bool:
-        """Update task status."""
+        """Update task status.
+
+        Warning: this writes the row status directly and emits **no** task
+        event (``TASK_CANCELLED`` / ``TASK_RELEASED`` / etc.). Every
+        terminal task-status transition must go through ``TeamTaskManager``
+        (``cancel`` / ``reset`` / ``complete``) so the DB row and the event
+        stream stay in sync — a status change with no matching event is
+        exactly the divergence behind issue #181 (a task shows ``cancelled``
+        in the DB while ``history.jsonl`` records no cancel). There is no
+        production caller of this setter inside ``agent_teams/``; keep it
+        that way for terminal statuses.
+        """
         team_task_model = _get_task_model()
         task_dependency_model = _get_task_dependency_model()
         async with self._sessions.write() as session:

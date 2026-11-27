@@ -914,6 +914,90 @@ class TestMemberOperations:
         members = await db.member.get_team_members("team9")
         assert members == []
 
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_get_team_members_exclude_statuses_drops_shut_down_keeps_dormant(self, db):
+        """exclude_statuses drops ``shut_down`` but keeps ``dormant`` (issue #181).
+
+        The roster-departed contract (``is_departed_member``) treats only
+        terminal ``shut_down`` as departed; ``dormant`` and
+        ``shutdown_requested`` stay on the roster. ``exclude_statuses`` must
+        honor that so a roster projection never resurrects a departed member.
+        """
+        from openjiuwen.agent_teams.schema.status import MemberStatus
+
+        await db.team.create_team(
+            team_name="team_exclude",
+            display_name="Team Exclude",
+            leader_member_name="leader_exclude",
+        )
+        agent_card = AgentCard(name="TestAgent").model_dump_json()
+        for name, status in (
+            ("m_ready", MemberStatus.READY.value),
+            ("m_shutdown", MemberStatus.SHUTDOWN.value),
+            ("m_dormant", MemberStatus.DORMANT.value),
+        ):
+            await db.member.create_member(
+                member_name=name,
+                team_name="team_exclude",
+                display_name=name,
+                agent_card=agent_card,
+                status=status,
+            )
+
+        # Default: every row is returned (callers that need the full set).
+        all_members = await db.member.get_team_members("team_exclude")
+        assert {m.member_name for m in all_members} == {
+            "m_ready",
+            "m_shutdown",
+            "m_dormant",
+        }
+
+        # exclude_statuses={shut_down}: departed dropped, dormant kept.
+        filtered = await db.member.get_team_members(
+            "team_exclude",
+            exclude_statuses={MemberStatus.SHUTDOWN.value},
+        )
+        assert {m.member_name for m in filtered} == {"m_ready", "m_dormant"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_get_member_roster_exclude_statuses_drops_shut_down(self, db):
+        """Roster projection honors ``exclude_statuses`` (issue #181)."""
+        from openjiuwen.agent_teams.schema.status import MemberStatus
+
+        await db.team.create_team(
+            team_name="team_roster_exclude",
+            display_name="Team Roster Exclude",
+            leader_member_name="leader_roster_exclude",
+        )
+        agent_card = AgentCard(name="TestAgent").model_dump_json()
+        await db.member.create_member(
+            member_name="m_ready",
+            team_name="team_roster_exclude",
+            display_name="Ready",
+            agent_card=agent_card,
+            status=MemberStatus.READY.value,
+        )
+        await db.member.create_member(
+            member_name="m_shutdown",
+            team_name="team_roster_exclude",
+            display_name="Shutdown",
+            agent_card=agent_card,
+            status=MemberStatus.SHUTDOWN.value,
+        )
+
+        roster = await db.member.get_member_roster(
+            "team_roster_exclude",
+            exclude_statuses={MemberStatus.SHUTDOWN.value},
+        )
+        names = {row[0] for row in roster}
+        assert names == {"m_ready"}
+
+        # Without exclusion the departed member is still visible (full set).
+        full_roster = await db.member.get_member_roster("team_roster_exclude")
+        assert {row[0] for row in full_roster} == {"m_ready", "m_shutdown"}
+
 
 class TestTaskOperations:
     """Test task CRUD operations"""

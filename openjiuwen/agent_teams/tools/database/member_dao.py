@@ -4,7 +4,7 @@
 """Member table data access object."""
 
 from enum import Enum
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -300,20 +300,38 @@ class MemberDao:
             )
             return result.scalar_one_or_none()
 
-    async def get_team_members(self, team_name: str, status: str | None = None) -> List[TeamMember]:
+    async def get_team_members(
+        self,
+        team_name: str,
+        status: str | None = None,
+        exclude_statuses: Iterable[str] | None = None,
+    ) -> List[TeamMember]:
         """Get members for a team, optionally filtered by status.
 
         Args:
             team_name: Team identifier.
             status: If provided, only return members with this status.
+            exclude_statuses: If provided, drop members whose status is in
+                this set. Roster projections use this to keep departed
+                (``shut_down``) members out of the active roster while leaving
+                ``dormant`` / ``shutdown_requested`` members visible — matching
+                ``is_departed_member`` (terminal ``shut_down`` only). Defaults
+                to ``None`` (no exclusion) for callers that need the full row
+                set (recovery, membership, name-uniqueness guards).
         """
         async with self._sessions.read() as session:
             stmt = select(TeamMember).where(TeamMember.team_name == team_name)
             if status is not None:
                 stmt = stmt.where(TeamMember.status == status)
+            if exclude_statuses:
+                stmt = stmt.where(TeamMember.status.not_in(list(exclude_statuses)))
             return (await session.execute(stmt)).scalars().all()
 
-    async def get_member_roster(self, team_name: str) -> List[tuple[str, str, str]]:
+    async def get_member_roster(
+        self,
+        team_name: str,
+        exclude_statuses: Iterable[str] | None = None,
+    ) -> List[tuple[str, str, str]]:
         """Get a projected roster of ``(member_name, display_name, status)``.
 
         A column projection instead of ``select(TeamMember)`` so the roster
@@ -322,6 +340,9 @@ class MemberDao:
 
         Args:
             team_name: Team identifier.
+            exclude_statuses: If provided, drop members whose status is in
+                this set. See ``get_team_members`` for the roster-departed
+                contract (``shut_down`` only; ``dormant`` stays visible).
 
         Returns:
             One ``(member_name, display_name, status)`` tuple per member.
@@ -332,6 +353,8 @@ class MemberDao:
                 TeamMember.display_name,
                 TeamMember.status,
             ).where(TeamMember.team_name == team_name)
+            if exclude_statuses:
+                stmt = stmt.where(TeamMember.status.not_in(list(exclude_statuses)))
             rows = (await session.execute(stmt)).all()
             return [(row.member_name, row.display_name, row.status) for row in rows]
 

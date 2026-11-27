@@ -1464,15 +1464,31 @@ class TeamTaskManager:
         return cancelled_tasks
 
     async def _publish_task_event(self, event, *, error_label: str) -> None:
-        """Publish a task event on the team task topic; log on failure."""
+        """Publish a task event on the team task topic; log on failure.
+
+        A task status transition and its event must stay in sync (issue #181):
+        the DB row is committed by the caller before this publish, so a
+        publish failure leaves the DB ahead of the event stream — the very
+        gap that lets a task show ``cancelled`` in the DB while no
+        ``TASK_CANCELLED`` ever reaches subscribers (and hence ``history.jsonl``).
+        Surface such divergences loudly with the team, task id and event type
+        so a missed ``TASK_CANCELLED`` / ``TASK_RELEASED`` is diagnosable from
+        logs instead of being silently swallowed.
+        """
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                 message=EventMessage.from_event(event),
             )
             team_logger.debug(f"Published: {error_label}")
-        except Exception as e:
-            team_logger.error(f"Failed to publish {error_label}: {e}")
+        except Exception:
+            team_logger.exception(
+                "Failed to publish task event: team=%s task_id=%s event=%s label=%s",
+                self.team_name,
+                getattr(event, "task_id", None),
+                type(event).__name__,
+                error_label,
+            )
 
     async def _start_human_assigned_task_if_ready(self, task: TeamTaskBase) -> bool:
         """Start a ready task already assigned to a live human member.

@@ -1880,12 +1880,20 @@ class TeamBackend:
         return self._leader_name_cache
 
     async def list_members(self) -> List[TeamMember]:
-        """List all team members
+        """List all team members, excluding departed (``shut_down``) peers.
+
+        Departed members are kept out so the roster announcement
+        (``team_context``) and any roster projection never lists a member that
+        has left the team (issue #181). ``dormant`` / ``shutdown_requested``
+        members stay visible — see ``list_member_roster`` for the contract.
 
         Returns:
-            List of TeamMember info
+            List of TeamMember info.
         """
-        members = await self.db.member.get_team_members(self.team_name)
+        members = await self.db.member.get_team_members(
+            self.team_name,
+            exclude_statuses={MemberStatus.SHUTDOWN.value},
+        )
         return [self._overlay_member(m) for m in members if m.member_name != self.member_name]
 
     async def list_member_roster(self) -> List[MemberRosterEntry]:
@@ -1897,10 +1905,25 @@ class TeamBackend:
         fields — avoids pulling every member's ``agent_card`` / ``prompt`` /
         ``options`` out of the DB on each call.
 
+        Departed (``shut_down``) members are kept out of the roster — they
+        have left the team and must never appear in the active roster the
+        LLM / frontend restore from (issue #181). ``dormant`` and
+        ``shutdown_requested`` members stay visible: a dormant member is
+        retired on purpose and wakes on mention, and a ``shutdown_requested``
+        member is still being delivered to until it settles. This matches
+        ``is_departed_member`` (terminal ``shut_down`` only) and the
+        ``_split_roster`` contract used by the snapshot paths. Callers that
+        need departed rows (recovery, name-uniqueness) already skip
+        ``shut_down`` in their own loops, so excluding them here is a no-op
+        for those paths.
+
         Returns:
             One ``MemberRosterEntry`` per member, the calling member removed.
         """
-        rows = await self.db.member.get_member_roster(self.team_name)
+        rows = await self.db.member.get_member_roster(
+            self.team_name,
+            exclude_statuses={MemberStatus.SHUTDOWN.value},
+        )
         return [
             MemberRosterEntry(member_name=name, display_name=display_name, status=status)
             for name, display_name, status in rows
