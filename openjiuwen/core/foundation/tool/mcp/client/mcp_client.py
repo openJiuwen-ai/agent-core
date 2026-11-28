@@ -3,7 +3,7 @@
 from abc import abstractmethod
 from typing import Any, List, Optional
 
-from openjiuwen.core.foundation.tool.mcp.base import McpServerConfig, NO_TIMEOUT
+from openjiuwen.core.foundation.tool.mcp.base import McpServerConfig, McpToolCard, NO_TIMEOUT
 from openjiuwen.core.common.clients import BaseClient
 
 
@@ -25,7 +25,7 @@ class McpClient(BaseClient):
         pass
 
     @abstractmethod
-    async def list_tools(self, *, timeout: float = NO_TIMEOUT) -> List[Any]:
+    async def list_tools(self, *, timeout: float = NO_TIMEOUT) -> List[McpToolCard]:
         pass
 
     @abstractmethod
@@ -33,8 +33,17 @@ class McpClient(BaseClient):
         pass
 
     @abstractmethod
-    async def get_tool_info(self, tool_name: str, *, timeout: float = NO_TIMEOUT) -> Optional[Any]:
+    async def get_tool_info(
+        self, tool_name: str, *, timeout: float = NO_TIMEOUT
+    ) -> Optional[McpToolCard]:
         pass
+
+    async def get_tool_schema(
+        self, tool_name: str, *, timeout: float = NO_TIMEOUT
+    ) -> Optional[dict[str, Any]]:
+        """Return the server-declared input JSON Schema without copying its constraints."""
+        tool_info = await self.get_tool_info(tool_name, timeout=timeout)
+        return tool_info.input_params if tool_info else None
 
     @abstractmethod
     async def list_resources(self, *, timeout: float = NO_TIMEOUT) -> List[Any]:

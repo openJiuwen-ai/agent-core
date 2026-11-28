@@ -497,7 +497,7 @@ class StreamableHttpClient(McpClient):
             raise
 
     @with_reconnect
-    async def list_tools(self, *, timeout: float = NO_TIMEOUT) -> List[Any]:
+    async def list_tools(self, *, timeout: float = NO_TIMEOUT) -> List[McpToolCard]:
         """List available tools via streamable-http."""
         if not self._session:
             raise RuntimeError("Not connected to streamable-http server")
@@ -547,7 +547,7 @@ class StreamableHttpClient(McpClient):
             logger.error("Tool call failed via streamable-http: %s", e)
             raise
 
-    async def get_tool_info(self, tool_name: str, *, timeout: float = NO_TIMEOUT) -> Optional[Any]:
+    async def get_tool_info(self, tool_name: str, *, timeout: float = NO_TIMEOUT) -> Optional[McpToolCard]:
         """Get specific tool info via streamable-http."""
         tools = await self.list_tools(timeout=timeout)
         for tool in tools:

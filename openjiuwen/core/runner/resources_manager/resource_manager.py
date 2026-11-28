@@ -9,6 +9,7 @@ from openjiuwen.core.common.exception.errors import ValidationError, build_error
 from openjiuwen.core.common.logging import LogEventType, runner_logger as logger
 
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
+from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.tool import Tool, ToolInfo, ToolCard
 from openjiuwen.core.multi_agent import BaseTeam, TeamCard
@@ -1209,6 +1210,25 @@ class ResourceMgr:
                 elif tool_card:
                     results.append(tool_card.tool_info())
         return results
+
+    async def get_mcp_tool_schema(
+        self, name: str, server_id: str, *, timeout: float = NO_TIMEOUT
+    ) -> Optional[dict[str, Any]]:
+        """Get the live server-declared input JSON Schema for one MCP tool.
+
+        The required server_id prevents ambiguous results when different servers
+        expose tools with the same name. A missing tool returns None; an
+        unregistered server raises the standard MCP tool lookup error.
+        This queries the live server and bypasses the registry metadata cache.
+        """
+        client = self._get_mcp_client(server_id)
+        if client is None:
+            raise build_error(
+                StatusCode.RESOURCE_MCP_TOOL_GET_ERROR,
+                server_id=server_id,
+                reason="server not found",
+            )
+        return await client.get_tool_schema(name, timeout=timeout)
 
     def get_mcp_server_config(self, server_id: str) -> Optional[McpServerConfig]:
         """Get MCP server configuration by server_id if it is already registered."""

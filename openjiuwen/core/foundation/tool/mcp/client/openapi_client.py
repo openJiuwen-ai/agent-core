@@ -212,8 +212,12 @@ class OpenApiClient(McpClient):
         except Exception as e:
             raise build_error(StatusCode.TOOL_OPENAPI_CLIENT_EXECUTION_ERROR, cause=e, reason=e)
 
-    async def get_tool_info(self, tool_name: str, *, timeout: float = NO_TIMEOUT) -> Any:
+    async def get_tool_info(
+        self, tool_name: str, *, timeout: float = NO_TIMEOUT
+    ) -> Optional[McpToolCard]:
         tool = await self._tool_manager.get_tool(tool_name)
+        if tool is None:
+            return None
         return McpToolCard(
             name=tool_name,
             server_name=self._name,

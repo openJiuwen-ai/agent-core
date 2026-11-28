@@ -107,7 +107,7 @@ class BrowserMoveStreamableHttpClient(StreamableHttpClient):
             self._get_session_id = None
             self._exit_stack = AsyncExitStack()
 
-    async def list_tools(self, *, timeout: float = NO_TIMEOUT) -> List[Any]:
+    async def list_tools(self, *, timeout: float = NO_TIMEOUT) -> list[McpToolCard]:
         """List available tools via Streamable HTTP, with auto-reconnect on transport errors."""
         if not self._session:
             connected = await self._reconnect(timeout=timeout)
@@ -192,7 +192,9 @@ class BrowserMoveStreamableHttpClient(StreamableHttpClient):
                 logger.error(f"Tool call failed via Streamable HTTP: {e}")
                 raise
 
-    async def get_tool_info(self, tool_name: str, *, timeout: float = NO_TIMEOUT) -> Optional[Any]:
+    async def get_tool_info(
+        self, tool_name: str, *, timeout: float = NO_TIMEOUT
+    ) -> McpToolCard | None:
         """Get specific tool info via Streamable HTTP."""
         tools = await self.list_tools(timeout=timeout)
         for tool in tools:
