@@ -215,6 +215,74 @@ async def test_tool_search_returns_complete_schema_in_results():
 
 
 @pytest.mark.asyncio
+async def test_tool_search_names_a_direct_tool_the_query_asks_for_as_already_loaded():
+    """A direct tool is never in the deferred index; naming it gets a pointer to call it, not unrelated matches."""
+
+    rail, _agent_instance, manager = _rail_and_agent()
+    manager.cards.append(
+        ToolCard(
+            id="native_app_record",
+            name="native_app_record",
+            description="Add one record to the app",
+            input_params={"type": "object", "properties": {}},
+            exposure=ToolExposure.DIRECT,
+        )
+    )
+    rail.seed_cached_tools(
+        all_tool_infos=[
+            ToolInfo(
+                name="cron_create_job",
+                description="Create a calendar reminder for an app record",
+                parameters=FULL_SCHEMA,
+            )
+        ]
+    )
+    search_tool = manager.registered["tool_search"][1]
+
+    output = await search_tool.invoke(
+        {"query": "select:native_app_record"},
+        session=_FakeSession(),
+    )
+
+    assert output.success is True
+    assert output.data["results"][0] == {
+        "name": "native_app_record",
+        "description": "Add one record to the app",
+        "parameters": {"type": "object", "properties": {}},
+        "loaded": True,
+    }
+    rendered = search_tool.render_for_llm(output)
+    assert "native_app_record is already loaded" in rendered
+    assert "call it by name, not through tool_call" in rendered
+    assert "native_app_record" not in rail._get_discovered_tools(_FakeSession())
+
+
+@pytest.mark.asyncio
+async def test_tool_search_without_a_direct_tool_name_returns_only_deferred_matches():
+    rail, _agent_instance, manager = _rail_and_agent()
+    manager.cards.append(
+        ToolCard(
+            id="native_app_record",
+            name="native_app_record",
+            description="Add one record to the app",
+            input_params={"type": "object", "properties": {}},
+            exposure=ToolExposure.DIRECT,
+        )
+    )
+    rail.seed_cached_tools(
+        all_tool_infos=[
+            ToolInfo(name="cron_create_job", description="Create a calendar reminder", parameters=FULL_SCHEMA)
+        ]
+    )
+    search_tool = manager.registered["tool_search"][1]
+
+    output = await search_tool.invoke({"query": "calendar"}, session=_FakeSession())
+
+    assert [item["name"] for item in output.data["results"]] == ["cron_create_job"]
+    assert "loaded" not in output.data["results"][0]
+
+
+@pytest.mark.asyncio
 async def test_tool_search_allows_model_limit_and_clamps_it():
     """The model may choose a limit, bounded by the server safety range."""
 

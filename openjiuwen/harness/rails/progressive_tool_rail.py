@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set
 
@@ -595,7 +596,33 @@ class ProgressiveToolRail(DeepAgentRail):
             },
         )
 
-        return [self._build_tool_schema(tool) for tool in matched]
+        return self._named_direct_tools(query) + [self._build_tool_schema(tool) for tool in matched]
+
+    def _named_direct_tools(self, query: str) -> List[Dict[str, Any]]:
+        """Direct tools the query names exactly; the deferred BM25 index never contains them."""
+        words = set(re.findall(r"[a-z0-9_.-]+", query))
+        list_abilities = getattr(self._tool_search_registry, "list", None)
+        if not words or not callable(list_abilities):
+            return []
+        named: List[Dict[str, Any]] = []
+        for card in list_abilities() or []:
+            name = str(getattr(card, "name", "") or "")
+            if (
+                isinstance(card, ToolCard)
+                and getattr(card, "exposure", ToolExposure.DIRECT) == ToolExposure.DIRECT
+                and name not in self._meta_tool_names
+                and name.lower() in words
+            ):
+                info = card.tool_info()
+                named.append(
+                    {
+                        "name": name,
+                        "description": str(getattr(info, "description", "") or ""),
+                        "parameters": getattr(info, "parameters", None) or {},
+                        "loaded": True,
+                    }
+                )
+        return named
 
     async def _call_discovered_tool(
         self,
