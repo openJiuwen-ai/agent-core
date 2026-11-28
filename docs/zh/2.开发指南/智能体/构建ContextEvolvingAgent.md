@@ -297,8 +297,9 @@ tests/unit_tests/extensions/context_evolver/
 
 ```python
 from openjiuwen.extensions.context_evolver.service.task_memory_service import TaskMemoryService
-from openjiuwen.extensions.context_evolver.context_evolving_react_agent import ContextEvolvingReActAgent, create_memory_agent_config
+from openjiuwen.extensions.context_evolver.context_evolving_react_agent import ContextEvolvingReActAgent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.single_agent import ReActAgentConfig
 from openjiuwen.extensions.context_evolver.service.task_memory_service import AddMemoryRequest
 
 # 步骤 1：创建记忆服务（共享实例）
@@ -328,15 +329,20 @@ agent = ContextEvolvingReActAgent(
     inject_memories_in_context=True,  # 自动将记忆添加到提示中
 )
 
-# 步骤 5：使用辅助函数进行配置
-agent_config = create_memory_agent_config(
-    model_provider="OpenAI",
+# 步骤 5：配置 ReAct 智能体
+agent_config = ReActAgentConfig()
+agent_config.configure_model_client(
+    provider="OpenAI",  # 例如 "OpenAI"、"SiliconFlow"
     api_key="your-api-key",
     api_base="https://api.openai.com/v1",
     model_name="gpt-5.2",
-    system_prompt="你是一个有帮助的软件工程助手。"
-                 "使用提供的记忆上下文来增强你的回答。",
+    verify_ssl=True,  # configure_model_client 默认为 False，生产环境务必开启 TLS 校验
 )
+agent_config.configure_prompt_template([{
+    "role": "system",
+    "content": "你是一个有帮助的软件工程助手。"
+               "使用提供的记忆上下文来增强你的回答。",
+}])
 agent.configure(agent_config)
 
 # 步骤 6：使用自动记忆检索进行调用
@@ -380,7 +386,7 @@ print("=" * 60)
 - `openjiuwen.core.retrieval.embedding.api_embedding` 用于嵌入
 
 ```python
-from service.task_memory_service import TaskMemoryService, AddMemoryRequest
+from openjiuwen.extensions.context_evolver import TaskMemoryService, AddMemoryRequest
 
 # 使用默认 config.yaml
 service = TaskMemoryService(

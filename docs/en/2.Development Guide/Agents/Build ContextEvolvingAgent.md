@@ -298,8 +298,9 @@ A `ReActAgent` subclass that automatically retrieves relevant memories before pr
 
 ```python
 from openjiuwen.extensions.context_evolver.service.task_memory_service import TaskMemoryService
-from openjiuwen.extensions.context_evolver.context_evolving_react_agent import ContextEvolvingReActAgent, create_memory_agent_config
+from openjiuwen.extensions.context_evolver.context_evolving_react_agent import ContextEvolvingReActAgent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.single_agent import ReActAgentConfig
 from openjiuwen.extensions.context_evolver.service.task_memory_service import AddMemoryRequest
 
 # Step 1: Create memory service (shared instance)
@@ -329,15 +330,20 @@ agent = ContextEvolvingReActAgent(
     inject_memories_in_context=True,  # Automatically add memories to prompts
 )
 
-# Step 5: Configure using helper function
-agent_config = create_memory_agent_config(
-    model_provider="OpenAI",
+# Step 5: Configure the ReAct agent
+agent_config = ReActAgentConfig()
+agent_config.configure_model_client(
+    provider="OpenAI",  # e.g. "OpenAI", "SiliconFlow"
     api_key="your-api-key",
     api_base="https://api.openai.com/v1",
     model_name="gpt-5.2",
-    system_prompt="You are a helpful software engineering assistant. "
-                 "Use any provided memory context to enhance your answers.",
+    verify_ssl=True,  # configure_model_client defaults to False; keep TLS verification on
 )
+agent_config.configure_prompt_template([{
+    "role": "system",
+    "content": "You are a helpful software engineering assistant. "
+               "Use any provided memory context to enhance your answers.",
+}])
 agent.configure(agent_config)
 
 # Step 6: Invoke with automatic memory retrieval
@@ -381,7 +387,7 @@ Core service handling memory operations. Uses openjiuwen core libraries:
 - `openjiuwen.core.retrieval.embedding.api_embedding` for embeddings
 
 ```python
-from service.task_memory_service import TaskMemoryService, AddMemoryRequest
+from openjiuwen.extensions.context_evolver import TaskMemoryService, AddMemoryRequest
 
 # Using default config.yaml
 service = TaskMemoryService(
