@@ -208,7 +208,11 @@ class SseClient(McpClient):
                 ),
             )
             self._auth_provider = self._extract_auth_provider(auth_result)
-            actual_timeout = self._resolve_timeout(timeout)
+            # Issue #1975: a declared ``connect_timeout`` on the server config
+            # raises the fallback ceiling for slow-initializing servers when
+            # the caller passed no explicit timeout; an explicit call-level
+            # timeout still wins.
+            actual_timeout = self._resolve_timeout(self._resolve_connect_timeout(timeout))
             self._client = sse_client(self._server_path, timeout=actual_timeout, auth=self._auth_provider)
             self._read, self._write = await self._exit_stack.enter_async_context(self._client)
             self._session = await self._exit_stack.enter_async_context(ClientSession(

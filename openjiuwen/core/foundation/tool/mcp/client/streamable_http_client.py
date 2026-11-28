@@ -269,7 +269,10 @@ class StreamableHttpClient(McpClient):
         from mcp import ClientSession
         from mcp.client import streamable_http as streamable_http_module
 
-        actual_timeout = self._resolve_timeout(timeout)
+        # Issue #1975: a declared ``connect_timeout`` on the server config
+        # raises the fallback ceiling for slow-initializing servers when the
+        # caller passed no explicit timeout; explicit call-level wins.
+        actual_timeout = self._resolve_timeout(self._resolve_connect_timeout(timeout))
         await self._close_stale_stack()
         self._exit_stack = AsyncExitStack()
 

@@ -132,6 +132,7 @@ McpServerConfig 包含以下核心配置项：
 | `params` | dict | 额外参数（如 StdioServerParameters 的 command/args） |
 | `auth_headers` | dict | HTTP认证Header（仅SSE/StreamableHttp） |
 | `auth_query_params` | dict[str, str] | HTTP认证Query参数 |
+| `connect_timeout` | float | 注册该服务器时的连接预算（秒），覆盖 connect 与工具列表拉取。默认 `None` 保持客户端内部回退值（60 秒），存量配置不受影响。慢网络或初始化缓慢的服务器（如内网仿真服务）可调大该值；`add_mcp_server` 上显式传入的调用级 `timeout` 仍然优先 |
 
 ### 4.1 基于 SSE 的远程服务对接
 

@@ -142,6 +142,20 @@ class McpServerConfig(BaseModel):
     params: Dict[str, Any] = Field(default_factory=dict)
     auth_headers: dict = Field(default_factory=dict)
     auth_query_params: Dict[str, str] = Field(default_factory=dict)
+    connect_timeout: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Connection budget in seconds for registering this server "
+            "(connect + tool listing). None keeps the client's internal "
+            "default (60s fallback), so existing configs are unaffected. "
+            "Raise it for slow networks or slow-initializing servers "
+            "(issue #1975); an explicit call-level timeout still takes "
+            "precedence. Must be positive: transports resolve non-positive "
+            "budgets inconsistently (most fall back to 60s), so a bad "
+            "value would silently not apply."
+        ),
+    )
     include_image_content: bool = Field(
         default=False,
         description=(

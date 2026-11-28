@@ -51,6 +51,13 @@ class StdioClient(McpClient):
                                            cwd=self._params.get('cwd'),
                                            encoding_error_handler=handler
                                            )
+            # Resolve the deadline up front (before any await can fail) so
+            # the except branch below can reference it unconditionally
+            # (bot review: a TimeoutError during enter_async_context would
+            # otherwise hit an UnboundLocalError that masks the real cause).
+            # Issue #1975: a declared ``connect_timeout`` on the server config
+            # raises the fallback ceiling when no explicit timeout was passed.
+            actual_timeout = self._resolve_timeout(self._resolve_connect_timeout(timeout))
 
             self._client = stdio_client(params)
             self._read, self._write = await self._exit_stack.enter_async_context(self._client)
@@ -58,7 +65,6 @@ class StdioClient(McpClient):
                 ClientSession(self._read, self._write, sampling_callback=None))
             # An stdio wrapper may wait on an interactive flow (e.g. OAuth) and
             # never answer initialize(); bound it so the caller cannot hang.
-            actual_timeout = self._resolve_timeout(timeout)
             async with asyncio.timeout(actual_timeout):
                 await self._session.initialize()
             self._is_disconnected = False
@@ -68,7 +74,7 @@ class StdioClient(McpClient):
             error = e
             if isinstance(e, TimeoutError):
                 error = TimeoutError(
-                    f"stdio handshake did not complete within {self._resolve_timeout(timeout):g}s"
+                    f"stdio handshake did not complete within {actual_timeout:g}s"
                 )
             logger.error(f"Stdio connection failed: {error}")
             self._last_connect_error = error
