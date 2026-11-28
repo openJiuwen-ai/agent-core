@@ -105,3 +105,64 @@ class TestLlmCallKwargsMerge:
         ctx = SimpleNamespace(extra={"llm_call_kwargs": {"temperature": 0.2}})
         out = agent._apply_llm_call_kwargs(ctx, base)
         assert out == base
+
+
+class TestLlmCallKwargsToolChoice:
+    """``tool_choice`` is the one non-thinking override rails may inject.
+
+    An input-side guard forces a single retrieval call for time-sensitive
+    factual questions. The value must survive the allowlist, but only in the
+    exact shapes providers accept, and only when the request really advertises
+    the forced tool.
+    """
+
+    def _apply(self, payload):
+        agent = object.__new__(ReActAgent)
+        ctx = SimpleNamespace(extra={"llm_call_kwargs": payload})
+        return agent._apply_llm_call_kwargs(ctx, {})
+
+    def test_filter_allows_named_function_choice(self):
+        choice = {"type": "function", "function": {"name": "web_flash"}}
+        assert self._apply({"tool_choice": choice})["tool_choice"] == choice
+
+    def test_filter_allows_required_mode(self):
+        assert self._apply({"tool_choice": "required"})["tool_choice"] == "required"
+
+    def test_filter_drops_malformed_choice(self):
+        assert "tool_choice" not in self._apply({"tool_choice": {"type": "function"}})
+        assert "tool_choice" not in self._apply({"tool_choice": {"name": "web_flash"}})
+        assert "tool_choice" not in self._apply({"tool_choice": "definitely"})
+        assert "tool_choice" not in self._apply({"tool_choice": 3})
+
+    def test_prune_drops_choice_without_tools(self):
+        agent = object.__new__(ReActAgent)
+        out = agent._prune_unusable_tool_choice(
+            {"tool_choice": {"type": "function", "function": {"name": "web_flash"}}},
+            None,
+        )
+        assert "tool_choice" not in out
+
+    def test_prune_drops_unadvertised_function(self):
+        agent = object.__new__(ReActAgent)
+        out = agent._prune_unusable_tool_choice(
+            {"tool_choice": {"type": "function", "function": {"name": "web_flash"}}},
+            [SimpleNamespace(name="read_file")],
+        )
+        assert "tool_choice" not in out
+
+    def test_prune_keeps_advertised_function(self):
+        agent = object.__new__(ReActAgent)
+        choice = {"type": "function", "function": {"name": "web_flash"}}
+        out = agent._prune_unusable_tool_choice(
+            {"tool_choice": choice},
+            [SimpleNamespace(name="web_flash")],
+        )
+        assert out["tool_choice"] == choice
+
+    def test_prune_keeps_required_with_tools(self):
+        agent = object.__new__(ReActAgent)
+        out = agent._prune_unusable_tool_choice(
+            {"tool_choice": "required"},
+            [{"type": "function", "function": {"name": "web_flash"}}],
+        )
+        assert out["tool_choice"] == "required"
