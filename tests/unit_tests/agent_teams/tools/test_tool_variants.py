@@ -659,6 +659,76 @@ async def test_create_task_allows_role_based_reviewer(db):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_update_task_string_empty_reviewer_clears_gate(db):
+    """reviewer="[]"（字符串）归一为空数组清空验收，不得逐字符成 ['[', ']']（PM-93）。
+
+    事故形态：leader 传字符串 "[]"，旧实现 list(str) 得到 ['[', ']'] 两个
+    非法审核人，T5 永远停在 in_review，settle 永不为 True，主对话 40 分钟
+    「正在思考」。
+    """
+    from openjiuwen.agent_teams.schema.task import TaskGraphSpec
+
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    await backend.task_manager.add_graph(
+        [TaskGraphSpec(title="t", content="c", task_id="r1", assignee=DEV_1, reviewer=(DEV_2,))]
+    )
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    update_task = _by_name(tools, "update_task")
+
+    result = await update_task.invoke({"task_id": "r1", "reviewer": "[]"})
+
+    assert result.success, result.error
+    task = await backend.task_manager.get("r1")
+    assert task.reviewers() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_task_json_string_reviewer_is_parsed(db):
+    """兼容旧模型输出：JSON 数组字符串按数组解析，而不是逐字符拆分。"""
+    from openjiuwen.agent_teams.schema.task import TaskGraphSpec
+
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    await backend.task_manager.add_graph(
+        [TaskGraphSpec(title="t", content="c", task_id="r1", assignee=DEV_1)]
+    )
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    update_task = _by_name(tools, "update_task")
+
+    result = await update_task.invoke({"task_id": "r1", "reviewer": f'["{DEV_2}"]'})
+
+    assert result.success, result.error
+    task = await backend.task_manager.get("r1")
+    assert task.reviewers() == [DEV_2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_task_rejects_malformed_reviewer(db):
+    """非 JSON 字符串/非法成员名一律拒绝且不写库——不能产生无人能清的验收门。"""
+    from openjiuwen.agent_teams.schema.task import TaskGraphSpec
+
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    await backend.task_manager.add_graph(
+        [TaskGraphSpec(title="t", content="c", task_id="r1", assignee=DEV_1, reviewer=(DEV_2,))]
+    )
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    update_task = _by_name(tools, "update_task")
+
+    not_json = await update_task.invoke({"task_id": "r1", "reviewer": f"[{DEV_2}]"})
+    assert not not_json.success
+    assert "array of member names" in not_json.error
+
+    bad_name = await update_task.invoke({"task_id": "r1", "reviewer": ["["]})
+    assert not bad_name.success
+    assert "Invalid reviewer name" in bad_name.error
+
+    task = await backend.task_manager.get("r1")
+    assert task.reviewers() == [DEV_2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_verify_task_tool_pass_flow(db):
     """VerifyTaskTool wires a reviewer's pass verdict through to COMPLETED."""
     # Leader assigns an author + reviewer, author completes -> IN_REVIEW.

@@ -3,6 +3,7 @@
 
 """Task management tools: create, view, update, submit, claim, and complete."""
 
+import json
 from typing import Any
 
 from openjiuwen.agent_teams.schema.status import TaskStatus
@@ -13,6 +14,7 @@ from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
+from openjiuwen.agent_teams.tools.tool_permissions import _MEMBER_NAME_PATTERN
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -148,20 +150,78 @@ def _validate_task_batch(tasks: list[dict]) -> str | None:
     return None
 
 
+def _normalize_reviewer_arg(raw: Any) -> tuple[list[str] | None, str | None]:
+    """Normalize a ``reviewer`` argument into a validated member-name list.
+
+    Accepts ``None`` (field omitted), a list of names and — for older model
+    output — a JSON array string (``"[]"`` / ``'["qa"]'``). A bare string must
+    never be iterated directly: ``"[]"`` would become the two "names" ``[``
+    and ``]``, activating a review gate no member can ever clear (PM-93:
+    T5-qa stuck in ``in_review`` forever after ``update_task(reviewer="[]")``).
+
+    Returns:
+        ``(names, error)``. ``names`` is ``None`` only when the field was
+        omitted (leave reviewers unchanged); an empty list means "clear the
+        gate". ``error`` is set when the raw value cannot be normalized.
+    """
+    if raw is None:
+        return None, None
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return [], None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return None, (
+                "'reviewer' must be an array of member names "
+                f"(got string {raw!r}); omit it to leave reviewers unchanged"
+            )
+        raw = parsed
+    if not isinstance(raw, (list, tuple)):
+        return None, (
+            f"'reviewer' must be an array of member names (got {type(raw).__name__})"
+        )
+    names: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            return None, f"'reviewer' entries must be member-name strings; got {item!r}"
+        name = item.strip()
+        if not name:
+            continue
+        if not _MEMBER_NAME_PATTERN.match(name):
+            return None, (
+                f"Invalid reviewer name {name!r}: must start with a lowercase ASCII "
+                "letter (a-z), followed by lowercase letters, digits (0-9) or "
+                "hyphen (-) — reviewer names are member-name routing tokens"
+            )
+        names.append(name)
+    return list(dict.fromkeys(names)), None
+
+
 def _clean_reviewers(spec: dict) -> list[str]:
-    """Extract a spec's reviewer list, trimmed and de-blanked."""
-    return [str(r).strip() for r in (spec.get("reviewer") or ()) if str(r).strip()]
+    """Extract a spec's normalized reviewer list (invalid input → empty).
+
+    The error text for invalid input is produced by ``_validate_reviewers``;
+    this helper stays total so the round-ceiling pre-check cannot raise.
+    """
+    names, _error = _normalize_reviewer_arg(spec.get("reviewer"))
+    return names or []
 
 
 async def _validate_reviewers(agent_team: TeamBackend, tasks: list[dict]) -> str | None:
-    """Reject a batch whose reviewer equals the task's own author.
+    """Reject malformed reviewer arguments and self-review.
 
     Reviewers no longer must be pre-existing team members — the scheduler
     spawns a temporary harness for any reviewer name not found in the roster.
-    Only the self-review guard remains.
+    The name-format check still applies: a reviewer name must be a valid
+    member routing token, otherwise the temporary harness can never run and
+    the task would sit in ``in_review`` with no verifier.
     """
     for spec in tasks:
-        reviewers = _clean_reviewers(spec)
+        reviewers, error = _normalize_reviewer_arg(spec.get("reviewer"))
+        if error:
+            return f"Task {_spec_label(spec)!r}: {error}"
         if not reviewers:
             continue
         assignee = (spec.get("assignee") or "").strip()
@@ -632,6 +692,14 @@ class UpdateTaskTool(TeamTool):
         content = inputs.get("content")
         assignee = inputs.get("assignee")
         reviewer = inputs.get("reviewer")
+        # Normalize/validate once, up front: a bare string is never iterated
+        # (``"[]"`` used to become reviewers ``['[', ']']`` and strand the
+        # task in ``in_review`` — PM-93).
+        reviewer_names: list[str] | None = None
+        if reviewer is not None:
+            reviewer_names, reviewer_error = _normalize_reviewer_arg(reviewer)
+            if reviewer_error:
+                return ToolOutput(success=False, error=reviewer_error)
         max_review_rounds = inputs.get("max_review_rounds")
         add_blocked_by = inputs.get("add_blocked_by")
 
@@ -744,8 +812,7 @@ class UpdateTaskTool(TeamTool):
         # Set / clear verify-gate reviewers. A leader may (re)assign reviewers
         # at any status; an empty list clears the gate. Reviewers must be real
         # members and none may be the task's author (no self-verification).
-        if reviewer is not None:
-            reviewer_names = [str(r).strip() for r in reviewer if str(r).strip()]
+        if reviewer_names is not None:
             current_assignee = (assignee or task.assignee or "").strip()
             for name in reviewer_names:
                 if current_assignee and name == current_assignee:
@@ -766,7 +833,7 @@ class UpdateTaskTool(TeamTool):
             if not isinstance(max_review_rounds, int) or isinstance(max_review_rounds, bool) or max_review_rounds < 1:
                 return ToolOutput(success=False, error="'max_review_rounds' must be an integer >= 1")
             effective_reviewers = (
-                [str(r).strip() for r in reviewer if str(r).strip()] if reviewer is not None else task.reviewers()
+                reviewer_names if reviewer_names is not None else task.reviewers()
             )
             if not effective_reviewers:
                 return ToolOutput(
