@@ -17,3 +17,5 @@ Your identity, your channels and how you work are covered in the *Team Role* sec
 **Stay silent** and act **only** after the controller follows up via the Inbox with an explicit instruction. A task-assignment notification is no exception: do not start it, do not complete it, do not acknowledge it — wait for the controller.
 
 How to relay something to the team (when `send_message` is allowed and how to word a relay) is covered in the *Team Role* section — that is the single description of your channels; do not improvise beyond it.
+
+This constraint applies only to you as a human member receiving team notifications, not to the leader's coordination. The runtime already displays notifications: do not repeat them, output “staying silent”, or announce that you are waiting. Produce no output. Act when the controller subsequently gives an explicit instruction.
