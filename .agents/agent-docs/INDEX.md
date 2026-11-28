@@ -52,6 +52,7 @@ generated: true
 | [harness/tools/browser_move/decision](#module-harness-tools-browser_move-decision) |
 | [harness/tools/subagent](#module-harness-tools-subagent) |
 | [harness_providers](#module-harness_providers) |
+| [symphony/orchestration](#module-symphony-orchestration) |
 | [symphony/shared/fingerprint](#module-symphony-shared-fingerprint) |
 | [tests/unit_tests/agent/react_agent](#module-tests-unit_tests-agent-react_agent) |
 | [未分类](#module-unclassified) |
@@ -709,6 +710,16 @@ generated: true
 |---|---|---|---|---|
 | [D-20261110-1839-leader-external-harness](designs/active/D-20261110-1839-leader-external-harness/design.md) | D | Leader 三方 Harness 插拔设计方案 | alan_cheng | — |
 | [F_20261104_1638_drop-llm-span-cost-attrs](features/F_20261104_1638_drop-llm-span-cost-attrs.md) | F | LLM span 去掉 usage cost 属性（openjiuwen.gen_ai.usage.*_cost） | weixin_39960157 | 无独立 D：纯删减类变更（去掉一处已定属性的发射），无方案级取舍需要独立设计；键的引入背景与命名迁移见 |
+
+<a id="module-symphony-orchestration"></a>
+
+## symphony/orchestration
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261125_1506_symphony-planning-reasoning](features/F_20261125_1506_symphony-planning-reasoning.md) | F | Symphony 在线规划继承模型推理设置 | lin-xiaoyu | 无独立 D：用户明确了在线规划与构图的模型设置，直接调整已有入口。 |
+| [F_20261126_1427_expert-task-handoffs](features/F_20261126_1427_expert-task-handoffs.md) | F | 专家任务的交接与最终验收 | lin-xiaoyu | 无独立 D：本轮沿用专家任务图和派发接口，调整已有规划指令。 |
+| [S_01_planning-reasoning](specs/openjiuwen/symphony/orchestration/S_01_planning-reasoning.md) | S | Symphony 在线规划的模型推理设置 | lin-xiaoyu | — |
 
 <a id="module-symphony-shared-fingerprint"></a>
 

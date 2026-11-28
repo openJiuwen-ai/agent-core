@@ -10,9 +10,7 @@ from typing import Any, Literal, Mapping, Sequence
 from pydantic import BaseModel, ConfigDict, Field
 
 from openjiuwen.symphony.orchestration.contracts import PlanningInput
-from openjiuwen.symphony.orchestration.model import (
-    invoke_json, model_usage_context, thinking_disabled_request_overrides,
-)
+from openjiuwen.symphony.orchestration.model import invoke_json, model_usage_context
 from openjiuwen.symphony.orchestration.language import planner_language_instruction
 from openjiuwen.symphony.retrieval.search.runtime.lexical import LexicalDocument, LexicalIndex
 
@@ -64,29 +62,65 @@ class RoutingUpgradeRequired(ValueError):
     """Planning found evidence requiring a fresh routing decision."""
 
 
-_SYSTEM_PROMPT = """Choose one supplied strategy. Decide who owns the work before selecting tools.
-Honor delegation limits and required capabilities. Copy IDs from catalog entries, never their descriptions:
-skills → skill_ids, tools → tool_ids, experts → expert_ids. List each selected ID once.
-direct_answer: Answer from known information; leave all ID lists empty.
-single_capability: Use exactly one entry across skill_ids and tool_ids. A Skill can use tools internally.
-capability_workflow: The main agent coordinates two or more Skills/tools for a batch of identical operations, alternate
-formats of one result, or steps that must keep updating the same working result.
-For these three strategies leave expert_ids empty. Host tools are used by the main agent.
-File inputs are references for later reading. Treat truncated previews and partial catalogs as incomplete.
-Flag unavailable required capabilities or genuinely missing material and keep a feasible route.
+_SYSTEM_PROMPT = """
+Choose one supplied execution strategy. Decide who should own the work before
+selecting capabilities. Default to main-agent execution.
+
+Group work by the context it needs: original sources, prior decisions, and
+working state. Give steps that repeatedly need the same context one owner.
+A sequence of steps that produces or revises the same result normally belongs
+to one work unit.
+
+Honor delegation limits and required capabilities. Select only visible IDs
+from the corresponding catalog: skills in skill_ids, tools in tool_ids, and
+experts in expert_ids. List each selected ID once.
+
+direct_answer: Answer from known information. Leave all capability ID lists empty.
+single_capability: Use exactly one Skill or host tool. A Skill may use tools internally.
+capability_workflow: The main agent coordinates two or more Skills or host tools
+to process a batch, produce alternate formats, or update a shared working result.
+For these three strategies, leave expert_ids empty.
+
+Treat file references, truncated previews, and partial catalogs as incomplete
+evidence. Identify genuinely missing material and unavailable required capabilities.
+Keep the route feasible given the capabilities and permissions actually available.
 """
 
 _EXPERT_PROMPT = """
-When delegation is allowed, choose by the work. An empty experts list permits both expert strategies:
-use expert_ids=[] and the planner supplies temporary roles.
-multi_expert: Choose this when two or more units can each deliver a verifiable finding, authored result,
-or tested change without needing a sibling's output. This includes distinct evidence for one final decision.
-The units may use identical methods, inputs or tools. A common final check or combined report joins them
-afterwards. Also use this strategy for a necessary specialist handoff or an independent review.
-single_expert: One specialist owns a coupled judgment that benefits from consistent domain expertise.
-For expert routes, start with skill_ids=[] and tool_ids=[]; add only required host capabilities.
-List a matching expert ID once even for several tasks. Use a temporary role for unmatched work.
-In reason, name the independent results or the working result that couples them.
+When delegation is allowed, evaluate the work before inspecting the expert
+catalog. If it qualifies for delegation, use an expert route even when no
+installed expert is listed or suitable. The planner can create task-specific
+inline roles. In that case, use single_expert or multi_expert as appropriate
+and leave expert_ids empty when there are no matching IDs.
+
+Choose an expert route if the user requires an expert assignment or at least
+one work unit has a clear benefit from separate ownership:
+
+- Context isolation: The unit must examine substantial local material, while
+  downstream work needs only a compact set of findings, evidence references,
+  applicable conditions, and unresolved questions. The expert can complete
+  the unit using a defined set of sources, and the recipient can act or verify
+  the findings without rereading most of those sources. This can justify one
+  expert even when the unit is on a sequential path.
+- Parallel work: Units can make meaningful progress concurrently and return
+  independently verifiable results. They may share read-only requirements
+  or sources. Put interleaved writes and tightly coupled decisions under one owner.
+- Specialist role: The unit calls for a distinct domain judgment, toolset,
+  or working rule that materially changes how the work is done. State the
+  judgment or behavior the role adds.
+- Independent verification: A separate reviewer can assess a specified result
+  against original sources and acceptance criteria using the artifact or state
+  under review and a small amount of additional context.
+
+Choose single_expert when one delegated assignment is sufficient, and
+multi_expert when multiple assignments are justified. Use a matching visible
+expert when available. Honor any required expert IDs. For expert routes,
+include only required host capabilities.
+
+In reason, identify the work to delegate, the benefit of independent ownership,
+and the result the main agent needs back. If the proposed split requires
+repeatedly transferring the same evidence, decisions, or state, keep that
+work with one owner.
 """
 
 
@@ -221,7 +255,6 @@ async def route_task(
                 model, system_prompt=f"{system_prompt}\n{planner_language_instruction(language)}",
                 user_content=json.dumps(payload, ensure_ascii=False),
                 error_context="Symphony task routing", response_observer=observer,
-                request_overrides=thinking_disabled_request_overrides(),
             )
             try:
                 return _validate_route(_RouteDraft.model_validate_json(raw), context)

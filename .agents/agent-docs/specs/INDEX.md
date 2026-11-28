@@ -22,6 +22,7 @@ generated: true
 | [core/session](#module-core-session) |
 | [extensions/a2a](#module-extensions-a2a) |
 | [harness](#module-harness) |
+| [symphony/orchestration](#module-symphony-orchestration) |
 
 <a id="module-agent_evolving-ttse"></a>
 
@@ -134,3 +135,11 @@ generated: true
 | [S_17_personal-context](harness/S_17_personal-context.md) | S | S_17 Personal Context | yangzequ | — |
 | [S_18_subagents-and-lifecycle](harness/S_18_subagents-and-lifecycle.md) | S | S_18 SubAgent 预设与生命周期 | yangzequ | — |
 | [S_19_harness-providers](harness/S_19_harness-providers.md) | S | S_19 Harness Providers（协议实现、IO Adapter 与 Manifest 工厂） | alan_cheng | — |
+
+<a id="module-symphony-orchestration"></a>
+
+## symphony/orchestration
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [S_01_planning-reasoning](openjiuwen/symphony/orchestration/S_01_planning-reasoning.md) | S | Symphony 在线规划的模型推理设置 | lin-xiaoyu | — |

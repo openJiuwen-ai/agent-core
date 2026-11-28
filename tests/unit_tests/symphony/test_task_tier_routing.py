@@ -30,10 +30,12 @@ class _Model:
         self.task_count = task_count
         self.requests = []
         self.system_prompts = []
+        self.invoke_options = []
 
     async def invoke(self, messages, **kwargs):
         data = json.loads(messages[-1]["content"])
         self.requests.append(data)
+        self.invoke_options.append(kwargs)
         self.system_prompts.append(messages[0]["content"])
         if data.get("operation") == "task_routing":
             response = self.route(data) if callable(self.route) else self.route
@@ -76,6 +78,7 @@ async def test_auto_routes_without_building_or_planning(tmp_path, route, strateg
                   for kind in ("skill", "expert", "tool")
                   for identifier in route.get(f"{kind}_ids", [])]
     result = await planner.plan("Complete the task", candidates, context=_context(), progress=events.append)
+    assert all("extra_body" not in options for options in model.invoke_options)
     assert result["execution_route"]["strategy"] == strategy
     assert "planned_graph" not in result
     assert len(model.requests) == 1
@@ -94,7 +97,12 @@ async def test_auto_routes_without_building_or_planning(tmp_path, route, strateg
 async def test_expert_strategies_need_no_skill_graph_and_limit_workers(tmp_path, strategy, count, mode):
     model = _Model({"strategy": strategy, "reason": "Independent specialist verification"})
     engine = SymphonyGraphEngine(_service(tmp_path, model), unavailable_reason="No Skill graph")
-    result = await engine.plan("Verify the evidence", context=_context(), mode=mode)
+    result = await engine.plan("Verify the evidence", context=_context(experts=[]), mode=mode)
+    assert all("extra_body" not in options for options in model.invoke_options)
+    assert model.requests[0]["context"]["experts"] == []
+    prompt = " ".join(model.system_prompts[0].split())
+    assert "use an expert route even when no installed expert is listed or suitable" in prompt
+    assert "planner can create task-specific inline roles" in prompt
     assert result["execution_route"]["strategy"] == strategy
     graph = result["planned_graph"]["graph"]
     assert graph["metadata"]["plan_kind"] == "expert_tasks"

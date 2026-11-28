@@ -587,7 +587,6 @@ class BidirectionalBeamPlanner:
                     system_prompt=self._system_prompt(BEAM_FINAL_RERANK_SYSTEM_PROMPT),
                     user_content=json.dumps(payload, ensure_ascii=False),
                     error_context="Symphony beam final rerank",
-                    request_overrides={"extra_body": {"thinking": {"type": "disabled"}}},
                     response_observer=self.model_response_observer,
                 )
             selection = json.loads(raw)

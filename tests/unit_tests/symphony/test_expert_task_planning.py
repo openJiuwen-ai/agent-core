@@ -328,27 +328,39 @@ async def test_expert_task_plan_preserves_evidence_and_final_acceptance(tmp_path
     evidence = _port("measurements", "csv")
     collect = _task("collect", outputs=[evidence])
     collect["task"] = "Record measurements with their source locations and test conditions."
-    deliver = _task("deliver")
+    protocol = PlanningInput(name="protocol", kind="file", value="attachment/protocol.md")
+    deliver = {**_task("deliver"), "external_inputs": [protocol.name]}
     deliver["task"] = (
         "Use measurements to write the summary. Preserve source locations and test conditions "
-        "beside the claims. Before delivery, check the final summary against measurements."
+        "beside the claims. Check the final summary against the requested scope and the original protocol."
     )
     service, model = _service(tmp_path, {
         "tasks": [collect, deliver],
         "handoffs": [_handoff("collect", "deliver", "measurements", "measurements")],
     }, monkeypatch)
 
-    result = await service.plan_subagent_graph("Summarize the measurements and make each claim traceable.")
+    query = "Summarize the measurements and account for all conditions in the protocol."
+    result = await service.plan_subagent_graph(query, inputs=[protocol])
     graph = result["planned_graph"]["graph"]
 
     assert graph["nodes"]["task-1"]["metadata"]["task"] == collect["task"]
     assert graph["nodes"]["task-2"]["metadata"]["task"] == deliver["task"]
     assert graph["nodes"]["task-2"]["metadata"]["inputs"] == [evidence]
-    prompt = model.planning_prompts[0]
-    assert "checked independently" in prompt
-    assert "small or tightly coupled work" in prompt
-    assert "what must survive integration" in prompt
-    assert "final version" in prompt
+    assert graph["nodes"]["task-2"]["metadata"]["external_inputs"] == [protocol.name]
+    assert graph["metadata"]["missing_inputs"] == []
+    prompt = " ".join(model.planning_prompts[0].split())
+    assert "tasks array is the list of assignments to dispatch to child agents" in prompt
+    assert "final delivery owned by the main agent outside the tasks array and handoffs" in prompt
+    assert "Give successive changes to the same artifact or mutable state one owner" in prompt
+    assert "specify the source boundary, the question to answer" in prompt
+    assert "precise evidence locations, applicable conditions, and unresolved questions" in prompt
+    assert "state what it is responsible for deciding" in prompt
+    assert "Include the relevant original user requirements, applicable sources" in prompt
+    assert "its basis in the user request or an applicable source" in prompt
+    assert "Preserve scope, exclusions, meaning, and requested output formats" in prompt
+    assert "Keep planner-chosen methods adjustable" in prompt
+    assert "verify changes after correction" in prompt
+    assert "inspect existing state before retrying an action with side effects" in prompt
 
 
 @pytest.mark.asyncio
@@ -527,6 +539,7 @@ async def test_expert_task_plan_corrects_invalid_draft(failure, tmp_path, monkey
     assert graph["nodes"]["task-2"]["metadata"]["expert_id"] == "report"
     assert graph["nodes"]["task-2"]["metadata"]["inputs"] == [_port("result", "text")]
     assert len(model.planning_requests) == 2
+    assert model.planning_prompts[1].startswith(model.planning_prompts[0])
     first, second = model.planning_requests
     assert {key: value for key, value in second.items() if key != "validation_feedback"} == first
     assert second["inputs"] == [source.model_dump(exclude_none=True)]
