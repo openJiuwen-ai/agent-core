@@ -4,8 +4,6 @@ import ipaddress
 import os
 import re
 import socket
-from struct import unpack
-from socket import inet_aton
 from typing import Optional, List
 from urllib.parse import urlparse
 
@@ -24,10 +22,12 @@ class UrlUtils:
         if not re.match(r"^https?://.*$", url):
             raise build_error(StatusCode.COMMON_URL_INPUT_INVALID, error_msg='illegal url protocol')
         try:
-            ip_address = socket.gethostbyname(hostname)
-        except socket.error as e:
+            ip_addresses = {info[4][0] for info in socket.getaddrinfo(hostname, None)}
+        except (socket.error, UnicodeError) as e:
             raise build_error(StatusCode.COMMON_URL_INPUT_INVALID, error_msg="resolving IP address failed") from e
-        if UrlUtils._is_inner_ipaddress(ip_address):
+        if not ip_addresses:
+            raise build_error(StatusCode.COMMON_URL_INPUT_INVALID, error_msg="resolving IP address failed")
+        if any(UrlUtils._is_inner_ipaddress(ip_address) for ip_address in ip_addresses):
             raise build_error(StatusCode.COMMON_URL_INPUT_INVALID, error_msg="illegal ip address")
 
     @staticmethod
@@ -65,18 +65,13 @@ class UrlUtils:
             # only if set SSRF_PROTECT_ENABLED to false, then allow inner ip
             return False
 
-        ip_long = UrlUtils._ip_to_long(ip)
-        is_inner_ip = UrlUtils._ip_to_long("10.0.0.0") <= ip_long <= UrlUtils._ip_to_long("10.255.255.255") or \
-                      UrlUtils._ip_to_long("172.16.0.0") <= ip_long <= UrlUtils._ip_to_long("172.31.255.255") or \
-                      UrlUtils._ip_to_long("192.168.0.0") <= ip_long <= UrlUtils._ip_to_long("192.168.255.255") or \
-                      UrlUtils._ip_to_long("127.0.0.0") <= ip_long <= UrlUtils._ip_to_long("127.255.255.255") or \
-                      ip_long == UrlUtils._ip_to_long("0.0.0.0")
-        return is_inner_ip
-
-    @staticmethod
-    def _ip_to_long(ip_addr):
-        """ trans ip to long"""
-        return unpack("!L", inet_aton(ip_addr))[0]
+        try:
+            address = ipaddress.ip_address(str(ip).split("%", 1)[0])
+        except ValueError:
+            return True
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+        return not address.is_global or address.is_multicast
 
     @staticmethod
     def should_bypass_proxy(url: str) -> bool:

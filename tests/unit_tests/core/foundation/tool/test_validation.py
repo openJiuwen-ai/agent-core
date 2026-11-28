@@ -177,7 +177,7 @@ class TestToolValidation:
         # Test invalid URL: mock DNS resolution failure to avoid
         # environment-dependent behavior (macOS search domains may resolve
         # arbitrary hostnames).
-        with patch("socket.gethostbyname", side_effect=socket.error("DNS resolution failed")):
+        with patch("socket.getaddrinfo", side_effect=socket.gaierror("DNS resolution failed")):
             with pytest.raises(BaseError):
                 RestfulApiCard(
                     name="test_api",
