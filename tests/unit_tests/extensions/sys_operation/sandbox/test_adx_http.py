@@ -407,3 +407,504 @@ async def test_local_rootfs_variants_are_cleaned_by_the_original_scope(monkeypat
     assert await adx.delete_adx_sandbox(shared_key=scope) == [first, second]
     assert deleted == [(base, "one"), (base, "two")]
     assert set(instances) == {unrelated}
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_variants_are_cleaned_by_the_original_scope(monkeypatch):
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    base = "https://example.test"
+    scope = adx.build_adx_shared_scope_key(base, "alice")
+    lifecycle = scope + "|lifecycle=first"
+    nested = scope + "|rootfs=abc|lifecycle=second"
+    unrelated = base + "|alice-extra"
+    instances = {
+        lifecycle: ("one", "runsc", {}),
+        nested: ("two", "runsc", {}),
+        unrelated: ("other", "runsc", {}),
+    }
+    monkeypatch.setattr(adx._AdxProviderMixin, "_shared_instances", instances)
+    deleted = []
+
+    def delete(base_url, environment_id, headers):
+        deleted.append((base_url, environment_id))
+
+    monkeypatch.setattr(adx, "_delete_environment", delete)
+    assert await adx.delete_adx_sandbox(shared_key=scope) == [lifecycle, nested]
+    assert deleted == [(base, "one"), (base, "two")]
+    assert set(instances) == {unrelated}
+
+
+def test_create_body_carries_idle_lifecycle():
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx import _adx_create_body
+
+    body = _adx_create_body({
+        "runtime": "runsc",
+        "idle_timeout": 900,
+        "idle_action": "pause",
+        "pause_policy": {
+            "retention": {"kind": "ttl", "ttlSeconds": 86400},
+            "timeoutSeconds": 300,
+            "storage": "configured",
+        },
+        "failover": True,
+    }, "supervisor")
+    assert body["idleAction"] == "pause"
+    assert body["pauseOptions"] == {
+        "retention": {"kind": "ttl", "ttlSeconds": 86400},
+        "timeoutSeconds": 300,
+        "storage": "configured",
+    }
+    assert body["failover"] is True
+
+
+@pytest.mark.parametrize("extra", [
+    {"idle_action": "keep"},
+    {"idle_action": "pause", "idle_timeout": 0},
+    {"idle_action": "pause", "idle_timeout": 900, "pause_policy": {"retention": {"kind": "ttl", "ttlSeconds": 0}}},
+    {"idle_action": "pause", "idle_timeout": 900, "pause_policy": {"retention": {"kind": "ttl", "ttlSeconds": -1}}},
+    {"idle_action": "pause", "idle_timeout": 900, "pause_policy": {"retention": {"kind": "forever"}, "timeoutSeconds": 0}},
+    {"idle_action": "pause", "idle_timeout": 900, "pause_policy": {"retention": {"kind": "forever"}, "storage": "cluster"}},
+    {"failover": "yes"},
+])
+def test_create_body_rejects_invalid_lifecycle(extra):
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx import _adx_create_body
+
+    with pytest.raises(ValueError):
+        _adx_create_body(dict(extra), "supervisor")
+
+
+@pytest.mark.parametrize("runtime", ["conch", " Conch ", "\"conch\""])
+def test_create_body_rejects_pause_for_conch(runtime):
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx import _adx_create_body
+
+    with pytest.raises(ValueError, match="conch"):
+        _adx_create_body({"runtime": runtime, "idle_action": "pause", "idle_timeout": 900}, "conch")
+
+
+def test_shared_scope_tracks_lifecycle():
+    import copy
+
+    from openjiuwen.core.sys_operation.sandbox.gateway.gateway import SandboxEndpoint
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    def scope(extra):
+        provider = object.__new__(adx.AdxShellProvider)
+        provider.endpoint = SandboxEndpoint(base_url="https://example.test", isolation_key="alice")
+        provider.config = SandboxGatewayConfig(launcher_config=PreDeployLauncherConfig(
+            base_url="https://example.test", sandbox_type="adx-environment", extra_params=extra))
+        provider._executor = "supervisor"
+        return provider._shared_scope_key()
+
+    pause = {
+        "runtime": "runsc", "idle_timeout": 900, "idle_action": "pause",
+        "pause_policy": {"retention": {"kind": "ttl", "ttlSeconds": 86400}},
+        "failover": True,
+    }
+    assert "|lifecycle=" not in scope({"runtime": "runsc"})
+    assert scope(copy.deepcopy(pause)) == scope(copy.deepcopy(pause))
+    assert scope(pause) != scope({**copy.deepcopy(pause), "idle_timeout": 3600})
+    assert scope(pause) != scope({**copy.deepcopy(pause), "idle_action": "delete"})
+    assert scope(pause) != scope({**copy.deepcopy(pause), "failover": False})
+    assert scope(pause) != scope({
+        **copy.deepcopy(pause),
+        "pause_policy": {"retention": {"kind": "ttl", "ttlSeconds": 3600}},
+    })
+    # failover is a create-time field even when the idle action deletes.
+    assert scope({"runtime": "runsc", "failover": True}) != scope({"runtime": "runsc"})
+    # Equivalent spellings and defaults must select the same environment.
+    assert scope(pause) == scope({
+        **copy.deepcopy(pause),
+        "pause_policy": {
+            "retention": {"kind": "ttl", "ttlSeconds": 86400},
+            "timeoutSeconds": 300,
+            "storage": "configured",
+        },
+    })
+    assert scope(pause) == scope({
+        "runtime": "runsc",
+        "idleAction": "pause",
+        "idleTimeoutSeconds": 900,
+        "pauseOptions": {
+            "retention": {"kind": "ttl", "ttlSeconds": 86400},
+            "timeoutSeconds": 300,
+            "storage": "configured",
+        },
+        "failover": True,
+    })
+
+
+def test_create_body_accepts_native_lifecycle_keys():
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx import _adx_create_body
+
+    body = _adx_create_body({
+        "runtime": "runsc",
+        "idleAction": "pause",
+        "idleTimeoutSeconds": 900,
+        "pauseOptions": {"retention": {"kind": "forever"}, "storage": "shared"},
+    }, "supervisor")
+    assert body["idleAction"] == "pause"
+    assert body["idleTimeoutSeconds"] == 900
+    assert body["pauseOptions"] == {
+        "retention": {"kind": "forever"},
+        "timeoutSeconds": 300,
+        "storage": "shared",
+    }
+
+
+def _conflict_provider(monkeypatch, responses):
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    deletes = []
+    calls = []
+
+    def fake_request(method, url, *, payload=None, headers=None, timeout=30):
+        calls.append({"method": method, "url": url, "payload": payload, "headers": headers or {}})
+        if "/resume" in url:
+            kind = "resume"
+        elif "/api/instances" in url:
+            kind = "instances"
+        else:
+            kind = "create"
+        return responses[kind].pop(0)
+
+    provider = object.__new__(adx.AdxShellProvider)
+    provider._instance = None
+    provider._auth_headers = {"X-Auth": "test"}
+    provider._timeout_seconds = 30
+    provider._executor = "supervisor"
+    provider.endpoint = SimpleNamespace(base_url="http://adx.test")
+    provider.config = SimpleNamespace(
+        launcher_config=SimpleNamespace(
+            extra_params={
+                "executor": "supervisor",
+                "idle_timeout": 900,
+                "idle_action": "pause",
+                "pause_policy": {"retention": {"kind": "forever"}, "storage": "local"},
+            }
+        )
+    )
+    monkeypatch.setattr(adx, "_adx_request", fake_request)
+    monkeypatch.setattr(adx, "_delete_environment", lambda base, eid, headers: deletes.append(eid))
+    return provider, calls, deletes
+
+
+def _paused_conflict():
+    return {
+        "code": 409,
+        "data": None,
+        "error": {
+            "code": "CONFLICT",
+            "retry": "never",
+            "outcome": "not_started",
+            "environmentId": "default-tools-x",
+        },
+        "message": "environment default-tools-x is paused; resume it explicitly",
+    }
+
+
+def test_create_conflict_resumes_a_paused_environment(monkeypatch):
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    responses = {
+        "create": [(409, _paused_conflict())],
+        "instances": [(200, [{"id": "default-tools-x", "status": "paused"}])],
+        "resume": [(200, {"data": {"environmentId": "default-tools-x", "state": "running"}})],
+    }
+    provider, calls, deletes = _conflict_provider(monkeypatch, responses)
+
+    assert provider._create_instance() == ("default-tools-x", "supervisor")
+    resume_calls = [call for call in calls if "/resume" in call["url"]]
+    assert len(resume_calls) == 1
+    assert resume_calls[0]["method"] == "POST"
+    assert resume_calls[0]["headers"]["X-ADX-Request-ID"].startswith("resume-")
+    assert deletes == []
+
+
+def test_create_conflict_discards_an_unusable_restore_point(monkeypatch):
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    responses = {
+        "create": [(409, _paused_conflict())],
+        "instances": [
+            (200, [{"id": "default-tools-x", "status": "paused"}]),
+            (200, [{"id": "default-tools-x", "status": "paused"}]),
+        ],
+        "resume": [
+            (
+                409,
+                {
+                    "code": 409,
+                    "message": "local restore point is unavailable on another node",
+                    "error": {
+                        "code": "CONFLICT",
+                        "retry": "never",
+                        "outcome": "not_started",
+                        "environmentId": "default-tools-x",
+                    },
+                },
+            )
+        ],
+    }
+    provider, _, deletes = _conflict_provider(monkeypatch, responses)
+
+    with pytest.raises(adx.AdxHttpError) as raised:
+        provider._create_instance()
+    assert raised.value.status == 409
+    assert deletes == ["default-tools-x"]
+
+
+def test_create_conflict_transient_resume_failure_keeps_the_environment(monkeypatch):
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    responses = {
+        "create": [(409, _paused_conflict())],
+        "instances": [(200, [{"id": "default-tools-x", "status": "paused"}])],
+        "resume": [
+            (
+                503,
+                {
+                    "code": 503,
+                    "message": "owner node missing",
+                    "error": {
+                        "code": "OUTCOME_UNKNOWN",
+                        "retry": "same_operation",
+                        "outcome": "unknown",
+                        "environmentId": "default-tools-x",
+                    },
+                },
+            )
+        ],
+    }
+    provider, _, deletes = _conflict_provider(monkeypatch, responses)
+
+    with pytest.raises(adx.AdxHttpError) as raised:
+        provider._create_instance()
+    assert raised.value.status == 503
+    assert deletes == []
+
+
+def test_create_conflict_binds_a_running_environment(monkeypatch):
+    responses = {
+        "create": [(409, _paused_conflict())],
+        "instances": [(200, [{"id": "default-tools-x", "status": "running"}])],
+        "resume": [],
+    }
+    provider, calls, deletes = _conflict_provider(monkeypatch, responses)
+
+    assert provider._create_instance() == ("default-tools-x", "supervisor")
+    assert not any("/resume" in call["url"] for call in calls)
+    assert deletes == []
+
+
+def test_create_conflict_recreates_when_the_environment_vanished(monkeypatch):
+    responses = {
+        "create": [
+            (409, _paused_conflict()),
+            (200, {"data": {"environmentId": "default-tools-x", "status": "running"}}),
+        ],
+        "instances": [(404, {"message": "not found"})],
+        "resume": [],
+    }
+    provider, calls, deletes = _conflict_provider(monkeypatch, responses)
+
+    assert provider._create_instance() == ("default-tools-x", "supervisor")
+    assert len([call for call in calls if call["method"] == "POST" and call["url"].endswith("/environments")]) == 2
+    assert deletes == []
+
+
+def test_create_uses_a_deterministic_environment_name(monkeypatch):
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    payloads = []
+
+    def fake_request(method, url, *, payload=None, headers=None, timeout=30):
+        payloads.append(dict(payload or {}))
+        return 200, {"data": {"environmentId": "default-" + payload["name"]}}
+
+    provider = object.__new__(adx.AdxShellProvider)
+    provider._instance = None
+    provider._auth_headers = {}
+    provider._timeout_seconds = 30
+    provider._executor = "runsc"
+    provider.endpoint = SimpleNamespace(base_url="http://adx.test")
+    provider.config = SimpleNamespace(
+        launcher_config=SimpleNamespace(extra_params={"executor": "runsc", "idle_timeout": 0}),
+    )
+    monkeypatch.setattr(adx, "_adx_request", fake_request)
+
+    first, _ = provider._create_instance()
+    second, _ = provider._create_instance()
+
+    assert first == second
+    assert len(payloads) == 2
+    assert payloads[0]["name"] == payloads[1]["name"]
+    assert payloads[0]["name"].startswith("tools-")
+    assert first == "default-" + payloads[0]["name"]
+
+
+def test_create_body_converts_schema_v2_network_settings():
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    body = adx._adx_create_body(
+        {
+            "idle_timeout": 0,
+            "network": {
+                "traffic": {
+                    "ingress_default_action": "deny",
+                    "egress_default_action": "allow",
+                    "rules": [
+                        {
+                            "action": "deny",
+                            "direction": "egress",
+                            "protocol": "any",
+                            "cidr": "10.0.0.0/8",
+                            "port_range": 80,
+                            "priority": 200,
+                        }
+                    ],
+                }
+            },
+        },
+        "runsc",
+    )
+    network = body["network"]
+    assert network["schemaVersion"] == 2
+    assert network["traffic"]["ingressDefaultAction"] == "deny"
+    assert network["traffic"]["egressDefaultAction"] == "allow"
+    assert network["traffic"]["mode"] == "stateful"
+    assert network["traffic"]["rules"][0]["portRange"] == 80
+    assert "port_range" not in network["traffic"]["rules"][0]
+
+    legacy = adx._adx_create_body({"idle_timeout": 0, "network": {"block_network": True}}, "runsc")
+    assert legacy["network"] == {"block_network": True}
+
+
+def test_init_adx_uses_the_agentos_token_without_connection(monkeypatch):
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    monkeypatch.setenv("ADX_TOKEN", "tenant-token")
+    provider = object.__new__(adx.AdxShellProvider)
+    provider.endpoint = SimpleNamespace(base_url="http://adx.test")
+    provider.config = SimpleNamespace(
+        launcher_config=SimpleNamespace(extra_params={"executor": "runsc"}),
+        timeout_seconds=30,
+        auth_headers={},
+    )
+
+    provider._init_adx(provider.endpoint, provider.config)
+
+    assert provider._auth_headers["Authorization"] == "Bearer tenant-token"
+    assert provider._auth_headers["X-Auth"] == "tenant-token"
+
+
+def _invoke_provider():
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    provider = object.__new__(adx.AdxShellProvider)
+    provider._auth_headers = {"X-Auth": "test"}
+    provider._timeout_seconds = 30
+    provider.endpoint = SimpleNamespace(base_url="http://adx.test")
+    provider.config = None
+    return provider
+
+
+def test_invoke_retries_a_resuming_environment(monkeypatch):
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    calls = []
+    responses = [
+        (503, {
+            "error": {
+                "code": "ENV_RESUMING",
+                "retry": "same_operation",
+                "outcome": "not_started",
+                "requestForwarded": False,
+            }
+        }),
+        (200, {"exists": True}),
+    ]
+
+    def fake_request(method, url, *, payload=None, headers=None, timeout=30):
+        calls.append({"headers": dict(headers or {}), "timeout": timeout})
+        return responses.pop(0)
+
+    monkeypatch.setattr(adx, "_adx_request", fake_request)
+    monkeypatch.setattr(adx, "ADX_RESUME_RETRY_SLEEP_SECONDS", 0)
+    provider = _invoke_provider()
+    assert provider._invoke("env", "file.exists", {"path": "/workspace"}, timeout=30) == {"exists": True}
+    assert len(calls) == 2
+    assert calls[0]["headers"]["X-ADX-Processing-Timeout-Ms"] == "29000"
+
+
+def test_invoke_gives_up_after_resume_retries(monkeypatch):
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    calls = []
+
+    def fake_request(method, url, *, payload=None, headers=None, timeout=30):
+        calls.append(headers)
+        return (503, {
+            "error": {
+                "code": "ENV_RESUMING",
+                "retry": "same_operation",
+                "outcome": "not_started",
+                "requestForwarded": False,
+            }
+        })
+
+    monkeypatch.setattr(adx, "_adx_request", fake_request)
+    monkeypatch.setattr(adx, "ADX_RESUME_RETRY_SLEEP_SECONDS", 0)
+    provider = _invoke_provider()
+    with pytest.raises(adx.AdxHttpError) as raised:
+        provider._invoke("env", "file.exists", {"path": "/workspace"}, timeout=30)
+    assert raised.value.status == 503
+    assert len(calls) == adx.ADX_RESUME_RETRIES
+
+
+def test_invoke_does_not_retry_a_forwarded_503(monkeypatch):
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    calls = []
+
+    def fake_request(method, url, *, payload=None, headers=None, timeout=30):
+        calls.append(headers)
+        return (503, {
+            "error": {
+                "code": "PROCESSING_DEADLINE_EXCEEDED",
+                "retry": "never",
+                "outcome": "unknown",
+                "requestForwarded": True,
+            }
+        })
+
+    monkeypatch.setattr(adx, "_adx_request", fake_request)
+    monkeypatch.setattr(adx, "ADX_RESUME_RETRY_SLEEP_SECONDS", 0)
+    provider = _invoke_provider()
+    with pytest.raises(adx.AdxHttpError) as raised:
+        provider._invoke("env", "file.exists", {"path": "/workspace"}, timeout=30)
+    assert raised.value.status == 503
+    assert len(calls) == 1
+
+
+def test_environment_name_follows_the_agent_key(monkeypatch):
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    provider = object.__new__(adx.AdxShellProvider)
+    provider._instance = None
+    provider._auth_headers = {}
+    provider._timeout_seconds = 30
+    provider._executor = "runsc"
+    provider.endpoint = SimpleNamespace(base_url="http://adx.test")
+    provider.config = SimpleNamespace(
+        launcher_config=SimpleNamespace(extra_params={"executor": "runsc", "idle_timeout": 0}),
+    )
+
+    monkeypatch.setenv("JIUWENSWARM_ADX_AGENT_KEY", "agent-a")
+    first = provider._environment_name()
+    monkeypatch.setenv("JIUWENSWARM_ADX_AGENT_KEY", "agent-b")
+    second = provider._environment_name()
+
+    assert first.startswith("tools-")
+    assert second.startswith("tools-")
+    assert first != second
