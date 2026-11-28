@@ -638,3 +638,88 @@ def test_create_conflict_recreates_when_the_environment_vanished(monkeypatch):
     assert provider._create_instance() == ("default-tools-x", "supervisor")
     assert len([call for call in calls if call["method"] == "POST" and call["url"].endswith("/environments")]) == 2
     assert deletes == []
+
+
+def test_create_uses_a_deterministic_environment_name(monkeypatch):
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    payloads = []
+
+    def fake_request(method, url, *, payload=None, headers=None, timeout=30):
+        payloads.append(dict(payload or {}))
+        return 200, {"data": {"environmentId": "default-" + payload["name"]}}
+
+    provider = object.__new__(adx.AdxShellProvider)
+    provider._instance = None
+    provider._auth_headers = {}
+    provider._timeout_seconds = 30
+    provider._executor = "runsc"
+    provider.endpoint = SimpleNamespace(base_url="http://adx.test")
+    provider.config = SimpleNamespace(
+        launcher_config=SimpleNamespace(extra_params={"executor": "runsc", "idle_timeout": 0}),
+    )
+    monkeypatch.setattr(adx, "_adx_request", fake_request)
+
+    first, _ = provider._create_instance()
+    second, _ = provider._create_instance()
+
+    assert first == second
+    assert len(payloads) == 2
+    assert payloads[0]["name"] == payloads[1]["name"]
+    assert payloads[0]["name"].startswith("tools-")
+    assert first == "default-" + payloads[0]["name"]
+
+
+def test_create_body_converts_schema_v2_network_settings():
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    body = adx._adx_create_body(
+        {
+            "idle_timeout": 0,
+            "network": {
+                "traffic": {
+                    "ingress_default_action": "deny",
+                    "egress_default_action": "allow",
+                    "rules": [
+                        {
+                            "action": "deny",
+                            "direction": "egress",
+                            "protocol": "any",
+                            "cidr": "10.0.0.0/8",
+                            "port_range": 80,
+                            "priority": 200,
+                        }
+                    ],
+                }
+            },
+        },
+        "runsc",
+    )
+    network = body["network"]
+    assert network["schemaVersion"] == 2
+    assert network["traffic"]["ingressDefaultAction"] == "deny"
+    assert network["traffic"]["egressDefaultAction"] == "allow"
+    assert network["traffic"]["mode"] == "stateful"
+    assert network["traffic"]["rules"][0]["portRange"] == 80
+    assert "port_range" not in network["traffic"]["rules"][0]
+
+    legacy = adx._adx_create_body({"idle_timeout": 0, "network": {"block_network": True}}, "runsc")
+    assert legacy["network"] == {"block_network": True}
+
+
+def test_init_adx_uses_the_agentos_token_without_connection(monkeypatch):
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    monkeypatch.setenv("ADX_TOKEN", "tenant-token")
+    provider = object.__new__(adx.AdxShellProvider)
+    provider.endpoint = SimpleNamespace(base_url="http://adx.test")
+    provider.config = SimpleNamespace(
+        launcher_config=SimpleNamespace(extra_params={"executor": "runsc"}),
+        timeout_seconds=30,
+        auth_headers={},
+    )
+
+    provider._init_adx(provider.endpoint, provider.config)
+
+    assert provider._auth_headers["Authorization"] == "Bearer tenant-token"
+    assert provider._auth_headers["X-Auth"] == "tenant-token"
