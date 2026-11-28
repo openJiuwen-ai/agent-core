@@ -82,6 +82,14 @@ DEFAULT_DOCKER_CPU = 1000
 DEFAULT_DOCKER_MEMORY = 1024
 ADX_RECREATE_RETRIES = 5
 ADX_RECREATE_SLEEP_SECONDS = 1
+# A paused environment is woken by the first data-plane request. Ingress holds
+# that request until the environment is ready and only reports ENV_RESUMING
+# when its processing deadline expires, so the caller must advertise a
+# deadline below its own socket timeout and retry the not-started request.
+ADX_RESUME_RETRIES = 3
+ADX_RESUME_RETRY_SLEEP_SECONDS = 1
+ADX_PROCESSING_TIMEOUT_HEADER = "X-ADX-Processing-Timeout-Ms"
+ADX_PROCESSING_TIMEOUT_MARGIN_SECONDS = 1.0
 _SDK_LIST_DEPTH = 20
 _ADX_ENVIRONMENTS = "/api/environment/v1/environments"
 _ADX_INSTANCES = "/api/instances"
@@ -449,7 +457,8 @@ def _adx_create_body(extra: dict[str, Any], executor: str) -> dict[str, Any]:
     idle_action = _idle_action(extra)
     body["idleAction"] = idle_action
     if idle_action == "pause":
-        if body["runtime"] == "conch":
+        runtime = str(body["runtime"]).strip().strip("'\"").lower()
+        if runtime == "conch":
             raise ValueError("ADX tool idle_action=pause is not supported by the conch runtime")
         if body["idleTimeoutSeconds"] <= 0:
             raise ValueError("ADX tool idle_action=pause requires a positive idle_timeout")
@@ -505,7 +514,9 @@ _PAUSE_FIELDS = frozenset({"retention", "timeoutSeconds", "storage"})
 
 
 def _idle_action(extra: dict[str, Any]) -> str:
-    value = extra.get("idle_action")
+    value = extra.get("idleAction")
+    if value is None:
+        value = extra.get("idle_action")
     if value is None:
         return "delete"
     if not isinstance(value, str) or value not in _IDLE_ACTIONS:
@@ -514,7 +525,9 @@ def _idle_action(extra: dict[str, Any]) -> str:
 
 
 def _pause_options(extra: dict[str, Any]) -> Optional[dict[str, Any]]:
-    value = extra.get("pause_policy")
+    value = extra.get("pauseOptions")
+    if value is None:
+        value = extra.get("pause_policy")
     if value is None:
         return None
     if not isinstance(value, dict):
@@ -552,16 +565,24 @@ def _failover_flag(extra: dict[str, Any]) -> bool:
 
 
 def _lifecycle_signature(extra: dict[str, Any]) -> str:
+    """Fingerprint the effective create-time lifecycle configuration.
+
+    Values are normalized first so equivalent spellings (native camelCase keys,
+    omitted pause defaults) produce the same key instead of selecting a new
+    environment. ``failover`` is a create-time field regardless of the idle
+    action, so it participates in the key even when the environment is deleted.
+    """
     action = _idle_action(extra)
-    if action == "delete":
+    failover = _failover_flag(extra)
+    if action == "delete" and not failover:
         return ""
-    lifecycle: dict[str, Any] = {"idle_action": action}
-    if extra.get("idle_timeout") is not None:
-        lifecycle["idle_timeout"] = extra["idle_timeout"]
-    if extra.get("pause_policy") is not None:
-        lifecycle["pause_policy"] = extra["pause_policy"]
-    if _failover_flag(extra):
-        lifecycle["failover"] = True
+    lifecycle: dict[str, Any] = {
+        "idle_action": action,
+        "idle_timeout": _idle_timeout_seconds(extra),
+        "failover": failover,
+    }
+    if action == "pause":
+        lifecycle["pause_options"] = _pause_options(extra)
     payload = json.dumps(lifecycle, sort_keys=True, separators=(",", ":"))
     return "|lifecycle=" + hashlib.sha256(payload.encode()).hexdigest()
 
@@ -694,6 +715,22 @@ def _adx_request(
 def _invoke_url(base_url: str, environment_id: str) -> str:
     quoted = urllib.parse.quote(environment_id, safe="")
     return f"{base_url}{_ADX_INVOKE}/{quoted}/invoke"
+
+
+def _resume_pending(body: Any) -> bool:
+    """Return whether a 503 reports an environment wake that never started.
+
+    Only the reserved ENV_RESUMING error with ``requestForwarded: false`` is
+    safe to retry: no application bytes reached the environment yet.
+    """
+    if not isinstance(body, dict):
+        return False
+    error = body.get("error")
+    return (
+        isinstance(error, dict)
+        and error.get("code") == "ENV_RESUMING"
+        and error.get("requestForwarded") is False
+    )
 
 
 def _environment_url(base_url: str, environment_id: str) -> str:
@@ -942,21 +979,37 @@ class _AdxProviderMixin:
         return environment_id, executor
 
     def _invoke(self, environment_id: str, action: str, args: dict[str, Any], *, timeout: float) -> Any:
-        status, body = _adx_request(
-            "POST",
-            _invoke_url(self._base_url(), environment_id),
-            payload={"action": action, "args": args},
-            headers=self._auth_headers,
-            timeout=timeout,
-        )
-        if status == 429:
-            message = "file search max_results exceeded; narrow the search"
-            if isinstance(body, dict) and body.get("error"):
-                message = str(body["error"])
-            raise SandboxSearchLimitError(message)
-        if status >= 400:
-            raise AdxHttpError(status, _http_error_message(body))
-        return body
+        headers = dict(self._auth_headers)
+        processing_ms = int(max(0.0, timeout - ADX_PROCESSING_TIMEOUT_MARGIN_SECONDS) * 1000)
+        if processing_ms > 0:
+            headers[ADX_PROCESSING_TIMEOUT_HEADER] = str(processing_ms)
+        for attempt in range(ADX_RESUME_RETRIES):
+            status, body = _adx_request(
+                "POST",
+                _invoke_url(self._base_url(), environment_id),
+                payload={"action": action, "args": args},
+                headers=headers,
+                timeout=timeout,
+            )
+            if status == 429:
+                message = "file search max_results exceeded; narrow the search"
+                if isinstance(body, dict) and body.get("error"):
+                    message = str(body["error"])
+                raise SandboxSearchLimitError(message)
+            if status >= 400:
+                if status == 503 and _resume_pending(body) and attempt + 1 < ADX_RESUME_RETRIES:
+                    logger.info(
+                        "[adx] environment resuming; retry invoke attempt=%d/%d environment_id=%s action=%s",
+                        attempt + 1,
+                        ADX_RESUME_RETRIES,
+                        environment_id,
+                        action,
+                    )
+                    time.sleep(ADX_RESUME_RETRY_SLEEP_SECONDS)
+                    continue
+                raise AdxHttpError(status, _http_error_message(body))
+            return body
+        raise AdxHttpError(503, "ADX environment is still resuming; retry the request")
 
     def _ensure_shared_instance(self, *, sleep_before_create: bool = False) -> Tuple[str, str]:
         """Return the cached environment id, creating one if needed.
@@ -1231,7 +1284,9 @@ async def delete_adx_sandbox(
     """Delete cached ADX environments on sysoperation teardown."""
     entries: List[Tuple[str, str, Dict[str, str]]] = []
     if shared_key:
-        entries.extend(_AdxProviderMixin.clear_shared_for_scope(shared_key, suffix_prefix="|rootfs="))
+        # Teardown owns every variant of the scope: local-rootfs and lifecycle
+        # suffixes are both derived from the same base_url|isolation_key.
+        entries.extend(_AdxProviderMixin.clear_shared_for_scope(shared_key))
     elif base_url:
         entries.extend(_AdxProviderMixin.clear_shared_for_scope(base_url.rstrip("/")))
 
