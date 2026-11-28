@@ -1556,6 +1556,62 @@ async def test_reassign_from_departed_owner_lands_directed_pending(
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_reassign_from_legacy_shutdown_label_lands_directed_pending(
+    task_manager, member2, db, message_bus
+):
+    """Legacy / fixture rows may store the enum *name* ``SHUTDOWN``.
+
+    ``"SHUTDOWN".lower()`` is ``"shutdown"``, which is not the canonical
+    value ``"shut_down"``. Parsing must still recognize the owner as
+    departed so reassign takes the directed-pending path.
+    """
+    from openjiuwen.agent_teams.tools.models import TeamMember
+    from sqlalchemy import update
+
+    task = await task_manager.add(title="T", content="c")
+    assert (await task_manager.assign(task.task_id, "member1")).ok
+    # Bypass transition validation: write the historical label directly.
+    async with db.member._sessions.write() as session:
+        await session.execute(
+            update(TeamMember)
+            .where(
+                TeamMember.member_name == "member1",
+                TeamMember.team_name == "test_team",
+            )
+            .values(status="SHUTDOWN")
+        )
+        await session.commit()
+    message_bus.publish.reset_mock()
+
+    result = await task_manager.reassign(task.task_id, "member2")
+    assert result.ok, result.reason
+
+    refreshed = await task_manager.get(task.task_id)
+    assert refreshed.assignee == "member2"
+    assert refreshed.status == TaskStatus.PENDING.value
+    assert _published_events(message_bus, TeamEvent.TASK_RELEASED) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("shut_down", MemberStatus.SHUTDOWN),
+        ("SHUTDOWN", MemberStatus.SHUTDOWN),
+        ("shutdown_requested", MemberStatus.SHUTDOWN_REQUESTED),
+        ("SHUTDOWN_REQUESTED", MemberStatus.SHUTDOWN_REQUESTED),
+        ("BUSY", MemberStatus.BUSY),
+        ("busy", MemberStatus.BUSY),
+        ("not-a-status", None),
+    ],
+)
+async def test_parse_member_status_accepts_value_and_enum_name(raw, expected):
+    assert TeamTaskManager._parse_member_status(raw) is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_reassign_assigned_but_not_started_task_keeps_it_pending(task_manager, member2, message_bus):
     """An assigned-but-not-yet-started task can be handed over, and stays put.
 

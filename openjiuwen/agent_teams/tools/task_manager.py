@@ -2051,20 +2051,47 @@ class TeamTaskManager:
         )
         return TaskOpResult.success()
 
+    @staticmethod
+    def _parse_member_status(status: str | None) -> MemberStatus | None:
+        """Normalize a persisted member status into ``MemberStatus``.
+
+        Accepts the canonical enum value (``shut_down``), a lower-cased value
+        (``BUSY`` → ``busy``), and the enum *name* used by some fixtures /
+        legacy rows (``SHUTDOWN`` → ``MemberStatus.SHUTDOWN``). The last form
+        matters because ``"SHUTDOWN".lower()`` is ``"shutdown"``, which is
+        *not* the value ``"shut_down"``.
+        """
+        if status is None:
+            return None
+        raw = str(status).strip()
+        if not raw:
+            return None
+        for candidate in (raw, raw.lower()):
+            try:
+                return MemberStatus(candidate)
+            except ValueError:
+                pass
+        try:
+            return MemberStatus[raw.upper()]
+        except KeyError:
+            return None
+
     async def _owner_is_departed(self, member_name: str) -> bool:
         """Whether ``member_name`` has been released by the leader (shutdown)."""
         status = await self.db.member.get_member_status(self.team_name, member_name)
         if not status:
             # Missing roster row: treat as gone so the task is not left on a ghost.
             return True
-        try:
-            member_status = MemberStatus(status)
-        except ValueError:
-            try:
-                # Some fixtures / legacy rows used upper-case labels.
-                member_status = MemberStatus(str(status).lower())
-            except ValueError:
-                return False
+        member_status = self._parse_member_status(status)
+        if member_status is None:
+            team_logger.warning(
+                "Unrecognized member status %r for %s in team %s; "
+                "treating owner as still on the team (not departed)",
+                status,
+                member_name,
+                self.team_name,
+            )
+            return False
         return member_status in MEMBER_DEPARTED_STATUSES
 
     async def approve_plan(
