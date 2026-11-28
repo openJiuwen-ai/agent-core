@@ -351,6 +351,7 @@ Agent 会话类，提供会话管理与流式输出功能。
 * **session_id**(str，可选)：会话 ID，若为 `None` 则自动生成。默认值：`None`。
 * **envs**(dict[str, Any]，可选)：环境变量字典。默认值：`None`。
 * **card**(AgentCard，可选)：Agent 卡片。默认值：`None`。
+* **execution_id**(str，可选)：执行实例 ID，用于隔离并发 workflow trace，并被子工作流会话继承。默认值：`None`。
 
 ### get_session_id() -> str
 
@@ -488,7 +489,7 @@ dump_state(self) -> dict
 
 ### create_workflow_session() -> WorkflowSession
 
-创建工作流子会话。
+创建工作流子会话。新建会话继承当前 Agent 会话的 `execution_id`（用于隔离并发 workflow trace）。
 
 **返回**：
 
@@ -504,7 +505,7 @@ dump_state(self) -> dict
 
 ---
 
-## func openjiuwen.core.single_agent.create_agent_session(session_id: str = None, envs: dict[str, Any] = None, card: AgentCard = None) -> Session
+## func openjiuwen.core.single_agent.create_agent_session(session_id: str = None, envs: dict[str, Any] = None, card: AgentCard = None, *, execution_id: str = None) -> Session
 
 创建 Agent 会话的工厂函数。
 

@@ -27,6 +27,13 @@ class Session:
         else:
             self._session_id = str(uuid.uuid4())
         self._trace_id = trace_id
+        if execution_id is None and parent is not None:
+            getter = getattr(parent, "get_execution_id", None) or getattr(parent, "execution_id", None)
+            if callable(getter):
+                try:
+                    execution_id = getter()
+                except Exception:  # noqa: BLE001 - 旧会话无该能力时视为未提供
+                    execution_id = None
         self._execution_id = execution_id
         # 请求级环境作用域（issue #1755）：同一 Runtime 服务多个工作空间，
         # 只能随执行写入 Span；子工作流从 parent 继承同值，缺失则保持 None。

@@ -351,6 +351,7 @@ Agent session class, providing session management and streaming output functiona
 * **session_id** (str, optional): Session ID, automatically generated if `None`. Default value: `None`.
 * **envs** (dict[str, Any], optional): Environment variable dictionary. Default value: `None`.
 * **card** (AgentCard, optional): Agent card. Default value: `None`.
+* **execution_id** (str, optional): Execution instance ID used to isolate concurrent workflow traces and inherited by workflow sub-sessions. Default value: `None`.
 
 ### get_session_id() -> str
 
@@ -488,7 +489,7 @@ Post-execution processing, close streaming output.
 
 ### create_workflow_session() -> WorkflowSession
 
-Create workflow sub-session.
+Create workflow sub-session. The created session inherits this Agent session's `execution_id` (used to isolate concurrent workflow traces).
 
 **Returns:**
 
@@ -504,7 +505,7 @@ Send interaction data to session.
 
 ---
 
-## func openjiuwen.core.single_agent.create_agent_session(session_id: str = None, envs: dict[str, Any] = None, card: AgentCard = None) -> Session
+## func openjiuwen.core.single_agent.create_agent_session(session_id: str = None, envs: dict[str, Any] = None, card: AgentCard = None, *, execution_id: str = None) -> Session
 
 Factory function to create Agent session.
 

@@ -54,6 +54,17 @@ class EdgeTopology:
         )
 
 
+def _session_execution_id(session) -> str | None:
+    """读取会话的执行 ID，兼容 get_execution_id() / execution_id() 两种命名。"""
+    getter = getattr(session, "get_execution_id", None) or getattr(session, "execution_id", None)
+    if not callable(getter):
+        return None
+    try:
+        return getter()
+    except Exception:  # noqa: BLE001 - 旧会话无该能力时视为未提供
+        return None
+
+
 async def execute_single_component(
     component_id: str,
     session: Session,
@@ -66,8 +77,10 @@ async def execute_single_component(
 ):
     # 1. Create WorkflowSession
     _env_scope = session.get_env_scope() if hasattr(session, "get_env_scope") else {}
+    _execution_id = _session_execution_id(session)
     workflow_session = WorkflowSession(
         workflow_id=component_id, parent=None, session_id=session.get_session_id(),
+        execution_id=_execution_id,
         workspace_id=_env_scope.get("workspace_id"),
         environment_id=_env_scope.get("environment_id"),
         project_id=_env_scope.get("project_id"),

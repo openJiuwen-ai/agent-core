@@ -11,6 +11,7 @@ failures never propagate to the business flow.
 
 from __future__ import annotations
 
+import functools
 import json
 from datetime import datetime
 from typing import Any
@@ -1150,6 +1151,34 @@ class OtelAgentHandler(TraceExtAgentHandler):
 # ---------------------------------------------------------------------------
 
 
+def _execution_scoped(method):
+    """Route a workflow event to its execution-scoped handler (issue #2430).
+
+    ``TracerHandlerRegistry`` injects one handler instance into every Tracer,
+    while workflow invoke_ids are static (workflow id / node path). Scoped
+    events therefore run on a per-execution child handler that owns
+    independent span state; events without an execution id keep using this
+    instance so direct callers retain the legacy flat-state behavior.
+    """
+
+    @functools.wraps(method)
+    async def wrapper(self, *args, **kwargs):
+        try:
+            target = self.resolve_event_handler(method.__name__, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - tracing must not break business flow
+            session_logger.warning(
+                "otel workflow handler: route %s failed: %s", method.__name__, exc
+            )
+            target = self
+        if target is not self:
+            # Dispatch through the child's class so downstream event
+            # overrides (studio's on_call_done) keep working.
+            return await getattr(target, method.__name__)(*args, **kwargs)
+        return await method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class OtelWorkflowHandler(TraceExtWorkflowHandler):
     """Workflow-dimension OTel handler.
 
@@ -1161,7 +1190,17 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
       workflow layer's root span
     - ``_component_spans`` (node_id → component OtelSpanState): host
       component spans that serve as parents for sub-workflow roots
+
+    The registry injects one instance into every Tracer, so workflow state
+    must be partitioned per execution (issue #2430): events carrying an
+    execution id run on a child handler (``_exec_handlers``) with independent
+    copies of every mapping above. Events without an execution id keep using
+    this instance's flat state for direct callers and backward compatibility.
     """
+
+    # Upper bound for execution-scoped child handlers retained on the root.
+    # Overridable per instance/subclass for configuration and tests.
+    _MAX_EXECUTION_HANDLERS: int = 128
 
     def __init__(self, otel_tracer: trace.Tracer, config: OtelTracerConfig, trace_id: str | None = None):
         super().__init__()
@@ -1191,6 +1230,155 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         # when it materializes (on_call_finalize, or on_call_done fallback
         # with the original begin timestamp when the marker never arrives).
         self._deferred_end_starts: dict[str, dict] = {}
+        # Execution isolation (issue #2430): the registry injects this single
+        # instance into every Tracer, while workflow invoke_ids are static.
+        # Events carrying an execution id are routed to a child handler that
+        # owns independent copies of every state field above; the root keeps
+        # its flat state for unscoped direct callers.
+        # Child handlers are kept in LRU order and bounded by
+        # _max_execution_handlers: successful runs leave an idle child that
+        # still holds _cached_root_ctx (the ended root span and its attribute
+        # payloads), so unbounded retention would be a memory regression even
+        # without interruptions. Live executions are never evicted; TTL and
+        # forced cleanup for stuck runs remain in #2432.
+        self._parent_handler: OtelWorkflowHandler | None = None
+        self._exec_handlers: dict[str, OtelWorkflowHandler] = {}
+        self._max_execution_handlers = self._MAX_EXECUTION_HANDLERS
+
+    # --- helper: execution-scoped routing ---
+
+    def bind_parent_handler(self, parent: "OtelWorkflowHandler") -> None:
+        """Attach this handler as an execution-scoped child of ``parent``."""
+        self._parent_handler = parent
+
+    def get_trace_id(self) -> str:
+        """Return the trace id bound to this handler (public accessor)."""
+        return self._trace_id
+
+    def get_session_id(self) -> str | None:
+        """Return the session id bound to this handler (public accessor)."""
+        return self._session_id
+
+    def _new_execution_handler(self, trace_id: str | None) -> "OtelWorkflowHandler":
+        # Preserve downstream subclasses (e.g. studio's business_error handler)
+        # so their overrides run on the execution-scoped instance too. A
+        # subclass with an incompatible constructor can override this hook or
+        # accept the router's fallback to the root handler.
+        handler_cls = type(self)
+        return handler_cls(self._otel_tracer, self._config, trace_id=trace_id or self._trace_id)
+
+    def resolve_event_handler(self, event_name: str, **kwargs) -> "OtelWorkflowHandler":
+        """Return the handler that must receive this workflow event.
+
+        Called by ``Tracer.trigger`` before dispatching extension events. It
+        runs on the registered root instance and must happen at the dispatch
+        entry: subclasses may override an event method without calling
+        ``super()`` (studio's ``on_call_done`` does), so a parent-class
+        decorator alone cannot route those overrides.
+        """
+        return self._route_for_event(
+            kwargs.get("execution_id"),
+            trace_id=kwargs.get("trace_id"),
+            session_id=kwargs.get("session_id"),
+        )
+
+    def _route_for_event(
+        self,
+        execution_id: str | None,
+        trace_id: str | None = None,
+        session_id: str | None = None,
+    ) -> "OtelWorkflowHandler":
+        """Return the handler that owns span state for this execution.
+
+        The registered handler is shared by every Tracer, so state keyed by
+        static workflow invoke_ids would cross concurrent executions. Scoped
+        events run on a child handler with independent state; events without
+        an execution id stay on this instance (legacy direct callers/tests).
+        """
+        if self._parent_handler is not None:
+            return self
+        key = str(execution_id) if execution_id else ""
+        if not key:
+            return self
+
+        target = self._exec_handlers.get(key)
+        if target is not None:
+            # Refresh LRU order (dict preserves insertion order).
+            self._exec_handlers.pop(key, None)
+            self._exec_handlers[key] = target
+            if trace_id and trace_id != target.get_trace_id():
+                target.set_trace_id(trace_id)
+            if session_id is not None and session_id != target.get_session_id():
+                target.set_session_id(session_id)
+            return target
+
+        self._evict_idle_execution_handlers()
+        target = self._new_execution_handler(trace_id)
+        target.bind_parent_handler(self)
+        # Only bind the session observed on this event: inheriting the
+        # root's _session_id would leak another request's binding.
+        if session_id is not None:
+            target.set_session_id(session_id)
+        self._exec_handlers[key] = target
+        session_logger.debug("otel: execution-scoped workflow handler created: %s", key)
+        return target
+
+    def _evict_idle_execution_handlers(self) -> None:
+        """Keep the execution-handler cache bounded (success-path retention).
+
+        An idle child still holds ``_cached_root_ctx``, which references the
+        ended root span and its serialized attribute payloads. Without
+        eviction the root handler grows with cumulative sessions even when
+        every run completes. Live executions are skipped here; TTL/forced
+        cleanup for stuck runs remains in #2432.
+        """
+        limit = max(1, int(self._max_execution_handlers))
+        for key in list(self._exec_handlers):
+            if len(self._exec_handlers) < limit:
+                return
+            child = self._exec_handlers[key]
+            if not child.evict_if_idle():
+                continue
+            self._exec_handlers.pop(key, None)
+            session_logger.debug("otel: evicted idle execution handler: %s", key)
+
+    def evict_if_idle(self) -> bool:
+        """Release retained state when this execution handler is idle.
+
+        Public wrapper for the root's eviction loop; the root must not touch
+        a child's protected members (G.CLS.11).
+        """
+        if not self._is_idle():
+            return False
+        self._discard_execution_state()
+        return True
+
+    def _is_idle(self) -> bool:
+        """Whether this execution handler retains no in-flight or buffered state."""
+        return (
+            self._parent_handler is not None
+            and not self._layer_root_spans
+            and not self._component_spans
+            and not self._deferred_end_starts
+            and not self._exec_handlers
+            and not self._span_manager.has_spans()
+        )
+
+    def _discard_execution_state(self) -> None:
+        """Release every resource retained by an evicted execution handler."""
+        self._cleanup_stale_spans()
+        for state in self._span_manager.discard_all():
+            try:
+                state.span.end()
+            except Exception:  # noqa: BLE001 - already-ended spans are fine
+                pass
+            self._detach_state(state)
+        pending = getattr(self, "_unhandled_errors", None)
+        if isinstance(pending, dict):
+            pending.clear()
+        self._cached_root_ctx = None
+        self._cached_trace_id = None
+        self._cached_session_id = None
 
     # --- helper: resolve parent context for a new span ---
 
@@ -1270,6 +1458,9 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 session_logger.warning("otel workflow handler: cleanup component span failed: %s", exc)
         self._layer_root_spans.clear()
         self._component_spans.clear()
+        # 旧轮次未 finalize 的 deferred end-node stash 已不可能再完成；
+        # 进入新 trace 前丢弃，防止新轮次误 materialize 旧 span。
+        self._deferred_end_starts.clear()
 
     @staticmethod
     def _detach_state(state: OtelSpanState) -> None:
@@ -1433,6 +1624,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     # Lifecycle events
     # ================================================================
 
+    @_execution_scoped
     async def on_call_start(
         self,
         invoke_id: str,
@@ -1605,6 +1797,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         else:
             self._component_spans[invoke_id] = state
 
+    @_execution_scoped
     async def on_call_finalize(self, invoke_id: str, **kwargs):
         """Open the deferred end-node span at the finalize marker.
 
@@ -1659,6 +1852,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         if dropped:
             self._span_manager.merge_dropped_counts(invoke_id, dropped)
 
+    @_execution_scoped
     async def on_call_done(self, invoke_id: str, outputs: Any = None, **kwargs):
         try:
             # Deferred end node whose finalize marker never arrived (stream
@@ -1713,6 +1907,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     # Input/output events
     # ================================================================
 
+    @_execution_scoped
     async def on_pre_invoke(
         self,
         invoke_id: str,
@@ -1749,6 +1944,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         except Exception as exc:
             session_logger.warning("otel workflow handler: on_pre_invoke failed: %s", exc)
 
+    @_execution_scoped
     async def on_pre_stream(self, invoke_id: str, chunk, need_send: bool = False, **kwargs):
         try:
             if isinstance(chunk, dict):
@@ -1768,6 +1964,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         except Exception as exc:
             session_logger.warning("otel workflow handler: on_pre_stream failed: %s", exc)
 
+    @_execution_scoped
     async def on_invoke(
         self,
         invoke_id: str,
@@ -1868,6 +2065,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         except Exception as exc:
             session_logger.warning("otel workflow handler: on_invoke failed: %s", exc)
 
+    @_execution_scoped
     async def on_post_invoke(self, invoke_id: str, outputs, inputs=None, **kwargs):
         try:
             state = self._span_manager.get(invoke_id)
@@ -1896,6 +2094,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         except Exception as exc:
             session_logger.warning("otel workflow handler: on_post_invoke failed: %s", exc)
 
+    @_execution_scoped
     async def on_post_stream(self, invoke_id: str, chunk, **kwargs):
         try:
             state = self._span_manager.get(invoke_id)
@@ -1923,6 +2122,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     # Interactive events
     # ================================================================
 
+    @_execution_scoped
     async def on_interact(
         self,
         invoke_id: str,

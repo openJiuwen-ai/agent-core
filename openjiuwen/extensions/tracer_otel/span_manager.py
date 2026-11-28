@@ -185,6 +185,26 @@ class OtelWorkflowSpanManager:
     def get(self, invoke_id: str) -> OtelSpanState | None:
         return self._spans.get(invoke_id)
 
+    def has_spans(self) -> bool:
+        """Whether any span state is currently retained."""
+        return bool(self._spans)
+
+    def discard_all(self) -> list[OtelSpanState]:
+        """Remove and return every span state and buffered payload.
+
+        Used when an execution-scoped handler is evicted (issue #2430 review):
+        the caller ends/detaches the returned spans so their attributes stop
+        being retained by the handler.
+        """
+        states = list(self._spans.values())
+        self._spans.clear()
+        self._on_invoke_data.clear()
+        self._stream_inputs.clear()
+        self._stream_outputs.clear()
+        self._byte_counts.clear()
+        self._dropped.clear()
+        return states
+
     # --- Incremental data buffers ---
 
     def _try_append(self, invoke_id: str, kind: str, buf: list, chunk: dict) -> None:
