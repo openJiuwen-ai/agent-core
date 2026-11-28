@@ -13,6 +13,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ModelCallInputs,
     ToolCallInputs,
+    tool_call_skipped,
 )
 from openjiuwen.rsi.harness_rsi.evaluator.controlled_skill_treatment_rail import (
     ControlledSkillTreatmentRail,
@@ -89,7 +90,7 @@ async def test_treatment_blocks_non_skill_tool_before_delivery() -> None:
 
     await rail.before_tool_call(tool_ctx)
 
-    assert tool_ctx.extra["_skip_tool"] is True
+    assert tool_call_skipped(tool_ctx) is True
     assert "requires skill_tool" in tool_ctx.inputs.tool_result["error"]
     assert rail.evidence()["blocked_tool_names"] == ["bash"]
     assert rail.evidence()["delivered"] is False

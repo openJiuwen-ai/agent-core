@@ -25,6 +25,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
     AgentRail,
+    mark_tool_skipped,
 )
 
 _MODEL_EVENTS: Set[AgentCallbackEvent] = {
@@ -311,7 +312,7 @@ class BaseSecurityRail(AgentRail):
         - Alert: log + stream to frontend, then continue execution
         - Reject:
           - MODEL events: request_force_finish
-          - BEFORE_TOOL_CALL: _skip_tool
+          - BEFORE_TOOL_CALL: mark_tool_skipped
           - AFTER_TOOL_CALL: request_force_finish + set tool_result/msg
         - Interrupt:
           - MODEL events: auto-converted to Reject in _run_and_apply
@@ -497,7 +498,7 @@ class BaseSecurityRail(AgentRail):
             content=str(tool_result),
             tool_call_id=tool_call_id,
         )
-        ctx.extra["_skip_tool"] = True
+        mark_tool_skipped(ctx)
         ctx.inputs.tool_result = tool_result
         ctx.inputs.tool_msg = msg
 

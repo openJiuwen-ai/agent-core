@@ -22,7 +22,7 @@ from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, mark_tool_skipped, tool_call_skipped
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails.llm_stability_rail import FORCE_SKIP_ALL_KEY, SKIP_KEY
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -141,7 +141,7 @@ class DebateRoundCapRail(DeepAgentRail):
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Tag debate messages and transform over-limit sends into notices."""
-        if ctx.extra.get("_skip_tool") or not self._is_send_message(ctx.inputs.tool_name):
+        if tool_call_skipped(ctx) or not self._is_send_message(ctx.inputs.tool_name):
             return
         if self._role == TeamRole.LEADER:
             call_id = str(getattr(ctx.inputs.tool_call, "id", "") or "")
@@ -259,10 +259,10 @@ class DebateRoundCapRail(DeepAgentRail):
             return
         if self._role == TeamRole.LEADER:
             call_id = str(getattr(ctx.inputs.tool_call, "id", "") or "")
-            succeeded = not ctx.extra.get("_skip_tool") and self._tool_succeeded(ctx)
+            succeeded = not tool_call_skipped(ctx) and self._tool_succeeded(ctx)
             delivered = (
                 set()
-                if ctx.extra.get("_skip_tool")
+                if tool_call_skipped(ctx)
                 else self._multicast_delivered_participants(ctx.inputs.tool_result)
             )
             await self._debate.settle_invitation(
@@ -272,7 +272,7 @@ class DebateRoundCapRail(DeepAgentRail):
             )
             await self._settle_leader_relay(ctx, succeeded)
             return
-        if ctx.extra.get("_skip_tool"):
+        if tool_call_skipped(ctx):
             return
 
         self._sync_participant_round()
@@ -322,7 +322,7 @@ class DebateRoundCapRail(DeepAgentRail):
             return
         if not ctx.extra.pop(self._leader_relay_key(ctx), False):
             return
-        if not succeeded or ctx.extra.get("_skip_tool"):
+        if not succeeded or tool_call_skipped(ctx):
             return
         async with self._count_lock:
             if self._count < self._max:
@@ -648,7 +648,7 @@ class DebateRoundCapRail(DeepAgentRail):
     @staticmethod
     def _reject_tool(ctx: AgentCallbackContext, error: str) -> None:
         tool_call_id = getattr(ctx.inputs.tool_call, "id", "")
-        ctx.extra["_skip_tool"] = True
+        mark_tool_skipped(ctx)
         ctx.inputs.tool_result = {"error": error}
         ctx.inputs.tool_msg = ToolMessage(content=error, tool_call_id=tool_call_id)
 

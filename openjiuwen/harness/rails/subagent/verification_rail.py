@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import ToolMessage
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, mark_tool_skipped, tool_call_skipped
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.workspace.workspace import Workspace
@@ -176,7 +176,7 @@ class VerificationRail(DeepAgentRail):
         Args:
             ctx: Callback context containing the tool name and call metadata.
         """
-        if ctx.extra.get("_skip_tool"):
+        if tool_call_skipped(ctx):
             return
 
         tool_name = ctx.inputs.tool_name
@@ -242,7 +242,7 @@ class VerificationRail(DeepAgentRail):
         tool_call = ctx.inputs.tool_call
         tool_call_id = tool_call.id if tool_call else ""
         msg = ToolMessage(content=error_msg, tool_call_id=tool_call_id)
-        ctx.extra["_skip_tool"] = True
+        mark_tool_skipped(ctx)
         ctx.inputs.tool_result = {"error": error_msg}
         ctx.inputs.tool_msg = msg
 

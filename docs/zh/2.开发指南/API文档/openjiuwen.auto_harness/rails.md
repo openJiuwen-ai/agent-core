@@ -151,7 +151,9 @@ def __init__(self, max_files: int = 3) -> None
 
 ### async before_tool_call(ctx: AgentCallbackContext) -> None
 
-对 `write_file` / `edit_file` 工具调用，将 `file_path` 规范化为 repo 相对路径并校验是否落在允许的编辑范围内。若越界则硬性拦截：设置 `ctx.extra["_skip_tool"] = True`、回写错误 `tool_result` 与 `ToolMessage`。允许编辑范围：`openjiuwen/dev_tools/**`、`openjiuwen/harness/**`、`openjiuwen/core/**`、`tests/**`、`examples/**`、`docs/en/**`、`docs/zh/**`。
+对 `write_file` / `edit_file` 工具调用，将 `file_path` 规范化为 repo 相对路径并校验是否落在允许的编辑范围内。若越界则硬性拦截：调用 `ctx.mark_tool_skipped()` 标记本次调用被否决、回写错误 `tool_result` 与 `ToolMessage`。允许编辑范围：`openjiuwen/dev_tools/**`、`openjiuwen/harness/**`、`openjiuwen/core/**`、`tests/**`、`examples/**`、`docs/en/**`、`docs/zh/**`。
+
+**跳过执行的兼容与迁移**：本仓 rail 统一用 `ctx.mark_tool_skipped()` 标记否决，执行体仍在同一位置消费一次旧写法 `ctx.extra["_skip_tool"]`；但该 key 在整轮共享的 `extra` 里，并发多工具调用时兄弟调用可能先消费它（#2413 的竞争未消除）。外部/宿主自有 rail 请双向迁移：**写**用 `ctx.mark_tool_skipped()`（模块级 `mark_tool_skipped(ctx)` 适用于鸭子类型上下文），**读**用 `tool_call_skipped(ctx)`——该函数会同时回读旧 key；直接读 `extra.get("_skip_tool")` 的检查点看不到新标记的否决，必须改。新代码不要再写 `extra["_skip_tool"]`。
 
 **参数**：
 
@@ -304,7 +306,7 @@ def __init__(self, immutable_files: List[str] | None = None, high_impact_prefixe
 
 ### async before_tool_call(ctx: AgentCallbackContext) -> None
 
-对 `write_file` / `edit_file` 工具调用，用 `fnmatch` 检查 `file_path`：命中不可变模式则硬性拦截（设置 `_skip_tool`、回写错误 `ToolMessage`）；命中高影响前缀则置 `ctx.extra["high_impact"] = True`。
+对 `write_file` / `edit_file` 工具调用，用 `fnmatch` 检查 `file_path`：命中不可变模式则硬性拦截（`ctx.mark_tool_skipped()` 标记否决、回写错误 `ToolMessage`）；命中高影响前缀则置 `ctx.extra["high_impact"] = True`。
 
 **参数**：
 

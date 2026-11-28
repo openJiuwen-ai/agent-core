@@ -62,7 +62,7 @@ Agent: Terminates, shows "Blocked by security rail"
 │  BEFORE_TOOL_CALL Rail                                          │
 │  ✓ Secret detected in args                                      │
 │  → Reject                                                        │
-│  → _skip_tool (base behavior)                                   │
+│  → mark_tool_skipped() (base behavior)                                   │
 │  → ToolMessage = "Tool execution skipped"                       │
 └─────────────────────────────────────────────────────────────────┘
                               ↓

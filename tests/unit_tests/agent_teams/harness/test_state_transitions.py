@@ -283,7 +283,7 @@ async def test_debate_cap_rail_persists_across_idle_mailbox_rounds() -> None:
         ] == [rail]
         assert rail._count == 2
         cap_notice = fake.tool_contexts[2]
-        assert cap_notice.extra.get("_skip_tool") is None
+        assert not cap_notice.tool_skipped
         assert "member has reached" in cap_notice.inputs.tool_args["content"]
         assert normalize_debate_meta(
             cap_notice.inputs.tool_args["_team_debate_meta"],
@@ -292,7 +292,7 @@ async def test_debate_cap_rail_persists_across_idle_mailbox_rounds() -> None:
         # final_report flag -- is rejected outright; the error points the
         # member at the final_report=true convergence path.
         repeat = fake.tool_contexts[3]
-        assert repeat.extra.get("_skip_tool") is True
+        assert repeat.tool_skipped is True
         assert "final_report=true" in repeat.inputs.tool_result["error"]
     finally:
         await Runner.stop()

@@ -21,13 +21,18 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, List, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.runner.runner import Runner
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    ToolCallInputs,
+    mark_tool_skipped,
+    tool_call_skipped,
+)
 from openjiuwen.harness.prompts.builder import PromptSection
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
@@ -36,7 +41,7 @@ from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.agent_mode import build_plan_mode_section
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.config import SubAgentConfig
-from openjiuwen.harness.tools import SwitchModeTool, EnterPlanModeTool, ExitPlanModeTool, create_task_tool
+from openjiuwen.harness.tools import EnterPlanModeTool, ExitPlanModeTool, SwitchModeTool, create_task_tool
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -480,7 +485,7 @@ class AgentModeRail(DeepAgentRail):
         # ----------------------------------------------------------------
         # Segment 3: plan mode — whitelist + path check + hard-block
         # ----------------------------------------------------------------
-        if ctx.extra.get("_skip_tool"):
+        if tool_call_skipped(ctx):
             return
 
         # 3a. Hard-block todo/session tools (belt-and-suspenders)
@@ -580,16 +585,16 @@ class AgentModeRail(DeepAgentRail):
         tool_name = ctx.inputs.tool_name
         agent = self._agent
 
-        if tool_name == "enter_plan_mode" and not ctx.extra.get("_skip_tool"):
+        if tool_name == "enter_plan_mode" and not tool_call_skipped(ctx):
             self._register_task_tool(agent)
 
-        elif tool_name == "exit_plan_mode" and not ctx.extra.get("_skip_tool"):
+        elif tool_name == "exit_plan_mode" and not tool_call_skipped(ctx):
             self._unregister_task_tool(agent)
 
         # Supplement mode restoration: when exit_plan_mode with empty plan
         # content exits early without calling restore_mode_after_plan_exit,
         # mode is still "plan".  Also covers the case where a hook blocks
-        # tool execution (_skip_tool=True but restore was never called).
+        # tool execution (tool_skipped=True but restore was never called).
         #
         # IMPORTANT: when exit_plan_mode is intercepted by a higher-priority
         # rail (e.g. ConfirmInterruptRail raises AbortError), tool_result is
@@ -752,7 +757,7 @@ class AgentModeRail(DeepAgentRail):
             self._reject_tool(ctx, msg)
 
     def _reject_tool(self, ctx: AgentCallbackContext, error_msg: str) -> None:
-        """Lightweight tool rejection — sets _skip_tool and injects error result.
+        """Lightweight tool rejection — marks the call skipped and injects error result.
 
         Args:
             ctx: Callback context to mutate.
@@ -761,7 +766,7 @@ class AgentModeRail(DeepAgentRail):
         tool_call = ctx.inputs.tool_call
         tool_call_id = tool_call.id if tool_call else ""
         msg = ToolMessage(content=error_msg, tool_call_id=tool_call_id)
-        ctx.extra["_skip_tool"] = True
+        mark_tool_skipped(ctx)
         ctx.inputs.tool_result = {"error": error_msg}
         ctx.inputs.tool_msg = msg
 

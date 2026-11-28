@@ -414,6 +414,7 @@ class AgentCallbackContext:
     context_usage_sequence: Optional[int] = None
     context_usage_attribution: Dict[str, Any] = field(default_factory=dict)
     invoke_start_time: float = 0.0
+    _tool_skip_marker: bool = field(default=False, init=False, repr=False, compare=False)
     _retry_request: Optional[RetryRequest] = field(
         default=None, init=False, repr=False
     )
@@ -426,6 +427,46 @@ class AgentCallbackContext:
     _steering_window: Optional[SteeringWindow] = field(
         default=None, init=False, repr=False
     )
+
+    def mark_tool_skipped(self) -> None:
+        """Veto the tool call this context belongs to.
+
+        Every tool call of a model turn gets its own ``AgentCallbackContext``,
+        so the marker is inherently scoped to one call: a sibling call cannot
+        observe or consume it. It deliberately does not travel through
+        ``extra``, which is shared by the whole invoke and carries state that
+        rails accumulate across calls (failure counters, skill shortlists).
+
+        The executor answers a marked call with ``inputs.tool_result`` /
+        ``inputs.tool_msg`` and never runs the tool body.
+        """
+        self._tool_skip_marker = True
+
+    @property
+    def tool_skipped(self) -> bool:
+        """Whether a rail vetoed this call.
+
+        Visible to the BEFORE hooks that decide the call, exactly like the
+        legacy ``extra["_skip_tool"]`` before the executor popped it: the
+        executor consumes the marker when it answers the call with the veto
+        result, so later hooks see the same view they always did.
+        """
+        return self._tool_skip_marker
+
+    def consume_tool_skip(self) -> bool:
+        """Read the veto marker and clear it, like popping a one-shot flag."""
+        skipped = self._tool_skip_marker
+        self._tool_skip_marker = False
+        return skipped
+
+    def clear_tool_skip(self) -> None:
+        """Drop a veto recorded on this context.
+
+        Only needed when hooks are replayed against one context object, as
+        tests and resume flows do; a real tool call owns its context for the
+        whole call, so the marker naturally expires with it.
+        """
+        self._tool_skip_marker = False
 
     async def fire(
         self, event: AgentCallbackEvent
@@ -647,6 +688,52 @@ EVENT_METHOD_MAP: Dict[AgentCallbackEvent, str] = {
     AgentCallbackEvent.AFTER_REACT_ITERATION: "after_react_iteration",
     AgentCallbackEvent.ON_USER_MESSAGE: "on_user_message",
 }
+
+
+def mark_tool_skipped(ctx: Any) -> None:
+    """Veto the tool call *ctx* belongs to.
+
+    ``AgentCallbackContext`` carries the marker itself. Duck-typed contexts
+    (test fakes and out-of-tree hosts that build their own stand-in) keep the
+    historical ``extra["_skip_tool"]`` flag, so a rail does not have to care
+    which shape it was handed.
+    """
+    if isinstance(ctx, AgentCallbackContext):
+        ctx.mark_tool_skipped()
+        return
+    extra = getattr(ctx, "extra", None)
+    if isinstance(extra, dict):
+        extra["_skip_tool"] = True
+
+
+def tool_call_skipped(ctx: Any) -> bool:
+    """Whether a rail vetoed *ctx*'s tool call.
+
+    Both veto channels are read: the per-call marker and the legacy
+    ``extra["_skip_tool"]`` key. The legacy read is what keeps a veto raised by
+    an un-migrated out-of-tree rail visible to in-repo rails; it is read-only,
+    so it cannot consume a marker that belongs to another call (the executor
+    owns consumption).
+
+    The reverse direction does not hold: a marker veto is invisible to rails
+    that still read ``extra.get("_skip_tool")`` directly -- mirroring the marker
+    into the shared dict would make siblings consume it again (#2413). Such
+    readers must migrate to this helper.
+    """
+    if isinstance(ctx, AgentCallbackContext) and ctx.tool_skipped:
+        return True
+    extra = getattr(ctx, "extra", None)
+    return bool(extra.get("_skip_tool")) if isinstance(extra, dict) else False
+
+
+def clear_tool_skipped(ctx: Any) -> None:
+    """Drop the veto recorded for *ctx*'s tool call."""
+    if isinstance(ctx, AgentCallbackContext):
+        ctx.clear_tool_skip()
+        return
+    extra = getattr(ctx, "extra", None)
+    if isinstance(extra, dict):
+        extra.pop("_skip_tool", None)
 
 
 # ================================================================

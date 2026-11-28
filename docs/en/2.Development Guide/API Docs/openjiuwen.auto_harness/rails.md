@@ -151,7 +151,9 @@ Inherits `DeepAgentRail`, merging the former `AtomicChangeRail` and `EditCheckRa
 
 ### async before_tool_call(ctx: AgentCallbackContext) -> None
 
-For `write_file` / `edit_file` tool calls, normalizes `file_path` to repo-relative path and validates it falls within the allowed edit scope. Hard-blocks if out of scope: sets `ctx.extra["_skip_tool"] = True`, writes back error `tool_result` and `ToolMessage`. Allowed edit scope: `openjiuwen/dev_tools/**`, `openjiuwen/harness/**`, `openjiuwen/core/**`, `tests/**`, `examples/**`, `docs/en/**`, `docs/zh/**`.
+For `write_file` / `edit_file` tool calls, normalizes `file_path` to repo-relative path and validates it falls within the allowed edit scope. Hard-blocks if out of scope: calls `ctx.mark_tool_skipped()` to veto the call, writes back error `tool_result` and `ToolMessage`. Allowed edit scope: `openjiuwen/dev_tools/**`, `openjiuwen/harness/**`, `openjiuwen/core/**`, `tests/**`, `examples/**`, `docs/en/**`, `docs/zh/**`.
+
+**Compatibility and migration for skipped tools**: in-repo rails all mark a veto with `ctx.mark_tool_skipped()`; the executor still consumes the legacy `ctx.extra["_skip_tool"]` once at the same point. That key lives in the invoke-shared `extra`, so with concurrent tool calls a sibling can consume it first (the #2413 race is not fixed on this path). Out-of-tree / host rails must migrate on both sides: write with `ctx.mark_tool_skipped()` (module-level `mark_tool_skipped(ctx)` for duck-typed contexts) and read with `tool_call_skipped(ctx)`, which still falls back to the legacy key; a checkpoint that reads `extra.get("_skip_tool")` directly cannot see marker vetoes and has to change. New code must not write `extra["_skip_tool"]`.
 
 **Parameters**:
 
@@ -304,7 +306,7 @@ Inherits `DeepAgentRail`, merging the former `ImmutableFileRail` and `InputSanit
 
 ### async before_tool_call(ctx: AgentCallbackContext) -> None
 
-For `write_file` / `edit_file` tool calls, checks `file_path` with `fnmatch`: hard-blocks on immutable pattern match (sets `_skip_tool`, writes back error `ToolMessage`); sets `ctx.extra["high_impact"] = True` on high-impact prefix match.
+For `write_file` / `edit_file` tool calls, checks `file_path` with `fnmatch`: hard-blocks on immutable pattern match (marks the call via `ctx.mark_tool_skipped()`, writes back error `ToolMessage`); sets `ctx.extra["high_impact"] = True` on high-impact prefix match.
 
 **Parameters**:
 
