@@ -286,6 +286,22 @@ class TeamBackend:
         self._leader_name_cache: str | None = None
         self.db = db
         self.messager = messager
+        # Deferred publish window: while active (a list), the build-time
+        # event publish sites collect (topic, message) pairs instead of
+        # publishing immediately. Managed exclusively by ``build_team`` —
+        # open only inside its deferred tail, so no failure path can leave
+        # it latched open. A successful build hands its buffer to
+        # ``_pending_build_events``; a failed build discards it (no team
+        # row, nothing to notify).
+        self._deferred_events: list[tuple[str, EventMessage]] | None = None
+        # Build-time events waiting to be published once the leader's topic
+        # subscriptions are up. Framework bootstrap builds the team before
+        # the kernel has subscribed, and the message bus drops
+        # subscriber-less publishes without replay. The buffer survives a
+        # mid-``start`` failure on this backend instance: the next
+        # ``start`` — recovery included — flushes whatever a previous run
+        # left here. Cleared by ``flush_pending_build_events``.
+        self._pending_build_events: list[tuple[str, EventMessage]] = []
         self.teammate_mode = teammate_mode
         self.predefined_members = predefined_members or []
         self._model_allocator = model_allocator
@@ -2363,6 +2379,8 @@ class TeamBackend:
         leader_display_name: str,
         leader_desc: str,
         overrides: Optional[CapabilityOverrides] = None,
+        *,
+        defer_event_publish: bool = False,
     ):
         """Create a team and register the leader as a member.
 
@@ -2388,6 +2406,15 @@ class TeamBackend:
                 each flag inherits its spec ceiling. ``dispatch_mode`` follows
                 the F_62 rule instead: None -> "autonomous", "scheduled" must
                 be explicit and requires the spec ceiling.
+            defer_event_publish: Buffer the build-time events (member_spawned
+                for identity-only members, then team_created) instead of
+                publishing them here. Only the framework bootstrap branch of
+                ``CoordinationKernel.start`` sets this: it builds the team
+                before its own topic subscriptions exist, and the message bus
+                drops subscriber-less publishes without replay. The buffered
+                events are handed to ``_pending_build_events`` and published by
+                ``flush_pending_build_events`` once the subscriptions are up —
+                this start, or the next one when anything in between fails.
         """
         # Step 0: a team that already exists is taken over, not rebuilt. The
         # case this exists for is NEW_TEAM_IN_SESSION -- a fresh session
@@ -2591,49 +2618,72 @@ class TeamBackend:
         # Passive humans ride the same gate: predefined PASSIVE_HUMAN specs
         # register (as READY roster identities) only when HITT is engaged.
         passive_specs = [m for m in self.predefined_members if m.role_type == TeamRole.PASSIVE_HUMAN]
-        if effective_enable_hitt:
-            for passive_spec in passive_specs:
-                await self.spawn_passive_human(
-                    member_name=passive_spec.member_name,
-                    display_name=passive_spec.display_name,
-                    desc=passive_spec.desc,
-                )
-        elif passive_specs:
-            team_logger.warning(
-                "Skipped %d predefined PASSIVE_HUMAN(s) for team %s because "
-                "build_team(enable_hitt=False) overrode the spec capability",
-                len(passive_specs),
-                team_name,
-            )
-
-        if self._on_team_built is not None:
-            try:
-                await self._on_team_built()
-            except Exception as e:
-                team_logger.error(f"on_team_built callback failed for team {team_name}: {e}")
-
-        for member in host_members:
-            await self._publish_host_managed_registration(member.member_name)
-
-        # Publish team created event
-        session_id = get_session_id()
+        # From here on, the build-time events fire: member_spawned for
+        # passive humans and host-managed members, then team_created. Under
+        # ``defer_event_publish`` they are buffered (see
+        # ``_publish_or_defer``) — publishing now would drop them on the
+        # topicless bus, because the framework bootstrapper has not
+        # subscribed to its topics yet. Activation and cleanup live in this
+        # try/finally so no failure path leaves the buffer latched open.
+        deferred_events: list[tuple[str, EventMessage]] = []
+        if defer_event_publish:
+            self._deferred_events = deferred_events
         try:
-            await self.messager.publish(
-                topic_id=TeamTopic.TEAM.build(session_id, team_name),
-                message=EventMessage.from_event(
-                    TeamCreatedEvent(
-                        team_name=team_name,
-                        display_name=display_name,
-                        leader_member_name=leader_member_name,
-                        created=TeamDatabase.get_current_time(),
+            if effective_enable_hitt:
+                for passive_spec in passive_specs:
+                    await self.spawn_passive_human(
+                        member_name=passive_spec.member_name,
+                        display_name=passive_spec.display_name,
+                        desc=passive_spec.desc,
                     )
-                ),
-            )
-            team_logger.debug(f"Team created event published: {team_name}")
-        except Exception as e:
-            team_logger.error(f"Failed to publish team created event for {team_name}: {e}")
+            elif passive_specs:
+                team_logger.warning(
+                    "Skipped %d predefined PASSIVE_HUMAN(s) for team %s because "
+                    "build_team(enable_hitt=False) overrode the spec capability",
+                    len(passive_specs),
+                    team_name,
+                )
 
-        team_logger.info(f"Team {team_name} created successfully")
+            if self._on_team_built is not None:
+                try:
+                    await self._on_team_built()
+                except Exception as e:
+                    team_logger.error(f"on_team_built callback failed for team {team_name}: {e}")
+
+            for member in host_members:
+                await self._publish_host_managed_registration(member.member_name)
+
+            # Publish team created event
+            session_id = get_session_id()
+            try:
+                buffered = await self._publish_or_defer(
+                    topic_id=TeamTopic.TEAM.build(session_id, team_name),
+                    message=EventMessage.from_event(
+                        TeamCreatedEvent(
+                            team_name=team_name,
+                            display_name=display_name,
+                            leader_member_name=leader_member_name,
+                            created=TeamDatabase.get_current_time(),
+                        ),
+                    ),
+                )
+                if not buffered:
+                    team_logger.debug(f"Team created event published: {team_name}")
+            except Exception as e:
+                team_logger.error(f"Failed to publish team created event for {team_name}: {e}")
+
+            team_logger.info(f"Team {team_name} created successfully")
+            # Hand the buffer over to the pending list — the single channel
+            # the kernel reads. A failure anywhere between here and the
+            # kernel's flush (workspace init, memory toolkit, bus start,
+            # transport subscription) leaves it parked on the backend, and
+            # the next start — recovery included — flushes it after its own
+            # subscriptions are up.
+            if defer_event_publish:
+                self._pending_build_events.extend(deferred_events)
+        finally:
+            if defer_event_publish:
+                self._deferred_events = None
 
     async def spawn_human_agent(
         self,
@@ -2740,9 +2790,44 @@ class TeamBackend:
             mode=MemberMode.BUILD_MODE, role=TeamRole.HOST_MANAGED,
         )
 
+    async def _publish_or_defer(self, topic_id: str, message: EventMessage) -> bool:
+        """Publish one team event now, or buffer it while deferral is active.
+
+        Returns True when the event was appended to the deferred buffer
+        instead of being published — only framework bootstrap activates the
+        buffer inside ``build_team``, and the buffered events are handed to
+        ``_pending_build_events`` and published by
+        :meth:`flush_pending_build_events` once the leader's transport
+        subscriptions are up. Callers keep their own best-effort error
+        handling around this call: buffering itself cannot fail.
+        """
+        if self._deferred_events is not None:
+            self._deferred_events.append((topic_id, message))
+            return True
+        await self.messager.publish(topic_id=topic_id, message=message)
+        return False
+
+    async def flush_pending_build_events(self) -> None:
+        """Publish build-time events buffered by ``build_team``.
+
+        Called by the leader kernel once ``subscribe_transport`` succeeded —
+        on every start, so events a mid-``start`` failure left parked on the
+        backend are flushed by the next (recovery) start too. Each publish
+        keeps the build-path best-effort semantics: a failure is logged and
+        the loop moves on. The buffer is cleared for the whole pass — every
+        event gets at most one publish attempt, no retries that would
+        duplicate notices already delivered.
+        """
+        pending, self._pending_build_events = self._pending_build_events, []
+        for topic_id, message in pending:
+            try:
+                await self.messager.publish(topic_id=topic_id, message=message)
+            except Exception as e:
+                team_logger.error("Failed to publish deferred event on topic {}: {}", topic_id, e)
+
     async def _publish_host_managed_registration(self, member_name: str) -> None:
         try:
-            await self.messager.publish(
+            await self._publish_or_defer(
                 topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
                 message=EventMessage.from_event(MemberSpawnedEvent(
                     team_name=self.team_name, member_name=member_name,
@@ -2867,7 +2952,7 @@ class TeamBackend:
             return result
 
         try:
-            await self.messager.publish(
+            buffered = await self._publish_or_defer(
                 topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
                 message=EventMessage.from_event(
                     MemberSpawnedEvent(
@@ -2876,7 +2961,8 @@ class TeamBackend:
                     ),
                 ),
             )
-            team_logger.debug("Member spawned event published: {}", member_name)
+            if not buffered:
+                team_logger.debug("Member spawned event published: {}", member_name)
         except Exception as e:
             team_logger.error("Failed to publish member spawned event for {}: {}", member_name, e)
 

@@ -528,6 +528,7 @@ def _framework_backend(existing_team: object | None) -> SimpleNamespace:
             team=SimpleNamespace(get_team=AsyncMock(return_value=existing_team)),
         ),
         build_team=AsyncMock(),
+        flush_pending_build_events=AsyncMock(),
     )
 
 
@@ -635,6 +636,108 @@ async def test_start_never_builds_a_team_for_a_non_leader():
     await kernel.start(session)
 
     backend.build_team.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_start_flushes_pending_build_events_after_subscription():
+    """Framework bootstrap publishes the buffered build events once subscribed.
+
+    ``build_team`` runs before the kernel has subscribed to its topics, so
+    it buffers the build-time events on the backend instead of publishing
+    them (the bus drops subscriber-less publishes). ``start`` must flush the
+    parked buffer, and only after ``subscribe_transport`` succeeded.
+    """
+    session = _StubSession()
+    calls: list[str] = []
+    messager = SimpleNamespace(
+        subscribe=AsyncMock(side_effect=lambda *args: calls.append("subscribe")),
+        register_direct_message_handler=AsyncMock(),
+    )
+    host = _make_kernel_host(messager=messager)
+    host.session_manager.team_session = session
+    host.recover_team = AsyncMock()
+    kernel = _arm_kernel_for_start(host)
+    host.blueprint = SimpleNamespace(spec=_framework_spec())
+    backend = _framework_backend(existing_team=None)
+    backend.flush_pending_build_events = AsyncMock(side_effect=lambda: calls.append("flush"))
+    host.infra.team_backend = backend
+
+    await kernel.start(session)
+
+    assert backend.build_team.await_args.kwargs["defer_event_publish"] is True
+    backend.flush_pending_build_events.assert_awaited_once()
+    # The flush runs after every transport subscription, never before them.
+    assert "subscribe" in calls
+    assert calls[-1] == "flush"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_start_retries_pending_flush_left_by_a_failed_start():
+    """A mid-``start`` failure parks the buffer; the next start flushes it.
+
+    Regression guard. The team row already exists after the failed start,
+    so the retry takes the recovery branch — without the parked buffer it
+    would never publish the one-shot build-time events again, and plugins
+    would miss ``team_created`` exactly like the original bug.
+    """
+    session = _StubSession()
+    messager = SimpleNamespace(
+        subscribe=AsyncMock(),
+        register_direct_message_handler=AsyncMock(),
+    )
+    host = _make_kernel_host(messager=messager)
+    host.session_manager.team_session = session
+    host.recover_team = AsyncMock()
+    kernel = _arm_kernel_for_start(host)
+    host.blueprint = SimpleNamespace(spec=_framework_spec())
+    backend = _framework_backend(existing_team=None)
+    host.infra.team_backend = backend
+
+    # First start: the team builds, then the tail of ``start`` fails.
+    host.update_status = AsyncMock(side_effect=RuntimeError("status backend down"))
+    with pytest.raises(RuntimeError, match="status backend down"):
+        await kernel.start(session)
+    backend.flush_pending_build_events.assert_not_awaited()
+
+    # Retry: the team row is there now, so this start takes the recovery
+    # branch — and must still flush what the failed start left parked.
+    backend.db.team.get_team.return_value = object()
+    host.update_status = AsyncMock()
+    await kernel.start(session)
+
+    backend.build_team.assert_awaited_once()
+    host.recover_team.assert_awaited_once()
+    backend.flush_pending_build_events.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_start_subscription_failure_leaves_pending_buffer_for_retry():
+    """A subscription failure surfaces the error; the parked buffer is retried later.
+
+    The flush runs strictly after the subscriptions succeed, so a transport
+    failure must never emit the team-created notice on the failing start —
+    the next start re-flushes the parked buffer instead.
+    """
+    session = _StubSession()
+    messager = SimpleNamespace(
+        subscribe=AsyncMock(side_effect=RuntimeError("transport down")),
+        register_direct_message_handler=AsyncMock(),
+    )
+    host = _make_kernel_host(messager=messager)
+    host.session_manager.team_session = session
+    host.recover_team = AsyncMock()
+    kernel = _arm_kernel_for_start(host)
+    host.blueprint = SimpleNamespace(spec=_framework_spec())
+    backend = _framework_backend(existing_team=None)
+    host.infra.team_backend = backend
+
+    with pytest.raises(RuntimeError, match="transport down"):
+        await kernel.start(session)
+
+    backend.flush_pending_build_events.assert_not_awaited()
 
 
 @pytest.mark.asyncio
