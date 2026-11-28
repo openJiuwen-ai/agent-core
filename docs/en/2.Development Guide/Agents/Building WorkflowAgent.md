@@ -449,7 +449,7 @@ def create_questioner_component() -> QuestionerComponent:
 
 def create_start_component():
     """Create start component"""
-    return Start({"inputs": [{"id": "query", "type": "String", "required": "true", "sourceType": "ref"}]})
+    return Start()
 
 def create_end_component():
     """Create end component"""

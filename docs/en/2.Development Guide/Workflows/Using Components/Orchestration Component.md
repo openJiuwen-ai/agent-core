@@ -110,7 +110,7 @@ from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.workflow import Start, End
 
 flow = Workflow()
-flow.set_start_comp("start", Start({}), inputs_schema={"a": "${a}"})
+flow.set_start_comp("start", Start(), inputs_schema={"a": "${a}"})
 # a: throw 2 frames: {value: 1}, {value: 2}
 flow.add_workflow_comp("a", StreamCompNode("a"), inputs_schema={"value": "${start.a}"})
 # b: transform 2 frames to c
