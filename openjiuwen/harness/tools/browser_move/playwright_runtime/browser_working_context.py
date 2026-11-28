@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, UserMessage
+from openjiuwen.core.foundation.llm.schema.message import OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA
 
 from .browser_logging import browser_agent_log_info, browser_agent_log_warning
 from .evidence import merge_evidence_slot, same_page_url, source_observations, task_observation_allowed
@@ -1320,6 +1321,9 @@ def latest_browser_user_request(messages: Iterable[BaseMessage]) -> str:
                 is_ephemeral_context = True
                 break
         if is_ephemeral_context:
+            continue
+        # A steering message continues the request in progress; it starts no new browser task.
+        if metadata.get(OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA) == "steering":
             continue
         text = BrowserWorkingContextStore.message_content_to_text(message.content).strip()
         if text:

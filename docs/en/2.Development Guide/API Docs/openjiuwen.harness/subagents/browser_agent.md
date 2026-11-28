@@ -437,6 +437,9 @@ new user input, successful handoff or unknown read ends the streak. Continued re
 management calls use the existing protocol-error terminal path with retained facts.
 An approved resume retires the previous invocation's max_iterations_reached blocker while
 preserving the original deadline, unresolved effects, live obstacles and all execution facts.
+A steering message, such as a host notice or the rail's retry after a reply that described a
+tool call without making it, continues the current task and keeps its state. Only a new user
+request starts a new task.
 
 Compact receipts and journal retain execution_stage and explicit-target versus active-element
 keyboard binding. Optional focus diagnostics are bounded structural metadata, not field values
