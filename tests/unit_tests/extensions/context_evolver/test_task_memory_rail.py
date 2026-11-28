@@ -510,11 +510,11 @@ class TestAutoSummarize:
     @staticmethod
     @pytest.mark.asyncio
     async def test_no_auto_summarize_when_disabled():
-        """_summarize_trajectories is NOT called when auto_summarize=False."""
+        """summarize_trajectories is NOT called when auto_summarize=False."""
         svc = _make_memory_service()
         mw = _make_middleware(memory_service=svc, summarize_cfg=_SummarizeCfg(enabled=False))
         with patch(
-            "openjiuwen.harness.rails.evolution.context_evolution_rail._summarize_trajectories",
+            "openjiuwen.extensions.context_evolver.service.summarize_trajectories",
             new=AsyncMock(),
         ) as mock_summ:
             ctx = _make_ctx(query="test")
@@ -525,15 +525,15 @@ class TestAutoSummarize:
     @staticmethod
     @pytest.mark.asyncio
     async def test_summarize_called_immediately_per_trajectory():
-        """_summarize_trajectories is called immediately for each trajectory (no buffering)."""
+        """summarize_trajectories is called immediately for each trajectory (no buffering)."""
         svc = _make_memory_service()
         mw = _make_middleware(memory_service=svc, summarize_cfg=_SummarizeCfg(enabled=True))
         mw.extract_trajectory = MagicMock(return_value="USER: test\nTHOUGHT: ok")
         with patch(
-            "openjiuwen.harness.rails.evolution.context_evolution_rail._evaluate_trial",
+            "openjiuwen.extensions.context_evolver.service.evaluate_trial",
             return_value=("success", 1),
         ), patch(
-            "openjiuwen.harness.rails.evolution.context_evolution_rail._summarize_trajectories",
+            "openjiuwen.extensions.context_evolver.service.summarize_trajectories",
             new=AsyncMock(return_value={"memory": []}),
         ) as mock_summ:
             ctx = _make_ctx(query="my question")
@@ -553,10 +553,10 @@ class TestAutoSummarize:
         mw = _make_middleware(memory_service=svc, summarize_cfg=_SummarizeCfg(enabled=True))
         mw.extract_trajectory = MagicMock(return_value="USER: test\nTHOUGHT: ok")
         with patch(
-            "openjiuwen.harness.rails.evolution.context_evolution_rail._evaluate_trial",
+            "openjiuwen.extensions.context_evolver.service.evaluate_trial",
             return_value=("success", 1),
         ), patch(
-            "openjiuwen.harness.rails.evolution.context_evolution_rail._summarize_trajectories",
+            "openjiuwen.extensions.context_evolver.service.summarize_trajectories",
             new=AsyncMock(return_value={"memory": []}),
         ) as mock_summ:
             for i in range(2):
@@ -568,15 +568,15 @@ class TestAutoSummarize:
     @staticmethod
     @pytest.mark.asyncio
     async def test_summarize_uses_evaluate_trial_feedback_and_score():
-        """feedback and score from _evaluate_trial are forwarded to _summarize_trajectories."""
+        """feedback and score from evaluate_trial are forwarded to summarize_trajectories."""
         svc = _make_memory_service()
         mw = _make_middleware(memory_service=svc, summarize_cfg=_SummarizeCfg(enabled=True))
         mw.extract_trajectory = MagicMock(return_value="USER: q\nTHOUGHT: a")
         with patch(
-            "openjiuwen.harness.rails.evolution.context_evolution_rail._evaluate_trial",
+            "openjiuwen.extensions.context_evolver.service.evaluate_trial",
             return_value=("failure", 0),
         ) as mock_eval, patch(
-            "openjiuwen.harness.rails.evolution.context_evolution_rail._summarize_trajectories",
+            "openjiuwen.extensions.context_evolver.service.summarize_trajectories",
             new=AsyncMock(return_value={"memory": []}),
         ) as mock_summ:
             ctx = _make_ctx(query="q")
@@ -591,12 +591,12 @@ class TestAutoSummarize:
     @staticmethod
     @pytest.mark.asyncio
     async def test_auto_summarize_skipped_when_no_trajectory():
-        """When extract_trajectory returns None, _summarize_trajectories is not called."""
+        """When extract_trajectory returns None, summarize_trajectories is not called."""
         svc = _make_memory_service()
         mw = _make_middleware(memory_service=svc, summarize_cfg=_SummarizeCfg(enabled=True))
         mw.extract_trajectory = MagicMock(return_value=None)
         with patch(
-            "openjiuwen.harness.rails.evolution.context_evolution_rail._summarize_trajectories",
+            "openjiuwen.extensions.context_evolver.service.summarize_trajectories",
             new=AsyncMock(),
         ) as mock_summ:
             ctx = _make_ctx(query="test")
@@ -611,7 +611,7 @@ class TestAutoSummarize:
         svc = _make_memory_service()
         mw = _make_middleware(memory_service=svc, summarize_cfg=_SummarizeCfg(enabled=True))
         with patch(
-            "openjiuwen.harness.rails.evolution.context_evolution_rail._summarize_trajectories",
+            "openjiuwen.extensions.context_evolver.service.summarize_trajectories",
             new=AsyncMock(),
         ) as mock_summ:
             ctx = _make_ctx(query="test")
@@ -974,10 +974,10 @@ class TestCancelledRoundGating:
         mw.extract_trajectory = MagicMock(return_value="USER: q\nTHOUGHT: ok")
 
         with patch(
-            "openjiuwen.harness.rails.evolution.context_evolution_rail._evaluate_trial",
+            "openjiuwen.extensions.context_evolver.service.evaluate_trial",
             return_value=("success", 1),
         ), patch(
-            "openjiuwen.harness.rails.evolution.context_evolution_rail._summarize_trajectories",
+            "openjiuwen.extensions.context_evolver.service.summarize_trajectories",
             new=AsyncMock(return_value={"memory": []}),
         ) as mock_summ:
             await mw.after_task_iteration(_make_ctx(query="q", result=dict(TestCancelledRoundGating.CANCELLED)))

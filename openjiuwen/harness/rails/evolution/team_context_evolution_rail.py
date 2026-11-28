@@ -22,9 +22,8 @@ from typing import Any, Dict, List, Optional
 
 from openjiuwen.core.common.logging import context_engine_logger as logger
 from openjiuwen.core.single_agent.rail import AgentCallbackContext
-from openjiuwen.extensions.context_evolver.service import TaskMemoryService
 
-from .context_evolution_rail import ContextEvolutionRail
+from .context_evolution_rail import ContextEvolutionRail, _service_types
 
 
 # ---------------------------------------------------------------------------
@@ -118,8 +117,8 @@ class TeamContextEvolutionRail(ContextEvolutionRail):
         self,
         team_id: str,
         agent_role: str,
-        personal_service: Optional[TaskMemoryService] = None,
-        shared_service: Optional[TaskMemoryService] = None,
+        personal_service: Optional[_service_types.TaskMemoryService] = None,
+        shared_service: Optional[_service_types.TaskMemoryService] = None,
         *,
         memory_dir: str = "./memories",
         personal_algo: str = "ace",
@@ -141,20 +140,23 @@ class TeamContextEvolutionRail(ContextEvolutionRail):
         # Auto-create services when not provided.
         # Personal store:  ./memories/{team_id}/{role}.json
         # Shared store:    ./memories/{team_id}/shared.json
-        if personal_service is None:
-            personal_service = TaskMemoryService(
-                persist_type="json",
-                persist_path=f"{memory_dir}/{team_id}/{agent_role}.json",
-                retrieval_algo=personal_algo,
-                summary_algo=personal_algo,
-            )
-        if shared_service is None:
-            shared_service = TaskMemoryService(
-                persist_type="json",
-                persist_path=f"{memory_dir}/{team_id}/shared.json",
-                retrieval_algo=shared_algo,
-                summary_algo=shared_algo,
-            )
+        if personal_service is None or shared_service is None:
+            from openjiuwen.extensions.context_evolver.service import TaskMemoryService
+
+            if personal_service is None:
+                personal_service = TaskMemoryService(
+                    persist_type="json",
+                    persist_path=f"{memory_dir}/{team_id}/{agent_role}.json",
+                    retrieval_algo=personal_algo,
+                    summary_algo=personal_algo,
+                )
+            if shared_service is None:
+                shared_service = TaskMemoryService(
+                    persist_type="json",
+                    persist_path=f"{memory_dir}/{team_id}/shared.json",
+                    retrieval_algo=shared_algo,
+                    summary_algo=shared_algo,
+                )
 
         self._personal_service = personal_service
         self._shared_service = shared_service

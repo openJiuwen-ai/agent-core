@@ -217,6 +217,45 @@ def test_old_build_factory_names_no_longer_exported():
             getattr(evolution, name)
 
 
+@pytest.mark.level0
+def test_importing_context_evolution_rails_defers_service():
+    """The context-evolver service loads when its public type is requested."""
+    import subprocess
+    import sys
+
+    script = """
+import sys
+from typing import get_args, get_type_hints
+
+from openjiuwen.harness import rails
+from openjiuwen.harness.rails import evolution
+from openjiuwen.harness.rails.evolution import context_evolution_rail
+from openjiuwen.harness.rails.evolution.team_context_evolution_rail import TeamContextEvolutionRail
+
+service_name = "openjiuwen.extensions.context_evolver.service"
+assert rails.TeamContextEvolutionRail is TeamContextEvolutionRail
+assert rails.ContextEvolutionRail is context_evolution_rail.ContextEvolutionRail
+assert "SummarizeTrajectoriesInput" in dir(rails)
+assert "SummarizeTrajectoriesInput" in dir(evolution)
+assert "SummarizeTrajectoriesInput" in dir(context_evolution_rail)
+assert service_name not in sys.modules, f"{service_name} was imported eagerly"
+
+from openjiuwen.harness.rails import SummarizeTrajectoriesInput
+assert SummarizeTrajectoriesInput is sys.modules[service_name].SummarizeTrajectoriesInput
+assert SummarizeTrajectoriesInput is evolution.SummarizeTrajectoriesInput
+assert SummarizeTrajectoriesInput is context_evolution_rail.SummarizeTrajectoriesInput
+
+service_type = sys.modules[service_name].TaskMemoryService
+single_hints = get_type_hints(rails.ContextEvolutionRail.__init__)
+team_hints = get_type_hints(TeamContextEvolutionRail.__init__)
+assert service_type in get_args(single_hints["memory_service"])
+assert service_type in get_args(team_hints["personal_service"])
+assert service_type in get_args(team_hints["shared_service"])
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=False, timeout=45)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 # ── Idempotency tests ──
 
 
