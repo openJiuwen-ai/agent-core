@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 import json
+import weakref
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import (
@@ -67,6 +68,13 @@ from openjiuwen.core.foundation.llm.utils.request_parameter_fallback import Requ
 from openjiuwen.core.foundation.llm.utils.request_sanitizer import json_arguments, sanitize_chat_request
 from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 from openjiuwen.core.foundation.llm.utils.responses_utils import build_request_body
+from openjiuwen.core.foundation.llm.utils.shared_client_lifecycle import (
+    CacheEntryLoopMap,
+    LoopFinalizerMap,
+    aclose_all_shared_clients,
+    aclose_targeted_shared_clients,
+    get_or_build_shared_async_client,
+)
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import LLMCallEvents
@@ -403,6 +411,8 @@ class OpenAIModelClient(BaseModelClient):
     # build/close). Shared across subclasses (OpenRouter/DashScope/DeepSeek) on
     # purpose: one cache per process.
     _client_cache: Dict[Tuple, "openai.AsyncOpenAI"] = {}
+    _client_cache_loops: CacheEntryLoopMap = {}
+    _loop_finalizers: LoopFinalizerMap = weakref.WeakKeyDictionary()
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
@@ -1163,21 +1173,23 @@ class OpenAIModelClient(BaseModelClient):
         if not self._use_shared_client():
             return self._build_async_openai_client(timeout=timeout)
 
-        # Shared path: build once per tenant/connection identity and reuse.
-        # Building is fully synchronous (no ``await``), so under a single-threaded
-        # asyncio event loop the get/build/set below is atomic and needs no lock.
-        key = self._client_cache_key()
-        client = self._client_cache.get(key)
-        if client is None:
-            client = self._build_async_openai_client()
-            self._client_cache[key] = client
-            llm_logger.info(
+        # Shared path: build once per tenant/connection identity on the active
+        # event loop and reuse. Building is synchronous (no ``await``), so under
+        # a single-threaded asyncio event loop the lookup/build/set is atomic.
+        return get_or_build_shared_async_client(
+            key=self._client_cache_key(),
+            client_cache=self._client_cache,
+            cache_loops=self._client_cache_loops,
+            loop_finalizers=self._loop_finalizers,
+            build_client=self._build_async_openai_client,
+            on_created=lambda: llm_logger.info(
                 "Created shared long-lived AsyncOpenAI client.",
                 event_type=LogEventType.LLM_CALL_START,
                 timeout=self.model_client_config.timeout,
                 max_retries=0,
-            )
-        return client
+            ),
+            client_label="AsyncOpenAI client",
+        )
 
     def _build_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
         """Build a fresh ``AsyncOpenAI`` client with its own httpx connection pool."""
@@ -1232,14 +1244,11 @@ class OpenAIModelClient(BaseModelClient):
         hot path: it tears down the shared client that other in-flight calls
         rely on.
         """
-        clients = list(cls._client_cache.values())
-        cls._client_cache.clear()
-
-        for client in clients:
-            try:
-                await client.close()
-            except Exception as e:  # pragma: no cover - defensive cleanup
-                logger.warning(f"Error closing cached AsyncOpenAI client: {e}")
+        await aclose_all_shared_clients(
+            client_cache=cls._client_cache,
+            cache_loops=cls._client_cache_loops,
+            client_label="AsyncOpenAI client",
+        )
 
     @classmethod
     async def aclose_connections(cls, configs: Iterable[ModelClientConfig]) -> None:
@@ -1257,18 +1266,12 @@ class OpenAIModelClient(BaseModelClient):
         may retry it when no user-visible output has been written.
         """
         keys = {cls.connection_key(cfg) for cfg in configs}
-        closed = 0
-        for key in keys:
-            client = cls._client_cache.pop(key, None)
-            if client is None:
-                continue
-            try:
-                await client.close()
-                closed += 1
-            except Exception as e:  # pragma: no cover - defensive cleanup
-                logger.warning(f"Error closing AsyncOpenAI client: {e}")
-        if closed:
-            logger.info(f"Closed {closed} AsyncOpenAI client(s) for removed/updated model config")
+        await aclose_targeted_shared_clients(
+            keys=keys,
+            client_cache=cls._client_cache,
+            cache_loops=cls._client_cache_loops,
+            client_label="AsyncOpenAI client",
+        )
 
     def _uses_responses_api(self) -> bool:
         """Whether this client talks to the OpenAI Responses endpoint (``/responses``)."""
