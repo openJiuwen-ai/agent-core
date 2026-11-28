@@ -524,8 +524,8 @@ class _RecordingHost:
     async def shutdown_self(self) -> None:
         return None
 
-    async def conclude_completed_round(self, member_count: int, task_count: int) -> None:
-        return None
+    async def conclude_completed_round(self, member_count: int, task_count: int) -> bool:
+        return True
 
     async def finalize_non_contributing_worktrees(self) -> None:
         return None

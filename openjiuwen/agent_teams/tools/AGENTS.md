@@ -44,9 +44,9 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
   （也被 DDL helper 用到）；`read_engine` / `read_session_local` 是读者池。
 - **`DbSessions`（`database/engine.py`）** —— 四个 DAO 共享的一个 provider，
   暴露分别绑定到读者 / 写者工厂的 `read()` / `write()` async-context 访问器。
-  `write()` 持有一把进程级 `asyncio.Lock`；`read()` 不持锁。这正是多成员负载下
-  阻止 `QueuePool limit ... timed out` 耗尽的东西。写锁是**不可重入**的：当一个公开
-  写委托给另一个（`verify_and_fix_task_consistency` →
+  `write()` 持有一把进程级 `asyncio.Lock`。内存 SQLite 的 `read()` 也持同一把锁，
+  避免结束读取时回滚共享连接上尚未提交的事务。文件 SQLite 与服务端数据库的读取独立运行。
+  锁**不可重入**，同一事务中的 helper 应复用调用方的 session。当一个公开写委托给另一个（`verify_and_fix_task_consistency` →
   `_verify_and_fix_blocked_tasks`）时，只有最内层的 session opener 取锁。
   **bind-time 动态表 DDL 同样在 `write()` 内执行**（
   `create_cur_session_tables(sessions)` 收 `DbSessions` 不收 engine）——DDL 与

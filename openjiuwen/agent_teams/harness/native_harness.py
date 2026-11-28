@@ -66,7 +66,6 @@ from openjiuwen.core.single_agent.interrupt.state import (
     INTERRUPTION_KEY,
     match_answers,
     pending_interrupts,
-    retarget_stale_permission_answer,
 )
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -1058,15 +1057,13 @@ class NativeHarness(DeepAgent):
                 except Exception:
                     logger.warning("interrupt resume could not read pending state", exc_info=True)
                     pending = None
-                if not pending:
-                    # Nothing is waiting yet. That is not proof the tool id is wrong.
+                if pending is None:
                     reason = "interrupt_resume_unavailable"
+                elif not pending:
+                    # A readable, settled runtime has no target for this answer.
+                    reason = "unsupported_interactive_input"
                 else:
                     matched = match_answers(cmd.msg.content, pending)
-                    if (not matched.answers or matched.unmatched) and retarget_stale_permission_answer(
-                        cmd.msg.content, pending,
-                    ):
-                        matched = match_answers(cmd.msg.content, pending)
                     if not matched.answers or matched.unmatched:
                         reason = "unsupported_interactive_input"
             if reason is not None:

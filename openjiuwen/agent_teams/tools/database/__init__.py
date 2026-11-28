@@ -16,6 +16,7 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from openjiuwen.agent_teams.context import get_session_id
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database.session_settings_dao import SessionSettingsDao
 from openjiuwen.agent_teams.tools.database.config import (
     DatabaseConfig as DatabaseConfig,
@@ -123,6 +124,22 @@ class TeamDatabase:
         self.task: Optional[TaskDao] = None
         self.message: Optional[MessageDao] = None
 
+    async def claim_approval_restart(
+        self, team_name: str, member_name: str, leader: str, expected_ids: frozenset[str],
+    ) -> bool:
+        """Atomically claim a stopped teammate whose mail is still approval-only."""
+        async with self._sessions.write() as session:
+            claimed = await self.member.claim_restart_in_session(
+                session, member_name, team_name, MemberStatus.STOPPED, role="teammate",
+            )
+            if not claimed or not await self.message.approval_mail_matches(
+                session, team_name, member_name, leader, expected_ids,
+            ):
+                await session.rollback()
+                return False
+            await session.commit()
+            return True
+
     @staticmethod
     def get_current_time() -> int:
         """Return current time in milliseconds."""
@@ -170,7 +187,13 @@ class TeamDatabase:
         # write lock is database-wide, so all DAO tables must serialise
         # writes through the same lock. Reads go to the reader factory
         # (a separate pool for file-backed SQLite) — see DbSessions.
-        sessions = DbSessions(engines.write_session_local, engines.read_session_local)
+        sessions = DbSessions(
+            engines.write_session_local,
+            engines.read_session_local,
+            single_connection=(
+                self.config.db_type == DatabaseType.SQLITE and self.config.connection_string == ":memory:"
+            ),
+        )
         # Bind-time session-table DDL runs under the same write lock: the
         # engine-level variant (``engine.begin()``) bypassed it and could
         # hold both write-pool connections during concurrent binds.

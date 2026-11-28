@@ -92,6 +92,8 @@ class SessionManager:
         Rebinding to a different session resets the prior Token first
         so the contextvar stack stays consistent.
         """
+        if self._configurator.role == TeamRole.LEADER and self._state.team_session is not session:
+            await self._recovery_manager.cancel_approval_recovery_tasks()
         team_backend = self._configurator.team_backend
         if team_backend and hasattr(team_backend, "bind_group_session"):
             team_backend.bind_group_session(session.get_session_id())
@@ -132,6 +134,8 @@ class SessionManager:
         """
         self._reset_session_id_token()
         self._state.team_session = None
+        if self._configurator.role == TeamRole.LEADER:
+            self._recovery_manager.clear_approval_checkpoints()
 
     async def resume_for_new_session(self, session: AgentTeamSession) -> None:
         """Switch to a new session and rebind live teammate runtimes.
@@ -140,6 +144,8 @@ class SessionManager:
         sessions; only the live runtime needs rebinding so it picks up the
         new session_id.
         """
+        if self._configurator.role == TeamRole.LEADER and self._state.team_session is not session:
+            await self._recovery_manager.cancel_approval_recovery_tasks()
         recoverable_members = await self._recovery_manager.collect_live_teammates_for_session_switch()
         await self.bind_session(session)
 

@@ -402,8 +402,212 @@ async def test_slow_host_notification_does_not_block_an_expert_or_the_next_messa
         assert normal_delivery.await_count == 2
         assert not cancelled.is_set()
     finally:
-        handler.cancel_host_notifications()
+        await handler.cancel_host_notifications()
     await asyncio.wait_for(cancelled.wait(), timeout=1)
+    assert not handler._host_notifications
+    assert await runtime.db.member.get_member("alice", "group") is not None
+    assert len(await runtime.db.message.get_team_messages("group", broadcast=True)) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["read_lock", "cursor"])
+@pytest.mark.parametrize("timeout", [False, True])
+async def test_host_notification_cancellation_preserves_in_flight_read(runtime, monkeypatch, boundary, timeout):
+    from aiosqlite import Cursor
+    from openjiuwen.agent_teams.group_chat import message_handler as module
+    from openjiuwen.agent_teams.schema.team import TeamRole
+
+    posted = await runtime.backend.append_group_message("user", "Retain me", client_message_id="cancel-read")
+    handler = module.GroupMessageHandler(
+        SimpleNamespace(), SimpleNamespace(role=TeamRole.LEADER),
+        SimpleNamespace(team_backend=runtime.backend), None,
+    )
+    callback = AsyncMock()
+    monkeypatch.setattr(runtime.backend, "notify_host_managed_inbound", callback)
+    entered, release = asyncio.Event(), asyncio.Event()
+    rows = []
+    get_message = runtime.db.message.get_message
+
+    async def read(message_id):
+        if boundary == "read_lock":
+            entered.set()
+        row = await get_message(message_id)
+        rows.append(row)
+        return row
+
+    execute = Cursor.execute
+
+    async def blocked_execute(cursor, sql, parameters=None):
+        if "FROM team_message_" in sql:
+            entered.set()
+            await release.wait()
+        return await execute(cursor, sql, parameters)
+
+    monkeypatch.setattr(runtime.db.message, "get_message", read)
+    if boundary == "read_lock":
+        await runtime.db._sessions._write_lock.acquire()
+    else:
+        monkeypatch.setattr(Cursor, "execute", blocked_execute)
+    if timeout:
+        monkeypatch.setattr(module, "_HOST_NOTIFICATION_TIMEOUT", 0)
+
+    drains = []
+    try:
+        handler._schedule_host_notification(runtime.backend, posted.message.message_id)
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        notification = next(iter(handler._host_notifications.values()))
+        drains = [asyncio.create_task(handler.cancel_host_notifications()) for _ in range(2)]
+        # Yield to both drains, then cancel the notification and its owner again.
+        await asyncio.sleep(0)
+        for _ in range(2):
+            drains[0].cancel()
+            notification.cancel()
+            await asyncio.sleep(0)
+        assert not rows
+        assert all(not task.done() for task in drains)
+    finally:
+        if boundary == "read_lock":
+            runtime.db._sessions._write_lock.release()
+        release.set()
+        outcomes = await asyncio.gather(*drains, return_exceptions=True)
+        await handler.cancel_host_notifications()
+
+    assert isinstance(outcomes[0], asyncio.CancelledError)
+    assert outcomes[1] is None
+    assert len(rows) == 1 and rows[0].message_id == posted.message.message_id
+    callback.assert_not_awaited()
+    assert not handler._host_notifications
+    assert await runtime.db.member.get_member("alice", "group") is not None
+    assert (await get_message(posted.message.message_id)).content == "Retain me"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("callbacks", [1, 2])
+async def test_host_callback_can_stop_its_own_team(runtime, callbacks, monkeypatch):
+    from openjiuwen.agent_teams.agent.coordination.kernel import CoordinationKernel
+    from openjiuwen.agent_teams.group_chat.message_handler import GroupMessageHandler
+    from tests.unit_tests.agent_teams.test_coordination_lifecycle import _make_kernel_host
+
+    assert (await runtime.backend.spawn_host_managed_member(member_name="colleague", display_name="Colleague")).ok
+    host = _make_kernel_host()
+    host.team_name = "group"
+    host.resources.harness = None
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+    handler = GroupMessageHandler(host, SimpleNamespace(), SimpleNamespace(), None)
+    kernel._dispatcher = SimpleNamespace(group_message=handler)
+    runtime.agent.stop_coordination = kernel.stop
+    entered = 0
+    ready, release = asyncio.Event(), asyncio.Event()
+    outcomes = []
+    cancellation_sources = {}
+    drain = handler.cancel_host_notifications
+
+    async def observe_drain():
+        caller = asyncio.current_task()
+        peers = {task: task.cancelling() for task in tasks if task is not caller}
+        try:
+            await drain()
+        finally:
+            if caller in tasks:
+                for task, before in peers.items():
+                    if task.cancelling() > before:
+                        cancellation_sources[task] = caller
+
+    monkeypatch.setattr(handler, "cancel_host_notifications", observe_drain)
+
+    async def callback(message):
+        nonlocal entered
+        task = asyncio.current_task()
+        result, pool_absent, error = None, None, None
+        try:
+            entered += 1
+            if entered == callbacks:
+                ready.set()
+            await release.wait()
+            result = await runtime.manager.stop_team(team_name="group", session_id="session")
+            if result is False:
+                pool_absent = await runtime.manager.pool.get("group") is None
+        except asyncio.CancelledError as exc:
+            error = exc
+            raise
+        except Exception as exc:
+            error = exc
+            raise
+        finally:
+            outcomes.append((message.message_id, task, result, pool_absent, error))
+
+    await runtime.backend.register_host_managed_inbound("colleague", callback)
+    message_ids = set()
+    for index in range(callbacks):
+        posted = await runtime.backend.append_group_message(
+            "user", "Stop", client_message_id=f"stop-{index}", mentions=["colleague"],
+        )
+        message_ids.add(posted.message.message_id)
+        handler._schedule_host_notification(runtime.backend, posted.message.message_id)
+    tasks = tuple(handler._host_notifications.values())
+    try:
+        await asyncio.wait_for(ready.wait(), timeout=1)
+        release.set()
+        task_results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=1)
+    finally:
+        release.set()
+        await handler.cancel_host_notifications()
+    assert len(outcomes) == callbacks
+    assert {row[0] for row in outcomes} == message_ids
+    successful = {task for _, task, result, _, error in outcomes if result is True and error is None}
+    assert successful
+    results_by_task = dict(zip(tasks, task_results))
+    for _, task, result, pool_absent, error in outcomes:
+        if isinstance(error, asyncio.CancelledError):
+            assert cancellation_sources.get(task) in successful
+            assert isinstance(results_by_task[task], asyncio.CancelledError)
+        else:
+            assert error is None, repr(error)
+            assert result is True or result is False
+            if result is False:
+                assert pool_absent
+            assert results_by_task[task] is None
+    host.stream_controller.close_stream.assert_called()
+    host.session_manager.release_session.assert_called()
+    assert await runtime.manager.pool.get("group") is None
+    assert not handler._host_message_reads
+    assert await runtime.db.member.get_member("alice", "group") is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_host_notification_query_failure_is_drained(cancelled):
+    from openjiuwen.agent_teams.group_chat.message_handler import GroupMessageHandler
+
+    handler = GroupMessageHandler(SimpleNamespace(), SimpleNamespace(), SimpleNamespace(), None)
+    callback = AsyncMock()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def failing_read(message_id):
+        entered.set()
+        await release.wait()
+        raise ValueError("read failed")
+
+    backend = SimpleNamespace(
+        db=SimpleNamespace(message=SimpleNamespace(get_message=failing_read)),
+        notify_host_managed_inbound=callback,
+    )
+    handler._schedule_host_notification(backend, "missing")
+    notification = next(iter(handler._host_notifications.values()))
+    drain = None
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        drain = asyncio.create_task(handler.cancel_host_notifications()) if cancelled else None
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+        outcome, = await asyncio.gather(notification, return_exceptions=True)
+        if drain is not None:
+            await drain
+    assert isinstance(outcome, asyncio.CancelledError) if cancelled else outcome is None
+    callback.assert_not_awaited()
+    assert not handler._host_notifications
 
 
 @pytest.mark.asyncio
