@@ -1023,6 +1023,64 @@ class TaskDao:
                 )
             return swapped
 
+    async def redirect_working_task_to_pending(
+        self,
+        task_id: str,
+        from_assignee: str,
+        to_assignee: str,
+    ) -> bool:
+        """Hand a working task to a new owner as directed ``PENDING``.
+
+        Used when the former owner is already gone (shutdown / departed): a
+        status-preserving ``reassign`` would leave ``IN_PROGRESS`` on a member
+        that never started the work, and a bare ``reset`` would open a
+        claimable-pool window other idle teammates can race into. This CAS
+        keeps an assignee the whole time (``to_assignee``) while bouncing the
+        status to ``PENDING`` so the new owner's startup board survey can see
+        it, and so others cannot ``claim`` it.
+
+        Only ``IN_PROGRESS`` is accepted: the plan / verify gates bind an
+        artifact to the current owner and stay non-reassignable.
+        """
+        team_task_model = _get_task_model()
+        now = get_current_time()
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                update(team_task_model)
+                .where(
+                    team_task_model.task_id == task_id,
+                    team_task_model.assignee == from_assignee,
+                    team_task_model.status == TaskStatus.IN_PROGRESS.value,
+                )
+                .values(
+                    status=TaskStatus.PENDING.value,
+                    assignee=to_assignee,
+                    summary=None,
+                    note=None,
+                    resume_pending=False,
+                    observed_revision=team_task_model.revision,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+            redirected = result.rowcount == 1
+            if redirected:
+                team_logger.info(
+                    "Task %s redirected from %s to pending under %s",
+                    task_id,
+                    from_assignee,
+                    to_assignee,
+                )
+            else:
+                team_logger.debug(
+                    "CAS redirect-to-pending for task %s (%s -> %s) did not apply (rowcount=%s)",
+                    task_id,
+                    from_assignee,
+                    to_assignee,
+                    result.rowcount,
+                )
+            return redirected
+
     async def reset_task(self, task_id: str) -> Optional[TeamTaskBase]:
         """Reset an in-flight task back to pending status and clear assignee.
 

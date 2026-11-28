@@ -15,6 +15,7 @@ from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.status import (
     MemberMode,
+    MemberStatus,
     TaskStatus,
 )
 from openjiuwen.agent_teams.context import (
@@ -70,7 +71,7 @@ async def task_manager(db, message_bus):
             team_name="test_team",
             display_name="member1",
         agent_card=AgentCard().model_dump_json(),
-        status="BUSY",
+        status=MemberStatus.BUSY.value,
         mode=MemberMode.BUILD_MODE.value
     )
     return TeamTaskManager(team_name="test_team", member_name="member1", db=db, messager=message_bus)
@@ -1453,7 +1454,7 @@ async def member2(task_manager, db):
         team_name="test_team",
         display_name="member2",
         agent_card=AgentCard().model_dump_json(),
-        status="BUSY",
+        status=MemberStatus.BUSY.value,
         mode=MemberMode.BUILD_MODE.value,
     )
     return "member2"
@@ -1511,6 +1512,102 @@ async def test_reassign_transfers_task_and_revokes_old_assignee(task_manager, me
 
     # Atomic swap: no reset means no spurious TASK_RELEASED for idle teammates.
     assert _published_events(message_bus, TeamEvent.TASK_RELEASED) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_reassign_from_departed_owner_lands_directed_pending(
+    task_manager, member2, db, message_bus
+):
+    """A working task handed off a shut-down owner becomes pending under the
+    replacement — never an ownerless claimable-pool row, and never a fake
+    in_progress the replacement has not started."""
+    task = await task_manager.add(title="T", content="c")
+    assert (await task_manager.assign(task.task_id, "member1")).ok
+    # Legal shutdown path: BUSY -> shutdown_requested -> shut_down.
+    assert await db.member.update_member_status(
+        "member1", "test_team", MemberStatus.SHUTDOWN_REQUESTED.value
+    )
+    assert await db.member.update_member_status(
+        "member1", "test_team", MemberStatus.SHUTDOWN.value
+    )
+    message_bus.publish.reset_mock()
+
+    result = await task_manager.reassign(task.task_id, "member2")
+    assert result.ok, result.reason
+
+    refreshed = await task_manager.get(task.task_id)
+    assert refreshed.assignee == "member2"
+    assert refreshed.status == TaskStatus.PENDING.value
+
+    assert _published_events(message_bus, TeamEvent.TASK_RELEASED) == []
+    revoked = _published_events(message_bus, TeamEvent.TASK_REVOKED)
+    assert [e.payload["member_name"] for e in revoked] == ["member1"]
+    claimed = _published_events(message_bus, TeamEvent.TASK_CLAIMED)
+    assert any(c.payload["member_name"] == "member2" for c in claimed)
+
+    # Another teammate cannot steal the directed pending assignment.
+    steal = await task_manager.claim(task.task_id)
+    assert not steal.ok
+    still = await task_manager.get(task.task_id)
+    assert still.assignee == "member2"
+    assert still.status == TaskStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_reassign_from_legacy_shutdown_label_lands_directed_pending(
+    task_manager, member2, db, message_bus
+):
+    """Legacy / fixture rows may store the enum *name* ``SHUTDOWN``.
+
+    ``"SHUTDOWN".lower()`` is ``"shutdown"``, which is not the canonical
+    value ``"shut_down"``. Parsing must still recognize the owner as
+    departed so reassign takes the directed-pending path.
+    """
+    from openjiuwen.agent_teams.tools.models import TeamMember
+    from sqlalchemy import update
+
+    task = await task_manager.add(title="T", content="c")
+    assert (await task_manager.assign(task.task_id, "member1")).ok
+    # Bypass transition validation: write the historical label directly.
+    async with db.member._sessions.write() as session:
+        await session.execute(
+            update(TeamMember)
+            .where(
+                TeamMember.member_name == "member1",
+                TeamMember.team_name == "test_team",
+            )
+            .values(status="SHUTDOWN")
+        )
+        await session.commit()
+    message_bus.publish.reset_mock()
+
+    result = await task_manager.reassign(task.task_id, "member2")
+    assert result.ok, result.reason
+
+    refreshed = await task_manager.get(task.task_id)
+    assert refreshed.assignee == "member2"
+    assert refreshed.status == TaskStatus.PENDING.value
+    assert _published_events(message_bus, TeamEvent.TASK_RELEASED) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("shut_down", MemberStatus.SHUTDOWN),
+        ("SHUTDOWN", MemberStatus.SHUTDOWN),
+        ("shutdown_requested", MemberStatus.SHUTDOWN_REQUESTED),
+        ("SHUTDOWN_REQUESTED", MemberStatus.SHUTDOWN_REQUESTED),
+        ("BUSY", MemberStatus.BUSY),
+        ("busy", MemberStatus.BUSY),
+        ("not-a-status", None),
+    ],
+)
+async def test_parse_member_status_accepts_value_and_enum_name(raw, expected):
+    assert TeamTaskManager._parse_member_status(raw) is expected
 
 
 @pytest.mark.asyncio
