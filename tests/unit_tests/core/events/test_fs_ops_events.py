@@ -55,6 +55,15 @@ def _reset_agent_runtime():
     _BOUND.clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_cwd_state():
+    """Keep the per-task CWD binding isolated between tests."""
+
+    from openjiuwen.core.sys_operation import cwd
+
+    cwd.init_cwd(os.getcwd())
+
+
 class _FakeFs:
     """Filesystem backend over a real directory, returning real result models."""
 
@@ -520,6 +529,78 @@ async def test_read_timeout_keeps_the_requested_mode(tmp_path: Path) -> None:
 
     assert output.status is FsStatus.TIMEOUT
     assert output.mode == "bytes"
+
+
+async def test_relative_paths_use_agent_cwd_without_session_cwd(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "notes").mkdir(parents=True)
+    target = workspace / "notes" / "alpha.txt"
+    target.write_text("workspace", encoding="utf-8")
+    bus = ExtensionEventBus()
+    session = SessionContext("session-fs")
+    agent = _Agent(_FakeSysOperation(), str(workspace))
+    get_agent_runtime().bind(session.session_id, agent)
+    _BOUND.append((session.session_id, agent))
+    builder = await bus.trigger(Event(OPS_BUILD_EVENT_TYPE, None))
+    assert isinstance(builder, EventHandlerOpsBuilder)
+    ops = builder.build(None, session)
+
+    first = await ops.fs.read(FsReadInput(path="notes/alpha.txt"))
+    second = await ops.fs.read(FsReadInput(path="notes/alpha.txt"))
+
+    for output in (first, second):
+        assert output.status is FsStatus.OK
+        assert output.content == "workspace"
+        assert Path(output.path).resolve() == target.resolve()
+
+
+async def test_relative_paths_keep_a_live_worktree_cwd(tmp_path: Path) -> None:
+    main_root = tmp_path / "main"
+    worktree = tmp_path / "worktree"
+    for root, marker in ((main_root, "main"), (worktree, "worktree")):
+        (root / "notes").mkdir(parents=True)
+        (root / "notes" / "alpha.txt").write_text(marker, encoding="utf-8")
+    from openjiuwen.core.sys_operation import cwd
+
+    cwd.init_cwd(str(main_root))
+    cwd.set_cwd(str(worktree))
+    cwd.set_original_cwd(str(worktree))
+    bus = ExtensionEventBus()
+    session = SessionContext("session-fs")
+    agent = _Agent(_FakeSysOperation(), str(main_root))
+    get_agent_runtime().bind(session.session_id, agent)
+    _BOUND.append((session.session_id, agent))
+    builder = await bus.trigger(Event(OPS_BUILD_EVENT_TYPE, None))
+    assert isinstance(builder, EventHandlerOpsBuilder)
+    ops = builder.build(None, session)
+
+    output = await ops.fs.read(FsReadInput(path="notes/alpha.txt"))
+
+    assert output.status is FsStatus.OK
+    assert output.content == "worktree"
+    assert Path(output.path).resolve() == (worktree / "notes" / "alpha.txt").resolve()
+    assert Path(cwd.get_cwd()).resolve() == worktree.resolve()
+
+
+async def test_absolute_paths_are_not_rebased_to_agent_cwd(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("explicit", encoding="utf-8")
+    bus = ExtensionEventBus()
+    session = SessionContext("session-fs")
+    agent = _Agent(_FakeSysOperation(), str(workspace))
+    get_agent_runtime().bind(session.session_id, agent)
+    _BOUND.append((session.session_id, agent))
+    builder = await bus.trigger(Event(OPS_BUILD_EVENT_TYPE, None))
+    assert isinstance(builder, EventHandlerOpsBuilder)
+    ops = builder.build(None, session)
+
+    output = await ops.fs.read(FsReadInput(path=str(outside)))
+
+    assert output.status is FsStatus.OK
+    assert output.content == "explicit"
+    assert Path(output.path).resolve() == outside.resolve()
 
 
 async def test_working_dir_restores_original_cwd(tmp_path: Path) -> None:

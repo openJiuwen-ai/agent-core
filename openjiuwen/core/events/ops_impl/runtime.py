@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
@@ -40,6 +41,15 @@ def build_context(ops: EventHandlerOps) -> SessionContext:
     if base.cwd:
         return base
     return replace(base, cwd=_current_cwd())
+
+
+def live_cwd() -> str | None:
+    """Return a cwd only when the live task state has moved off the process root."""
+
+    from openjiuwen.core.sys_operation import cwd
+
+    current = cwd.get_cwd()
+    return current if current != os.getcwd() or cwd.get_workspace() is not None else None
 
 
 @contextmanager
