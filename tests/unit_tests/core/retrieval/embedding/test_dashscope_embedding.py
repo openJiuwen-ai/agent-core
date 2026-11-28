@@ -5,6 +5,7 @@ DashScope embedding model implementation test cases
 
 from unittest.mock import AsyncMock, Mock, patch
 
+import aiohttp
 import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
@@ -428,3 +429,106 @@ class TestDashscopeEmbeddingGetEmbeddings:
                 await getattr(model, "_get_embeddings")("hello", session=Mock())
 
         assert mock_dashscope.AioMultiModalEmbedding.call.call_count == 1
+
+
+class TestDashscopeEmbeddingConnectorOwnership:
+    """The instance-shared TCPConnector must survive per-call ClientSession exits.
+
+    ClientSession closes a connector it owns on exit; a shared connector must
+    therefore be attached with connector_owner=False, or every call after the
+    first fails with 'Connector is closed'.
+    """
+
+    @staticmethod
+    def _make_model_with_connector(embedding_config):
+        model = DashscopeEmbedding(config=embedding_config, verify="/tmp/ca.pem")
+        assert model.aio_connector is not None
+        return model
+
+    @pytest.mark.asyncio
+    @staticmethod
+    async def test_embed_documents_reuses_connector_across_sessions(embedding_config):
+        """Two sequential embed_documents calls must share one live connector."""
+        model = TestDashscopeEmbeddingConnectorOwnership._make_model_with_connector(embedding_config)
+        mock_embedding = [0.1] * 8
+        setattr(model, "_get_embeddings", AsyncMock(return_value=[mock_embedding]))
+
+        connector = model.aio_connector
+        captured = []
+
+        real_init = aiohttp.ClientSession.__init__
+
+        def spy_init(session_self, *args, **kwargs):
+            captured.append(kwargs.get("connector_owner"))
+            return real_init(session_self, *args, **kwargs)
+
+        with patch.object(aiohttp.ClientSession, "__init__", autospec=True) as mock_init:
+            mock_init.side_effect = spy_init
+            await model.embed_documents(["hello", "world"], batch_size=2)
+            await model.embed_documents(["again"], batch_size=1)
+
+        assert model.aio_connector is connector, "connector instance must be shared"
+        assert not connector.closed, "session exit must not close the shared connector"
+        assert captured, "sessions were created"
+        assert all(owner is False for owner in captured), (
+            "every ClientSession over the shared connector must set connector_owner=False"
+        )
+
+    @pytest.mark.asyncio
+    @staticmethod
+    async def test_embed_multimodal_keeps_connector_open(embedding_config):
+        """embed_multimodal must not close the shared connector on session exit."""
+        model = TestDashscopeEmbeddingConnectorOwnership._make_model_with_connector(embedding_config)
+        doc = MultimodalDocument()
+        doc.add_field("text", "Hello world")
+        setattr(model, "_get_embeddings", AsyncMock(return_value=[[0.1] * 8]))
+
+        await model.embed_multimodal(doc)
+
+        assert not model.aio_connector.closed, "connector must stay open for later calls"
+
+    @pytest.mark.asyncio
+    @staticmethod
+    async def test_default_config_session_closes_own_connector(embedding_config):
+        """Without custom SSL (aio_connector=None) the session owns its connector.
+
+        Passing connector_owner=False unconditionally made the session skip
+        closing its self-built connector, leaking one TCPConnector per call.
+        The owner flag must only be applied to the instance-shared connector.
+        """
+        model = DashscopeEmbedding(config=embedding_config)
+        assert model.aio_connector is None
+        setattr(model, "_get_embeddings", AsyncMock(return_value=[[0.1] * 8]))
+
+        captured: list[bool] = []
+
+        real_init = aiohttp.ClientSession.__init__
+
+        def spy_init(session_self, *args, **kwargs):
+            captured.append(kwargs.get("connector_owner", True))
+            return real_init(session_self, *args, **kwargs)
+
+        connectors: list = []
+
+        async def _call():
+            with patch.object(aiohttp.ClientSession, "__init__", autospec=True) as mock_init:
+                mock_init.side_effect = spy_init
+                async with aiohttp.ClientSession(
+                    connector=model.aio_connector,
+                    **({"connector_owner": False} if model.aio_connector is not None else {}),
+                ) as session:
+                    connectors.append(session.connector)
+
+        await _call()
+        # The default path must NOT pass connector_owner=False, so the
+        # session closes the connector it built.
+        assert captured == [True], "session without a shared connector must own its connector"
+        assert connectors and connectors[0].closed, "self-built connector must be closed by the session"
+
+        # And the production path: embed_documents with default config goes
+        # through the same branch; only assert no exception and no leak flag.
+        with patch.object(aiohttp.ClientSession, "__init__", autospec=True) as mock_init:
+            mock_init.side_effect = spy_init
+            captured.clear()
+            await model.embed_documents(["hello"], batch_size=1)
+        assert captured == [True], "embed_documents default config must not pass connector_owner=False"
