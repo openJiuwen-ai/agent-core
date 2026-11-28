@@ -64,6 +64,7 @@ generated: true
 | [B_20261117_1240_swarmflow-fork-round-boundary-attachment](agent_teams/B_20261117_1240_swarmflow-fork-round-boundary-attachment.md) | B | Swarmflow fork 轮数边界被运行时附件消息整体前移一轮 | chenchunzhou | [SDD-0014](../designs/active/SDD-0014-swarmflow-session-fork/design.md) |
 | [B_20261117_1626_directed-assignment-notice-dropped](agent_teams/B_20261117_1626_directed-assignment-notice-dropped.md) | B | 定向指派/改派的通知被接收端 pending 判据丢弃，新 owner 永不唤醒 | xiajing | 无独立 D：缺陷修复只改消费端投递判据，不新增契约与机制；依据见 S_03（TASK_CLAIMED 定向投递）与 jiuwenswarm 问题 |
 | [B_20261118_1142_shared-templates-name-leader-only-tools](agent_teams/B_20261118_1142_shared-templates-name-leader-only-tools.md) | B | 全员共享提示词模板点名 leader 专属工具误导 teammate | zhanglongmin | 无独立 D：日常文案修复，无独立设计文档；行为依据 F_76（提示词分层与渐进式披露）、F_122（framework 建队的 <team-policy> 投递）与 prompts/AGENTS.md 编辑规则 2。 |
+| [B_20261128_1130_framework-team-created-event](agent_teams/B_20261128_1130_framework-team-created-event.md) | B | framework 建队事件在订阅前发布被总线丢弃，插件漏收 team_created | zhanglongmin | 无独立 D：方案在缺陷分析对话中与用户逐点确认（三类事件一起补、顺序保持 spawned→created、持留仅由 framework 调用点激活），无独立 D。机制契约依据见 S_05（注册与拉起分离）、tools/AGENTS.md（TeamBackend 事件发布路径）与 extensions/AGENTS.md（监控桥 best-effort、不重放）。关联 issue：#2440。 |
 
 <a id="module-agent_teams-workflow"></a>
 

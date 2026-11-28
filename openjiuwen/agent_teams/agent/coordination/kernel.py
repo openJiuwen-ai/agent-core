@@ -194,13 +194,21 @@ class CoordinationKernel:
                 # capability at its spec ceiling: there is no leader choice
                 # to honour. ``build_team`` fires ``on_team_built`` as usual,
                 # which latches the checkpoint ``db_state`` (the session is
-                # already bound above) and arms the scheduler.
+                # already bound above) and arms the scheduler. The build-time
+                # events (member_spawned for identity-only members, then
+                # team_created) are buffered instead of published — this
+                # kernel has not subscribed to its topics yet, and the bus
+                # drops subscriber-less publishes without replay. The buffer
+                # parks on the backend and is published below, after
+                # ``subscribe_transport`` — this start, or the next one when
+                # anything in between fails.
                 spec = blueprint.spec
                 await backend.build_team(
                     display_name=spec.team_display_name or t("blueprint.generic_team_display_name"),
                     desc=spec.team_desc or t("blueprint.generic_team_desc"),
                     leader_display_name=spec.leader.display_name,
                     leader_desc=spec.leader.desc,
+                    defer_event_publish=True,
                 )
                 team_row_present = True
 
@@ -270,6 +278,14 @@ class CoordinationKernel:
             team_name = host.team_name
             if team_name and not self._subscribed_topics:
                 await self.subscribe_transport(team_name)
+            # Publish build-time events ``build_team`` buffered because the
+            # framework bootstrapper runs before these subscriptions exist.
+            # The buffer lives on the backend, so a mid-``start`` failure that
+            # skipped this flush is retried by the next start — recovery
+            # included. No-op for leader mode (events already published) and
+            # for an empty buffer.
+            if infra.team_backend:
+                await infra.team_backend.flush_pending_build_events()
         await self._event_bus.enqueue(InnerEventMessage(event_type=InnerEventType.REFRESH_TEAM_CONTEXT))
         # Re-arm the team-completion rising-edge guard on every start (cold
         # start / resume / recover) so each run cycle evaluates completion

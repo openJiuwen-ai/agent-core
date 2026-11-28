@@ -4,7 +4,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 from openjiuwen.agent_teams.context import set_session_id, reset_session_id
+from openjiuwen.agent_teams.messager.inprocess import InProcessMessager, cleanup_inprocess_bus
 from openjiuwen.agent_teams.paths import reset_task_openjiuwen_home, set_task_openjiuwen_home
+from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent, TeamTopic
 from openjiuwen.agent_teams.schema.team import TeamRole, TeamMemberSpec
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
 from openjiuwen.agent_teams.tools.team import TeamBackend
@@ -93,3 +95,95 @@ async def test_build_team_with_failed_predefined_host_can_be_retried(tmp_path, m
         await database.close()
         reset_session_id(token)
         reset_task_openjiuwen_home(home)
+
+
+@pytest.mark.asyncio
+async def test_build_team_deferred_events_wait_for_flush(tmp_path):
+    """``build_team(defer_event_publish=True)`` buffers instead of publishing.
+
+    Framework bootstrap builds the team before the leader kernel has
+    subscribed to its topics; the in-process bus drops subscriber-less
+    publishes without replay, so the build-time events (member_spawned for
+    identity-only members, then team_created) must stay buffered during
+    ``build_team`` and reach subscribers only after the caller flushes
+    them, in the same order an immediate publish would have used.
+    """
+    home = set_task_openjiuwen_home(tmp_path)
+    token = set_session_id("defer-sess")
+    database = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    messager = InProcessMessager()
+    received: list[EventMessage] = []
+
+    async def record(event: EventMessage) -> None:
+        received.append(event)
+
+    try:
+        await database.initialize()
+        topic = TeamTopic.TEAM.build("defer-sess", "defer-team")
+        await messager.subscribe(topic, record)
+        passive = TeamMemberSpec(member_name="watcher", display_name="Watcher", role_type=TeamRole.PASSIVE_HUMAN)
+        host = TeamMemberSpec(member_name="ops-bot", display_name="Ops Bot", role_type=TeamRole.HOST_MANAGED)
+        backend = TeamBackend(
+            "defer-team", "leader", True, database, messager,
+            predefined_members=[passive, host], enable_hitt=True,
+        )
+
+        await backend.build_team(
+            display_name="Team", desc="", leader_display_name="Leader", leader_desc="",
+            defer_event_publish=True,
+        )
+
+        # Nothing reached the bus while building: the subscriber was there,
+        # so any publish would have been delivered immediately.
+        assert received == []
+        # The buffer parks on the backend in the immediate-publish order:
+        # passive-human and host-managed member_spawned, then team_created.
+        assert [event.event_type for _, event in backend._pending_build_events] == [
+            TeamEvent.MEMBER_SPAWNED,
+            TeamEvent.MEMBER_SPAWNED,
+            TeamEvent.CREATED,
+        ]
+        # The deferral window is closed again — later publishes go straight out.
+        assert backend._deferred_events is None
+
+        await backend.flush_pending_build_events()
+
+        assert [event.event_type for event in received] == [
+            TeamEvent.MEMBER_SPAWNED,
+            TeamEvent.MEMBER_SPAWNED,
+            TeamEvent.CREATED,
+        ]
+        # The buffer is cleared for the whole pass: a second flush is a no-op,
+        # so already-delivered notices are never duplicated.
+        assert backend._pending_build_events == []
+        await backend.flush_pending_build_events()
+        assert len(received) == 3
+    finally:
+        cleanup_inprocess_bus()
+        await database.close()
+        reset_session_id(token)
+        reset_task_openjiuwen_home(home)
+
+
+@pytest.mark.asyncio
+async def test_flush_pending_build_events_publishes_each_event_best_effort():
+    """A failing publish is logged and skipped; later events still go out."""
+    token = set_session_id("defer-flaky")
+    database = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    messager = AsyncMock()
+    try:
+        await database.initialize()
+        backend = TeamBackend("flaky-team", "leader", True, database, messager)
+        first = EventMessage(event_type=TeamEvent.MEMBER_SPAWNED, payload={})
+        second = EventMessage(event_type=TeamEvent.CREATED, payload={})
+        backend._pending_build_events = [("topic-a", first), ("topic-b", second)]
+        messager.publish.side_effect = [RuntimeError("bus down"), None]
+
+        await backend.flush_pending_build_events()
+
+        assert messager.publish.await_count == 2
+        # Cleared despite the failure — every event gets one attempt, no retry.
+        assert backend._pending_build_events == []
+    finally:
+        await database.close()
+        reset_session_id(token)
