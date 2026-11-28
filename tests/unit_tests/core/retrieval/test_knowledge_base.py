@@ -218,3 +218,31 @@ class TestKnowledgeBase:
         )
         # Should catch exception, not raise
         await kb.close()
+
+    @pytest.mark.asyncio
+    async def test_close_async_failure_still_closes_remaining_components(self):
+        """A failing async close on one component must not leak the others.
+
+        Before the fix, only the synchronous branch had try/except: an
+        await obj.close() that raised propagated immediately and
+        index_manager was never closed (and the caller got an exception
+        out of close()).
+        """
+        config = KnowledgeBaseConfig(kb_id="test_kb")
+        mock_vector_store = AsyncMock()
+        mock_vector_store.close = AsyncMock(side_effect=RuntimeError("backend down"))
+        mock_index_manager = AsyncMock()
+        mock_index_manager.close = AsyncMock()
+        for attr in KNOWLEDGE_BASE_ATTRIBUTES:
+            setattr(mock_vector_store, attr, "test_value")
+            setattr(mock_index_manager, attr, "test_value")
+
+        kb = ConcreteKnowledgeBase(
+            config=config,
+            vector_store=mock_vector_store,
+            index_manager=mock_index_manager,
+        )
+        # Must not raise, and the second component must still be closed.
+        await kb.close()
+        mock_index_manager.close.assert_called_once()
+        mock_vector_store.close.assert_called_once()

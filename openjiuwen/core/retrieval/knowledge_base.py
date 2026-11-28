@@ -200,7 +200,12 @@ class KnowledgeBase(ABC):
             if not obj:
                 return
             if inspect.iscoroutinefunction(getattr(obj, "close", None)):
-                await obj.close()
+                # Same protection as the sync branch below: one component
+                # failing to close must not leak the remaining ones.
+                try:
+                    await obj.close()
+                except Exception:
+                    logger.warning("Failed to close object", exc_info=True)
             elif hasattr(obj, "close"):
                 try:
                     obj.close()
