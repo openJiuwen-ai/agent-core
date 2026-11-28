@@ -1160,6 +1160,44 @@ async def test_tool_definitions_model_dump_before_string_fallback() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tool_definitions_written_as_empty_array_when_tools_missing() -> None:
+    exporter = InMemorySpanExporter()
+    runtime = ObservabilityRuntime()
+    runtime.initialize(
+        ObservabilityConfig(
+            enabled=True,
+            service_name="tool-definition-empty-test",
+            sample_rate=1.0,
+            backend="otlp",
+        ),
+        span_exporter_override=exporter,
+    )
+    framework = Runner.callback_framework
+    root = runtime.get_tracer("tool-definition-empty-test").start_span("agent.root")
+    set_root_span(root, session_id="tool-definition-empty-session")
+    try:
+        await framework.trigger(
+            LLMCallEvents.LLM_INVOKE_INPUT,
+            messages=[{"role": "user", "content": "no tools here"}],
+            model="fake",
+        )
+        await framework.trigger(
+            LLMCallEvents.LLM_INVOKE_OUTPUT,
+            result=AssistantMessage(content="done", finish_reason="stop"),
+        )
+    finally:
+        if root.is_recording():
+            root.end()
+        clear_root_span(session_id="tool-definition-empty-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    # 未携带工具时应写入空数组，而不是缺失该属性。
+    assert span.attributes[GEN_AI_TOOL_DEFINITIONS] == "[]"
+
+
+@pytest.mark.asyncio
 async def test_tool_definitions_failures_fallback_per_item_without_orphaning_span() -> None:
     class BrokenModelDumpTool:
         def model_dump(self, **kwargs: object) -> dict[str, object]:

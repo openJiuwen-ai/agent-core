@@ -1054,6 +1054,10 @@ class OtelCallbackHandler:
             except Exception:
                 serialized_tools = json.dumps(_controlled_string(tools), ensure_ascii=False)
             span.set_attribute(GEN_AI_TOOL_DEFINITIONS, serialized_tools)
+        else:
+            # 即使本次调用未携带工具，也显式写入空数组，
+            # 便于下游区分「未采集」与「模型请求确实没有工具」。
+            span.set_attribute(GEN_AI_TOOL_DEFINITIONS, "[]")
 
         self._propagate_session_context(span, include_additive=True)
         subject_id = str(span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "")

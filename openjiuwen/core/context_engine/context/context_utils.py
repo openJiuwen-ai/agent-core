@@ -31,6 +31,12 @@ _OPENROUTER_PREFETCH_LOCK = threading.Lock()
 _OPENROUTER_PREFETCH_THREAD: Optional[threading.Thread] = None
 
 MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {
+    # Native context windows only. A catalog "4K"/"32K" label is the platform
+    # SKU serving cap, not the model window: never copy it onto a bare name.
+    # Table hits shadow OpenRouter metadata with no runtime correction, so
+    # bare names of unknown native window (glm-4-9b, qwen2.5-72b, ...) are
+    # deliberately unlisted and fall back to DEFAULT_CONTEXT_MAX_TOKENS;
+    # only names whose own suffix encodes the cap (qwen2.5-72b-32k) may carry it.
     # GLM
     "glm-5.3": 1048576,  # official 1,048,576 context; glm-5.2 and earlier stay at 198Ki
     "glm-5.3-flash": 1048576,
@@ -90,6 +96,26 @@ MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {
     "deepseek-r1": 163840,
     "deepseek-v3": 128000,
     "deepseek-chat": 163840,
+    "deepseek-r1-0528": 128000,
+    "deepseek-r1-250528": 128000,
+    "deepseek-v3.1-128k": 128000,
+    "deepseek-v3.1-64k": 64000,
+    "deepseek-v3-64k": 64000,
+    "deepseek-v3-32k": 32000,
+    "deepseek-v3-16k": 16000,
+    "deepseek-v3-8k": 8000,
+    "deepseek-r1-64k": 64000,
+    "deepseek-r1-64k-0528": 64000,
+    "deepseek-r1-32k": 32000,
+    "deepseek-r1-32k-0528": 32000,
+    "deepseek-r1-16k": 16000,
+    "deepseek-r1-8k": 8000,
+    "deepseek-r1-distill-qwen-32b-32k": 32000,
+    "deepseek-r1-distill-qwen-32b-8k": 8000,
+    "deepseek-r1-distill-qwen-32b-4k": 4000,
+    "deepseek-r1-distill-qwen-14b-8k": 8000,
+    "deepseek-r1-distill-qwen-14b-4k": 4000,
+    "deepseek-coder-33b-32k": 32000,
     # Anthropic Claude
     "claude-opus-5": 1000000,
     "claude-opus-4-8": 1000000,
@@ -140,6 +166,31 @@ MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {
     "qwen-flash": 1000000,
     "qwen-turbo": 8192,
     "qwen-long": 1000000,
+    "qwen3-coder-480b-a35b-instruct": 262144,
+    "qwen3-30b-a3b": 131072,  # YaRN-extended serving window; native 32768, matches OpenRouter metadata
+    "qwen3-30b-a3b-128k": 128000,
+    "qwen3-30b-a3b-32k": 32000,
+    "qwen3-235b-a22b": 131072,  # YaRN-extended serving window; native 32768, matches OpenRouter metadata
+    "qwen3-235b-a22b-thinking-2507": 262144,
+    "qwen3-235b-a22b-64k": 64000,
+    "qwen3-235b-a22b-32k": 32000,
+    "qwen3-32b": 131072,  # YaRN-extended serving window; native 32768, matches OpenRouter metadata
+    "qwen3-32b-64k": 64000,
+    "qwen3-32b-32k": 32000,
+    "qwen3-14b-32k": 32000,
+    "qwen3-8b-32k": 32000,
+    "qwen3-4b-32k": 32000,
+    "qwq-32b-32k": 32000,
+    "qwq-32b-16k": 16000,
+    "qwen2.5-72b-32k": 32000,
+    "qwen2.5-72b-8k": 8000,
+    "qwen2.5-72b-4k": 4000,
+    "qwen2.5-72b-1k": 1000,
+    "qwen2.5-32b-32k": 32000,
+    "qwen2.5-7b-32k": 32000,
+    "qwen2.5-vl-7b-32k": 32000,
+    "qwen2.5-vl-72b-32k": 32000,
+    "qwen2.5-vl-72b-48k": 48000,
     # Moonshot Kimi
     "kimi-k3": 1048576,
     "kimi-k3.1-pro-highspeed": 1048576,
@@ -165,7 +216,16 @@ MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {
     "grok-4.3": 1000000,
     "grok-4.3-latest": 1000000,
     "grok-latest": 500000,
+    "openpangu-2.0": 512000,
+    "openpangu-2.0-pro": 512000,
+    "openpangu-2.0-flash": 512000,
     "openpangu-2.1-pro": 512000,
+    # LongCat
+    "longcat-flash-chat": 128000,
+    # Ling
+    "ling-flash-2.0": 128000,
+    "ling-mini-2.0": 128000,
+    "ling-1t": 128000,
 }
 
 
