@@ -3,22 +3,19 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import sys
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from openjiuwen.core.common.logging import context_engine_logger as logger
 from openjiuwen.core.single_agent.rail import AgentCallbackContext
-from openjiuwen.extensions.context_evolver.service import (
-    SummarizeTrajectoriesInput,
-    TaskMemoryService,
-    format_trajectory,
-)
-from openjiuwen.extensions.context_evolver.service import (
-    evaluate_trial as _evaluate_trial,
-)
-from openjiuwen.extensions.context_evolver.service import (
-    summarize_trajectories as _summarize_trajectories,
-)
 from openjiuwen.harness.rails.base import DeepAgentRail
+
+if TYPE_CHECKING:
+    from openjiuwen.extensions.context_evolver import service as _service_types
+    from openjiuwen.extensions.context_evolver.service import SummarizeTrajectoriesInput
+else:
+    # Resolve service annotations through the lazy module exports at runtime.
+    _service_types = sys.modules[__name__]
 
 # ---------------------------------------------------------------------------
 # ContextEvolutionRail
@@ -32,7 +29,7 @@ class ContextEvolutionRail(DeepAgentRail):
     def __init__(
         self,
         user_id: str,
-        memory_service: Optional[TaskMemoryService] = None,
+        memory_service: Optional[_service_types.TaskMemoryService] = None,
         inject_memories_in_context: Optional[bool] = True,
         auto_summarize: Optional[bool] = True,
         auto_summarize_matts_mode: Optional[str] = "none",
@@ -43,7 +40,11 @@ class ContextEvolutionRail(DeepAgentRail):
         self.auto_summarize = auto_summarize
         self.auto_summarize_matts_mode = auto_summarize_matts_mode
 
-        self.memory_service = memory_service if memory_service is not None else TaskMemoryService()
+        if memory_service is None:
+            from openjiuwen.extensions.context_evolver.service import TaskMemoryService
+
+            memory_service = TaskMemoryService()
+        self.memory_service = memory_service
 
         # Per-iteration state – reset at the start of each before_task_iteration
         self.memories_used: int = 0
@@ -226,13 +227,19 @@ class ContextEvolutionRail(DeepAgentRail):
             try:
                 trajectory = self.extract_trajectory(ctx)
                 if trajectory:
+                    from openjiuwen.extensions.context_evolver.service import (
+                        SummarizeTrajectoriesInput,
+                        evaluate_trial,
+                        summarize_trajectories,
+                    )
+
                     # use invoke_result.get("output", "") instead of trajectory
                     # for simple questions and trajectory for complex questions
                     # use ground_truth if available for evaluate_trial
                     # modify evaluate_trial based on use case on trajectory_generator.py
-                    feedback, score = _evaluate_trial(self._current_query, trajectory)
+                    feedback, score = evaluate_trial(self._current_query, trajectory)
                     logger.info("Running auto-summarize for current trajectory")
-                    await _summarize_trajectories(
+                    await summarize_trajectories(
                         self.memory_service,
                         self.user_id,
                         SummarizeTrajectoriesInput(
@@ -265,6 +272,8 @@ class ContextEvolutionRail(DeepAgentRail):
                 context_id="default_context_id",
             )
             if context:
+                from openjiuwen.extensions.context_evolver.service import format_trajectory
+
                 return format_trajectory(context.get_messages())
         except Exception as exc:
             logger.warning("Failed to extract trajectory: %s", exc)
@@ -275,3 +284,18 @@ __all__ = [
     "ContextEvolutionRail",
     "SummarizeTrajectoriesInput",
 ]
+
+
+def __getattr__(name: str):
+    """Resolve context-evolver types on demand."""
+    if name in ("SummarizeTrajectoriesInput", "TaskMemoryService"):
+        from openjiuwen.extensions.context_evolver import service
+
+        value = getattr(service, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted({*globals().keys(), "SummarizeTrajectoriesInput", "TaskMemoryService"})

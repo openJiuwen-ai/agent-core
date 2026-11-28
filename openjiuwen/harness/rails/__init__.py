@@ -2,6 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """DeepAgent rail definitions."""
 
+from typing import TYPE_CHECKING
+
 # fmt: off
 # ruff: noqa: I001
 from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
@@ -21,7 +23,6 @@ from openjiuwen.harness.rails.evolution import (
     MemberSkillEvolutionRail,
     MetisContextEvolveRail,
     SkillEvolutionRail,
-    SummarizeTrajectoriesInput,
     CapabilityIdentity,
     CapabilitySnapshotProvider,
     GraphSnapshotProvider,
@@ -86,6 +87,9 @@ from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
 from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
 # fmt: on
+
+if TYPE_CHECKING:
+    from openjiuwen.harness.rails.evolution import SummarizeTrajectoriesInput
 
 __all__ = [
     "ARCHIVED_SCREEN_PLACEHOLDER",
@@ -161,14 +165,15 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    """Load TTSERail only when the TTSE export is requested."""
-    if name != "TTSERail":
+    """Load optional evolution exports on demand."""
+    if name not in ("TTSERail", "SummarizeTrajectoriesInput"):
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    from openjiuwen.harness.rails.evolution import TTSERail
+    from openjiuwen.harness.rails import evolution
 
-    globals()["TTSERail"] = TTSERail
-    return TTSERail
+    value = getattr(evolution, name)
+    globals()[name] = value
+    return value
 
 
 def __dir__():
-    return sorted({*globals().keys(), "TTSERail"})
+    return sorted({*globals().keys(), "TTSERail", "SummarizeTrajectoriesInput"})

@@ -3,6 +3,7 @@
 """Evolution rail implementations and their historical harness exports."""
 
 from importlib import import_module
+from typing import TYPE_CHECKING
 
 from openjiuwen.harness.rails.evolution.approval_events import (
     attach_evolution_meta,
@@ -23,10 +24,7 @@ from openjiuwen.harness.rails.evolution.configuration import (
     unconfigure_skill_evolution,
     unconfigure_ttse_evolution,
 )
-from openjiuwen.harness.rails.evolution.context_evolution_rail import (
-    ContextEvolutionRail,
-    SummarizeTrajectoriesInput,
-)
+from openjiuwen.harness.rails.evolution.context_evolution_rail import ContextEvolutionRail
 from openjiuwen.harness.rails.evolution.context_evolve_rail import ContextEvolveRail
 from openjiuwen.harness.rails.evolution.contracts import (
     EvolutionHostEventMeta,
@@ -91,6 +89,9 @@ from openjiuwen.harness.rails.evolution.team_skill_evolution_rail import TeamSki
 from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
 from openjiuwen.harness.rails.skills.skill_create_rail import SkillCreateRail
 from openjiuwen.harness.rails.skills.team_skill_create_rail import TeamSkillCreateRail
+
+if TYPE_CHECKING:
+    from openjiuwen.harness.rails.evolution.context_evolution_rail import SummarizeTrajectoriesInput
 
 __all__ = [
     "PublishedCapabilitySnapshotProvider",
@@ -161,7 +162,10 @@ __all__ = [
     "SignalBasedSuccessDetector",
 ]
 
-_TTSE_LAZY_ATTRS = {
+_LAZY_ATTRS = {
+    "SummarizeTrajectoriesInput": (
+        "openjiuwen.harness.rails.evolution.context_evolution_rail", "SummarizeTrajectoriesInput"
+    ),
     "TTSERail": ("openjiuwen.harness.rails.evolution.ttse_rail", "TTSERail"),
     "TTSEConfig": ("openjiuwen.agent_evolving.ttse", "TTSEConfig"),
     "TTSERecordStore": ("openjiuwen.agent_evolving.ttse", "TTSERecordStore"),
@@ -173,8 +177,8 @@ _TTSE_LAZY_ATTRS = {
 
 
 def __getattr__(name: str):
-    """Load TTSE types only when an explicit TTSE export is requested."""
-    target = _TTSE_LAZY_ATTRS.get(name)
+    """Load optional evolution exports on demand."""
+    target = _LAZY_ATTRS.get(name)
     if target is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     module_name, attr_name = target
@@ -184,4 +188,4 @@ def __getattr__(name: str):
 
 
 def __dir__():
-    return sorted({*globals().keys(), *_TTSE_LAZY_ATTRS})
+    return sorted({*globals().keys(), *_LAZY_ATTRS})
