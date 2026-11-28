@@ -74,6 +74,41 @@ async def test_interrupt_appends_record_and_skips_blob():
 
 
 @pytest.mark.asyncio
+async def test_settle_agent_steps_lets_switch_off_run_commit_after_a_crash():
+    kv = MockKVStore()
+    writer = PersistenceCheckpointer(kv)
+    session = make_session()
+    writer.begin_agent_steps(session)
+    set_msgs(session, ["q", "a1"])
+    await writer.save_agent_step(session, 0, query="q")
+    assert len(keys(kv)) == 1
+
+    # A fresh process replays the crashed run; the switch-off host never begins.
+    reader_session = make_session()
+    restarted = PersistenceCheckpointer(kv)
+    await restarted.pre_agent_execute(reader_session, None)
+    assert restarted._step_storage.status(reader_session) == "resume_pending"
+    assert restarted.peek_agent_step_resume(reader_session) == StepResume(iteration=0, query="q")
+
+    restarted.settle_agent_steps(reader_session)
+
+    assert restarted._step_storage.status(reader_session) == "idle"
+    assert restarted.peek_agent_step_resume(reader_session) is None
+    assert len(keys(kv)) == 1  # settling neither appends nor deletes a record
+
+    set_msgs(reader_session, ["q", "a1", "a2"])
+    await restarted.post_agent_execute(reader_session)
+
+    assert keys(kv) == []
+    assert await restarted._agent_storage.exists(reader_session) is True
+
+    recovered = make_session()
+    reloaded = PersistenceCheckpointer(kv)
+    await reloaded.pre_agent_execute(recovered, None)
+    assert contents(recovered) == ["q", "a1", "a2"]
+
+
+@pytest.mark.asyncio
 async def test_mid_task_commit_keeps_records_and_skips_blob():
     kv = MockKVStore()
     cp = PersistenceCheckpointer(kv)

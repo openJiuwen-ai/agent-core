@@ -323,6 +323,10 @@ class Session:
         """Close this run's step records, marking how it stopped."""
         await self._inner.checkpointer().end_agent_steps(self._inner, interrupted)
 
+    def settle_agent_steps(self) -> None:
+        """Mark a replayed run idle without recording a new step."""
+        self._inner.checkpointer().settle_agent_steps(self._inner)
+
     def create_workflow_session(self) -> WorkflowSession:
         return WorkflowSession(parent=self._inner, session_id=self.get_session_id())
 

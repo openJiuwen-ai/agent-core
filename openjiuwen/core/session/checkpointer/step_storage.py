@@ -291,6 +291,31 @@ class AgentStepStorage:
         track = self._tracks.get(ids)
         return track.status if track is not None else None
 
+    def settle(self, session: BaseSession) -> None:
+        """Mark a replayed run idle without writing or deleting a record.
+
+        A host that disabled iteration checkpoints never begins a new track, so
+        a ``resume_pending`` track replayed from an older run would otherwise
+        keep ``post_agent_execute`` from merging the blob and clearing the
+        records. The recovered context stays in the session; only the resume
+        point is dropped.
+        """
+        ids = self._ids(session)
+        if ids is None:
+            return
+        track = self._tracks.get(ids)
+        if track is None or track.status != "resume_pending":
+            return
+        track.status = "idle"
+        track.resume = None
+        session_logger.debug(
+            "Agent steps settled without a new record",
+            event_type=LogEventType.CHECKPOINT_CLEAR,
+            session_id=ids[0],
+            agent_id=ids[1],
+            metadata={"storage_type": "persistence"},
+        )
+
     def has_records(self, session: BaseSession) -> bool:
         ids = self._ids(session)
         if ids is None:

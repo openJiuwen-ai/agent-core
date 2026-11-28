@@ -317,6 +317,81 @@ async def test_switch_off_writes_no_step_records(monkeypatch):
         CheckpointerFactory.set_default_checkpointer(original)
 
 
+async def _seed_leftover_step(kv, agent, session_id, messages):
+    """Write one completed step and leave it unclosed, as a crash would."""
+    from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointer
+    from tests.unit_tests.core.session.checkpointer.test_step_storage import set_msgs
+
+    writer = PersistenceCheckpointer(kv)
+    writer_session = create_agent_session(session_id=session_id, card=agent.card)
+    writer.begin_agent_steps(writer_session._inner)
+    set_msgs(writer_session._inner, messages)
+    await writer.save_agent_step(writer_session._inner, 0, query=messages[0])
+
+
+@pytest.mark.asyncio
+async def test_switch_off_run_merges_leftover_step_records(monkeypatch):
+    """A switch-off host must merge a crashed run instead of skipping forever."""
+    from openjiuwen.core.session.checkpointer import CheckpointerFactory
+    from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointer
+    from tests.unit_tests.core.session.checkpointer.test_persistence_storage import MockKVStore
+    from tests.unit_tests.core.session.checkpointer.test_step_storage import keys
+
+    kv = MockKVStore()
+    agent = make_step_agent("step-off-crash", enable_iteration_checkpoint=False)
+    await _seed_leftover_step(kv, agent, "sess-off-crash", ["q", "a1"])
+
+    cp = PersistenceCheckpointer(kv)
+    original = CheckpointerFactory._default_checkpointer
+    CheckpointerFactory.set_default_checkpointer(cp)
+    try:
+        session = create_agent_session(session_id="sess-off-crash", card=agent.card)
+        await session.pre_run(inputs=None)
+        assert cp.peek_agent_step_resume(session._inner) is not None
+
+        llm = MockLLMModel()
+        llm.set_responses([create_text_response("done")])
+        monkeypatch.setattr(agent, "_get_llm", lambda: llm)
+
+        result = await agent.invoke({"query": "q"}, session=session)
+
+        assert result["result_type"] == "answer"
+        await session.commit()
+    finally:
+        CheckpointerFactory.set_default_checkpointer(original)
+
+    assert keys(kv, "sess-off-crash", "step-off-crash") == []
+    assert await cp._agent_storage.exists(session._inner) is True
+
+
+@pytest.mark.asyncio
+async def test_switch_off_rejected_run_keeps_leftover_resume(monkeypatch):
+    """A rejected invoke must not settle a resume point the run never used."""
+    from openjiuwen.core.session.checkpointer import CheckpointerFactory
+    from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointer
+    from tests.unit_tests.core.session.checkpointer.test_persistence_storage import MockKVStore
+    from tests.unit_tests.core.session.checkpointer.test_step_storage import keys
+
+    kv = MockKVStore()
+    agent = make_step_agent("step-off-rejected", enable_iteration_checkpoint=False)
+    await _seed_leftover_step(kv, agent, "sess-off-rejected", ["q", "a1"])
+
+    cp = PersistenceCheckpointer(kv)
+    original = CheckpointerFactory._default_checkpointer
+    CheckpointerFactory.set_default_checkpointer(cp)
+    try:
+        session = create_agent_session(session_id="sess-off-rejected", card=agent.card)
+        await session.pre_run(inputs=None)
+
+        with pytest.raises(ValueError):
+            await agent.invoke({"query": ""}, session=session)
+
+        assert cp.peek_agent_step_resume(session._inner) is not None
+        assert len(keys(kv, "sess-off-rejected", "step-off-rejected")) == 1
+    finally:
+        CheckpointerFactory.set_default_checkpointer(original)
+
+
 def test_iteration_checkpoint_is_on_by_default():
     """The step checkpoint is opt-out: the config default must stay on."""
     from openjiuwen.core.context_engine.schema.config import ContextEngineConfig

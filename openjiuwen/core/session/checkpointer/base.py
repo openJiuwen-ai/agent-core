@@ -169,6 +169,10 @@ class Checkpointer(ABC):
         """Close the current run, recording whether it stopped for confirmation."""
         return None
 
+    def settle_agent_steps(self, session: BaseSession) -> None:
+        """Mark a replayed run idle when this run does not write step records."""
+        return None
+
 
 class Storage(ABC):
     @abstractmethod

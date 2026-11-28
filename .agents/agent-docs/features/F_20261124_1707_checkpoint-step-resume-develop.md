@@ -54,8 +54,9 @@ dev-stable 与 develop 长期分叉，本记录是同一特性在 develop 的落
 2. **`ReActAgent` 按 develop 的钩子点手工落地**：develop 的 `_inner_invoke` 与 dev-stable 分叉较大，未整文件套用，而是在 `interruption_state` 之后取续跑点、在 `elif not resume_continuation` 之前插入续跑分支、在 `AFTER_REACT_ITERATION` 之后写增量、两条无 tool_calls 结束路径各写 `final`、`finally` 先关 step 再提交；abort 路径通过 `_handle_context_abort` 新增 `close_steps` 参数，在 commit 前关闭记录。
 3. **todo 快照适配 develop 的文件设施**：develop 没有 `todo_store`、`ToolSnapshot`/`missing_ok` 选项，改为"普通读 + 父目录列表探测"区分空文件与缺失文件；滚回用 `write_file(prepend_newline=False)`。
 4. **不引入代际重打**：develop 的 `TodoItem` 没有 `generation_token` 字段，也没有宿主侧代际过滤，因此不移植 dev-stable #10746 的续跑保代际逻辑；待 develop 侧未来引入代际体系时再评估。
-5. **按 issue 建议补开关 `ContextEngineConfig.enable_iteration_checkpoint`（默认开启）**：关闭时 ReActAgent 不取续跑点、不写记录，TaskPlanningRail 也不做 todo 快照，基线行为与引入前一致；关闭后每轮不写。默认开启与 dev-stable 的默认生效保持一致；宿主可按需显式关闭。
-5. **任务结束清理顺序**：先写全量 blob、成功后才删 step 键；序列化失败时保留增量，避免数据丢失。
+5. **按 issue 建议补开关 `ContextEngineConfig.enable_iteration_checkpoint`（默认开启）**：关闭时 ReActAgent 不取续跑点、不写 step 记录，TaskPlanningRail 也不做 todo 快照，基线行为与引入前一致。两个有意例外：HITL 的 `interrupt_agent_execute` 仍追加一条 interrupt 记录，用于保留“中断已发生、blob 尚未落盘”的崩溃窗口；若关闭前已有 `resume_pending` 遗留记录，run 通过参数校验、进入循环前会把它 `settle` 为 idle（不追加记录），由 `post_agent_execute` 写 blob 并清理，避免该类 session 永久停写。跨进程 mid-task commit 仍按 `resume_pending` 跳过。默认开启与 dev-stable 的默认生效保持一致；宿主可按需显式关闭。
+6. **任务结束清理顺序**：先写全量 blob、成功后才删 step 键；序列化失败时保留增量，避免数据丢失。
+7. **检视回合补充（2026-11-28，CR-1/CR-2）**：新增 `settle_agent_steps`（`AgentStepStorage` → `PersistenceCheckpointer` → `Session`），只把回放出的 `resume_pending` track 置为 idle，不写盘；`ReActAgent` 在开关关闭、存在遗留续跑点且已通过参数校验后调用它。HITL interrupt 路径保持不受开关约束，按 CR-2 的文档方案显式记录该例外，不改 `interrupt_agent_execute` 的写盘方式。
 
 ## 与设计的偏差
 
@@ -68,6 +69,7 @@ dev-stable 与 develop 长期分叉，本记录是同一特性在 develop 的落
 | --- | --- | --- | --- | --- |
 | 2026-11-24 定向新测试 | develop 分支工作区，Windows 11 / Python 3.11 | `uv run pytest tests/unit_tests/core/session/checkpointer tests/unit_tests/core/single_agent/agents/test_react_agent_step_resume.py tests/unit_tests/harness/rails/test_task_planning_step_todo.py` | 91 passed | 无 |
 | 2026-11-24 受影响目录 | 同上 | `uv run pytest tests/unit_tests/core/session tests/unit_tests/core/single_agent tests/unit_tests/harness/rails` | 2014 passed，2 failed | 2 条失败均为环境问题且未被本分支改动：`test_colliding_and_path_like_ids_survive_flush_load`（Windows 非 ASCII 路径读取）、`test_snapshot_cyclic_symlink_is_empty`（Windows 符号链接权限） |
+| 2026-11-28 检视修改（CR-1/CR-2） | develop 分支工作区，Windows 11 / Python 3.11 | `pytest tests/unit_tests/core/session/checkpointer`、`pytest tests/unit_tests/core/session`、`pytest tests/unit_tests/core/single_agent`，以及 step-resume 定向批次 | 72 / 509 / 250 passed；定向批次 119 passed | 未跑全仓 UT |
 
 ### 可见行为、副作用与证据有效范围
 

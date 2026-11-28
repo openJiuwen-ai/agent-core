@@ -1057,6 +1057,9 @@ class PersistenceCheckpointer(Checkpointer):
     async def end_agent_steps(self, session: BaseSession, interrupted: bool) -> None:
         await self._step_storage.end(session, interrupted=interrupted)
 
+    def settle_agent_steps(self, session: BaseSession) -> None:
+        self._step_storage.settle(session)
+
 
 def _enable_sqlite_wal(engine: AsyncEngine) -> None:
     """

@@ -3316,6 +3316,8 @@ class ReActAgent(BaseAgent):
                 )
                 step_resume = self._begin_agent_steps(session) if step_checkpoint else None
                 steps_started = step_checkpoint
+                if not step_checkpoint:
+                    await self._settle_stale_agent_steps(session)
 
                 state_loaded_at = time.monotonic()
 
@@ -4044,6 +4046,33 @@ class ReActAgent(BaseAgent):
                 "[ReActAgent] failed to close agent steps session_id=%s interrupted=%s",
                 session.get_session_id() if hasattr(session, "get_session_id") else "",
                 interrupted,
+                exc_info=True,
+            )
+
+    async def _settle_stale_agent_steps(self, session) -> None:
+        """Drop a replayed resume point when this run writes no step records.
+
+        A host that turned ``enable_iteration_checkpoint`` off never begins a
+        new track. Without settling the replayed ``resume_pending`` track, every
+        ``post_agent_execute`` would skip the blob and the session would never
+        persist again.
+        """
+        if not self._session_has_step_sink(session):
+            return
+        peek = getattr(session, "peek_agent_step_resume", None)
+        settle = getattr(session, "settle_agent_steps", None)
+        if not callable(peek) or not callable(settle):
+            return
+        try:
+            if peek() is None:
+                return
+            result = settle()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:  # noqa: BLE001 - a broken checkpointer must not break the turn
+            logger.warning(
+                "[ReActAgent] failed to settle leftover agent steps session_id=%s",
+                session.get_session_id() if hasattr(session, "get_session_id") else "",
                 exc_info=True,
             )
 

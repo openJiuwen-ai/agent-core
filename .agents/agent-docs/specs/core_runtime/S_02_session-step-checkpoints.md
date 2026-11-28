@@ -27,7 +27,7 @@ files:
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/core/session/checkpointer/`、`openjiuwen/core/session/agent.py`、`openjiuwen/core/single_agent/agents/react_agent.py`、`openjiuwen/harness/rails/task_planning_rail.py` |
-| 最近一次修订日期 | 2026-11-24 |
+| 最近一次修订日期 | 2026-11-28 |
 | 关联 feature | `F_20261124_1707_checkpoint-step-resume-develop.md` |
 
 ## 范围 / 边界
@@ -47,12 +47,13 @@ files:
 
 `ContextEngineConfig.enable_iteration_checkpoint`（默认 `True`）控制本能力。关闭时：
 
-- `ReActAgent` 不取续跑点、不写任何 step 记录，也不关闭记录；循环行为与引入本特性前一致；
+- `ReActAgent` 不取续跑点、不写任何 step 记录；循环行为与引入本特性前一致；
 - `TaskPlanningRail` 不做 todo.json 快照；滚回只在存在待续跑点时动作，关闭状态下自然不触发；
 - 全量 blob 的提交/恢复路径不变。
-- 开关只约束“写”：此前打开时已写入、尚未清理的记录仍会在 `pre_agent_execute` 回放，并在任务正常结束时由 `post_agent_execute` 清理；关闭开关不会跳过这部分已落盘进度。
+- 开关只约束“写”：此前打开时已写入、尚未清理的记录仍会在 `pre_agent_execute` 回放。若末条是普通 `step`（`resume_pending`），关闭状态的运行会在进入循环前把这条遗留 track 置为 `idle`（`settle_agent_steps`，不追加记录），随后 `post_agent_execute` 写全量 blob 并清理 step 键；因此关闭开关不会让这类 session 永久停写。跨进程、本轮未 `begin` 的进行中 commit 仍按 `resume_pending` 跳过，避免提前合并别人的未完成 request。
+- `interrupt_agent_execute` 是关闭状态的唯一例外：HITL 中断仍追加一条 `interrupt` 记录，用于覆盖“中断已发生、blob 尚未落盘”的崩溃窗口；本轮 `post_agent_execute` 会写 blob 并清理。该路径不检查开关，因为它不产生可续跑的 step 进度，只保留中断当刻的状态。
 
-默认开启，每完成一轮完整迭代产生一次 KV 写入；宿主可显式关闭以回到引入前的循环行为。内部方法（`Session`/`Checkpointer` 上的四个方法）在
+默认开启，每完成一轮完整迭代产生一次 KV 写入；宿主可显式关闭以回到引入前的循环行为。内部方法（`Session`/`Checkpointer` 上的五个方法）在
 两种状态下都存在，基类默认空操作。宿主按部署形态决定是否启用。
 
 ## 增量语义
@@ -69,9 +70,10 @@ files:
 |---|---|
 | `pre_agent_execute` | 先恢复 blob，再回放 step 增量，最后设置 `INTERACTIVE_INPUT` |
 | `interrupt_agent_execute` | 追加 `interrupt` 记录，不写全量 blob |
-| `post_agent_execute` | 有记录时按状态分流：`active`/`resume_pending` 不写；`interrupted` 追加 `interrupt`；`idle` 写全量 blob，成功后才清理 step 键。无记录时照旧写全量 blob |
+| `post_agent_execute` | 有记录时按状态分流：`active`（本轮 `begin` 未 `end`）与 `resume_pending`（本轮未 `begin`，可能属于另一个进程）不写；`interrupted` 追加 `interrupt` 后写全量 blob，成功才清理 step 键；`idle` 写全量 blob，成功才清理。无记录时照旧写全量 blob |
+| `settle_agent_steps` | 开关关闭且本进程回放出待续跑记录时，把遗留 track 置为 `idle`（不追加记录），让下一次 `post_agent_execute` 走 blob+clear；基类默认空实现 |
 | `release(session_id, agent_id)` | 精确前缀删除该 agent 的 step 键并丢弃进程内状态；仅给 session_id 时按精确前缀删除整个会话并丢弃该会话的进程内状态 |
-| `Session.save_agent_step / begin_agent_steps / peek_agent_step_resume / end_agent_steps` | 转发到当前 checkpointer；基类默认空实现 |
+| `Session.save_agent_step / begin_agent_steps / peek_agent_step_resume / end_agent_steps / settle_agent_steps` | 转发到当前 checkpointer；基类默认空实现 |
 
 - 状态由 run 边界驱动：`begin` 标记 `active` 并取走续跑点，`end` 按 `interrupted` 标记 `interrupted`/`idle`；`end` 在 `finally` 中断言状态，不掩盖原始异常。
 - 校验失败（未进入循环）的 invoke 不关闭 step 记录，保留续跑点。
