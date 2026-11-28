@@ -15,6 +15,16 @@ with ``ingress_url`` and optional ``node_id``. It is read before every environme
 lookup; malformed or missing configured context is an error. Node changes select
 a fresh SDK connection scope even when bridge URLs are identical. Serialized
 traffic and DNS policies are rehydrated through the public SDK types.
+
+Idle lifecycle settings are passed through to the SDK create call:
+``idle_action`` (``delete`` or ``pause``), ``pause_policy`` (``retention``,
+``timeoutSeconds`` and ``storage``) and ``failover``. Non-default lifecycle
+settings participate in the environment scope, so changing them selects a new
+environment instead of silently keeping an environment created with the old
+settings. A ``paused`` environment stays cached: the first data-plane operation
+wakes it and keeps the retained checkpoint. When a create conflicts with an
+existing paused environment, ADX reports its environment ID; the provider
+attaches to that handle and resumes it explicitly instead of replacing it.
 """
 
 from __future__ import annotations
@@ -22,9 +32,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import shlex
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, ClassVar
@@ -40,6 +52,13 @@ from openjiuwen.extensions.sys_operation.sandbox.providers.adx_operations import
 )
 
 ADX_ENVIRONMENT_CAPABILITIES = frozenset({"local-rootfs"})
+
+logger = logging.getLogger(__name__)
+
+# A rejected resume can leave the record briefly in its transitional state
+# (resuming/pausing) before it settles back to paused.
+_RESUME_SETTLE_SECONDS = 10.0
+_RESUME_SETTLE_POLL_SECONDS = 0.5
 
 _PROCESS_IDENTITY = uuid.uuid4().hex
 _DEFAULT_RESTART_POLICY = {"maxAttempts": 3, "initialBackoffSeconds": 1, "maxBackoffSeconds": 30}
@@ -58,6 +77,120 @@ def _restart_policy(value: Any) -> Any:
         initial_backoff_seconds=value["initialBackoffSeconds"],
         max_backoff_seconds=value["maxBackoffSeconds"],
     )
+
+
+_IDLE_ACTIONS = ("delete", "pause")
+_PAUSE_STORAGE = ("configured", "local", "shared")
+
+
+def _idle_action(value: Any) -> Any:
+    """Convert a serializable idle action into the public SDK enum."""
+    from adx_environment import IdleAction
+
+    if not isinstance(value, str) or value not in _IDLE_ACTIONS:
+        raise ValueError("ADX tool idle_action must be one of: " + ", ".join(_IDLE_ACTIONS))
+    return IdleAction(value)
+
+
+def _pause_policy(value: Any) -> Any:
+    """Convert serializable pause settings into the public SDK policy types."""
+    from adx_environment import CheckpointStorage, PausePolicy, RetentionPolicy
+
+    if not isinstance(value, dict):
+        raise ValueError("ADX tool pause_policy must be a mapping")
+    unknown = sorted(set(value) - {"retention", "timeoutSeconds", "storage"})
+    if unknown:
+        raise ValueError("ADX tool pause_policy has unsupported fields: " + ", ".join(unknown))
+    arguments: dict[str, Any] = {}
+    retention = value.get("retention")
+    if retention is not None:
+        if not isinstance(retention, dict) or set(retention) - {"kind", "ttlSeconds"}:
+            raise ValueError("ADX tool pause_policy.retention must contain kind and optional ttlSeconds")
+        kind = retention.get("kind")
+        ttl = retention.get("ttlSeconds")
+        if kind == "forever" and "ttlSeconds" not in retention:
+            arguments["retention"] = RetentionPolicy.forever()
+        elif kind == "ttl" and isinstance(ttl, int) and not isinstance(ttl, bool):
+            if ttl <= 0:
+                raise ValueError("ADX tool pause_policy.retention.ttlSeconds must be a positive integer")
+            arguments["retention"] = RetentionPolicy.for_seconds(ttl)
+        else:
+            raise ValueError("ADX tool pause_policy.retention requires kind 'forever' or 'ttl' with ttlSeconds")
+    storage = value.get("storage")
+    if storage is not None:
+        if storage not in _PAUSE_STORAGE:
+            raise ValueError("ADX tool pause_policy.storage must be one of: " + ", ".join(_PAUSE_STORAGE))
+        arguments["storage"] = CheckpointStorage(storage)
+    if "timeoutSeconds" in value:
+        timeout = value["timeoutSeconds"]
+        if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+            raise ValueError("ADX tool pause_policy.timeoutSeconds must be a positive integer")
+        arguments["timeout_seconds"] = timeout
+    return PausePolicy(**arguments)
+
+
+def _failover(value: Any) -> bool:
+    """Validate the same-node recovery flag before handing it to the SDK."""
+    if not isinstance(value, bool):
+        raise ValueError("ADX tool failover must be a boolean")
+    return value
+
+
+def _lifecycle_signature(settings: dict[str, Any]) -> str:
+    """Separate cached environments when create-time lifecycle settings change."""
+    lifecycle: dict[str, Any] = {}
+    if settings.get("idle_action") not in (None, "delete"):
+        lifecycle["idle_action"] = settings["idle_action"]
+        if settings.get("idle_timeout") is not None:
+            lifecycle["idle_timeout"] = settings["idle_timeout"]
+        if settings.get("pause_policy") is not None:
+            lifecycle["pause_policy"] = settings["pause_policy"]
+    if settings.get("failover") not in (None, False):
+        lifecycle["failover"] = settings["failover"]
+    if not lifecycle:
+        return ""
+    payload = json.dumps(lifecycle, sort_keys=True, separators=(",", ":"))
+    return "|lifecycle=" + hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _definitive_resume_rejection(exc: BaseException) -> bool:
+    """Return whether ADX definitively rejected resuming the restore point.
+
+    An expired checkpoint, an incompatible release/recovery profile and a local
+    restore point that cannot move to another node are reported as 400 or 409
+    with ``retry=never`` and ``outcome=not_started``. Older SDKs wrap that
+    structured error, so follow the exception chain; a missing field keeps the
+    environment because the rejection may still be transient.
+    """
+    error = getattr(exc, "__cause__", None) or exc
+    return (
+        getattr(error, "status_code", None) in (400, 409)
+        and getattr(error, "retry", None) == "never"
+        and getattr(error, "outcome", None) == "not_started"
+    )
+
+
+def _settles_to_paused(environment: Any) -> bool:
+    """Return whether a rejected environment is (or returns to) paused.
+
+    The operation that was just rejected can leave the record in a transitional
+    state. Any terminal running/deleted/failed state keeps the environment.
+    """
+    from adx_environment import EnvironmentNotFound
+
+    deadline = time.monotonic() + _RESUME_SETTLE_SECONDS
+    while True:
+        try:
+            current = str(environment.get_info().state).lower()
+        except EnvironmentNotFound:
+            return False
+        except Exception:
+            return False
+        if current in ("paused", "running", "deleted", "failed"):
+            return current == "paused"
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_RESUME_SETTLE_POLL_SECONDS)
 
 
 def _network_policy(configuration: dict[str, Any]) -> Any:
@@ -120,7 +253,6 @@ class _AdxEnvironmentBackend:
                 self._extra[key] = str(value).strip()
             identity = json.dumps([self._extra["user"], self._extra["group"]], separators=(",", ":"))
             self._scope_suffix = "|identity=" + hashlib.sha256(identity.encode()).hexdigest()
-            self._scope += self._scope_suffix
         if "rootfs" in self._extra:
             rootfs = self._extra["rootfs"]
             if not isinstance(rootfs, dict) or rootfs.get("type") != "local":
@@ -134,7 +266,9 @@ class _AdxEnvironmentBackend:
                 raise ValueError("ADX tool rootfs cannot contain traversal or control characters")
             artifact = json.dumps({"type": "local", "path": path}, sort_keys=True)
             self._scope_suffix += "|rootfs=" + hashlib.sha256(artifact.encode()).hexdigest()
-            self._scope = build_adx_shared_scope_key(endpoint.base_url, endpoint.isolation_key) + self._scope_suffix
+        lifecycle = _lifecycle_signature(self._extra)
+        if lifecycle:
+            self._scope_suffix += lifecycle
 
     def _resolve_endpoint(self) -> tuple[SplitResult, str]:
         base_url = self.endpoint.base_url
@@ -179,6 +313,10 @@ class _AdxEnvironmentBackend:
                 f"ADX tool Environment {instance.id} is failed; ADX owns automatic restart; "
                 "retry after recovery or inspect the Environment after retry exhaustion"
             )
+        if state == "paused":
+            # The retained checkpoint belongs to this execution. Keep the
+            # cached Environment so the first data-plane operation wakes it.
+            return False
         return state in ("stopped", "deleted", "failed")
 
     def _get_environment(self) -> Any:
@@ -187,6 +325,7 @@ class _AdxEnvironmentBackend:
             ConnectionConfig,
             Environment,
             EnvironmentNotFound,
+            IdleAction,
             Mount,
         )
 
@@ -196,6 +335,22 @@ class _AdxEnvironmentBackend:
         with self._lock:
             url, self._scope = self._resolve_endpoint()
             kwargs = {"restart_policy": _restart_policy(self._extra.get("restart_policy", _DEFAULT_RESTART_POLICY))}
+            # Validate create-time lifecycle settings even when a cached environment
+            # is reused; a changed configuration must never pass silently.
+            lifecycle_kwargs: dict[str, Any] = {}
+            if "idle_action" in self._extra:
+                lifecycle_kwargs["idle_action"] = _idle_action(self._extra["idle_action"])
+            if "pause_policy" in self._extra:
+                lifecycle_kwargs["pause_policy"] = _pause_policy(self._extra["pause_policy"])
+            if "failover" in self._extra:
+                lifecycle_kwargs["failover"] = _failover(self._extra["failover"])
+            if lifecycle_kwargs.get("idle_action") == IdleAction.PAUSE:
+                if self._extra.get("runtime", "runsc") == "conch":
+                    raise ValueError("ADX tool idle_action=pause is not supported by the conch runtime")
+                if "idle_timeout" in self._extra:
+                    idle_timeout = self._extra["idle_timeout"]
+                    if isinstance(idle_timeout, bool) or not isinstance(idle_timeout, int) or idle_timeout <= 0:
+                        raise ValueError("ADX tool idle_action=pause requires a positive idle_timeout")
             cached = self._instances.get(self._scope)
             if cached is not None:
                 try:
@@ -243,6 +398,7 @@ class _AdxEnvironmentBackend:
             if not kwargs.get("image"):
                 kwargs.pop("image", None)
             kwargs.setdefault("runtime", "runsc")
+            kwargs.update(lifecycle_kwargs)
             identity = self._scope + self._incarnations.get(self._scope, "")
             kwargs["name"] = "tools-" + hashlib.sha256(identity.encode()).hexdigest()[:40]
             kwargs["mounts"] = [Mount(**mount) for mount in self._extra.get("mounts", [])]
@@ -251,7 +407,57 @@ class _AdxEnvironmentBackend:
             kwargs["cwd"] = self._extra.get("workdir")
             # Repeating this deterministic name must reconcile the same execution.
             # Unknown creates keep their name; never generate a fresh one on error.
-            environment = Environment(connection=connection, **kwargs)
+            try:
+                environment = Environment(connection=connection, **kwargs)
+            except Exception as exc:
+                # ADX reports a paused existing environment as a conflict carrying
+                # its environment ID. Attach to it and resume explicitly; never
+                # delete or replace a retained checkpoint from the create path.
+                environment_id = getattr(exc, "environment_id", None)
+                if (
+                    getattr(exc, "status_code", None) != 409
+                    or not isinstance(environment_id, str)
+                    or not environment_id
+                    or environment_id == "unknown"
+                    or "attach-paused-environment"
+                    not in getattr(adx_environment, "SDK_CAPABILITIES", ())
+                ):
+                    raise
+                environment = Environment.from_id(environment_id, connection=connection, require_running=False)
+                try:
+                    state = str(environment.get_info().state).lower()
+                    if state == "paused":
+                        try:
+                            environment.resume()
+                        except Exception as exc:
+                            if not _definitive_resume_rejection(exc):
+                                raise
+                            # An expired TTL, an incompatible release/profile or
+                            # an immovable local restore point can never resume.
+                            # Wait for the rejected operation to settle, then
+                            # discard only an environment that is still paused: a
+                            # concurrent resume or recreate must be preserved.
+                            if _settles_to_paused(environment):
+                                try:
+                                    Environment.delete(environment_id, connection=connection)
+                                    logger.warning(
+                                        "discarded ADX environment %s after an unusable restore point: %s",
+                                        environment_id,
+                                        exc,
+                                    )
+                                except Exception as cleanup_error:
+                                    logger.warning(
+                                        "failed to discard ADX environment %s with an unusable "
+                                        "restore point: %s",
+                                        environment_id,
+                                        cleanup_error,
+                                    )
+                            raise
+                    elif state != "running":
+                        raise
+                except BaseException:
+                    environment.close()
+                    raise
             self._instances[self._scope] = (environment, connection)
             return environment
 
@@ -261,7 +467,13 @@ class _AdxEnvironmentBackend:
             return True
         if shared_key:
             return key.startswith(
-                (shared_key + "|identity=", shared_key + "|node=", shared_key + "|rootfs=", shared_key + "|endpoint=")
+                (
+                    shared_key + "|identity=",
+                    shared_key + "|node=",
+                    shared_key + "|rootfs=",
+                    shared_key + "|endpoint=",
+                    shared_key + "|lifecycle=",
+                )
             )
         if base_url:
             return key.startswith(base_url.rstrip("/") + "|")

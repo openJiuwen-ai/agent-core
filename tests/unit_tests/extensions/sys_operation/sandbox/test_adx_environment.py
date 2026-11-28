@@ -141,3 +141,620 @@ def test_local_rootfs_config_errors_are_reported_before_operations(rootfs):
     config.launcher_config.extra_params["rootfs"] = rootfs
     with pytest.raises(ValueError, match="rootfs"):
         AdxEnvironmentFSProvider(SandboxEndpoint(base_url="http://localhost:18080"), config)
+
+
+
+@pytest.fixture
+def adx_cleanup_cache(monkeypatch):
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import _AdxEnvironmentBackend
+
+    monkeypatch.setattr(_AdxEnvironmentBackend, "_instances", {})
+    monkeypatch.setattr(_AdxEnvironmentBackend, "_incarnations", {})
+    return _AdxEnvironmentBackend
+
+
+def test_idle_pause_configuration_reaches_public_sdk(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    factory = MagicMock()
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    config = provider_config()
+    config.launcher_config.extra_params.update(
+        idle_timeout=900,
+        idle_action="pause",
+        pause_policy={
+            "retention": {"kind": "ttl", "ttlSeconds": 86400},
+            "timeoutSeconds": 300,
+            "storage": "configured",
+        },
+        failover=True,
+    )
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="idle-pause"), config
+    )
+    provider._get_environment()
+    arguments = factory.call_args.kwargs
+    assert arguments["idle_action"] is adx_environment.IdleAction.PAUSE
+    assert arguments["idle_timeout"] == 900
+    assert arguments["failover"] is True
+    assert arguments["pause_policy"] == adx_environment.PausePolicy(
+        retention=adx_environment.RetentionPolicy.for_seconds(86400),
+        timeout_seconds=300,
+        storage=adx_environment.CheckpointStorage.CONFIGURED,
+    )
+
+
+def test_permanent_pause_retention_and_inherited_defaults(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    factory = MagicMock()
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    config = provider_config()
+    config.launcher_config.extra_params.update(
+        idle_timeout=900, idle_action="pause", pause_policy={"retention": {"kind": "forever"}}
+    )
+    AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="idle-pause-forever"), config
+    )._get_environment()
+    policy = factory.call_args.kwargs["pause_policy"]
+    assert policy.retention.to_dict() == {"kind": "forever"}
+    assert policy.timeout_seconds == 300
+    assert policy.storage is adx_environment.CheckpointStorage.CONFIGURED
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        "pause",
+        {"retention": {"kind": "never"}},
+        {"retention": {"kind": "ttl"}},
+        {"retention": {"kind": "ttl", "ttlSeconds": True}},
+        {"retention": {"kind": "ttl", "ttlSeconds": 0}},
+        {"retention": {"kind": "ttl", "ttlSeconds": -1}},
+        {"retention": {"kind": "forever", "ttlSeconds": 5}},
+        {"timeoutSeconds": "300"},
+        {"timeoutSeconds": 0},
+        {"timeoutSeconds": -1},
+        {"storage": "cluster"},
+        {"timeout_seconds": 300},
+    ],
+)
+def test_invalid_pause_policy_is_rejected_before_create(monkeypatch, policy):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    factory = MagicMock()
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    config = provider_config()
+    config.launcher_config.extra_params.update(idle_timeout=900, idle_action="pause", pause_policy=policy)
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="invalid-pause-policy"), config
+    )
+    with pytest.raises(ValueError):
+        provider._get_environment()
+    factory.assert_not_called()
+
+
+@pytest.mark.parametrize("action", ["PAUSE", "", True, 1, None])
+def test_invalid_idle_action_is_rejected_before_create(monkeypatch, action):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    factory = MagicMock()
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    config = provider_config()
+    config.launcher_config.extra_params.update(idle_timeout=900, idle_action=action)
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key=f"invalid-idle-action-{action}"), config
+    )
+    with pytest.raises(ValueError):
+        provider._get_environment()
+    factory.assert_not_called()
+
+
+def test_idle_pause_is_rejected_for_conch_runtime(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    factory = MagicMock()
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    config = provider_config()
+    config.launcher_config.extra_params.update(runtime="conch", idle_timeout=900, idle_action="pause")
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="conch-idle-pause"), config
+    )
+    with pytest.raises(ValueError, match="conch"):
+        provider._get_environment()
+    factory.assert_not_called()
+
+
+@pytest.mark.parametrize("timeout", [0, -1, True, 60.0])
+def test_idle_pause_requires_positive_integer_timeout(monkeypatch, timeout):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    factory = MagicMock()
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    config = provider_config()
+    config.launcher_config.extra_params.update(idle_timeout=timeout, idle_action="pause")
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key=f"idle-timeout-{timeout}"), config
+    )
+    with pytest.raises(ValueError, match="idle_timeout"):
+        provider._get_environment()
+    factory.assert_not_called()
+
+
+def test_idle_pause_inherits_sdk_default_timeout(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    factory = MagicMock()
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    config = provider_config()
+    config.launcher_config.extra_params.update(idle_action="pause")
+    AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="idle-default-timeout"), config
+    )._get_environment()
+    assert "idle_timeout" not in factory.call_args.kwargs
+    assert factory.call_args.kwargs["idle_action"] is adx_environment.IdleAction.PAUSE
+
+
+@pytest.mark.parametrize("failover", ["true", 1, "yes"])
+def test_failover_must_be_boolean(monkeypatch, failover):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    factory = MagicMock()
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    config = provider_config()
+    config.launcher_config.extra_params["failover"] = failover
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key=f"failover-{failover}"), config
+    )
+    with pytest.raises(ValueError, match="failover"):
+        provider._get_environment()
+    factory.assert_not_called()
+
+
+def test_paused_environment_is_reused_and_not_recreated(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    instance = MagicMock(id="tools-paused")
+    instance.get_info.return_value = SimpleNamespace(state="paused")
+    factory = MagicMock(return_value=instance)
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="paused-reuse"), provider_config()
+    )
+    assert provider._get_environment() is instance
+    assert provider._get_environment() is instance
+    assert factory.call_count == 1
+    instance.close.assert_not_called()
+
+
+def test_default_lifecycle_settings_do_not_change_environment_scope():
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import _lifecycle_signature
+
+    assert _lifecycle_signature({}) == ""
+    assert _lifecycle_signature({"idle_action": "delete"}) == ""
+    assert _lifecycle_signature({"failover": False}) == ""
+    assert _lifecycle_signature({"idle_action": "pause", "idle_timeout": 900}) != _lifecycle_signature({})
+    assert _lifecycle_signature({"failover": True}) != _lifecycle_signature({})
+
+
+def test_lifecycle_change_selects_a_new_environment(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    factory = MagicMock()
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    endpoint = SandboxEndpoint(base_url="http://localhost:18080", isolation_key="lifecycle-change")
+    for storage in ("local", "shared"):
+        config = provider_config()
+        config.launcher_config.extra_params.update(
+            idle_timeout=900, idle_action="pause", pause_policy={"storage": storage}
+        )
+        AdxEnvironmentShellProvider(endpoint, config)._get_environment()
+    assert factory.call_count == 2
+    assert factory.call_args_list[0].kwargs["name"] != factory.call_args_list[1].kwargs["name"]
+
+
+def test_same_lifecycle_configuration_reuses_one_environment(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    factory = MagicMock()
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    config = provider_config()
+    config.launcher_config.extra_params.update(
+        idle_timeout=900, idle_action="pause",
+        pause_policy={"retention": {"kind": "ttl", "ttlSeconds": 86400},
+                      "timeoutSeconds": 300, "storage": "shared"},
+    )
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="lifecycle-reuse"), config
+    )
+    provider._get_environment()
+    provider._get_environment()
+    assert factory.call_count == 1
+
+
+def test_idle_timeout_change_selects_a_new_environment(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    factory = MagicMock()
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    endpoint = SandboxEndpoint(base_url="http://localhost:18080", isolation_key="lifecycle-timeout")
+    for idle_timeout in (900, 3600):
+        config = provider_config()
+        config.launcher_config.extra_params.update(
+            idle_timeout=idle_timeout, idle_action="pause",
+            pause_policy={"retention": {"kind": "ttl", "ttlSeconds": 86400}},
+        )
+        AdxEnvironmentShellProvider(endpoint, config)._get_environment()
+    assert factory.call_count == 2
+    assert factory.call_args_list[0].kwargs["name"] != factory.call_args_list[1].kwargs["name"]
+
+
+def test_cleanup_matches_lifecycle_scoped_environment(monkeypatch, adx_cleanup_cache):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import (
+        AdxEnvironmentFSProvider,
+        build_adx_shared_scope_key,
+    )
+
+    instance = MagicMock(id="tools-lifecycle-cleanup")
+    factory = MagicMock(return_value=instance)
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    endpoint = SandboxEndpoint(base_url="http://localhost:18080", isolation_key="lifecycle-cleanup")
+    config = provider_config()
+    config.launcher_config.extra_params.update(idle_timeout=900, idle_action="pause")
+    assert AdxEnvironmentFSProvider(endpoint, config)._get_environment() is instance
+    deleted = adx_cleanup_cache.delete_environments(
+        build_adx_shared_scope_key(endpoint.base_url, endpoint.isolation_key), None
+    )
+    assert len(deleted) == 1
+    factory.delete.assert_called_once_with(instance.id, connection=factory.call_args.kwargs["connection"])
+    instance.close.assert_called_once()
+
+
+def _create_conflict(environment_id="default-tools-paused"):
+    import adx_environment
+
+    error = adx_environment.EnvironmentError("environment is paused; resume it explicitly")
+    error.status_code = 409
+    error.environment_id = environment_id
+    return error
+
+
+def _resume_rejection(status_code=400, retry="never", outcome="not_started"):
+    import adx_environment
+
+    error = adx_environment.EnvironmentError("environment resume failed")
+    error.status_code = status_code
+    error.retry = retry
+    error.outcome = outcome
+    error.environment_id = "default-tools-paused"
+    return error
+
+
+def test_create_conflict_attaches_and_resumes_a_paused_environment(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    attached = MagicMock(id="default-tools-paused")
+    attached.get_info.return_value = SimpleNamespace(state="paused")
+    factory = MagicMock(side_effect=_create_conflict())
+    factory.from_id.return_value = attached
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    monkeypatch.setattr(
+        adx_environment, "SDK_CAPABILITIES",
+        (*adx_environment.SDK_CAPABILITIES, "attach-paused-environment"),
+    )
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="create-conflict"), provider_config()
+    )
+    assert provider._get_environment() is attached
+    factory.assert_called_once()
+    factory.from_id.assert_called_once_with(
+        "default-tools-paused",
+        connection=factory.call_args.kwargs["connection"],
+        require_running=False,
+    )
+    attached.resume.assert_called_once_with()
+    attached.close.assert_not_called()
+
+
+def test_create_conflict_resume_failure_is_not_recreated(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    attached = MagicMock(id="default-tools-paused")
+    attached.get_info.return_value = SimpleNamespace(state="paused")
+    attached.resume.side_effect = adx_environment.EnvironmentError("local restore point is unavailable")
+    factory = MagicMock(side_effect=_create_conflict())
+    factory.from_id.return_value = attached
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    monkeypatch.setattr(
+        adx_environment, "SDK_CAPABILITIES",
+        (*adx_environment.SDK_CAPABILITIES, "attach-paused-environment"),
+    )
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="create-conflict-failure"),
+        provider_config(),
+    )
+    with pytest.raises(adx_environment.EnvironmentError, match="restore point"):
+        provider._get_environment()
+    factory.assert_called_once()
+    factory.delete.assert_not_called()
+    attached.close.assert_called_once()
+
+
+def test_unusable_restore_point_is_discarded_for_recreation(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    attached = MagicMock(id="default-tools-paused")
+    attached.get_info.return_value = SimpleNamespace(state="paused")
+    attached.resume.side_effect = _resume_rejection()
+    factory = MagicMock(side_effect=_create_conflict())
+    factory.from_id.return_value = attached
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    monkeypatch.setattr(
+        adx_environment, "SDK_CAPABILITIES",
+        (*adx_environment.SDK_CAPABILITIES, "attach-paused-environment"),
+    )
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="restore-point-unusable"),
+        provider_config(),
+    )
+    with pytest.raises(adx_environment.EnvironmentError, match="resume failed"):
+        provider._get_environment()
+    factory.delete.assert_called_once_with(
+        "default-tools-paused", connection=factory.call_args.kwargs["connection"]
+    )
+    factory.assert_called_once()
+    attached.close.assert_called_once()
+
+
+def test_restore_point_rejection_through_cause_is_discarded(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    attached = MagicMock(id="default-tools-paused")
+    attached.get_info.return_value = SimpleNamespace(state="paused")
+    wrapped = adx_environment.EnvironmentError("environment resume failed (requestId=resume-x)")
+    wrapped.__cause__ = _resume_rejection()
+    attached.resume.side_effect = wrapped
+    factory = MagicMock(side_effect=_create_conflict())
+    factory.from_id.return_value = attached
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    monkeypatch.setattr(
+        adx_environment, "SDK_CAPABILITIES",
+        (*adx_environment.SDK_CAPABILITIES, "attach-paused-environment"),
+    )
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="restore-point-wrapped"),
+        provider_config(),
+    )
+    with pytest.raises(adx_environment.EnvironmentError):
+        provider._get_environment()
+    factory.delete.assert_called_once()
+    attached.close.assert_called_once()
+
+
+def test_definitive_409_rejection_discards_a_paused_environment(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    attached = MagicMock(id="default-tools-paused")
+    attached.get_info.return_value = SimpleNamespace(state="paused")
+    attached.resume.side_effect = _resume_rejection(409)
+    factory = MagicMock(side_effect=_create_conflict())
+    factory.from_id.return_value = attached
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    monkeypatch.setattr(
+        adx_environment, "SDK_CAPABILITIES",
+        (*adx_environment.SDK_CAPABILITIES, "attach-paused-environment"),
+    )
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="local-restore-unavailable"),
+        provider_config(),
+    )
+    with pytest.raises(adx_environment.EnvironmentError, match="resume failed"):
+        provider._get_environment()
+    factory.delete.assert_called_once_with(
+        "default-tools-paused", connection=factory.call_args.kwargs["connection"]
+    )
+    attached.close.assert_called_once()
+
+
+def test_resume_rejection_is_preserved_when_the_environment_changed(monkeypatch):
+    import adx_environment
+
+    import openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment as provider_module
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    monkeypatch.setattr(provider_module, "_RESUME_SETTLE_SECONDS", 0.0)
+    cases = [
+        ((409, "never", "not_started"), "running"),
+        ((409, "never", "not_started"), "resuming"),
+        ((503, "same_operation", "unknown"), "paused"),
+    ]
+    for (status_code, retry, outcome), changed_state in cases:
+        attached = MagicMock(id="default-tools-paused")
+        if status_code == 409:
+            attached.get_info.side_effect = [
+                SimpleNamespace(state="paused"),
+                SimpleNamespace(state=changed_state),
+            ]
+        else:
+            attached.get_info.return_value = SimpleNamespace(state="paused")
+        attached.resume.side_effect = _resume_rejection(status_code, retry, outcome)
+        factory = MagicMock(side_effect=_create_conflict())
+        factory.from_id.return_value = attached
+        monkeypatch.setattr(adx_environment, "Environment", factory)
+        monkeypatch.setattr(
+            adx_environment, "SDK_CAPABILITIES",
+            (*adx_environment.SDK_CAPABILITIES, "attach-paused-environment"),
+        )
+        provider = AdxEnvironmentShellProvider(
+            SandboxEndpoint(
+                base_url="http://localhost:18080",
+                isolation_key=f"resume-{status_code}-{changed_state}",
+            ),
+            provider_config(),
+        )
+        with pytest.raises(adx_environment.EnvironmentError):
+            provider._get_environment()
+        factory.delete.assert_not_called()
+        attached.close.assert_called_once()
+
+
+def test_transitional_resuming_state_settles_and_is_discarded(monkeypatch):
+    import adx_environment
+
+    import openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment as provider_module
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    monkeypatch.setattr(provider_module, "_RESUME_SETTLE_POLL_SECONDS", 0.0)
+    attached = MagicMock(id="default-tools-paused")
+    attached.get_info.side_effect = [
+        SimpleNamespace(state="paused"),
+        SimpleNamespace(state="resuming"),
+        SimpleNamespace(state="paused"),
+    ]
+    attached.resume.side_effect = _resume_rejection(409)
+    factory = MagicMock(side_effect=_create_conflict())
+    factory.from_id.return_value = attached
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    monkeypatch.setattr(
+        adx_environment, "SDK_CAPABILITIES",
+        (*adx_environment.SDK_CAPABILITIES, "attach-paused-environment"),
+    )
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="settles-to-paused"),
+        provider_config(),
+    )
+    with pytest.raises(adx_environment.EnvironmentError):
+        provider._get_environment()
+    factory.delete.assert_called_once()
+    attached.close.assert_called_once()
+
+
+def test_resume_rejection_with_a_vanished_environment_does_not_delete(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    attached = MagicMock(id="default-tools-paused")
+    attached.get_info.side_effect = [
+        SimpleNamespace(state="paused"),
+        adx_environment.EnvironmentNotFound("default-tools-paused"),
+    ]
+    attached.resume.side_effect = _resume_rejection()
+    factory = MagicMock(side_effect=_create_conflict())
+    factory.from_id.return_value = attached
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    monkeypatch.setattr(
+        adx_environment, "SDK_CAPABILITIES",
+        (*adx_environment.SDK_CAPABILITIES, "attach-paused-environment"),
+    )
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="restore-point-vanished"),
+        provider_config(),
+    )
+    with pytest.raises(adx_environment.EnvironmentError):
+        provider._get_environment()
+    factory.delete.assert_not_called()
+    attached.close.assert_called_once()
+
+
+def test_create_conflict_with_non_paused_state_is_closed_and_raised(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    attached = MagicMock(id="default-tools-paused")
+    attached.get_info.return_value = SimpleNamespace(state="failed")
+    factory = MagicMock(side_effect=_create_conflict())
+    factory.from_id.return_value = attached
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    monkeypatch.setattr(
+        adx_environment, "SDK_CAPABILITIES",
+        (*adx_environment.SDK_CAPABILITIES, "attach-paused-environment"),
+    )
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="create-conflict-failed"),
+        provider_config(),
+    )
+    with pytest.raises(adx_environment.EnvironmentError, match="paused"):
+        provider._get_environment()
+    factory.assert_called_once()
+    attached.resume.assert_not_called()
+    attached.close.assert_called_once()
+
+
+def test_create_conflict_without_stable_environment_id_is_raised(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    factory = MagicMock(side_effect=_create_conflict(environment_id="unknown"))
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    monkeypatch.setattr(
+        adx_environment, "SDK_CAPABILITIES",
+        (*adx_environment.SDK_CAPABILITIES, "attach-paused-environment"),
+    )
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="create-conflict-no-id"),
+        provider_config(),
+    )
+    with pytest.raises(adx_environment.EnvironmentError, match="paused"):
+        provider._get_environment()
+    factory.assert_called_once()
+    factory.from_id.assert_not_called()
+
+
+def test_create_conflict_without_paused_attach_support_is_raised(monkeypatch):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentShellProvider
+
+    factory = MagicMock(side_effect=_create_conflict())
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    monkeypatch.setattr(
+        adx_environment, "SDK_CAPABILITIES",
+        frozenset(c for c in adx_environment.SDK_CAPABILITIES if c != "attach-paused-environment"),
+    )
+    provider = AdxEnvironmentShellProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="create-conflict-unsupported"),
+        provider_config(),
+    )
+    with pytest.raises(adx_environment.EnvironmentError, match="paused"):
+        provider._get_environment()
+    factory.assert_called_once()
+    factory.from_id.assert_not_called()
