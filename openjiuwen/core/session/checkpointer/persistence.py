@@ -827,16 +827,11 @@ class PersistenceCheckpointer(Checkpointer):
                     metadata={"reason": "step_active", "storage_type": "persistence"},
                 )
                 return
-            if status == "interrupted":
-                await self._step_storage.append(session, kind="interrupt")
-                session_logger.info(
-                    "Agent steps kept for interrupt",
-                    event_type=LogEventType.CHECKPOINT_SAVE,
-                    **log_base,
-                    metadata={"reason": "step_interrupt", "storage_type": "persistence"},
-                )
-                return
-            if status == "idle":
+            if status in ("interrupted", "idle"):
+                if status == "interrupted":
+                    # Keep the post-interrupt memory state on disk for a crash
+                    # that lands before the blob is written below.
+                    await self._step_storage.append(session, kind="interrupt")
                 saved = await self._agent_storage.save(session)
                 if saved:
                     await self._step_storage.clear(session.session_id(), agent_id)
