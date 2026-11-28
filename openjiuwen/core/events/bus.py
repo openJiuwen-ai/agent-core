@@ -198,22 +198,21 @@ def _normalize_session(session: object) -> SessionContext | None:
         from openjiuwen.core.single_agent import Session
 
         if isinstance(session, Session):
-            session = SessionContext(session.get_session_id())
+            session = SessionContext(session.get_session_id(), agent_id=session.get_agent_id())
     if not isinstance(session, SessionContext):
         raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="unsupported session type")
         return None
 
-    if (
-        not isinstance(session.session_id, str)
-        or not session.session_id
-        or not (session.cwd is None or isinstance(session.cwd, str))
-    ):
+    valid_session_id = isinstance(session.session_id, str) and bool(session.session_id)
+    valid_cwd = session.cwd is None or isinstance(session.cwd, str)
+    valid_agent_id = session.agent_id is None or (isinstance(session.agent_id, str) and bool(session.agent_id))
+    if not valid_session_id or not valid_cwd or not valid_agent_id:
         raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="invalid session context")
     try:
         metadata = _freeze_match_pattern(session.metadata)
     except ValidationError as error:
         raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="invalid session metadata", cause=error)
-    return SessionContext(session.session_id, session.cwd, metadata)
+    return SessionContext(session.session_id, session.cwd, metadata, agent_id=session.agent_id)
 
 
 class ExtensionEventBus:

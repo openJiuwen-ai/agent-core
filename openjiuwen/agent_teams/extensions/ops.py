@@ -76,6 +76,24 @@ class TaskDependencyInfo:
     resolved: bool
 
 
+@dataclass(frozen=True, slots=True)
+class TeamSummary:
+    """One team's overview row as returned by ``ops.team.list``.
+
+    Answered from the static tables only: it lists every team that has
+    database rows, running or stopped. Runtime liveness is the monitor
+    event stream's concern, not a field here; ``updated_at`` is the
+    coarse-grained activity signal.
+    """
+
+    team_name: str
+    display_name: str | None
+    leader_member_name: str | None
+    created: int | None
+    updated_at: int | None
+    member_count: int
+
+
 class TeamReadView(Protocol):
     """Read-only query surface over one accessible team."""
 
@@ -128,6 +146,15 @@ class TeamResourceResolver(Protocol):
 
     async def resolve(self, session_id: str | None, team_name: str) -> TeamReadView | None:
         """Return the team's read view, or None when not accessible."""
+        ...
+
+    async def list_teams(self) -> list[TeamSummary]:
+        """Return one overview row per team, oldest first.
+
+        The database is the source of truth: stopped teams are listed
+        alongside running ones — this is the discovery surface for teams
+        a plugin never saw events for.
+        """
         ...
 
 
@@ -217,6 +244,7 @@ __all__ = [
     "TaskDependencyInfo",
     "TeamReadView",
     "TeamResourceResolver",
+    "TeamSummary",
     "bind_policy_context_scope",
     "bind_policy_loader_scope",
     "bind_team_scope",

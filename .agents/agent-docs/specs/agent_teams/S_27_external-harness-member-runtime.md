@@ -18,8 +18,8 @@ author_email: chengshuo5@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/external/member_runtime.py`、`openjiuwen/agent_teams/external/cli_agent/spawn.py`、`openjiuwen/agent_teams/spawn/external_cli_spawn.py` |
-| 最近一次修订日期 | 2026-11-10 |
-| 关联 feature | F_95_dsh-external-harness-adapter.md、F_96_protocol-harness-providers-and-member-migration.md、F_113_external-harness-builtin-model-selection.md、F_114_swarmflow-thirdparty-agent.md、F_115_external-session-fork.md、F_116_swarmflow-thirdparty-model-source.md、F_117_third-party-harness-provider-members.md、harness F_08_provider-owned-model-config.md、harness F_09_auth-fallback-as-a-protocol-capability.md、F_125_team-expert-catalog-and-spawn.md、F_20261110_1851_leader-external-harness.md |
+| 最近一次修订日期 | 2026-11-23 |
+| 关联 feature | F_95_dsh-external-harness-adapter.md、F_96_protocol-harness-providers-and-member-migration.md、F_113_external-harness-builtin-model-selection.md、F_114_swarmflow-thirdparty-agent.md、F_115_external-session-fork.md、F_116_swarmflow-thirdparty-model-source.md、F_117_third-party-harness-provider-members.md、harness F_08_provider-owned-model-config.md、harness F_09_auth-fallback-as-a-protocol-capability.md、F_125_team-expert-catalog-and-spawn.md、F_20261110_1851_leader-external-harness.md、F_20261123_1059_external-member-execution-environment.md |
 
 ## 范围 / 边界
 
@@ -165,6 +165,16 @@ runtime 何时构建、session 相关的绑定何时发生。
     abort 能力时，`pause()` 在 RUNNING 状态下执行 `abort(immediate=False)`：会话历史留在 provider 侧，
     状态落 IDLE，不产生 `pending_resume`，被暂停的轮次不会自动续跑。既不能暂停也不能中止的 provider 仍抛
     `UnsupportedHarnessCapabilityError`。对 Leader 与 teammate 同样生效。
+20. **成员执行环境在每次 `start` 时并入 provider 进程环境**（[[F_20261123_1059_external-member-execution-environment]]）。
+    `AgentConfigurator` 采纳外部 runtime 时，若 `spec.build_context` 非空，按原生成员同样的方式派生成员
+    BuildContext（成员名 / 角色 / 语言 / card id，extras 独立且注入成员 `TeamBackend`），把它的
+    `resolve_execution_environment` 经 `bind_execution_environment` 交给 runtime。runtime 在解析 start
+    context 之后、调用 provider 之前取一次快照，按 `ExecutionEnvironment.merge(context.env)` 合并（values
+    < context.env < overrides）写回 `HarnessContext.env`。provider 进程环境在启动时固定，策略变化从下一次
+    `start` 起生效，不会像原生成员那样逐次工具调用生效；值为 null 的删除项无法表达为 provider env，
+    会被丢弃并告警。resolver 抛错时 provider 不启动、成员 session 收尾，与原生工具调用一致地 fail closed。
+    没有平台 build context 时不绑定，provider env 不变。Leader 与 teammate 同样生效；swarmflow workflow
+    成员（`build_cli_workflow_runtime`）与适配器型 `CliRuntimeBase` backend 不在此范围。
 
 ## 接口契约
 
@@ -181,6 +191,8 @@ class ExternalHarnessMemberRuntime:
     def add_startup_hook(hook)             # hook(team_session): runs on every start, after the member
                                            # session is open (agent id known at construction), before
                                            # the start context is resolved
+    def bind_execution_environment(resolver)  # resolver: () -> Awaitable[ExecutionEnvironment] | None;
+                                              # merged into the start context env on every start
     def reset_tool_bindings()              # drop MCP servers / native tools bound for the next start
     def has_stored_checkpoint() -> bool    # the open member session holds this backend's checkpoint
     def bind_reliability_context(*, session_id, team_backend, leader_name, update_status_cb, messager)

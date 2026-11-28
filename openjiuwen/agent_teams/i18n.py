@@ -1145,22 +1145,26 @@ def get_language() -> Language:
     return _current_language
 
 
-def t(key: str, **kwargs: object) -> str:
-    """Resolve a localized string for the current language.
+def t(key: str, *, language: Language | str | None = None, **kwargs: object) -> str:
+    """Resolve a localized string for the current or explicit language.
 
     Args:
         key: Dotted lookup key (e.g. ``"dispatcher.member_online"``).
+        language: Optional ``"cn"`` / ``"en"`` override. When omitted or not a
+            supported code, uses the process-global language from
+            :func:`get_language`.
         **kwargs: Values interpolated via ``str.format_map``.
 
     Returns:
-        The localized string for the current language.
+        The localized string for the selected language.
 
     Raises:
         KeyError: If ``key`` is missing for the active language.
     """
-    table = STRINGS[_current_language]
+    lang: Language = language if language in STRINGS else _current_language  # type: ignore[assignment]
+    table = STRINGS[lang]
     if key not in table:
-        raise KeyError(f"Missing i18n key '{key}' for language '{_current_language}'")
+        raise KeyError(f"Missing i18n key '{key}' for language '{lang}'")
     raw = table[key]
     return raw.format_map(kwargs) if kwargs else raw
 

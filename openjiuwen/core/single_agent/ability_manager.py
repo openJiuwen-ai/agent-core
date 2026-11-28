@@ -66,6 +66,18 @@ from openjiuwen.core.single_agent.kv_cache import kv_cache_child_session
 # Ability type definition
 Ability = Union[ToolCard, WorkflowCard, AgentCard, McpServerConfig]
 
+# Tag namespace for ability-owned tool domain sweeps. Must stay distinct from
+# the card.id tag domain: DeepAgent MCP registration tags the MCP server and
+# every one of its tools with ``self.card.id``, and the default ability owner
+# id is also ``card.id``, so a bare owner tag in teardown_tools would sweep
+# shared/cross-cycle MCP tools out of the registry (dev-review CR-001).
+_ABILITY_OWNER_TAG_PREFIX = "ability-owner:"
+
+
+def _ability_owner_tag(owner_id: str) -> str:
+    """Build the namespaced tag isolating ability-owner sweeps from card.id."""
+    return f"{_ABILITY_OWNER_TAG_PREFIX}{owner_id}"
+
 
 @dataclass
 class AddAbilityResult:
@@ -269,6 +281,7 @@ class AbilityManager:
         self._tools: Dict[str, ToolCard] = {}
         self._workflows: Dict[str, WorkflowCard] = {}
         self._agents: Dict[str, AgentCard] = {}
+        self._hidden_agent_names: set[str] = set()
         self._mcp_servers: Dict[str, McpServerConfig] = {}
         self._mcp_tool_allowlists: Dict[str, frozenset[str]] = {}
         self._context_engine = None
@@ -740,12 +753,16 @@ class AbilityManager:
 
     def add(
             self,
-            ability: Union[Ability, List[Ability]]
+            ability: Union[Ability, List[Ability]],
+            *,
+            expose_agent_cards: bool = True,
     ) -> Union[AddAbilityResult, List[AddAbilityResult]]:
         """Add an ability
 
         Args:
             ability: Ability Card to add
+            expose_agent_cards: Whether newly added AgentCards should be
+                included in the model-facing tool list.
 
         Returns:
             AddAbilityResult for single ability input,
@@ -838,6 +855,10 @@ class AbilityManager:
                         reason="duplicate_agent",
                     )
                 self._agents[_ability.name] = _ability
+                if expose_agent_cards:
+                    self._hidden_agent_names.discard(_ability.name)
+                else:
+                    self._hidden_agent_names.add(_ability.name)
                 self._mark_registry_changed()
                 return AddAbilityResult(
                     name=_ability.name,
@@ -906,7 +927,10 @@ class AbilityManager:
             ``f"{card.name}_{owner_id}"`` (derived from the name so a
             pre-qualified id is idempotently normalized) and the instance is
             (re)bound in the resource manager with ``refresh=True`` so a later
-            owner of the same id wins.
+            owner of the same id wins. When ``owner_id`` is set the registration
+            is also tagged ``ability-owner:{owner_id}`` so
+            :meth:`teardown_tools` can sweep the whole owner domain, including
+            session-suffixed ids that never left through exact-id removal.
         - Stateless (``card.stateless`` is True): the tool is a shared
             module-level singleton. The bare id is kept and the resource-manager
             add is an idempotent ``skip_if_exists`` no-op.
@@ -927,7 +951,13 @@ class AbilityManager:
 
         if self._owner_id:
             card.id = self.qualify_tool_id(card, self._owner_id)
-        Runner.resource_mgr.add_tool(resource, refresh=True)
+            # Never the bare owner id: that equals card.id by default, which is
+            # also the MCP registration tag domain (CR-001).
+            Runner.resource_mgr.add_tool(
+                resource, refresh=True, tag=_ability_owner_tag(self._owner_id)
+            )
+        else:
+            Runner.resource_mgr.add_tool(resource, refresh=True)
         return self.add(card)
 
     def remove_ability(self, name: Union[str, List[str]]) -> None:
@@ -957,20 +987,48 @@ class AbilityManager:
         and re-registers every tool over the stale id, and :meth:`add_ability`'s
         refresh path then logs a warning per residual id.
 
-        Only tools this manager qualified with its own owner id
-        (``card.id == f"{name}_{owner_id}"``) are removed; stateless shared
-        singletons and externally-scoped tools (e.g. MCP server-scoped ids) are
-        left in place for other agents still using them.
+        Exact-id removal covers tools this manager still lists
+        (``card.id == f"{name}_{owner_id}"``). A namespaced
+        ``ability-owner:{owner_id}`` tag sweep is the backstop for entries
+        registered with this owner's tag but not through this manager's
+        exact-id form (session-suffixed ids that otherwise never leave the
+        process-global registry). Stateless shared singletons and the
+        ``card.id`` tag domain used by MCP registration are left in place.
         """
         from openjiuwen.core.runner import Runner
 
         if not self._owner_id:
             return
+
+        def _warn_remove_failures(result: Any, *, what: str) -> None:
+            items = result if isinstance(result, list) else [result]
+            for item in items:
+                is_err = getattr(item, "is_err", None)
+                if not callable(is_err) or not is_err():
+                    continue
+                detail = getattr(item, "msg", None)
+                err = detail() if callable(detail) else item
+                logger.warning(
+                    "AbilityManager teardown: remove_tool failed for %s: %s",
+                    what,
+                    err,
+                )
+
         for name, card in list(self._tools.items()):
             if card.stateless or card.id != f"{name}_{self._owner_id}":
                 continue
             self.remove(name)
-            Runner.resource_mgr.remove_tool(card.id)
+            _warn_remove_failures(
+                Runner.resource_mgr.remove_tool(card.id),
+                what=card.id,
+            )
+        owner_tag = _ability_owner_tag(self._owner_id)
+        _warn_remove_failures(
+            Runner.resource_mgr.remove_tool(
+                tag=owner_tag, skip_if_tag_not_exists=True
+            ),
+            what=f"tag={owner_tag}",
+        )
 
     def remove(self, name: Union[str, List[str]]) -> Union[None, Ability, List[Ability]]:
         """Remove an ability by name
@@ -989,6 +1047,7 @@ class AbilityManager:
                 removed = self._workflows.pop(name, None)
             if name in self._agents:
                 removed = self._agents.pop(name, None)
+                self._hidden_agent_names.discard(name)
             if name in self._mcp_servers:
                 # Remove MCP server and its tools
                 mcp_server = self._mcp_servers.pop(name, None)
@@ -1016,6 +1075,7 @@ class AbilityManager:
                     removed = self._workflows.pop(item, None)
                 if item in self._agents:
                     removed = self._agents.pop(item, None)
+                    self._hidden_agent_names.discard(item)
                 if item in self._mcp_servers:
                     # Remove MCP server and its tools
                     mcp_server = self._mcp_servers.pop(item, None)
@@ -1084,6 +1144,27 @@ class AbilityManager:
         abilities.extend(self._mcp_servers.values())
         return abilities
 
+    def registered_mcp_tool_cards(self) -> list[tuple[McpServerConfig, ToolCard]]:
+        """Return locally registered MCP tools permitted for this agent, without a server refresh."""
+        from openjiuwen.core.runner import Runner
+
+        cards = []
+        for server in self._mcp_servers.values():
+            if not server.server_id:
+                continue
+            prefix = f"{server.server_id}.{server.server_name}."
+            allowed = self._mcp_tool_allowlists.get(server.server_id)
+            for tool_id in Runner.resource_mgr.get_mcp_tool_ids(server.server_id):
+                if not tool_id.startswith(prefix):
+                    continue
+                name = tool_id.removeprefix(prefix)
+                if allowed is not None and name not in allowed:
+                    continue
+                card = self._tools.get(mcp_model_tool_name(server.server_name, name))
+                if card is not None and card.id == tool_id:
+                    cards.append((server, card))
+        return cards
+
     @staticmethod
     def _prioritize_paid_search(
             tool_items: List[Tuple[str, ToolCard]]
@@ -1146,6 +1227,8 @@ class AbilityManager:
 
         # Convert AgentCards to ToolInfo
         for name, agent_card in self._agents.items():
+            if name in self._hidden_agent_names:
+                continue
             if names is None or name in names:
                 # Build parameters from input_params
                 # input_params can be: None, dict (JSON Schema), or Type[BaseModel]

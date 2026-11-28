@@ -10,7 +10,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from openjiuwen.symphony.agent import AgenticSkillRetrievalToolkit, SkillRecord
-from openjiuwen.symphony.discovery import InstalledSkillsDirectoryToolkit, SkillFS
+from openjiuwen.symphony.discovery import SkillFS
+from openjiuwen.symphony.discovery.directory_toolkit import _CapabilityDirectory
 from openjiuwen.symphony.discovery.models import SkillRecord as DiscoveryRecord
 from openjiuwen.symphony.discovery.skillfs import capture_index_snapshot
 from openjiuwen.symphony.retrieval.search.artifacts import load_retriever_index
@@ -72,19 +73,21 @@ async def test_one_shot_build_feeds_discovery_search_visibility_and_pagination(b
     restored = type(environment.pinned_index_snapshot).from_dict(environment.pinned_index_snapshot.to_dict())
     assert restored == environment.pinned_index_snapshot
 
-    toolkit = InstalledSkillsDirectoryToolkit(environment, session_scope="retirement-regression")
+    toolkit = _CapabilityDirectory(environment, session_scope="retirement-regression")
     try:
-        assert len(toolkit.get_tools()) == 1
-        first = await toolkit.skill_index("list", category="documents", limit=1)
+        tool, = toolkit.get_tools()
+        assert tool.card.name == "capability_search"
+        assert not hasattr(toolkit, "skill_index")
+        first = await tool.invoke({"type": "skill", "operation": "list", "category": "documents", "top_k": 1})
         assert first.detailed_output["ok"]
         assert not first.detailed_output["result_complete"]
         cursor = first.detailed_output["next_cursor"]
-        second = await toolkit.skill_index("list", cursor=cursor)
+        second = await toolkit.search(operation="list", cursor=cursor)
         assert second.detailed_output["result_complete"]
         shown = set(first.detailed_output["observed_skill_ids"]) | set(second.detailed_output["observed_skill_ids"])
         assert shown == {"alpha", "beta"}
 
-        result = await toolkit.skill_index("search", query="invoice")
+        result = await tool.invoke({"type": ["skill"], "query": "invoice"})
         assert set(result.detailed_output["observed_skill_ids"]) == {"alpha", "beta"}
         assert "invoice" in result.data["content"]
         assert "hidden" not in result.data["content"]
@@ -135,10 +138,15 @@ async def test_missing_index_keeps_live_inventory_search_and_prompt(tmp_path):
     )
     assert environment.artifact.layout == "flat" and environment.artifact.index_state == "missing"
     assert environment.prompt_snapshot().entries[0].worker_id == "invoice"
-    toolkit = InstalledSkillsDirectoryToolkit(environment, session_scope="missing-index")
+    toolkit = _CapabilityDirectory(environment, session_scope="missing-index")
     try:
-        result = await toolkit.skill_index("search", query="Invoice")
-        assert result.detailed_output["observed_skill_ids"] == ["invoice"]
-        assert "Process invoices" in result.data["content"]
+        catalog = await toolkit.search(query="Invoice")
+        assert [(row["type"], row["id"]) for row in catalog["matches"]] == [("skill", "invoice")]
+        assert catalog["matches"][0]["description"] == "Process invoices"
+
+        skills = await toolkit.search(query="Invoice", type=["skill"])
+        assert skills.detailed_output["index_state"] == "missing"
+        assert skills.detailed_output["observed_skill_ids"] == ["invoice"]
+        assert "Process invoices" in skills.data["content"]
     finally:
         await toolkit.aclose()

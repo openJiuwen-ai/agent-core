@@ -84,6 +84,7 @@ from openjiuwen.harness_providers.inputs import harness_input_text
 from openjiuwen.harness_providers.io_adapter import HarnessIOAdapter, to_harness_input
 
 if TYPE_CHECKING:
+    from openjiuwen.core.sys_operation.execution_environment import ExecutionEnvironment
     from openjiuwen.harness_providers.trajectory import HarnessTrajectoryRecorder
 
 _EVENT_STATE = "harness.state"
@@ -106,6 +107,7 @@ ContextFactory = Callable[
     HarnessContext | Awaitable[HarnessContext],
 ]
 PromoteFallbackModel = Callable[[], Awaitable[bool]]
+ExecutionEnvironmentResolver = Callable[[], Awaitable["ExecutionEnvironment"]]
 
 
 @runtime_checkable
@@ -326,6 +328,7 @@ class ExternalHarnessMemberRuntime:
         self._promote_fallback_model: PromoteFallbackModel | None = None
         self._teardown_hooks: list[Callable[[], Awaitable[None]]] = []
         self._startup_hooks: list[Callable[[Any], Awaitable[None]]] = []
+        self._execution_environment_resolver: ExecutionEnvironmentResolver | None = None
         self._background_task_controller: Any = None
         self._round_seq = 0
         self._current_round_id: int | None = None
@@ -465,6 +468,40 @@ class ExternalHarnessMemberRuntime:
         """
         self._startup_hooks.append(hook)
 
+    def bind_execution_environment(self, resolver: ExecutionEnvironmentResolver | None) -> None:
+        """Resolve the member's execution environment into every provider start.
+
+        A native member resolves its environment at every tool call; a
+        third-party harness runs its own tools inside one provider process, so
+        the policy reaches it only through the start context's ``env`` and a
+        change applies from the next ``start``.
+
+        Args:
+            resolver: Returns the member's current environment; None unbinds.
+        """
+        self._execution_environment_resolver = resolver
+
+    async def _apply_execution_environment(self, context: HarnessContext) -> HarnessContext:
+        """Layer the resolved environment over the start context's own ``env``."""
+        resolver = self._execution_environment_resolver
+        if resolver is None:
+            return context
+        environment = await resolver()
+        merged = environment.merge(context.env)
+        # A provider env is a plain mapping laid over the CLI's base env, so
+        # it cannot express removing an inherited variable.
+        removed = sorted(key for key, value in merged.items() if value is None)
+        if removed:
+            team_logger.warning(
+                "external harness member {} cannot remove inherited env vars {}; they stay inherited",
+                context.agent_name,
+                removed,
+            )
+        env = {key: value for key, value in merged.items() if value is not None}
+        if env == dict(context.env):
+            return context
+        return dataclasses.replace(context, env=env)
+
     def has_stored_checkpoint(self) -> bool:
         """Whether the member's open session holds a checkpoint of this backend."""
         member_session = self._member_session
@@ -523,7 +560,7 @@ class ExternalHarnessMemberRuntime:
                 await self._ensure_member_session(team_session)
             for hook in self._startup_hooks:
                 await hook(team_session)
-            context = await self._resolve_context(team_session)
+            context = await self._apply_execution_environment(await self._resolve_context(team_session))
             self._member_name = context.agent_name
             self._member_name_known = True
             self._member_agent_id = context.agent_id

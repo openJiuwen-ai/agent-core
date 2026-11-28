@@ -52,7 +52,7 @@ def test_minimal_config_has_independent_enabled_features_and_expected_defaults()
     assert not config.orchestration.experience_enabled
 
 
-@pytest.mark.parametrize("capability_type", ["skill", "expert", "connector", "mcp"])
+@pytest.mark.parametrize("capability_type", ["skill", "expert", "mcp"])
 def test_supported_types_do_not_imply_runtime_loading(capability_type):
     config = target.SymphonyConfig.model_validate({
         "capability": {"sources": [{"type": capability_type, "root": "missing-directory"}]},
@@ -234,7 +234,7 @@ def test_schema_preserves_bounds_enum_and_examples():
     source = schema["$defs"]["CapabilitySourceConfig"]
     assert source["properties"]["root"]["examples"] == ["./capabilities"]
     assert source["properties"]["type"]["enum"] == [
-        "skill", "expert", "connector", "mcp",
+        "skill", "expert", "mcp",
     ]
     assert source["required"] == ["type", "root"]
     assert schema["$defs"]["StorageConfig"]["required"] == ["artifact_root"]

@@ -65,6 +65,7 @@ from openjiuwen.harness.personal_context.file_tools import (
     make_personal_context_file_tools as _make_personal_context_file_tools,
 )
 from openjiuwen.harness.personal_context.path_safety import _extended_path
+from openjiuwen.harness.personal_context._run_token_usage import model_usage_phase
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 from openjiuwen.harness.rails import SecurityRail
 from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
@@ -91,6 +92,7 @@ _REMINDER_TURNS = frozenset({20, 40, 60, 80})
 _PERSONAL_CONTEXT_REAL_INPUT_COMPRESSION_TOKENS = 90_000
 _PERSONAL_CONTEXT_ROUND_LEVEL_PROCESSOR_KEY = "PersonalContextCoreRoundLevelCompressor"
 _PROCESSOR_REGISTRATION_LOCK = Lock()
+_ADVISORY_LOCK_TIMEOUT_SECONDS = 0.5
 _DEFAULT_RETRY_RAIL_FLAG = (
     "enable_model_anomaly_detection_rail"
     if "enable_model_anomaly_detection_rail" in inspect.signature(create_deep_agent).parameters
@@ -277,24 +279,25 @@ async def _after_tool_call_directory_snapshot(
         seen = state.get("seen_directories")
         if not isinstance(lock, asyncio.Lock) or not isinstance(seen, set):
             return
-        async with lock:
-            if not always_attach and _callback_directory_key(directories[0]) in seen:
-                return
-            snapshots = await asyncio.to_thread(
-                lambda: [
-                    _directory_snapshot(
-                        sandbox,
-                        directory,
-                        max_pages_per_directory=max_pages_per_directory,
-                        max_subdirectories_per_directory=max_subdirectories_per_directory,
-                    )
-                    for directory in directories
-                ]
-            )
-            seen.update(_callback_directory_key(directory) for directory in directories)
-            value: object = snapshots if result_key == "directory_snapshots" else snapshots[0]
-            tool_result.data[result_key] = value
-            tool_msg.content += f"\n\n[{result_key}]\n" + json.dumps(value, ensure_ascii=False, sort_keys=True)
+        async with asyncio.timeout(_ADVISORY_LOCK_TIMEOUT_SECONDS):
+            async with lock:
+                if not always_attach and _callback_directory_key(directories[0]) in seen:
+                    return
+                snapshots = await asyncio.to_thread(
+                    lambda: [
+                        _directory_snapshot(
+                            sandbox,
+                            directory,
+                            max_pages_per_directory=max_pages_per_directory,
+                            max_subdirectories_per_directory=max_subdirectories_per_directory,
+                        )
+                        for directory in directories
+                    ]
+                )
+                seen.update(_callback_directory_key(directory) for directory in directories)
+                value: object = snapshots if result_key == "directory_snapshots" else snapshots[0]
+                tool_result.data[result_key] = value
+                tool_msg.content += f"\n\n[{result_key}]\n" + json.dumps(value, ensure_ascii=False, sort_keys=True)
     except Exception:
         # Directory hints are advisory and must never change tool success semantics.
         return
@@ -698,13 +701,17 @@ def _make_context_processor_rail(
     # ContextProcessorRail's forked preset may replace the shared official key.
     # Keep a stable PersonalContext-only alias to the existing core class without mutating
     # the meaning of RoundLevelCompressor for any other agent.
-    with _PROCESSOR_REGISTRATION_LOCK:
+    if not _PROCESSOR_REGISTRATION_LOCK.acquire(timeout=_ADVISORY_LOCK_TIMEOUT_SECONDS):
+        raise _agent_error("PersonalContext processor registration is busy", fallback_allowed=False)
+    try:
         processor_map = getattr(ContextEngine, "_PROCESSOR_MAP")
         registered = processor_map.get(_PERSONAL_CONTEXT_ROUND_LEVEL_PROCESSOR_KEY)
         if registered is None:
             processor_map[_PERSONAL_CONTEXT_ROUND_LEVEL_PROCESSOR_KEY] = RoundLevelCompressor
         elif registered is not RoundLevelCompressor:
             raise _agent_error("PersonalContext context processor registry key is occupied", fallback_allowed=False)
+    finally:
+        _PROCESSOR_REGISTRATION_LOCK.release()
     context_budget = ContextUtils.resolve_context_max(model_name=model_request.model_name)
     trigger_tokens = min(90_000, floor(0.9 * context_budget))
     target_tokens = min(60_000, floor(trigger_tokens * 2 / 3))
@@ -1096,7 +1103,8 @@ async def _invoke_with_length_recovery(
     effective_query = query
     continuations_used = 0
     while True:
-        result = await _maybe_await(cast(Any, agent).invoke({"query": effective_query}, session=session))
+        with model_usage_phase("agent"):
+            result = await _maybe_await(cast(Any, agent).invoke({"query": effective_query}, session=session))
         if not _is_length_limited_result(result):
             return result, None
         if not _discard_length_limited_tail(agent, session_id, result):

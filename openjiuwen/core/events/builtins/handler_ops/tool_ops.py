@@ -58,7 +58,11 @@ class _ToolOps:
                     StatusCode.EVENTS_STATE_INVALID,
                     reason="ops.tool.call requires a live session",
                 )
-            if session_context is None or session.get_session_id() != session_context.session_id:
+            session_matches = session_context is not None and session.get_session_id() == session_context.session_id
+            if not session_matches or (
+                session_context.agent_id is not None
+                and session.get_agent_id() != session_context.agent_id
+            ):
                 raise_error(
                     StatusCode.EVENTS_STATE_INVALID,
                     reason="ops.tool.call session does not match the event context",
@@ -103,7 +107,7 @@ class _ToolOps:
                 ) -> tuple[None, ToolCheckOutput]:
                     return None, ToolCheckOutput(decision="allow")
 
-            event_input = ToolCheckInput(tool_call_id=None, tool_name=tool_name)
+            event_input = ToolCheckInput(tool_call_id=None, tool_name=tool_name, agent_id=agent.card.id)
             trigger_context = ToolCheckTriggerContext(
                 callback_ctx=ctx,
                 invoke_original=invoke_original,
@@ -126,7 +130,7 @@ class _ToolOps:
         session_context = ops.session_context
         if session_context is None:
             raise_error(StatusCode.EVENTS_OPS_INVALID, reason="ops.tool requires a session context")
-        agent = get_agent_runtime().get(session_context.session_id)
+        agent = get_agent_runtime().get(session_context.session_id, agent_id=session_context.agent_id)
         if not isinstance(agent, DeepAgent):
             raise_error(StatusCode.EVENTS_STATE_INVALID, reason="ops.tool requires a DeepAgent bound to the session")
         react_agent = agent.react_agent
@@ -148,7 +152,7 @@ class _ToolOps:
             config=react_agent.config,
             session=None,
             context=None,
-            extra={"session_id": session_context.session_id},
+            extra={"session_id": session_context.session_id, "agent_id": agent.card.id},
         )
         return agent, callback_ctx, tool_call
 

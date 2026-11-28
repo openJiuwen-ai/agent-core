@@ -5,7 +5,7 @@
 | 项 | 值 |
 | --- | --- |
 | 建档日期 | 2026-10-19 |
-| 最近修订 | 2026-11-10 |
+| 最近修订 | 2026-11-24 |
 | 范围 | manifest 校验、安装目录、zip 包根识别与防护、受管包目录清理、一批候选的接受与包级排序、`EXTENSION_*` 基础错误码 |
 | 方案成熟度 | 已确认。契约以 [S_01](../specs/S_01_package-loading.md) 第 2～3 节为准 |
 | 计划条目 | [EX-01](../designs/extension-development-plan.md#ex-01-包声明安装目录与依赖定序) |
@@ -96,3 +96,11 @@ flowchart LR
 | 2026-10-21 | `pytest tests/unit_tests/core/extension/ -q` | 51 passed, 1 skipped（目录符号链接在无权限环境跳过） |
 
 **结论：** 来源校验、安装目录与依赖定序可按 S_01 使用。加载与生效记录见 F_02。
+
+
+## 8. 2026-11-24 bundle 根与成员源
+
+- bundle 根沿用 `<install_dir>/<bundle_id>/<version>/`，manifest 以 `is_bundle: true` 和 `members[].path` 声明成员；根不得带 domain 或 extensions，成员上限 50，成员路径、ID 和依赖环在解析期校验。
+- Core 只校验根和成员清单、计算成员依赖层级；bundle 根强制 `enable=false`，`package.parse` 拒绝把它当作普通包，安装与容器生命周期由宿主负责。
+- 成员不复制为独立安装副本。宿主把允许加载的成员根注册为 managed root；`PackageManager` 在发现、版本和启动快照中识别这些根，`copy_into_store` 就地返回，`remove_installed` 不删除宿主副本。
+- 兼容性：未声明 `is_bundle` 的旧包行为不变；`is_bundle` 为保留字段。验证见 `test_bundle.py`、`test_managed_roots.py`。

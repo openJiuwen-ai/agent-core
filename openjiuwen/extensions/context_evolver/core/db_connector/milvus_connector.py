@@ -30,7 +30,6 @@ Example::
 
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
-from pymilvus import utility
 
 from openjiuwen.core.common.logging import context_engine_logger as logger
 
@@ -130,6 +129,7 @@ class MilvusConnector:
             CollectionSchema,
             DataType,
             FieldSchema,
+            utility,
         )
 
         if self._collection is not None:
@@ -218,7 +218,7 @@ class MilvusConnector:
                 # Try to attach to an existing collection without knowing dim.
                 # Required for read-only ops (exists/count/load_from_db) on a
                 # collection that was created by a previous save_to_db() call.
-                from pymilvus import Collection  # pylint: disable=import-outside-toplevel
+                from pymilvus import Collection, utility  # pylint: disable=import-outside-toplevel
                 if not utility.has_collection(self.collection_name, using=self.alias):
                     raise ValueError(
                         "Vector dimension unknown. Provide `dim` in the constructor "
@@ -506,6 +506,7 @@ class MilvusConnector:
             # Skip the Milvus network round-trip when the collection has already
             # been injected (e.g. via set_collection() in tests).
             if self._collection is None:
+                from pymilvus import utility  # pylint: disable=import-outside-toplevel
                 if not utility.has_collection(self.collection_name, using=self.alias):
                     return False
             collection = self._get_collection()

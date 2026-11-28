@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
+from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -35,6 +36,17 @@ from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAge
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail, InvokeInputs
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.deep_agent import DeepAgent
+
+
+@pytest.fixture(autouse=True)
+def _verify_runtime_bindings_are_released() -> Iterator[None]:
+    runtime = get_agent_runtime()
+    # 调用记录保留强引用，防止 GC 提前回收模拟对象而掩盖绑定泄漏。
+    with patch.object(runtime, "bind", wraps=runtime.bind) as bind:
+        yield
+        for bind_call in bind.call_args_list:
+            session_id, bound_agent = bind_call.args
+            assert runtime.get(session_id) is not bound_agent, f"测试遗留 AgentRuntime 绑定：{session_id}"
 
 
 def _echo_tool() -> LocalFunction:
@@ -128,6 +140,7 @@ async def test_turn_step_handler_can_invoke_ops_tool_call_before_model_step() ->
     tool = _echo_tool()
     agent.ability_manager.add_ability(tool.card, tool)
     deep = MagicMock(spec=DeepAgent)
+    deep.card = agent.card
     deep.react_agent = agent
     deep.find_rails_by_type.return_value = []
     get_agent_runtime().bind(session.get_session_id(), deep)
@@ -163,6 +176,7 @@ async def test_turn_step_handler_can_invoke_ops_tool_call_before_model_step() ->
             result = await agent._call_model(ctx, context, None)
     finally:
         Runner.set_extension_bus(None)
+        get_agent_runtime().unbind(session.get_session_id(), deep)
         agent.ability_manager.teardown_tools()
         await Runner.stop()
 
@@ -192,6 +206,7 @@ async def test_turn_step_core_receives_user_forwarded_input_after_ops_prefetch()
     tool = _echo_tool()
     agent.ability_manager.add_ability(tool.card, tool)
     deep = MagicMock(spec=DeepAgent)
+    deep.card = agent.card
     deep.react_agent = agent
     deep.find_rails_by_type.return_value = []
     get_agent_runtime().bind(session.get_session_id(), deep)
@@ -226,6 +241,7 @@ async def test_turn_step_core_receives_user_forwarded_input_after_ops_prefetch()
                 await agent._call_model(ctx, context, None)
     finally:
         Runner.set_extension_bus(None)
+        get_agent_runtime().unbind(session.get_session_id(), deep)
         agent.ability_manager.teardown_tools()
         await Runner.stop()
 

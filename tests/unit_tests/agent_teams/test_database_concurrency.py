@@ -15,6 +15,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.schema.status import MemberStatus, TaskStatus
@@ -94,6 +95,62 @@ async def test_memory_db_shares_single_engine(tmp_path) -> None:
         assert database.engine is not None
         assert database.read_engine is database.engine
         assert database.read_session_local is database.session_local
+    finally:
+        await database.close()
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize("memory_db", [False, True], ids=["file_db", "memory_db"])
+async def test_member_ready_commit_survives_concurrent_read(tmp_path, monkeypatch, memory_db) -> None:
+    """A concurrent roster read cannot roll back a successful member CAS."""
+    connection = ":memory:" if memory_db else str(tmp_path / "restart.db")
+    database = TeamDatabase(DatabaseConfig(connection_string=connection))
+    token = set_session_id("restart_claim")
+    commit_waiting = asyncio.Event()
+    allow_commit = asyncio.Event()
+    started_reading = asyncio.Event()
+    commit = AsyncSession.commit
+
+    async def delay_commit(session):
+        commit_waiting.set()
+        await allow_commit.wait()
+        await commit(session)
+
+    async def read_member():
+        started_reading.set()
+        return await database.member.get_member("worker", "team")
+
+    try:
+        await database.initialize()
+        assert await database.team.create_team("team", "Team", "leader")
+        assert await database.member.create_member("worker", "team", "Worker", "{}", MemberStatus.RESTARTING.value)
+        monkeypatch.setattr(AsyncSession, "commit", delay_commit)
+
+        writer = asyncio.create_task(database.member.try_transition_member_status(
+            "worker", "team", MemberStatus.RESTARTING, MemberStatus.READY,
+        ))
+        reader = None
+        try:
+            await asyncio.wait_for(commit_waiting.wait(), timeout=2)
+            reader = asyncio.create_task(read_member())
+            await asyncio.wait_for(started_reading.wait(), timeout=2)
+            if memory_db:
+                done, _ = await asyncio.wait({reader}, timeout=0.1)
+                assert not done
+            else:
+                assert (await asyncio.wait_for(reader, timeout=2)).status == MemberStatus.RESTARTING.value
+        finally:
+            allow_commit.set()
+            await asyncio.wait_for(writer, timeout=2)
+            if reader is not None and not reader.done():
+                await asyncio.wait_for(reader, timeout=2)
+
+        assert writer.result()
+        if memory_db:
+            assert reader.result().status == MemberStatus.READY.value
+        assert (await database.member.get_member("worker", "team")).status == MemberStatus.READY.value
     finally:
         await database.close()
         reset_session_id(token)

@@ -12,7 +12,7 @@ from typing import Any, Literal, cast
 
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.spans import (
-    iter_spans,
+    iter_compact_spans,
     span_identity,
     span_sort_key,
 )
@@ -112,7 +112,7 @@ def build_symphony_edge_candidates(
     ``edge_search_max_depth``. Neither path creates a resolved edge decision.
     """
 
-    if max_candidates is not None and max_candidates <= 0:
+    if not fragments or (max_candidates is not None and max_candidates <= 0):
         return ()
 
     span_index = _index_spans(continuities)
@@ -563,7 +563,7 @@ def _ordered_valid_fragments(
 def _index_spans(continuities: Sequence[tuple[int, Trajectory]]) -> _SpanIndex:
     spans: dict[tuple[int, str, str], Mapping[str, Any]] = {}
     for continuity_index, trajectory in sorted(continuities, key=lambda item: item[0]):
-        for span in iter_spans(trajectory):
+        for span in iter_compact_spans(trajectory):
             identity = span_identity(span)
             if identity is not None:
                 spans.setdefault((int(continuity_index), identity[0], identity[1]), span)

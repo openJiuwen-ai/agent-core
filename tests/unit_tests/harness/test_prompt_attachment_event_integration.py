@@ -19,6 +19,9 @@ from openjiuwen.core.events.builtins.event_types.prompt_attachment import (
 from openjiuwen.core.events.event_next import EventNext
 from openjiuwen.core.events.types import OPS_BUILD_EVENT_TYPE, HandlerLevel
 from openjiuwen.core.foundation.llm import UserMessage
+from openjiuwen.core.session.agent import Session
+from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
@@ -230,6 +233,58 @@ async def test_attachment_event_cancellation_propagates_before_history_write() -
     with pytest.raises(asyncio.CancelledError):
         await sync_task
     assert len(context.get_messages()) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("team_mode", "expected_event_calls"),
+    ((True, []), (False, ["runtime"])),
+)
+async def test_react_agent_attachment_sync_uses_legacy_path_for_team_mode(
+    team_mode: bool,
+    expected_event_calls: list[str],
+) -> None:
+    event_calls: list[str] = []
+
+    async def observe(
+        event: Event,
+        ops: EventHandlerOps | None,
+        event_next: EventNext,
+    ) -> PromptAttachmentOutput:
+        del ops
+        event_input = event.event_input
+        assert isinstance(event_input, PromptAttachmentInput)
+        event_calls.append(str(event_input.detail["section"]))
+        return await event_next(event)
+
+    bus = ExtensionEventBus()
+    bus.register_event_handler(PROMPT_ATTACHMENT, observe, {})
+    await bus.trigger(Event(OPS_BUILD_EVENT_TYPE, None))
+
+    manager = PromptAttachmentManager(event_bus=bus)
+    await manager.add_section(
+        session_id="session-1",
+        section="runtime",
+        content="team attachment",
+        kind=PromptAttachmentKind.TEXT,
+        source="test",
+    )
+    agent = ReActAgent(AgentCard(id="agent-1", name="agent-1"))
+    agent.set_runtime_context(is_team_agent=team_mode)
+    agent.prompt_attachment_manager = manager
+    context = _context()
+    callback_context = AgentCallbackContext(
+        agent=agent,
+        session=Session(session_id="session-1"),
+        context=context,
+    )
+
+    await agent._sync_prompt_attachments(callback_context, context)
+
+    messages = context.get_messages()
+    assert len(messages) == 2
+    assert "team attachment" in messages[-1].content
+    assert event_calls == expected_event_calls
 
 
 def test_deep_agent_receives_prompt_attachment_bus_explicitly() -> None:

@@ -37,6 +37,7 @@ from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability import demand as demand_module
 from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.extensions.observability.runtime import ObservabilityRuntime
+from openjiuwen.extensions.observability.sequence_registry import materialize_stated_value
 from openjiuwen.extensions.observability.semconv import (
     ERROR_TYPE,
     GEN_AI_INPUT_MESSAGES,
@@ -124,6 +125,11 @@ def _llm_spans(exporter: InMemorySpanExporter) -> list[Any]:
         span for span in exporter.get_finished_spans()
         if span.attributes.get(GEN_AI_OPERATION_NAME) == "chat"
     ]
+
+
+def _stated_attribute(attributes: Any, key: str) -> str:
+    """Return one restated attribute as its full content, reference or not."""
+    return materialize_stated_value(attributes[key])
 
 
 def test_llm_span_omits_unknown_request_model(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -554,7 +560,7 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
     # belongs to the chat history rather than to the instructions given
     # alongside it, so it stays in gen_ai.input.messages.
     assert GEN_AI_SYSTEM_INSTRUCTIONS not in attrs
-    input_messages = json.loads(attrs[GEN_AI_INPUT_MESSAGES])
+    input_messages = json.loads(_stated_attribute(attrs, GEN_AI_INPUT_MESSAGES))
     assert input_messages[0]["role"] == "system"
     assert input_messages[0]["openjiuwen"] == {
         "kind": "prompt_attachment_history",
@@ -662,7 +668,7 @@ async def test_structured_input_and_output_share_redaction_decisions() -> None:
         reset_state()
 
     span = _llm_spans(exporter)[0]
-    input_text = json.loads(span.attributes[GEN_AI_INPUT_MESSAGES])[0]["parts"][0]["content"]
+    input_text = json.loads(_stated_attribute(span.attributes, GEN_AI_INPUT_MESSAGES))[0]["parts"][0]["content"]
     output_text = json.loads(span.attributes[GEN_AI_OUTPUT_MESSAGES])[0]["parts"][0]["content"]
     assert input_text.startswith("sha256:")
     assert output_text.startswith("sha256:")
@@ -756,7 +762,7 @@ async def test_prompt_attachment_provenance_is_additive_and_positioned() -> None
             ],
         }
     ]
-    structured = json.loads(span.attributes[GEN_AI_INPUT_MESSAGES])
+    structured = json.loads(_stated_attribute(span.attributes, GEN_AI_INPUT_MESSAGES))
     assert [message["parts"][0]["content"] for message in structured] == [
         repeated_content,
         repeated_content,
@@ -999,7 +1005,7 @@ async def test_structured_messages_preserve_ordered_multimodal_parts_and_name() 
         reset_state()
 
     span = _llm_spans(exporter)[0]
-    input_message = json.loads(span.attributes[GEN_AI_INPUT_MESSAGES])[0]
+    input_message = json.loads(_stated_attribute(span.attributes, GEN_AI_INPUT_MESSAGES))[0]
     assert input_message["name"] == "named-reviewer"
     assert [part["type"] for part in input_message["parts"]] == [
         "text",
@@ -1209,7 +1215,7 @@ async def test_tool_definitions_model_dump_before_string_fallback() -> None:
         reset_state()
 
     span = _llm_spans(exporter)[0]
-    definitions = json.loads(span.attributes[GEN_AI_TOOL_DEFINITIONS])
+    definitions = json.loads(_stated_attribute(span.attributes, GEN_AI_TOOL_DEFINITIONS))
     assert definitions == [
         {
             "type": "function",
@@ -1277,7 +1283,7 @@ async def test_tool_definitions_failures_fallback_per_item_without_orphaning_spa
     llm_spans = _llm_spans(exporter)
     assert len(llm_spans) == 1
     span = llm_spans[0]
-    definitions = json.loads(span.attributes[GEN_AI_TOOL_DEFINITIONS])
+    definitions = json.loads(_stated_attribute(span.attributes, GEN_AI_TOOL_DEFINITIONS))
     assert definitions == [
         "broken-model-dump",
         {"self": "<recursive:dict>"},

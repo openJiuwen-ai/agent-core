@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -22,6 +23,7 @@ from openjiuwen.agent_teams.external.member_runtime import (
     _bind_harness_trajectory_recorder,
 )
 from openjiuwen.agent_teams.agent.team_agent import team_member_execution_subject
+from openjiuwen.core.sys_operation.execution_environment import ExecutionEnvironment
 from openjiuwen.extensions.observability.semconv import AT_MEMBER_NAME, AT_TEAM_NAME
 from openjiuwen.harness_protocol import (
     AbortMode,
@@ -1395,6 +1397,66 @@ async def test_startup_hook_sees_the_member_session_before_the_context_is_resolv
 
     assert order == ["hook:checkpoint=False", "context"]
     assert team_session.created == [("member-agent", False)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_bound_execution_environment_reaches_each_provider_start() -> None:
+    """Policy overrides win over the context env and are re-read on every start."""
+    harness = _FakeHarness()
+    base = dataclasses.replace(_context(), env={"KEEP": "1", "GIT_AUTHOR_NAME": "host"})
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=base)
+    identities = iter(["alice", "bob"])
+
+    async def resolve() -> ExecutionEnvironment:
+        name = next(identities)
+        return ExecutionEnvironment(values={"DEFAULT": "d"}, overrides={"GIT_AUTHOR_NAME": name})
+
+    runtime.bind_execution_environment(resolve)
+    await runtime.start()
+    await runtime.stop()
+    await runtime.start()
+    await runtime.stop()
+
+    first, second = (dict(context.env) for context in harness.start_contexts)
+    assert first == {"DEFAULT": "d", "KEEP": "1", "GIT_AUTHOR_NAME": "alice"}
+    assert second["GIT_AUTHOR_NAME"] == "bob"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_execution_environment_removals_cannot_reach_the_provider() -> None:
+    """A null value has no provider env form, so it is left out of the start env."""
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+
+    async def resolve() -> ExecutionEnvironment:
+        return ExecutionEnvironment(values={"DROP": None, "SET": "v"})
+
+    runtime.bind_execution_environment(resolve)
+    await runtime.start()
+    await runtime.stop()
+
+    assert dict(harness.start_contexts[0].env) == {"SET": "v"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_failed_execution_environment_does_not_start_the_provider() -> None:
+    """A policy that cannot be resolved fails closed, like a native tool call."""
+    harness = _FakeHarness()
+    team_session = _FakeTeamSession()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+
+    async def resolve() -> ExecutionEnvironment:
+        raise RuntimeError("settings not initialized")
+
+    runtime.bind_execution_environment(resolve)
+    with pytest.raises(RuntimeError, match="settings not initialized"):
+        await runtime.start(team_session=team_session)
+
+    assert harness.start_contexts == []
+    assert team_session.member_session.post_run_calls == 1
 
 
 @pytest.mark.asyncio

@@ -153,6 +153,11 @@ class AgentTemplateSpec(_ExtensionSpecModel):
     rails: list[RailSpec] = Field(default_factory=list)
     skills: list[SkillSpec] = Field(default_factory=list)
 
+    # Host-managed MCP connector names (manifest ``{"connector": name}`` entries).
+    # Names only — the host resolves them into server configs (with credentials)
+    # when it builds a member; the native loader never mounts them by itself.
+    connectors: list[str] = Field(default_factory=list)
+
     # Shared memories (experience, conventions, troubleshooting knowledge)
     memories: list[MemorySpec] = Field(default_factory=list)
 

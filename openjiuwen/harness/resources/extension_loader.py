@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 import yaml
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.schema.deep_agent_spec import BuiltinToolSpec, ModelSpec, RailSpec
 from openjiuwen.harness.schema.extension_spec import (
@@ -236,6 +237,7 @@ def load_agent_template_package(manifest_path: str | Path) -> AgentTemplateSpec:
         ),
         tools=_build_tool_specs(payload.get("tools"), base_dir=base_dir, package_root=package_root),
         mcps=_build_mcp_specs(payload.get("mcps"), base_dir=base_dir, package_root=package_root),
+        connectors=_build_connector_names(payload.get("mcps")),
         rails=_build_rail_specs(payload.get("rails"), base_dir=base_dir, package_root=package_root),
         skills=_build_skill_specs(payload.get("skills"), base_dir=base_dir, package_root=package_root),
         memories=[MemorySpec.model_validate(item) for item in _as_list(payload.get("memories"))],
@@ -582,7 +584,8 @@ def _build_mcp_specs(items: Any, *, base_dir: Path, package_root: Path) -> list[
                 specs.append(_build_mcp_server_spec(raw_entry, base_dir=mcp_dir, package_root=package_root))
             continue
         if "connector" in item:
-            # Host-managed external MCP ref, Strict shape only — skip; never expand into a local McpServerSpec.
+            # Host-managed external MCP ref, Strict shape only — never expand into a local McpServerSpec;
+            # the name is kept on AgentTemplateSpec.connectors by _build_connector_names.
             connector = item.get("connector")
             if set(item) != {"connector"} or not isinstance(connector, str) or not connector:
                 raise ValueError(
@@ -591,6 +594,25 @@ def _build_mcp_specs(items: Any, *, base_dir: Path, package_root: Path) -> list[
             continue
         specs.append(_build_mcp_server_spec(item, base_dir=base_dir, package_root=package_root))
     return specs
+
+
+def _build_connector_names(items: Any) -> list[str]:
+    """Host-managed connector names from manifest ``mcps``, in order, without duplicates.
+
+    Shape validation stays in :func:`_build_mcp_specs`; non-connector entries are ignored.
+    """
+    names: list[str] = []
+    for item in _as_list(items):
+        connector = item.get("connector") if isinstance(item, dict) else None
+        if not isinstance(connector, str):
+            continue
+        name = connector.strip()
+        if not name:
+            logger.warning("Skipping blank mcp connector name in agent template manifest: %r", connector)
+            continue
+        if name not in names:
+            names.append(name)
+    return names
 
 
 def _mcp_payload_entries(payload: Any) -> list[dict[str, Any]]:

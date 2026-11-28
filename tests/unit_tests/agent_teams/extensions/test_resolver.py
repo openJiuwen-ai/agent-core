@@ -100,6 +100,45 @@ async def test_resolver_with_no_database_resolves_to_none() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_teams_answers_from_the_static_tables(db) -> None:
+    """list returns every team with light fields and member counts, created order."""
+    await _seed(db)
+    # A second team with no members: it must be listed with member_count 0.
+    await db.team.create_team("solo-team", "Solo", "solo-leader")
+
+    resolver = _resolver(db)
+    summaries = await resolver.list_teams()
+    by_name = {s.team_name: s for s in summaries}
+    assert set(by_name) == {"research-team", "solo-team"}
+
+    research = by_name["research-team"]
+    assert research.display_name == "Research"
+    assert research.leader_member_name == "leader"
+    assert research.member_count == 1
+    assert research.created is not None and research.updated_at is not None
+
+    solo = by_name["solo-team"]
+    assert solo.member_count == 0
+    # Light projection: heavy columns are not part of the summary at all.
+    assert not hasattr(solo, "desc") and not hasattr(solo, "prompt")
+
+    # Oldest first: timestamps never decrease along the listing.
+    created_values = [s.created for s in summaries if s.created is not None]
+    assert created_values == sorted(created_values)
+
+
+@pytest.mark.asyncio
+async def test_list_teams_without_database_returns_empty() -> None:
+    """A host without team storage configured lists nothing."""
+
+    async def factory() -> TeamDatabase | None:
+        return None
+
+    resolver = DatabaseResolver(factory)
+    assert await resolver.list_teams() == []
+
+
+@pytest.mark.asyncio
 async def test_view_queries_without_a_bound_session_contextvar(db) -> None:
     """The view binds its session around every query itself."""
     await _seed(db)

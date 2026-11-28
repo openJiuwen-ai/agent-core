@@ -44,7 +44,7 @@ from .prompts import (
     dream_merge_prompt,
     dream_purge_prompt,
 )
-from .stores import TTSERecordStore, format_ts, parse_ts
+from .stores import TTSERecordStore, _norm, format_ts, parse_ts
 from .tip_parse import parse_tip
 
 
@@ -996,9 +996,9 @@ async def _apply_merge_verdict(
         )
     selected_ids = {id(record) for record in merge_records}
     active = store.facts if track == "fact" else store.tips
-    merge_texts = {str(record.get("text") or "") for record in merge_records}
+    merge_texts = {_norm(record.get("text") or "") for record in merge_records}
     preserve_same_text = any(
-        id(record) not in selected_ids and str(record.get("text") or "") in merge_texts
+        id(record) not in selected_ids and _norm(record.get("text") or "") in merge_texts
         for record in active
     )
     for record in merge_records:
@@ -1983,7 +1983,7 @@ async def run_dream_pass(
             config=config,
         )
 
-    await store.save()
+    await store.save(strict=True)
 
     dream_state.non_followup_count = 0
     dream_state.last_dream_at = ts

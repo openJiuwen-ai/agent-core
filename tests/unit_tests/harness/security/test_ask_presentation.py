@@ -8,11 +8,76 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from openjiuwen.harness.security.permission_engine.approve.ask_presentation import (
     build_permission_ask_presentation,
     render_ask_presentation_message,
 )
 from openjiuwen.harness.security.permission_engine.models import PermissionLevel, PermissionResult
+from openjiuwen.harness.security.permission_engine.fileguard.file_guard import build_file_guard_checker
+from openjiuwen.harness.security.permission_engine.fileguard.shell_paths import (
+    ShellPathAnalysis,
+    analyze_posix_shell_paths,
+)
+from openjiuwen.harness.security.permission_engine.shell_path_context import shell_path_call
+
+
+@pytest.mark.parametrize("coverage", ["partial", "unsupported", None])
+def test_shell_path_summary_keeps_file_guard_compatibility_candidates(tmp_path, coverage):
+    workspace = tmp_path.resolve()
+    target = workspace / "external"
+    command = "echo ok > ./local.txt; head ./external"
+    args = {"command": command, "workdir": str(workspace)}
+    checker = build_file_guard_checker({
+        "file_guard": {
+            "enabled": True,
+            "defaults": {"read": "allow", "write": "allow"},
+            "paths": [{"path": str(target), "read": "ask"}],
+        },
+    }, workspace_root=workspace)
+    analysis = analyze_posix_shell_paths(command, str(workspace), "auto", workspace)
+    assert analysis.coverage == "partial"
+    if coverage == "unsupported":
+        analysis = ShellPathAnalysis(command, str(workspace), "auto", workspace, "unsupported")
+    with shell_path_call() as scope:
+        if coverage is not None:
+            scope.bind(SimpleNamespace(analyze_local_paths=lambda _: analysis), args)
+        result = checker.evaluate("bash", args)
+        assert result.permission == PermissionLevel.ASK
+        assert result.external_paths == [target.as_posix()]
+        presentation = build_permission_ask_presentation("bash", args, result)
+    assert presentation.summary == f"read {target}"
+
+
+def test_partial_shell_summary_does_not_present_home_directory_as_file_read(tmp_path, monkeypatch):
+    workspace = tmp_path.resolve()
+    home = workspace / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    command = "cd sub; head ./external"
+    args = {"command": command, "workdir": str(workspace)}
+    analysis = analyze_posix_shell_paths(command, str(workspace), "auto", workspace)
+    assert analysis.coverage == "partial"
+    result = PermissionResult(PermissionLevel.ASK, matched_rule="file_guard:paths", external_paths=[home.as_posix()])
+    with shell_path_call() as scope:
+        scope.bind(SimpleNamespace(analyze_local_paths=lambda _: analysis), args)
+        presentation = build_permission_ask_presentation("bash", args, result)
+    assert presentation.summary == f"bash {home.as_posix()}"
+
+
+def test_complete_shell_summary_matches_exact_posix_path_and_keeps_file_read(tmp_path):
+    workspace = tmp_path.resolve()
+    command = "echo ok > ./SUB; ls sub; cd sub"
+    args = {"command": command, "workdir": str(workspace)}
+    analysis = analyze_posix_shell_paths(command, str(workspace), "auto", workspace)
+    assert analysis.coverage == "complete"
+    target = workspace / "sub"
+    result = PermissionResult(PermissionLevel.ASK, matched_rule="file_guard:paths", external_paths=[target.as_posix()])
+    with shell_path_call() as scope:
+        scope.bind(SimpleNamespace(analyze_local_paths=lambda _: analysis), args)
+        presentation = build_permission_ask_presentation("bash", args, result)
+    assert presentation.summary == f"read {target}"
 
 
 def test_path_ask_uses_path_title_and_write_summary() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +32,22 @@ from openjiuwen.harness.personal_context.source_metadata import (
     source_id_for_locator,
     upsert_source_metadata,
 )
+
+
+@pytest.fixture(params=["completed", "skipped"])
+def capacity_maintenance_result(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    result = {"status": "failed", "reason": "time_budget"} if request.param == "skipped" else {
+        "status": "succeeded", "limit_bytes": 50_000_000, "before_bytes": 0,
+        "after_bytes": 0, "removed_count": 0, "oversized_count": 0,
+    }
+
+    async def maintenance(*_args, **_kwargs):
+        return dict(result)
+
+    monkeypatch.setattr(
+        "openjiuwen.harness.personal_context.context_capacity.run_capacity_maintenance", maintenance,
+    )
+    return result
 
 
 def _config(tmp_path: Path, *, interval: float = 0.01) -> PersonalContextConfig:
@@ -940,7 +957,9 @@ async def test_manual_run_retries_a_quarantined_revision(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_two_stage_run_freezes_candidates_and_reports_processing_progress(tmp_path: Path) -> None:
+async def test_two_stage_run_freezes_candidates_and_reports_processing_progress(
+    tmp_path: Path, capacity_maintenance_result: dict[str, object],
+) -> None:
     personal_context = PersonalContext(home=tmp_path)
     await personal_context.set_configuration(_config(tmp_path))
     assert personal_context._config is not None
@@ -1015,6 +1034,8 @@ async def test_two_stage_run_freezes_candidates_and_reports_processing_progress(
     finish_release.set()
     await asyncio.wait_for(task, timeout=1)
     assert (await personal_context.snapshot()).fetch_run_progress["notes"] == {
+        "capacity_maintenance": capacity_maintenance_result,
+        "token_usage": {"total_tokens": 0, "has_estimate": False, "incomplete": False},
         "service_id": "notes",
         "run_state": "succeeded",
         "progress_percent": 100,
@@ -1136,7 +1157,9 @@ async def test_run_progress_names_message_less_failure(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_empty_run_succeeds_and_next_run_replaces_retained_progress(tmp_path: Path) -> None:
+async def test_empty_run_succeeds_and_next_run_replaces_retained_progress(
+    tmp_path: Path, capacity_maintenance_result: dict[str, object],
+) -> None:
     class EmptyProvider(ContextFetchService):
         async def prepare_run(
             self,
@@ -1187,6 +1210,8 @@ async def test_empty_run_succeeds_and_next_run_replaces_retained_progress(tmp_pa
 
     await personal_context._run_fetch_once("notes", EmptyProvider(service_config, home=tmp_path))
     assert (await personal_context.snapshot()).fetch_run_progress["notes"] == {
+        "capacity_maintenance": capacity_maintenance_result,
+        "token_usage": {"total_tokens": 0, "has_estimate": False, "incomplete": False},
         "service_id": "notes",
         "run_state": "succeeded",
         "progress_percent": 100,
@@ -1209,6 +1234,7 @@ async def test_empty_run_succeeds_and_next_run_replaces_retained_progress(tmp_pa
     assert replacement["run_state"] == "running"
     assert replacement["progress_percent"] == 0
     assert replacement["total_items"] == 0
+    assert "capacity_maintenance" not in replacement
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -2684,10 +2710,15 @@ async def test_public_lifecycle_publishes_deduplicated_atomic_sources_without_so
         for _attempt in range(500):
             status = await personal_context.snapshot()
             cursor_files = sorted((home / "state" / "cursors").glob("*.json"))
+            runs = [
+                await personal_context.get_fetch_run_status(item["service_id"], run_id=item["run_id"])
+                for item in accepted["runs"]
+            ]
             if (
                 status.context_ready
                 and len(cursor_files) == 2
                 and status.fetch_service_states == {"notes-a": "RUNNING", "notes-b": "RUNNING"}
+                and all(run["run_state"] == "succeeded" for run in runs)
             ):
                 break
             assert status.fetch_service_errors == {}
@@ -2744,9 +2775,26 @@ async def test_public_lifecycle_publishes_deduplicated_atomic_sources_without_so
         assert all(
             json.loads(path.read_text(encoding="utf-8"))["cursor"]["_selection"]["completed"] for path in cursor_files
         )
+        from openjiuwen.harness.personal_context.context_capacity import maintain_capacity
+        from openjiuwen.harness.personal_context.context_retirement import is_sandbox_active
+
+        lease_files = list((home / "state" / "context-sandboxes").glob("*.lock"))
+        assert all(re.fullmatch(r"[0-9a-f]{64}-[0-9a-f]{32}", path.stem) for path in lease_files)
+        assert all(not is_sandbox_active(home, path.stem) for path in lease_files)
+        released_lease_paths = {path.relative_to(home).as_posix() for path in lease_files}
+        # The run has finished. An independent maintenance pass can now remove
+        # private arrangement copies, even if the collection's own budget expired.
+        await asyncio.to_thread(maintain_capacity, home, limit_bytes=100_000_000)
         persistent_files = {path.relative_to(home).as_posix() for path in home.rglob("*") if path.is_file()}
         assert all(
-            path.startswith(("workspace/context/", "workspace/source-meta/", "state/cursors/", "state/run-history/"))
+            path.startswith(("workspace/context/", "workspace/source-meta/", "state/cursors/", "state/run-history/",
+                             "state/run-token-usage/"))
+            or path in {
+                "state/context_usage.json", "state/context_usage.lock", "state/context_update.lock",
+                "state/context_arrange.lock", "state/context_priority.lock", "state/context_sandbox_registry.lock",
+                "state/context_sandbox_cleanup.lock",
+            }
+            or path in released_lease_paths
             for path in persistent_files
         )
         assert not list((home / "workspace" / "sandboxes").rglob("*"))
@@ -3517,6 +3565,11 @@ def test_strict_rollback_restores_preexisting_source_metadata(tmp_path: Path) ->
     assert metadata_path.read_bytes() == before
 
 
+def _original_run_records(records):
+    """Compare original history fields independently of optional background usage loading."""
+    return [{key: value for key, value in record.items() if key != "token_usage"} for record in records]
+
+
 @pytest.mark.asyncio
 async def test_retained_run_history_acceptance_retention_restart_and_active_slot(tmp_path, monkeypatch):
     monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _BlockingManualProvider)
@@ -3544,7 +3597,9 @@ async def test_retained_run_history_acceptance_retention_restart_and_active_slot
         await core.get_fetch_run_status("notes", run_id=run_ids[0])
     restored = PersonalContext(home=tmp_path)
     await restored.set_configuration(config)
-    assert await restored.get_fetch_run_status("notes") == retained
+    assert _original_run_records((await restored.get_fetch_run_status("notes"))["runs"]) == _original_run_records(
+        retained["runs"]
+    )
     accepted = await core.run_fetch(service_id="notes")
     assert len((await core.get_fetch_run_status("notes"))["runs"]) == 6
     await _finish_manual_tasks(core, ("notes",))
@@ -3589,7 +3644,7 @@ async def test_retained_run_history_stop_before_worker_starts(tmp_path, monkeypa
     assert record["finished_at"] is not None
     restored = PersonalContext(home=tmp_path)
     await restored.set_configuration(_manual_config(tmp_path))
-    assert (await restored.get_fetch_run_status("notes"))["runs"] == [record]
+    assert _original_run_records((await restored.get_fetch_run_status("notes"))["runs"]) == _original_run_records([record])
 
 
 @pytest.mark.asyncio
@@ -3601,11 +3656,11 @@ async def test_retained_run_history_reconfigure_remove_restore_and_atomic_failur
     record = await core.get_fetch_run_status("notes", run_id=accepted["runs"][0]["run_id"])
     restored = PersonalContext(home=tmp_path)
     await restored.set_configuration(_manual_config(tmp_path, collection_enabled=False))
-    assert (await restored.get_fetch_run_status("notes"))["runs"] == [record]
+    assert _original_run_records((await restored.get_fetch_run_status("notes"))["runs"]) == _original_run_records([record])
     backup = restored.remove_fetch_run_history("notes")
     assert (await restored.get_fetch_run_status("notes"))["runs"] == []
     restored.restore_fetch_run_history("notes", backup)
-    assert (await restored.get_fetch_run_status("notes"))["runs"] == [record]
+    assert _original_run_records((await restored.get_fetch_run_status("notes"))["runs"]) == _original_run_records([record])
     history_path = tmp_path / "state" / "run-history" / "notes.json"
     original = history_path.read_bytes()
 

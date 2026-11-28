@@ -49,6 +49,25 @@ _NESTED_TOOL_CALL_KEY = "__progressive_nested_tool_call__"
 _PROGRESSIVE_DISCOVERY_PROPERTY = "progressive_discovery"
 
 
+def _encode_name_map(value: Dict[str, Any]) -> str:
+    """Encode a tool-name-keyed mapping for session state.
+
+    Session state expands dots in dict keys as a nested path, which would
+    split a tool name such as ``manage.folder_list``.
+    """
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _decode_name_map(value: Any) -> Optional[Dict[str, Any]]:
+    """Decode a mapping written by ``_encode_name_map``; plain dicts are legacy."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+    return value if isinstance(value, dict) else None
+
+
 @dataclass(frozen=True)
 class _DeferredToolDocument:
     """Raw callable schema plus model-locale discovery metadata."""
@@ -755,13 +774,13 @@ class ProgressiveToolRail(DeepAgentRail):
     ) -> Optional[Dict[str, str]]:
         if session is None:
             return None
-        state = session.get_state(_DISCOVERED_TOOL_FINGERPRINTS_KEY)
-        if not isinstance(state, dict):
+        state = _decode_name_map(session.get_state(_DISCOVERED_TOOL_FINGERPRINTS_KEY))
+        if state is None:
             return None
         return {
-            str(name).strip(): str(fingerprint).strip()
+            str(name).strip(): fingerprint.strip()
             for name, fingerprint in state.items()
-            if str(name).strip() and str(fingerprint).strip()
+            if str(name).strip() and isinstance(fingerprint, str) and fingerprint.strip()
         }
 
     def _set_discovered_tools(
@@ -788,11 +807,13 @@ class ProgressiveToolRail(DeepAgentRail):
         session.update_state(
             {
                 _DISCOVERED_TOOLS_KEY: normalized_names,
-                _DISCOVERED_TOOL_FINGERPRINTS_KEY: {
-                    name: discovered_fingerprints[name]
-                    for name in normalized_names
-                    if name in discovered_fingerprints
-                },
+                _DISCOVERED_TOOL_FINGERPRINTS_KEY: _encode_name_map(
+                    {
+                        name: discovered_fingerprints[name]
+                        for name in normalized_names
+                        if name in discovered_fingerprints
+                    }
+                ),
             }
         )
 
@@ -927,32 +948,18 @@ class ProgressiveToolRail(DeepAgentRail):
         current_tools = self._normalize_deferred_catalog(current_tools) or {}
         current_fingerprints = self._collect_deferred_tool_fingerprints(agent)
         registry_revision = self._get_registry_revision(agent)
-        state = session.get_state(_DEFERRED_TOOL_CATALOG_STATE_KEY)
-        if not isinstance(state, dict):
-            state = {}
+        state = _decode_name_map(session.get_state(_DEFERRED_TOOL_CATALOG_STATE_KEY)) or {}
 
-        initial_tools = state.get("initial_tools")
-        if not isinstance(initial_tools, dict):
+        initial_tools = self._normalize_deferred_catalog(state.get("initial_tools"))
+        if initial_tools is None:
             initial_tools = dict(current_tools)
-        initial_tools = {
-            str(name): str(description or "")
-            for name, description in initial_tools.items()
-            if str(name).strip()
-        }
         initial_fingerprints = self._normalize_deferred_catalog(
             state.get(_DEFERRED_TOOL_CATALOG_INITIAL_FINGERPRINTS_STATE_KEY)
         )
         if initial_fingerprints is None:
             initial_fingerprints = dict(current_fingerprints)
 
-        previous_tools = state.get("tools")
-        if not isinstance(previous_tools, dict):
-            previous_tools = {}
-        previous_tools = {
-            str(name): str(description or "")
-            for name, description in previous_tools.items()
-            if str(name).strip()
-        }
+        previous_tools = self._normalize_deferred_catalog(state.get("tools")) or {}
         previous_fingerprints = self._normalize_deferred_catalog(
             state.get(_DEFERRED_TOOL_CATALOG_FINGERPRINTS_STATE_KEY)
         )
@@ -1076,22 +1083,24 @@ class ProgressiveToolRail(DeepAgentRail):
             if not changed:
                 session.update_state(
                     {
-                        _DEFERRED_TOOL_CATALOG_STATE_KEY: {
-                            **state,
-                            "initialized": True,
-                            "version": version,
-                            "delta_count": 0,
-                            "language": str(language),
-                            "initial_tools": dict(initial_tools),
-                            "tools": dict(current_tools),
-                            _DEFERRED_TOOL_CATALOG_INITIAL_FINGERPRINTS_STATE_KEY: dict(
-                                initial_fingerprints
-                            ),
-                            _DEFERRED_TOOL_CATALOG_FINGERPRINTS_STATE_KEY: dict(
-                                current_fingerprints
-                            ),
-                            _DEFERRED_TOOL_REGISTRY_REVISION_METADATA_KEY: registry_revision,
-                        }
+                        _DEFERRED_TOOL_CATALOG_STATE_KEY: _encode_name_map(
+                            {
+                                **state,
+                                "initialized": True,
+                                "version": version,
+                                "delta_count": 0,
+                                "language": str(language),
+                                "initial_tools": dict(initial_tools),
+                                "tools": dict(current_tools),
+                                _DEFERRED_TOOL_CATALOG_INITIAL_FINGERPRINTS_STATE_KEY: dict(
+                                    initial_fingerprints
+                                ),
+                                _DEFERRED_TOOL_CATALOG_FINGERPRINTS_STATE_KEY: dict(
+                                    current_fingerprints
+                                ),
+                                _DEFERRED_TOOL_REGISTRY_REVISION_METADATA_KEY: registry_revision,
+                            }
+                        )
                     }
                 )
                 return
@@ -1167,21 +1176,23 @@ class ProgressiveToolRail(DeepAgentRail):
 
         session.update_state(
             {
-                _DEFERRED_TOOL_CATALOG_STATE_KEY: {
-                    "initialized": True,
-                    "version": version,
-                    "delta_count": next_delta_count,
-                    "language": str(language),
-                    "initial_tools": dict(initial_tools),
-                    "tools": dict(current_tools),
-                    _DEFERRED_TOOL_CATALOG_INITIAL_FINGERPRINTS_STATE_KEY: dict(
-                        initial_fingerprints
-                    ),
-                    _DEFERRED_TOOL_CATALOG_FINGERPRINTS_STATE_KEY: dict(
-                        current_fingerprints
-                    ),
-                    _DEFERRED_TOOL_REGISTRY_REVISION_METADATA_KEY: registry_revision,
-                }
+                _DEFERRED_TOOL_CATALOG_STATE_KEY: _encode_name_map(
+                    {
+                        "initialized": True,
+                        "version": version,
+                        "delta_count": next_delta_count,
+                        "language": str(language),
+                        "initial_tools": dict(initial_tools),
+                        "tools": dict(current_tools),
+                        _DEFERRED_TOOL_CATALOG_INITIAL_FINGERPRINTS_STATE_KEY: dict(
+                            initial_fingerprints
+                        ),
+                        _DEFERRED_TOOL_CATALOG_FINGERPRINTS_STATE_KEY: dict(
+                            current_fingerprints
+                        ),
+                        _DEFERRED_TOOL_REGISTRY_REVISION_METADATA_KEY: registry_revision,
+                    }
+                )
             }
         )
 
@@ -1199,10 +1210,11 @@ class ProgressiveToolRail(DeepAgentRail):
             return None
         if not isinstance(value, dict):
             return None
+        # Nested dicts are dotted names expanded by legacy state; drop them.
         return dict(sorted({
             str(name): str(description or "")
             for name, description in value.items()
-            if str(name).strip()
+            if str(name).strip() and not isinstance(description, dict)
         }.items()))
 
     @staticmethod
@@ -1315,17 +1327,11 @@ class ProgressiveToolRail(DeepAgentRail):
                 else self._collect_deferred_tool_descriptions(agent)
             )
 
-        state = session.get_state(_DEFERRED_TOOL_CATALOG_STATE_KEY)
-        if not isinstance(state, dict):
-            state = {}
+        state = _decode_name_map(session.get_state(_DEFERRED_TOOL_CATALOG_STATE_KEY)) or {}
 
-        initial_tools = state.get("initial_tools")
-        if isinstance(initial_tools, dict):
-            return dict(sorted({
-                str(name): str(description or "")
-                for name, description in initial_tools.items()
-                if str(name).strip()
-            }.items()))
+        initial_tools = self._normalize_deferred_catalog(state.get("initial_tools"))
+        if initial_tools is not None:
+            return initial_tools
 
         if current_tools is None:
             current_tools = self._collect_deferred_tool_descriptions(agent)
@@ -1334,17 +1340,15 @@ class ProgressiveToolRail(DeepAgentRail):
             if state.get("initialized") and isinstance(state.get("tools"), dict)
             else current_tools
         )
-        initial_tools = dict(sorted({
-            str(name): str(description or "")
-            for name, description in seed_tools.items()
-            if str(name).strip()
-        }.items()))
+        initial_tools = self._normalize_deferred_catalog(seed_tools) or {}
         session.update_state(
             {
-                _DEFERRED_TOOL_CATALOG_STATE_KEY: {
-                    **state,
-                    "initial_tools": dict(initial_tools),
-                }
+                _DEFERRED_TOOL_CATALOG_STATE_KEY: _encode_name_map(
+                    {
+                        **state,
+                        "initial_tools": dict(initial_tools),
+                    }
+                )
             }
         )
         return initial_tools

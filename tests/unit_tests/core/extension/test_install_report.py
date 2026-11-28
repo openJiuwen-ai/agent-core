@@ -86,7 +86,8 @@ async def test_cross_domain_wait_and_reverse_dependency_protection(tmp_path):
     root = tmp_path / "installed"
     _write(root / "a" / "1.0.0", "a", "worker-a", requires=(PackageDependency("b", ">=1.0.0"),))
     _write(root / "b" / "1.0.0", "b", "worker-b")
-    a, a_bus = await _registry(root, "worker-a")
+    # Exercise successful dependency handoff without a one-second CI scheduling deadline.
+    a, a_bus = await _registry(root, "worker-a", timeout=5)
     b, b_bus = await _registry(root, "worker-b")
     try:
         task = asyncio.create_task(a.load_installed())
@@ -97,7 +98,8 @@ async def test_cross_domain_wait_and_reverse_dependency_protection(tmp_path):
             await asyncio.sleep(0.01)
         assert not task.done()
         assert (await b.load_installed())[0].status == "SUCCESS"
-        assert (await task)[0].status == "SUCCESS"
+        reports = await task
+        assert reports[0].status == "SUCCESS", reports[0].error
         assert [item.package_id for item in a.runtime.active_packages()] == ["a"]
         assert [item.package_id for item in b.runtime.active_packages()] == ["b"]
         assert (await b.uninstall("b")).error.code == "EXTENSION_PACKAGE_IN_USE"
@@ -517,6 +519,41 @@ async def test_highest_version_and_domain_projection_are_stable(tmp_path):
         assert registry.runtime.get_active("x").version == "2.0.0"
         assert (await registry.uninstall("x")).status == "SUCCESS"
         assert await registry.load_installed() == ()
+    finally:
+        await _close(registry, bus)
+
+
+@pytest.mark.asyncio
+async def test_startup_can_activate_an_explicit_install_snapshot(tmp_path):
+    root = tmp_path / "installed"
+    selected = _write(root / "selected" / "1.0.0", "selected", "a")
+    _write(root / "late" / "1.0.0", "late", "a")
+    registry, bus = await _registry(root, "a")
+    try:
+        reports = await registry.load_installed((str(selected),))
+
+        assert [item.package_id for item in reports] == ["selected"]
+        assert [item.package_id for item in registry.runtime.active_packages()] == ["selected"]
+    finally:
+        await _close(registry, bus)
+
+
+@pytest.mark.asyncio
+async def test_startup_snapshot_rejects_unmanaged_root_without_rewriting_manifest(tmp_path):
+    root = tmp_path / "installed"
+    unmanaged = _write(tmp_path / "outside" / "demo" / "1.0.0", "demo", "a")
+    manifest_path = unmanaged / "manifest.json"
+    original = manifest_path.read_bytes()
+    registry, bus = await _registry(root, "a")
+    try:
+        reports = await registry.load_installed((unmanaged,))
+
+        assert len(reports) == 1
+        assert reports[0].status == "FAILED"
+        assert reports[0].error.code == "EXTENSION_SOURCE_INVALID"
+        assert registry.runtime.active_packages() == ()
+        assert manifest_path.read_bytes() == original
+        assert "enable" not in json.loads(original)
     finally:
         await _close(registry, bus)
 

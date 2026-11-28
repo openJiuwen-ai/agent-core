@@ -100,7 +100,7 @@ def _resolve_team_mode(spec: TeamAgentSpec) -> str:
     # "hybrid": the leader keeps its spawn_* tools so the roster can
     # still grow at runtime. Lock it down by setting an explicit
     # "predefined" team_mode.
-    avatar_roles = {TeamRole.HUMAN_AGENT, TeamRole.PASSIVE_HUMAN, TeamRole.BRIDGE_AGENT}
+    avatar_roles = {TeamRole.HUMAN_AGENT, TeamRole.PASSIVE_HUMAN, TeamRole.BRIDGE_AGENT, TeamRole.HOST_MANAGED}
     non_avatar_predefined = [m for m in spec.predefined_members if m.role_type not in avatar_roles]
     return "hybrid" if non_avatar_predefined else "default"
 
@@ -595,10 +595,18 @@ class AgentConfigurator:
             # manager (no second attach path).
             resolved_language = self._blueprint.language if self._blueprint else "cn"
             self._attach_workspace_cache(spec, ctx, resolved_language)
+            self._bind_external_execution_environment(spec, ctx, member_runtime, resolved_language)
             return member_runtime
 
         agent_spec = self.resolve_agent_spec(
             spec, ctx.role, ctx.member_name, agent_template_spec=ctx.agent_template_spec
+        )
+        from openjiuwen.agent_teams.experts.template_connectors import attach_template_connectors
+
+        agent_spec = attach_template_connectors(
+            agent_spec,
+            team_name=(ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name,
+            member_name=ctx.member_name or "",
         )
         resolved_language = self._blueprint.language if self._blueprint else _resolve_language(agent_spec.language)
         member_name = ctx.member_name
@@ -791,7 +799,8 @@ class AgentConfigurator:
                     "exclude_tools": exclude,
                     "qualify_ids": spec.spawn_mode == "inprocess",
                     "team_name": resolved_team_name,
-                    "team_permissions_enabled": spec.enable_permissions,
+                    # This tool-only flag also retains replies to legacy member requests.
+                    "team_permissions_enabled": spec.enable_permissions or self._requires_legacy_approval(spec),
                 },
             ),
             RailSpec(
@@ -913,6 +922,8 @@ class AgentConfigurator:
                 member_card_id=self._card.id,
                 project_dir=member_project_dir,
             )
+        if ctx.agent_template_ref:
+            member_build_context.extras["team.agent_template_ref"] = dict(ctx.agent_template_ref)
         # Swarmflow shared infrastructure (worker-model resolver / worker +
         # human base specs / concurrency governor / budget ledger /
         # external-CLI allowlist / expert table). It is a team-level
@@ -1144,6 +1155,31 @@ class AgentConfigurator:
         )
         return TeamMemoryManager(params)
 
+    @classmethod
+    def _requires_legacy_approval(cls, spec: TeamAgentSpec) -> bool:
+        """Derive reply capability from specs usable by coordinated members."""
+        candidates = [
+            cls.resolve_agent_spec(spec, member.role_type, member.member_name)
+            for member in spec.predefined_members
+            if member.role_type.is_coordinated_member
+        ]
+        if _resolve_team_mode(spec) != "predefined":
+            candidates.extend(cls.resolve_agent_spec(spec, role) for role in TeamRole if role.is_coordinated_member)
+            from openjiuwen.agent_teams.constants import RESERVED_MEMBER_NAMES
+            from openjiuwen.agent_teams.tools.tool_member import validate_member_name
+
+            reserved = RESERVED_MEMBER_NAMES | {spec.leader.member_name}
+            other_members = {
+                member.member_name for member in spec.predefined_members
+                if not member.role_type.is_coordinated_member
+            }
+            candidates.extend(
+                cls.resolve_agent_spec(spec, TeamRole.TEAMMATE, name)
+                for name in spec.agents
+                if name not in reserved and name not in other_members and validate_member_name(name) is None
+            )
+        return any(agent_spec.approval_required_tools for agent_spec in candidates)
+
     @staticmethod
     def resolve_agent_spec(
         spec: TeamAgentSpec,
@@ -1285,6 +1321,10 @@ class AgentConfigurator:
             on_member_started=self._on_teammate_created,
             on_member_restarted=on_member_restarted,
             on_member_stopped=on_member_stopped,
+            on_explicit_member_change=(
+                spec.build_context.extras.get("team.on_explicit_member_change")
+                if spec.build_context is not None else None
+            ),
             validate_worktree_isolation=validate_worktree_isolation,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
             org_task_manager=org_task_manager,
@@ -1482,6 +1522,37 @@ class AgentConfigurator:
         # manager's resident instance.
         if self.team_backend is not None:
             self.team_backend.attach_workspace_manager(self.workspace_manager)
+
+    def _bind_external_execution_environment(
+        self,
+        spec: TeamAgentSpec,
+        ctx: TeamRuntimeContext,
+        member_runtime: "MemberRuntime",
+        language: str,
+    ) -> None:
+        """Give an external harness member the same environment policy as a native one.
+
+        A native member's ``BuildContext.resolve_execution_environment`` is
+        bound to its ``AbilityManager``; a third-party harness has none, so the
+        same per-member resolver is handed to the runtime and applied to the
+        provider process on every start. Without a platform build context
+        there is no policy to resolve.
+        """
+        bind = getattr(member_runtime, "bind_execution_environment", None)
+        if bind is None or spec.build_context is None:
+            return
+        from openjiuwen.agent_teams.rails.team_context import inject_team_handles
+
+        member_build_context = spec.build_context.derive(
+            member_name=ctx.member_name or "",
+            role=ctx.role.value,
+            language=language,
+            member_card_id=self._card.id,
+        )
+        # Per-member extras, as for a native member: never share the base dict.
+        member_build_context.extras = dict(member_build_context.extras)
+        inject_team_handles(member_build_context.extras, team_backend=self.team_backend)
+        bind(member_build_context.resolve_execution_environment)
 
     def _prepare_external_cli_workspace(
         self,

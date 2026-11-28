@@ -9,6 +9,7 @@ This module provides task management functionality for agent teams.
 import json
 import shutil
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -23,6 +24,7 @@ from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.paths import team_workspace_dir
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
+    TaskAcceptedEvent,
     TaskCancelledEvent,
     TaskClaimedEvent,
     TaskCompletedEvent,
@@ -42,8 +44,10 @@ from openjiuwen.agent_teams.schema.events import (
     TeamTopic,
 )
 from openjiuwen.agent_teams.schema.status import (
+    MEMBER_DEPARTED_STATUSES,
     TASK_TRANSITIONS,
     MemberMode,
+    MemberStatus,
     TaskStatus,
     is_valid_transition,
 )
@@ -58,6 +62,7 @@ from openjiuwen.agent_teams.schema.task import (
     TaskSummary,
 )
 from openjiuwen.agent_teams.context import get_session_id
+from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.tools.database import (
     TASK_TERMINAL_STATUSES,
     TeamDatabase,
@@ -159,6 +164,47 @@ class TeamTaskManager:
         self.team_plan_id = _safe_token(team_plan_id or get_session_id() or team_name, "team_plan")
         self.leader_member_name = str(leader_member_name or "").strip()
         self._dispatch_mode = dispatch_mode
+        self._acceptance_listener: Callable[[TaskAcceptedEvent], Awaitable[None]] | None = None
+        self._delivery_listener: Callable[[str, str], None] | None = None
+
+    def set_task_acceptance_listener(
+        self, listener: Callable[[TaskAcceptedEvent], Awaitable[None]],
+        *, on_delivery: Callable[[str, str], None] | None = None,
+    ) -> None:
+        self._acceptance_listener = listener
+        self._delivery_listener = on_delivery
+
+    @staticmethod
+    def _acceptance_version(task: TeamTaskBase) -> str:
+        return f"{task.revision}:{task.review_round}"
+
+    def _notify_task_delivered(self, task_id: str, version: str) -> None:
+        if self._delivery_listener is not None:
+            try:
+                self._delivery_listener(task_id, version)
+            except Exception as exc:
+                team_logger.warning("Task delivery listener failed: %s", type(exc).__name__)
+
+    async def _notify_task_accepted(self, task: TeamTaskBase) -> None:
+        listener = self._acceptance_listener
+        if listener is None or task.assignee != self.member_name:
+            return
+        try:
+            await listener(TaskAcceptedEvent(
+                task.task_id, self._acceptance_version(task), task.content or "",
+                task.summary or "", task.note or "",
+            ))
+        except Exception as exc:
+            team_logger.warning("Task acceptance listener failed: %s", type(exc).__name__)
+
+    async def notify_task_acceptance(self, task_id: str, version: str) -> None:
+        """Load authored delivery from its committed record when a peer accepts it."""
+        if self._acceptance_listener is None:
+            return
+        task = await self.db.task.get_task(task_id)
+        if task is not None and task.team_name == self.team_name and task.status == TaskStatus.COMPLETED.value:
+            if self._acceptance_version(task) == version:
+                await self._notify_task_accepted(task)
 
     @property
     def dispatch_mode(self) -> str:
@@ -178,7 +224,7 @@ class TeamTaskManager:
             self.team_plan_id = _safe_token(team_plan_id, "team_plan")
 
     async def _validate_task_owner(self, member_name: str) -> TaskOpResult:
-        """Validate that a task owner exists and is not the team leader."""
+        """Validate that the named member can own a team task."""
         owner = str(member_name or "").strip()
         if not owner:
             return TaskOpResult.success()
@@ -191,6 +237,8 @@ class TeamTaskManager:
         member = await self.db.member.get_member(owner, self.team_name)
         if not member:
             return TaskOpResult.fail(f"Member {owner} not found in team {self.team_name}")
+        if member.role == TeamRole.HOST_MANAGED.value:
+            return TaskOpResult.fail(f"Host-managed member {owner} cannot be assigned team tasks")
         return TaskOpResult.success()
 
     async def add_graph(self, specs: list[TaskGraphSpec], *, suspend_parent: str | None = None) -> TaskGraphResult:
@@ -277,7 +325,12 @@ class TeamTaskManager:
         created: list[TeamTaskBase] = []
         for node in new_tasks:
             status = status_by_id.get(node.task_id, node.initial_status)
-            await self._publish_task_created(node.task_id, status)
+            await self._publish_task_created(
+                node.task_id,
+                status,
+                member_name=node.assignee or None,
+                parent_task_id=node.parent_task_id,
+            )
             task = TeamTaskBase(
                 task_id=node.task_id,
                 team_name=self.team_name,
@@ -332,8 +385,23 @@ class TeamTaskManager:
             return TaskCreateResult.fail(f"Failed to create task {task_id or title!r}: {result.reason}")
         return TaskCreateResult.success(result.tasks[0])
 
-    async def _publish_task_created(self, task_id: str, status: str) -> None:
-        """Publish a task-created event; log-and-continue on failure."""
+    async def _publish_task_created(
+        self,
+        task_id: str,
+        status: str,
+        *,
+        member_name: Optional[str] = None,
+        parent_task_id: Optional[str] = None,
+    ) -> None:
+        """Publish a task-created event; log-and-continue on failure.
+
+        ``member_name`` carries the task's assignee at creation time (scheduled
+        dispatch seeds every task ``PENDING`` with an assignee). Trajectory
+        consumers read it to attribute a pending task to its owner before the
+        scheduler starts it; unassigned tasks leave it ``None``.
+        ``parent_task_id`` marks a member-split subtask (F_128); its creation
+        suspends the parent, which emits no event of its own.
+        """
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
@@ -342,6 +410,8 @@ class TeamTaskManager:
                         team_name=self.team_name,
                         task_id=task_id,
                         status=status,
+                        member_name=member_name,
+                        parent_task_id=parent_task_id,
                     )
                 ),
             )
@@ -595,6 +665,8 @@ class TeamTaskManager:
         member = await self.db.member.get_member(member_name, self.team_name)
         if not member:
             return TaskOpResult.fail(f"Member {member_name} not found in team {self.team_name}")
+        if member.role == TeamRole.HOST_MANAGED.value:
+            return TaskOpResult.fail(f"Host-managed member {member_name} cannot claim team tasks")
         if member.mode == MemberMode.PLAN_MODE.value:
             return TaskOpResult.fail(
                 "PLAN_MODE members must call submit_plan first; "
@@ -728,11 +800,15 @@ class TeamTaskManager:
 
         team_logger.info(f"Task {task_id} completed")
 
+        self._notify_task_delivered(task_id, self._acceptance_version(completed_task))
+        await self._notify_task_accepted(completed_task)
+
         await self._publish_task_event(
             TaskCompletedEvent(
                 team_name=self.team_name,
                 task_id=task_id,
                 member_name=completed_task.assignee,
+                acceptance_version=self._acceptance_version(completed_task),
             ),
             error_label=f"Task completed event for {task_id}",
         )
@@ -771,12 +847,13 @@ class TeamTaskManager:
         framework to dispatch/notify.
         """
         submitted = await self.db.task.submit_for_review(task.task_id, summary=summary, note=note)
-        if not submitted:
+        if submitted is None:
             return TaskOpResult.fail(
                 f"Task {task.task_id} cannot be submitted for review from status "
                 f"'{task.status}' (must be in_progress)"
             )
         team_logger.info("Task %s submitted for review", task.task_id)
+        self._notify_task_delivered(task.task_id, self._acceptance_version(submitted))
         await self._publish_task_event(
             TaskSubmittedForReviewEvent(
                 team_name=self.team_name,
@@ -1061,11 +1138,13 @@ class TeamTaskManager:
         completed_task = result.get("task")
         unblocked_tasks = result.get("unblocked_tasks", [])
         team_logger.info("Task %s verified (passed) and completed", task.task_id)
+        await self._notify_task_accepted(completed_task)
         await self._publish_task_event(
             TaskVerifiedEvent(
                 team_name=self.team_name,
                 task_id=task.task_id,
                 member_name=completed_task.assignee,
+                acceptance_version=self._acceptance_version(completed_task),
             ),
             error_label=f"Task verified event for {task.task_id}",
         )
@@ -1878,6 +1957,7 @@ class TeamTaskManager:
                 team_name=self.team_name,
                 task_id=task_id,
                 member_name=member_name,
+                resumed=bool(task.resume_pending),
             ),
             error_label=f"Task started event for {task_id}",
         )
@@ -1886,17 +1966,22 @@ class TeamTaskManager:
     async def reassign(self, task_id: str, new_assignee: str) -> TaskOpResult:
         """Hand an owned task from its current owner to another member.
 
-        Atomic assignee swap — **the task keeps whatever status it had** and
-        never bounces through PENDING, so no spurious ``TASK_RELEASED`` wakes
-        idle teammates and there is no claimable-pool window to race into.
-        Works across ``TASK_REASSIGNABLE_STATUSES``: an assigned-but-not-yet-
-        started task (``PENDING`` / ``BLOCKED`` — the scheduled mode's resting
-        state) is in fact the cheapest thing to hand over, since no reasoning
-        is in flight to discard. Fires exactly two targeted events:
-        ``TASK_REVOKED`` tells the former owner to steer off the now-foreign
-        task, ``TASK_CLAIMED`` tells the new owner it is theirs. The former
-        owner's other claims and in-flight round stay intact — this touches
-        only the one task.
+        Live-owner path: atomic assignee swap — **the task keeps whatever
+        status it had** and never bounces through PENDING, so no spurious
+        ``TASK_RELEASED`` wakes idle teammates and there is no claimable-pool
+        window to race into.
+
+        Departed-owner path (``SHUTDOWN_REQUESTED`` / ``SHUTDOWN``): an
+        ``IN_PROGRESS`` task is redirected to ``PENDING`` *with*
+        ``new_assignee`` already set. Keeping the assignee closes the public
+        claimable-pool race; landing on ``PENDING`` makes the new owner's
+        startup board survey see the work even if the transient
+        ``TASK_CLAIMED`` event was published before its runtime was up.
+
+        Works across ``TASK_REASSIGNABLE_STATUSES``. Fires exactly two
+        targeted events: ``TASK_REVOKED`` for the former owner,
+        ``TASK_CLAIMED`` for the new owner (never ``TASK_RELEASED`` on either
+        path — the task stays owned throughout).
 
         The new member is validated *before* the swap so a bad target never
         disturbs the task.
@@ -1930,12 +2015,31 @@ class TeamTaskManager:
                 "wait for the subtasks to finish, or cancel them first"
             )
 
-        swapped = await self.db.task.reassign_task(task_id, old_assignee, new_assignee)
-        if not swapped:
-            return TaskOpResult.fail(
-                f"Task {task_id} could not be reassigned; it is either no longer held by "
-                f"{old_assignee}, or its status ({task.status}) does not allow handing it over"
+        if (
+            task.status == TaskStatus.IN_PROGRESS.value
+            and await self._owner_is_departed(old_assignee)
+        ):
+            redirected = await self.db.task.redirect_working_task_to_pending(
+                task_id, old_assignee, new_assignee
             )
+            if not redirected:
+                return TaskOpResult.fail(
+                    f"Task {task_id} could not be redirected to pending under {new_assignee}; "
+                    f"it is either no longer held by {old_assignee}, or not in_progress"
+                )
+            team_logger.info(
+                "Task %s handed from departed %s to %s as directed pending",
+                task_id,
+                old_assignee,
+                new_assignee,
+            )
+        else:
+            swapped = await self.db.task.reassign_task(task_id, old_assignee, new_assignee)
+            if not swapped:
+                return TaskOpResult.fail(
+                    f"Task {task_id} could not be reassigned; it is either no longer held by "
+                    f"{old_assignee}, or its status ({task.status}) does not allow handing it over"
+                )
 
         await self._publish_task_event(
             TaskRevokedEvent(team_name=self.team_name, task_id=task_id, member_name=old_assignee),
@@ -1946,6 +2050,49 @@ class TeamTaskManager:
             error_label=f"Task claimed event for {task_id} (to {new_assignee})",
         )
         return TaskOpResult.success()
+
+    @staticmethod
+    def _parse_member_status(status: str | None) -> MemberStatus | None:
+        """Normalize a persisted member status into ``MemberStatus``.
+
+        Accepts the canonical enum value (``shut_down``), a lower-cased value
+        (``BUSY`` → ``busy``), and the enum *name* used by some fixtures /
+        legacy rows (``SHUTDOWN`` → ``MemberStatus.SHUTDOWN``). The last form
+        matters because ``"SHUTDOWN".lower()`` is ``"shutdown"``, which is
+        *not* the value ``"shut_down"``.
+        """
+        if status is None:
+            return None
+        raw = str(status).strip()
+        if not raw:
+            return None
+        for candidate in (raw, raw.lower()):
+            try:
+                return MemberStatus(candidate)
+            except ValueError:
+                pass
+        try:
+            return MemberStatus[raw.upper()]
+        except KeyError:
+            return None
+
+    async def _owner_is_departed(self, member_name: str) -> bool:
+        """Whether ``member_name`` has been released by the leader (shutdown)."""
+        status = await self.db.member.get_member_status(self.team_name, member_name)
+        if not status:
+            # Missing roster row: treat as gone so the task is not left on a ghost.
+            return True
+        member_status = self._parse_member_status(status)
+        if member_status is None:
+            team_logger.warning(
+                "Unrecognized member status %r for %s in team %s; "
+                "treating owner as still on the team (not departed)",
+                status,
+                member_name,
+                self.team_name,
+            )
+            return False
+        return member_status in MEMBER_DEPARTED_STATUSES
 
     async def approve_plan(
         self,

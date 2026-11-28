@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/rails/` |
-| 最近一次修订日期 | 2026-11-18 |
+| 最近一次修订日期 | 2026-11-24 |
 | 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_21_cua-desktop-subagent.md`、`F_22_cli-jiuwen-memory-rail-mount-and-switch.md` |
 
 ## 范围 / 边界
@@ -176,6 +176,12 @@ author_email: yangzequ1@huawei.com
       Coding 的 `uninit(agent)` 仅清空对应 Agent 的缓冲，其余使用者继续运行。
       既有超时、失败处理及 provider 接口不变，不承诺外部写入成功或重启续接。
 
+16. **演进轨迹持有采集到的 GenAI 序列**。采集时直接持有 observability 登记的序列头，pending、窗口和快照
+    随对应记录持有该头。快照可在 observability 注册表清空后继续读取。合并、裁剪、事件链重建
+    和元数据投影保留紧凑表示。消费者可读取所需属性，`Trajectory.to_otlp()` 导出完整、自包含的
+    标准属性。采集时已失效的序列使用既有缺失占位。查找与容量契约见
+    [S_14](../agent_teams/S_14_monitor-and-observability.md) 不变量 19。
+
 ## 接口契约
 
 ```python
@@ -183,7 +189,7 @@ author_email: yangzequ1@huawei.com
 AgentModeRail, AskUserPayload, AskUserRail, BaseInterruptRail, BaseSecurityRail,
 CodingMemoryRail, ConfirmInterruptRail, ContextEvolutionRail, DeepAgentRail,
 EvolutionRail, EvolutionInterruptRail, ExternalMemoryRail, HeartbeatRail,
-JiuwenMemoryRail, JiuwenMemoryCodingRail, ModelAnomalyDetectionRail, LspRail, McpRail, MemoryRail, MemberSkillEvolutionRail,
+JiuwenMemoryRail, JiuwenMemoryCodingRail, JiuwenTeamMemoryRail, ModelAnomalyDetectionRail, LspRail, McpRail, MemoryRail, MemberSkillEvolutionRail,
 MultimodalContextSummarizerRail, ARCHIVED_SCREEN_PLACEHOLDER,
 PermissionInterruptRail, ProgressiveToolRail, SafetyPromptRail, SecurityAllow,
 SecurityCheckContext, SecurityDecision, SecurityInterrupt, SecurityReject, SecurityRail,
@@ -284,3 +290,11 @@ class BaseSecurityRail(AgentRail):
 `JiuwenMemoryCodingRail.init` 跳过没有有效名称的工具 schema；工具注册或静态提示词装配异常时，撤回该 owner 的部分注册，Agent 主流程继续运行。卸载单项工具、静态提示词或动态上下文失败，不中断其余清理及最后一个 owner 的排空写入、关闭 Provider。
 
 `JiuwenMemoryRail` 提供静态辅助入口 `resolve_user_text_for_memory`、`is_background_run`、`build_memory_context_block`、`extract_assistant_output`、`unwrap_jiuwenswarm_envelope`，供同层记忆 Rail 共享上下文解析；保留原带下划线名称兼容既有调用，解析与返回语义不变。
+
+## Team 文档记忆
+
+`JiuwenTeamMemoryRail` 从 `openjiuwen.harness.rails` 导出，沿用 Coding Rail 的身份、工具、写队列和排空机制。每位回答者持有自己的 Rail。宿主 Provider 使用 `sync_turn(..., sources=...)` 接收结构化来源。`sources[].id` 在单次提交内唯一，用于引用本次来源证据。Core 不决定成员权、项目键、落点、模型或共享 Runtime。
+
+含可信真人来源的成功回合可触发回写。宿主标记的原文和已接受的 `ask_user` 答复属于真人来源，问题正文属于 Agent 上下文。匹配卡片选项时，来源额外提供已选项说明和问题，上送的证据正文仍是用户答复。异常、取消、暂停中的回合和纯内部对话不触发人机回写。
+
+子任务验收可触发回写。验收以任务 ID、任务修订号和评审轮次去重。任务提交与成功执行回复可精确关联时一起提交，验收可等待该轮的最后回复，任务状态流转和通知照常进行。没有实质交付文本时跳过抽取。回合退出时清理活动交付记录，包括所有者解绑和来源处理异常。退出排空已提交写入，最后一个 owner 退出后释放缓存和 Provider。

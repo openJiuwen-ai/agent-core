@@ -5,10 +5,21 @@
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import pytest
 
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.harness.rails.interrupt.interrupt_base import ApproveResult, InterruptResult
+from openjiuwen.harness.rails.security import tool_security_rail
 from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
 from openjiuwen.harness.security.host import ToolPermissionHost
+from openjiuwen.harness.security.models import PermissionConfirmResponse
+from openjiuwen.harness.security.permission_engine.fileguard.shell_paths import analyze_posix_shell_paths
+from openjiuwen.harness.security.permission_engine.shell_path_context import shell_path_call
 
 
 def test_session_remember_calls_session_persist_hook() -> None:
@@ -165,6 +176,113 @@ def _ask_bash_rail(*, persist_session=None, persist_permanent=None):
     )
     rail = PermissionInterruptRail(config=dict(disk_snapshot), host=host)
     return rail, disk_snapshot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persist_allow", [False, True])
+@pytest.mark.parametrize("hosted", [False, True])
+async def test_partial_shell_remember_allows_once_and_asks_again(tmp_path, monkeypatch, persist_allow, hosted):
+    messages = []
+    monkeypatch.setattr(tool_security_rail.logger, "info", lambda message, *args: messages.append(message % args))
+    workspace = tmp_path.resolve()
+    args = {"command": "head ./external", "workdir": str(workspace)}
+    payload = {"approved": True, "auto_confirm": True, "persist_allow": persist_allow}
+    answer = "interrupt"
+    writes = []
+
+    async def confirm(request):
+        assert request.auto_confirm_key == ""
+        return answer
+
+    def persist(config):
+        writes.append(config)
+        return True
+
+    config = {"enabled": True, "tools": {"bash": "ask"}, "defaults": {"*": "allow"}}
+    host = ToolPermissionHost(
+        request_permission_confirmation=confirm if hosted else None,
+        persist_allow_rule=persist,
+        persist_session_allow_rule=persist,
+    )
+    rail = PermissionInterruptRail(config=config, host=host)
+    session, stored = _session_store()
+    ctx = AgentCallbackContext(agent=object(), session=session)
+    call = ToolCall(id="c1", type="function", name="bash", arguments=json.dumps(args))
+    analysis = analyze_posix_shell_paths(args["command"], args["workdir"], "auto", workspace)
+    assert analysis.coverage == "partial"
+    with shell_path_call() as scope:
+        scope.bind(SimpleNamespace(analyze_local_paths=lambda _: analysis), args)
+        request = await rail.resolve_interrupt(ctx, call, None)
+        assert isinstance(request, InterruptResult)
+        assert "确认后仅放行本次" in request.request.message
+        assert "bash:head" not in request.request.message
+        if hosted:
+            answer = PermissionConfirmResponse(**payload)
+        decision = await rail.resolve_interrupt(ctx, call, None if hosted else payload)
+        assert isinstance(decision, ApproveResult)
+        assert not writes
+        assert not stored
+        assert any("permission.user.decision" in line and "decision=allow_once persisted=False" in line
+                   for line in messages)
+
+    answer = "interrupt"
+    with shell_path_call() as scope:
+        scope.bind(SimpleNamespace(analyze_local_paths=lambda _: analysis), args)
+        assert isinstance(await rail.resolve_interrupt(ctx, call, None), InterruptResult)
+
+
+@pytest.mark.asyncio
+async def test_complete_shell_remember_can_save_exact_path_without_a_cache_key(tmp_path):
+    workspace = tmp_path.resolve()
+    args = {"command": "cat ./external", "workdir": str(workspace)}
+    target = (workspace / "external").as_posix()
+    writes = []
+    config = {
+        "enabled": True,
+        "tools": {"bash": "ask"},
+        "defaults": {"*": "allow"},
+        "file_guard": {"enabled": True, "paths": [{"path": target, "read": "ask"}]},
+    }
+    host = ToolPermissionHost(
+        resolve_workspace_dir=lambda: workspace,
+        persist_session_allow_rule=lambda config: writes.append(config) or True,
+    )
+    rail = PermissionInterruptRail(config=config, host=host)
+    session, stored = _session_store()
+    ctx = AgentCallbackContext(agent=object(), session=session)
+    call = ToolCall(id="c1", type="function", name="bash", arguments=json.dumps(args))
+    analysis = analyze_posix_shell_paths(args["command"], args["workdir"], "auto", workspace)
+    assert analysis.coverage == "complete"
+    with shell_path_call() as scope:
+        scope.bind(SimpleNamespace(analyze_local_paths=lambda _: analysis), args)
+        request = await rail.resolve_interrupt(ctx, call, None)
+        assert isinstance(request, InterruptResult)
+        assert "确认后仅放行本次" not in request.request.message
+        result = await rail.resolve_interrupt(
+            ctx, call, {"approved": True, "auto_confirm": True, "persist_allow": False},
+        )
+    assert isinstance(result, ApproveResult)
+    assert not stored
+    assert len(writes) == 1
+    assert any(path["path"] == target and path["read"] == "allow" for path in writes[0]["file_guard"]["paths"])
+
+
+@pytest.mark.asyncio
+async def test_legacy_permanent_remember_failure_reports_session_cache(monkeypatch):
+    messages = []
+    monkeypatch.setattr(tool_security_rail.logger, "info", lambda message, *args: messages.append(message % args))
+    rail, _ = _ask_bash_rail(persist_permanent=lambda _: False)
+    session, stored = _session_store()
+    ctx = AgentCallbackContext(agent=object(), session=session)
+    call = ToolCall(id="c1", type="function", name="bash", arguments='{"command": "head ./external"}')
+    request = await rail.resolve_interrupt(ctx, call, None)
+    assert isinstance(request, InterruptResult)
+    assert "bash:head ./external" in request.request.message
+    result = await rail.resolve_interrupt(ctx, call, {"approved": True, "auto_confirm": True, "persist_allow": True})
+    assert isinstance(result, ApproveResult)
+    assert stored[INTERRUPT_AUTO_CONFIRM_KEY] == {"bash:head ./external": True}
+    assert any("permission.user.decision" in line and "decision=allow_always_session persisted=False" in line
+               for line in messages)
 
 
 @pytest.mark.asyncio

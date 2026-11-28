@@ -39,6 +39,7 @@ from openjiuwen.symphony.models import (
     SourceSnapshot,
 )
 from openjiuwen.symphony.models._message_trace import message_references_fingerprint
+from openjiuwen.symphony.orchestration.model import model_identity
 from openjiuwen.symphony.shared.fingerprint.artifact import FingerprintArtifactStore
 from openjiuwen.symphony.shared.fingerprint.cache import FingerprintCache
 from openjiuwen.symphony.shared.fingerprint.extractor import (
@@ -90,11 +91,19 @@ class FingerprintService:
         protocol: FingerprintProtocolConfig | None = None,
         evaluation_suite: QualityEvaluationSuite | None = None,
         model_response_observer: ModelResponseObserver | None = None,
+        allow_metadata_fallback: bool = False,
+        wait_for_lock: bool = False,
     ) -> None:
         self._provider = capability_provider
         self._llm = llm
-        self._settings = config or FingerprintPolicyConfig()
-        self._protocol = protocol or FingerprintProtocolConfig()
+        settings = config or FingerprintPolicyConfig()
+        if allow_metadata_fallback and llm is None:
+            settings = settings.model_copy(update={
+                "extraction": settings.extraction.model_copy(update={"llm_enabled": False}),
+                "evaluation": settings.evaluation.model_copy(update={"llm_enabled": False}),
+            })
+        self._settings = settings
+        self._protocol = protocol or FingerprintProtocolConfig(configuration_signature=_model_signature(llm))
         self._store = FingerprintArtifactStore(artifact_root)
         self._cache = FingerprintCache(self._store.root)
         self._extractor = CapabilityFingerprintExtractor(
@@ -107,6 +116,7 @@ class FingerprintService:
         )
         self._build_lock = asyncio.Lock()
         self._process_lock = FileLock(str(self._store.root / ".fingerprint.lock"))
+        self._wait_for_lock = wait_for_lock
         self._cancel_requested = False
         self.last_build_counts: dict[str, int] = {}
 
@@ -126,7 +136,7 @@ class FingerprintService:
         """Build and publish ``fingerprint.json`` from the provider snapshot."""
 
         self._validate_configuration()
-        if self._build_lock.locked():
+        if self._build_lock.locked() and not self._wait_for_lock:
             raise_error(
                 StatusCode.COMPONENT_SYMPHONY_BUILD_STATE_INVALID,
                 reason="a fingerprint build is already running in this service",
@@ -138,15 +148,8 @@ class FingerprintService:
             lock_acquired = False
             try:
                 self._store.root.mkdir(parents=True, exist_ok=True)
-                try:
-                    self._process_lock.acquire(timeout=0)
-                    lock_acquired = True
-                except FileLockTimeout as exc:
-                    raise_error(
-                        StatusCode.COMPONENT_SYMPHONY_BUILD_STATE_INVALID,
-                        cause=exc,
-                        reason="another fingerprint builder owns the artifact root",
-                    )
+                await self._acquire_process_lock()
+                lock_acquired = True
 
                 snapshot, descriptors = await self._load_inventory()
                 cases = _validate_cases(traces)
@@ -280,6 +283,21 @@ class FingerprintService:
             finally:
                 if lock_acquired:
                     self._process_lock.release()
+
+    async def _acquire_process_lock(self) -> None:
+        while True:
+            self._raise_if_cancelled()
+            try:
+                self._process_lock.acquire(timeout=0)
+                return
+            except FileLockTimeout as exc:
+                if not self._wait_for_lock:
+                    raise_error(
+                        StatusCode.COMPONENT_SYMPHONY_BUILD_STATE_INVALID,
+                        cause=exc,
+                        reason="another fingerprint builder owns the artifact root",
+                    )
+                await asyncio.sleep(0.05)
 
     def read(self) -> FingerprintArtifact:
         """Read and validate the most recently published artifact."""
@@ -468,6 +486,13 @@ class FingerprintService:
                 StatusCode.COMPONENT_SYMPHONY_BUILD_INTERRUPTED,
                 reason="fingerprint build was cancelled before publication",
             )
+
+
+def _model_signature(model: SymphonyLLM | None) -> str:
+    if model is None or (getattr(model, "model_config", None) is None
+                         and getattr(model, "model_client_config", None) is None):
+        return ""
+    return hashlib.sha256(json.dumps(model_identity(model), sort_keys=True).encode()).hexdigest()
 
 
 def _snapshot_stability_payload(snapshot: SourceSnapshot) -> dict[str, Any]:

@@ -48,7 +48,7 @@ class CancellationRail(DeepAgentRail):
         """Check cancellation before each tool call."""
         if self._orchestrator and self._orchestrator.should_cancel:
             logger.info("[CancellationRail] cancellation detected, requesting force_finish")
-            ctx.request_force_finish({"reason": "user_cancelled", "cancelled": True})
+            ctx.request_force_finish({"reason": "user_cancelled", "cancelled": True, "result_type": "cancelled"})
 
     async def after_model_call(
         self,
@@ -57,7 +57,7 @@ class CancellationRail(DeepAgentRail):
         """Check cancellation after each model call."""
         if self._orchestrator and self._orchestrator.should_cancel:
             logger.info("[CancellationRail] cancellation detected, requesting force_finish")
-            ctx.request_force_finish({"reason": "user_cancelled", "cancelled": True})
+            ctx.request_force_finish({"reason": "user_cancelled", "cancelled": True, "result_type": "cancelled"})
 
 
 __all__ = ["CancellationRail"]

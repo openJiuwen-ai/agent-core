@@ -55,6 +55,37 @@ Agent Skills 通过 三层加载机制 来最小化上下文消耗
 
 这种分层设计在保持完整能力深度的同时，最大限度降低了基础 Prompt 的体量
 
+## 在直接配置的 ReActAgent 中懒加载 Skills
+
+除下文的 `register_skill()` 外，还可以复用 Harness 的 `SkillUseRail`，通过 `register_rail()` 将本地 Skill 目录挂载到直接配置的 `ReActAgent`。它提供与 Harness/CLI 相同的 Skill 发现与按需加载能力，不要求改用 `DeepAgent`。
+
+```python
+from openjiuwen.harness.rails import SkillUseRail
+
+skill_rail = SkillUseRail(
+    skills_dir=str(skills_dir),
+    skill_mode="auto_list",
+    include_tools=False,
+)
+await agent.register_rail(skill_rail)
+result = await agent.invoke({"query": "Use the domain-guide skill to summarize its release checklist."})
+```
+
+- `skill_mode="auto_list"`（默认）注册 `list_skill`，由模型先查看可用 Skill，再通过 `skill_tool` 按需读取 `SKILL.md` 正文；适合领域知识较多、希望控制静态提示词体积的场景。
+- `skill_mode="all"` 将全部已启用 Skill 的列表注入系统提示词，并通过 `skill_tool` 读取正文；适合少量、稳定的 Skill。当前版本没有 `auto_load` 模式。
+- `include_tools=False` 只关闭 Rail 附带的 `read_file`、`bash` 等后备工具，`skill_tool` 和 `list_skill` 仍由 Rail 注册；适合服务侧已有文件系统工具或不希望授予 Shell 能力的场景。
+- 目录、新增和修改的 `SKILL.md` 会在调用前扫描；缓存按文件修改时间增量刷新。每个 Skill 需要独立目录和含 `name`、`description` 的 YAML 头部。
+
+当前直接配置的 `ReActAgent` 使用 `agent.invoke()`，不使用 `Runner.run_agent()`。`SkillUseRail` 复用 Harness 能力，但不要求使用 `DeepAgent`；其他 `DeepAgentRail` 是否可直接挂载取决于其所需的 Harness 生命周期和上下文。
+
+完整可执行示例及合成 Skill 位于仓库 `examples/skill_use/`。从仓库根目录运行以下命令，可在不调用模型、无需 API Key 的情况下验证 Skill 扫描和工具注册：
+
+```bash
+python examples/skill_use/react_agent_lazy_skills.py --check
+```
+
+配置 `MODEL_PROVIDER`、`API_BASE`、`API_KEY`、`MODEL_NAME` 后，去掉 `--check` 即可使用真实模型执行。可选 `SKILLS_DIR` 指定自己的 Skill 根目录；默认读取示例自带的 `skills/domain-guide/SKILL.md`。
+
 # Agent Skills 示例 - 图片缩放
 
 该示例展示了如何使用 Agent Skills 对图片进行缩放，涵盖以下内容：

@@ -142,6 +142,7 @@ class TeamRole(str, Enum):
     TEAMMATE = "teammate"
     HUMAN_AGENT = "human_agent"
     PASSIVE_HUMAN = "passive_human"
+    HOST_MANAGED = "host_managed"
     BRIDGE_AGENT = "bridge_agent"
     WORKER = "worker"
     EXTERNAL_CLI = "external_cli"
@@ -261,6 +262,7 @@ class TeamMemberSpec(MemberSpecBase):
         TeamRole.TEAMMATE,
         TeamRole.HUMAN_AGENT,
         TeamRole.PASSIVE_HUMAN,
+        TeamRole.HOST_MANAGED,
     ] = TeamRole.TEAMMATE
     goal: Optional[bool] = None
     """Per-member goal-mode switch, meaningful only when the team sets
@@ -750,6 +752,7 @@ class TeamRuntimeContext(BaseModel):
             "to tighten the base config. None when no override was specified."
         ),
     )
+    agent_template_ref: dict[str, str | None] | None = None
     agent_template_spec: Optional[dict[str, Any]] = None
     """Capability snapshot of a member spawned from an expert template.
 

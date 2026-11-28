@@ -44,7 +44,9 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
   （也被 DDL helper 用到）；`read_engine` / `read_session_local` 是读者池。
 - **`DbSessions`（`database/engine.py`）** —— 四个 DAO 共享的一个 provider，
   暴露分别绑定到读者 / 写者工厂的 `read()` / `write()` async-context 访问器。
-  SQLite（file / `:memory:`）上 `write()` 持有一把进程级 `asyncio.Lock`；`read()` 不持锁。
+  SQLite（file / `:memory:`）上 `write()` 持有一把进程级 `asyncio.Lock`；`read()` 不持锁，
+  例外是 `:memory:`（`single_connection=True`，读写共用一条 StaticPool 连接）——
+  此时 `read()` 也持同一把锁，避免结束读取时回滚共享连接上尚未提交的事务。
   PostgreSQL / MySQL（client/server 后端）上 `write()` **跳过**进程级写锁——这些
   后端的原生写并发（行锁 + MVCC）才是写仲裁者，进程内串行化只会拖吞吐（issue #115
   5 路 advocate 负载下 30s 看门狗堆积）。写锁是**不可重入**的：当一个公开

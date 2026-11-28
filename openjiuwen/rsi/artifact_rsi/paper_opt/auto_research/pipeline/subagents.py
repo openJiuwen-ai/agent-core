@@ -1705,6 +1705,9 @@ class ExperimentExecutionAdapter:
                     target_variants=list(contract.target_variants),
                 ),
             )
+        except asyncio.CancelledError:
+            self.agent.cancel()
+            raise
         except Exception as exc:  # noqa: BLE001
             return _report(
                 module=self.module,

@@ -86,6 +86,12 @@ class SafeRotatingFileHandler(RotatingFileHandler):
 
         super().__init__(filename, *args, **kwargs)
         self.backup_file_pattern = backup_file_pattern or "{baseFilename}.{index}"
+        # Rollover throttle: when the backup copy keeps failing (ENOSPC, file
+        # lock), the active file is never truncated and stdlib
+        # RotatingFileHandler.emit would re-run doRollover for every record
+        # (O(file) copy attempt per log line). Skip rollover attempts until
+        # the active file has grown past this size again; reset on success.
+        self._rollover_failed_size: Optional[int] = None
 
         # Set log file permissions
         try:
@@ -107,6 +113,23 @@ class SafeRotatingFileHandler(RotatingFileHandler):
         Uses copy + truncate for the active log to handle Windows file locks (WinError 32).
         Backup file permissions are set during rotation for security.
         """
+        # Throttle repeated attempts while the backup copy keeps failing:
+        # stdlib emit() calls doRollover for every record once the active
+        # file stays over maxBytes (it is no longer truncated on failure),
+        # which would turn each log line into a full copy attempt.
+        if self._rollover_failed_size is not None:
+            try:
+                current_size = os.path.getsize(self.baseFilename)
+            except OSError:
+                current_size = None
+            if current_size is not None and current_size <= self._rollover_failed_size * 2:
+                # The active file has not grown enough to justify another
+                # attempt; keep appending and reopen the stream.
+                if not self.delay:
+                    self.stream = self._open()
+                return
+            self._rollover_failed_size = None
+
         if self.stream:
             self.stream.close()
             self.stream = None  # type: ignore[assignment]
@@ -158,19 +181,31 @@ class SafeRotatingFileHandler(RotatingFileHandler):
                     except OSError:  # File locked, skip
                         pass
 
+            copied = False
             if os.path.exists(self.baseFilename):
                 try:
                     shutil.copy2(self.baseFilename, dfn)
-                except OSError:  # Copy failed, continue
-                    pass
+                    copied = True
+                except OSError:  # Copy failed (e.g. ENOSPC): keep the active
+                    pass      # file intact or the only copy is destroyed.
 
-            # Truncate active log file
-            try:
-                with open(self.baseFilename, "r+b") as f:
-                    f.seek(0)
-                    f.truncate(0)
-            except OSError:  # Truncate failed, continue
-                pass
+                # Truncate active log file only when the backup copy exists.
+                if copied:
+                    try:
+                        with open(self.baseFilename, "r+b") as f:
+                            f.seek(0)
+                            f.truncate(0)
+                    except OSError:  # Truncate failed, continue
+                        pass
+
+            # Record the failure so the next doRollover (which stdlib emit()
+            # re-triggers on every record while the file stays over maxBytes)
+            # is throttled until the active file grows past the recorded size.
+            if not copied:
+                try:
+                    self._rollover_failed_size = os.path.getsize(self.baseFilename)
+                except OSError:
+                    self._rollover_failed_size = None
 
         # Reopen stream
         if not self.delay:

@@ -22,10 +22,13 @@ class _CmdSend:
     Attributes:
         msg: Wrapped inbound message.
         ack: Future resolved with the message seq id.
+        require_pending_interrupt: Match and admit a Team-directed answer,
+            without treating it as ordinary queued or steering input.
     """
 
     msg: InboxMessage
     ack: asyncio.Future
+    require_pending_interrupt: bool = False
 
 
 @dataclass(frozen=True, slots=True)

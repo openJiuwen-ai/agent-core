@@ -6,12 +6,12 @@
 import asyncio
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from typing import NamedTuple, TypeVar
 
 from sqlalchemy import event, inspect
-from sqlalchemy.exc import DBAPIError, NoSuchTableError, OperationalError
+from sqlalchemy.exc import DBAPIError, NoSuchTableError, OperationalError, ProgrammingError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -20,13 +20,19 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.pool import AsyncAdaptedQueuePool, StaticPool
+from sqlalchemy.sql import quoted_name
 from sqlmodel import SQLModel
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database.config import DatabaseConfig, DatabaseType
 from openjiuwen.agent_teams.tools.models import (
     TEAM_DYNAMIC_TABLE_PREFIXES,
+    TEAM_MESSAGE_LONG_TEXT_SPECS,
+    TEAM_REVIEW_VOTE_LONG_TEXT_SPECS,
+    TEAM_STATIC_LONG_TEXT_SPECS,
     TEAM_STATIC_TABLES_TO_CLEAR,
+    TEAM_TASK_LONG_TEXT_SPECS,
+    _get_group_notification_model,
     _get_message_model,
     _get_message_read_status_model,
     _get_review_vote_model,
@@ -127,12 +133,14 @@ def _add_column_idempotent(sync_conn, table: str, column: str, col_type: str) ->
     absent.
     """
     use_savepoint = sync_conn.dialect.name != "mysql"
+    q_table = _quote_ident(sync_conn, table)
+    q_col = _quote_ident(sync_conn, column)
     try:
         if use_savepoint:
             with sync_conn.begin_nested():
-                sync_conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+                sync_conn.exec_driver_sql(f"ALTER TABLE {q_table} ADD COLUMN {q_col} {col_type}")
         else:
-            sync_conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+            sync_conn.exec_driver_sql(f"ALTER TABLE {q_table} ADD COLUMN {q_col} {col_type}")
     except DBAPIError as exc:
         msg = str(exc).lower()
         if "duplicate column" not in msg and "already exists" not in msg:
@@ -172,12 +180,14 @@ def _drop_column_idempotent(sync_conn, table: str, column: str) -> None:
     re-raised.
     """
     use_savepoint = sync_conn.dialect.name != "mysql"
+    q_table = _quote_ident(sync_conn, table)
+    q_col = _quote_ident(sync_conn, column)
     try:
         if use_savepoint:
             with sync_conn.begin_nested():
-                sync_conn.exec_driver_sql(f"ALTER TABLE {table} DROP COLUMN {column}")
+                sync_conn.exec_driver_sql(f"ALTER TABLE {q_table} DROP COLUMN {q_col}")
         else:
-            sync_conn.exec_driver_sql(f"ALTER TABLE {table} DROP COLUMN {column}")
+            sync_conn.exec_driver_sql(f"ALTER TABLE {q_table} DROP COLUMN {q_col}")
     except DBAPIError as exc:
         msg = str(exc).lower()
         if not any(
@@ -252,6 +262,7 @@ class DbSessions:
         read_session_local: async_sessionmaker | None = None,
         *,
         db_type: "DatabaseType | str | None" = None,
+        single_connection: bool = False,
     ) -> None:
         """Bind the write / read session factories.
 
@@ -265,6 +276,11 @@ class DbSessions:
                 and a wider watchdog applies. ``None`` keeps the legacy
                 SQLite behaviour (write lock + 30s watchdog) for backward
                 compatibility.
+            single_connection: Serialize reads and writes that share one
+                connection (in-memory SQLite). ``read()`` then takes the same
+                process lock as ``write()`` so closing a reader cannot roll
+                back a writer's transaction on the shared StaticPool
+                connection.
         """
         self._write_session_local = write_session_local
         self._read_session_local = read_session_local or write_session_local
@@ -297,6 +313,12 @@ class DbSessions:
             if _db_type_is_client_server(db_type)
             else _DB_SESSION_WATCHDOG_SECONDS_SQLITE
         )
+        # In-memory SQLite shares one StaticPool connection between the read
+        # and write factories; closing a reader rolls back that shared
+        # connection and would abort a writer's in-flight transaction, so
+        # readers also take the write lock. ``single_connection`` is only
+        # meaningful for in-memory SQLite (caller sets it explicitly).
+        self._single_connection = single_connection
 
     @property
     def write_locked(self) -> bool:
@@ -322,21 +344,26 @@ class DbSessions:
 
     @asynccontextmanager
     async def read(self) -> AsyncIterator[AsyncSession]:
-        """Yield a session for read-only work; the write lock is not held.
+        """Yield a read session, taking the shared lock for in-memory SQLite.
 
-        The whole block runs under the watchdog so a wedged driver surfaces
-        as a loud ``TimeoutError`` instead of hanging the caller forever.
+        Closing a reader on the shared in-memory SQLite connection can roll
+        back a writer's in-flight transaction, so when ``single_connection``
+        is set the same process lock as ``write()`` is held through session
+        cleanup. The whole block runs under the watchdog so a wedged driver
+        surfaces as a loud ``TimeoutError`` instead of hanging the caller.
         """
-        try:
-            async with asyncio.timeout(self._watchdog_seconds):
-                async with self._read_session_local() as session:
-                    yield session
-        except TimeoutError:
-            team_logger.warning(
-                "DbSessions.read() exceeded the %.0fs watchdog; the DB driver may be wedged",
-                self._watchdog_seconds,
-            )
-            raise
+        connection_guard = self._write_lock if self._single_connection else nullcontext()
+        async with connection_guard:
+            try:
+                async with asyncio.timeout(self._watchdog_seconds):
+                    async with self._read_session_local() as session:
+                        yield session
+            except TimeoutError:
+                team_logger.warning(
+                    "DbSessions.read() exceeded the %.0fs watchdog; the DB driver may be wedged",
+                    self._watchdog_seconds,
+                )
+                raise
 
     @asynccontextmanager
     async def write(self) -> AsyncIterator[AsyncSession]:
@@ -499,6 +526,205 @@ async def retry_on_transient(
             await asyncio.sleep(delay)
 
 
+def _quote_ident(sync_conn, name: str) -> str:
+    """Quote an identifier with the connection's SQL dialect rules.
+
+    SQLite / PostgreSQL use double quotes; MySQL / MariaDB use backticks.
+    Always quote via ``quoted_name(..., quote=True)`` so safe names still get
+    dialect markers — MySQL rejects hand-written ``"..."`` (error 1064) when
+    ANSI_QUOTES is off.
+    """
+    return sync_conn.dialect.identifier_preparer.quote(quoted_name(name, quote=True))
+
+
+def _is_mysql_family(sync_conn) -> bool:
+    """True for MySQL and MariaDB dialects (same DDL quirks for indexes/text)."""
+    return sync_conn.dialect.name in ("mysql", "mariadb")
+
+
+def _dialect_long_text_ddl(sync_conn) -> str:
+    """DDL type for unbounded text on the current dialect."""
+    if _is_mysql_family(sync_conn):
+        return "LONGTEXT"
+    return "TEXT"
+
+
+def _column_is_bounded_string(col_type) -> bool:
+    """True when the live column is a length-capped string (e.g. VARCHAR(255))."""
+    return getattr(col_type, "length", None) is not None
+
+
+def _widen_text_columns(
+    sync_conn,
+    table_name: str,
+    columns: dict,
+    specs: tuple[tuple[str, bool], ...],
+) -> None:
+    """MODIFY length-capped string columns to LONGTEXT/TEXT on MySQL/MariaDB.
+
+    SQLite affinity already accepts long values; no ALTER is required there.
+    ``specs`` is ``(column_name, nullable)`` pairs matching the model.
+    """
+    if not _is_mysql_family(sync_conn):
+        return
+    q_table = _quote_ident(sync_conn, table_name)
+    text_ddl = _dialect_long_text_ddl(sync_conn)
+    for column_name, nullable in specs:
+        col = columns.get(column_name)
+        if col is None or not _column_is_bounded_string(col.get("type")):
+            continue
+        q_col = _quote_ident(sync_conn, column_name)
+        null_sql = "NULL" if nullable else "NOT NULL"
+        sync_conn.exec_driver_sql(
+            f"ALTER TABLE {q_table} MODIFY {q_col} {text_ddl} {null_sql}"
+        )
+        team_logger.info(
+            "Migrated %s: widened %s to %s",
+            table_name,
+            column_name,
+            text_ddl,
+        )
+
+
+def _mysql_errno(exc: BaseException) -> int | None:
+    """Server errno from ``exc.orig.args[0]``, or None when the driver omitted it.
+
+    aiomysql/PyMySQL store the code on the DBAPI exception. The SQLAlchemy
+    wrapper's own ``args[0]`` is the SQL text, so it is not read here.
+    """
+    orig = getattr(exc, "orig", None)
+    args = getattr(orig, "args", ())
+    if not args or isinstance(args[0], bool) or not isinstance(args[0], int):
+        return None
+    return args[0]
+
+
+def _is_benign_mysql_index_error(exc: BaseException, *, missing: bool) -> bool:
+    """True when a MySQL/MariaDB index race has already reached the goal state.
+
+    ``missing=True`` is errno 1091: DROP of an index a peer already removed.
+    ``missing=False`` is errno 1061: CREATE of a name a peer already created.
+    Errno 1553 (index still required by a foreign key) is *not* benign here —
+    the index remains; see ``_is_mysql_fk_retained_index_error``. Any other
+    code (1062 duplicate row, 1050 table exists, 1146 unknown table) stays
+    fatal. Statement text is used only when no errno is present: a DROP
+    matches ``check that`` plus ``exists`` (MySQL ``column/key exists`` and
+    MariaDB ``check that it exists``); a CREATE matches ``Duplicate key name``.
+    """
+    errno = _mysql_errno(exc)
+    if errno is not None:
+        return errno == (1091 if missing else 1061)
+    orig = getattr(exc, "orig", None)
+    folded = str(orig if orig is not None else exc).casefold()
+    if missing:
+        return "check that" in folded and "exists" in folded
+    return "duplicate key name" in folded
+
+
+def _is_mysql_fk_retained_index_error(exc: BaseException) -> bool:
+    """True when InnoDB refuses DROP because a foreign key still needs the index.
+
+    Errno 1553: ``Cannot drop index ... needed in a foreign key constraint``.
+    Without an errno, require both ``foreign key`` and ``needed`` in the
+    server text. The index must stay; A1 cannot remove it while the FK remains.
+    """
+    errno = _mysql_errno(exc)
+    if errno is not None:
+        return errno == 1553
+    orig = getattr(exc, "orig", None)
+    folded = str(orig if orig is not None else exc).casefold()
+    return "foreign key" in folded and "needed" in folded
+
+
+def _exec_mysql_index_ddl(sync_conn, sql: str, *, missing: bool) -> bool:
+    """Run MySQL-family index DDL; return whether the goal state was reached.
+
+    MySQL 8.0 rejects ``IF [NOT] EXISTS`` on these statements. A concurrent
+    binder that already finished the same step raises ``OperationalError``
+    (aiomysql) or, on some drivers, ``ProgrammingError``.
+
+    Returns ``True`` when the index is absent after DROP (or present after
+    CREATE), including the 1091 / 1061 races. Returns ``False`` only for DROP
+    when errno 1553 keeps the index for a foreign key.
+    """
+    try:
+        sync_conn.exec_driver_sql(sql)
+        return True
+    except (OperationalError, ProgrammingError) as exc:
+        if missing and _is_mysql_fk_retained_index_error(exc):
+            return False
+        if _is_benign_mysql_index_error(exc, missing=missing):
+            return True
+        raise
+
+
+def _drop_index_if_present(
+    sync_conn,
+    table_name: str,
+    index_name: str,
+    index_names: set[str],
+) -> bool:
+    """Drop ``index_name`` when it appears in ``index_names``.
+
+    The snapshot skips a useless DROP. MySQL/MariaDB have no
+    ``DROP INDEX IF EXISTS`` and use ``DROP INDEX ... ON table``; a peer that
+    already dropped it (errno 1091) counts as success. InnoDB errno 1553
+    (index still required by a foreign key) leaves the index in place and
+    returns ``False`` so callers do not log a successful drop — A1 cannot
+    remove that covering index while the FK remains. SQLite / PostgreSQL
+    keep ``DROP INDEX IF EXISTS``. Returns whether the index is gone afterward
+    (dropped here or already absent via race).
+    """
+    if index_name not in index_names:
+        return False
+    q_idx = _quote_ident(sync_conn, index_name)
+    if _is_mysql_family(sync_conn):
+        q_table = _quote_ident(sync_conn, table_name)
+        dropped = _exec_mysql_index_ddl(
+            sync_conn, f"DROP INDEX {q_idx} ON {q_table}", missing=True
+        )
+        if not dropped:
+            team_logger.info(
+                "Retained index %s on %s: still required by a foreign key",
+                index_name,
+                table_name,
+            )
+        return dropped
+    sync_conn.exec_driver_sql(f"DROP INDEX IF EXISTS {q_idx}")
+    return True
+
+
+def _create_index_if_absent(
+    sync_conn,
+    table_name: str,
+    index_name: str,
+    columns_sql: str,
+    index_names: set[str],
+) -> bool:
+    """Create ``index_name`` when it is missing from ``index_names``.
+
+    The snapshot skips a useless CREATE. MySQL/MariaDB have no
+    ``CREATE INDEX IF NOT EXISTS``; a peer that already created the name
+    (errno 1061) counts as success. SQLite / PostgreSQL keep statement-level
+    ``IF NOT EXISTS``. Returns whether a CREATE was issued (or the name
+    already exists after a race).
+    """
+    if index_name in index_names:
+        return False
+    q_idx = _quote_ident(sync_conn, index_name)
+    q_table = _quote_ident(sync_conn, table_name)
+    if _is_mysql_family(sync_conn):
+        return _exec_mysql_index_ddl(
+            sync_conn,
+            f"CREATE INDEX {q_idx} ON {q_table} ({columns_sql})",
+            missing=False,
+        )
+    sync_conn.exec_driver_sql(
+        f"CREATE INDEX IF NOT EXISTS {q_idx} ON {q_table} ({columns_sql})"
+    )
+    return True
+
+
 def _get_table_names(sync_conn) -> list[str]:
     """Return all table names currently present in the database."""
     return list(inspect(sync_conn).get_table_names())
@@ -516,14 +742,14 @@ def _snapshot_existing_tables(sync_conn, table_names: list[str]) -> set[str]:
 
 def _drop_table(sync_conn, table_name: str) -> None:
     """Drop one table with raw SQL to avoid reflection-order issues."""
-    quoted_name = table_name.replace('"', '""')
-    sync_conn.exec_driver_sql(f'DROP TABLE IF EXISTS "{quoted_name}"')
+    q_table = _quote_ident(sync_conn, table_name)
+    sync_conn.exec_driver_sql(f"DROP TABLE IF EXISTS {q_table}")
 
 
 def _clear_table(sync_conn, table_name: str) -> None:
     """Delete all rows from one reflected table."""
-    quoted_name = table_name.replace('"', '""')
-    sync_conn.exec_driver_sql(f'DELETE FROM "{quoted_name}"')
+    q_table = _quote_ident(sync_conn, table_name)
+    sync_conn.exec_driver_sql(f"DELETE FROM {q_table}")
 
 
 def _create_static_tables(sync_conn) -> None:
@@ -623,7 +849,8 @@ def _ensure_team_member_role_column(sync_conn) -> None:
     # missing and both issue ALTER TABLE ADD COLUMN; the DB's own DDL lock
     # serialises the two ALTERs but the second fails with 'duplicate column
     # name' (PG ProgrammingError SQLSTATE 42701; MySQL 1060), crashing
-    # initialize().
+    # initialize(). Identifier quoting (MySQL backticks vs double quotes) is
+    # handled inside _add_column_idempotent via _quote_ident.
     _add_column_idempotent(
         sync_conn, "team_member", "role", f"TEXT NOT NULL DEFAULT '{default_role}'"
     )
@@ -652,10 +879,15 @@ def _ensure_team_member_options_column(sync_conn) -> None:
     if "team_member" not in inspector.get_table_names():
         return
     columns = {col["name"] for col in inspector.get_columns("team_member")}
+    q_table = _quote_ident(sync_conn, "team_member")
     if "options" not in columns:
         # Wrapped in _add_column_idempotent for cross-process TOCTOU
         # (issue #115 review round 14, same as _ensure_team_member_role_column).
-        _add_column_idempotent(sync_conn, "team_member", "options", "TEXT")
+        # Use the dialect long-text DDL (LONGTEXT on MySQL/MariaDB, TEXT
+        # elsewhere) so unbounded option JSON does not land as VARCHAR(255).
+        _add_column_idempotent(
+            sync_conn, "team_member", "options", _dialect_long_text_ddl(sync_conn)
+        )
         team_logger.info("Migrated legacy team_member table: added options column")
 
     if "model_ref_json" not in columns:
@@ -712,6 +944,7 @@ def _ensure_team_info_capability_columns(sync_conn) -> None:
     if "team_info" not in inspector.get_table_names():
         return
     columns = {col["name"] for col in inspector.get_columns("team_info")}
+    q_table = _quote_ident(sync_conn, "team_info")
     if "dispatch_mode" not in columns:
         # Wrapped in _add_column_idempotent for cross-process TOCTOU
         # (issue #115 review round 14).
@@ -724,6 +957,25 @@ def _ensure_team_info_capability_columns(sync_conn) -> None:
             sync_conn, "team_info", "enable_task_verification", "BOOLEAN NOT NULL DEFAULT 0"
         )
         team_logger.info("Migrated legacy team_info table: added enable_task_verification column")
+
+
+def _ensure_team_static_long_text_columns(sync_conn) -> None:
+    """Widen static-table body columns that used to be VARCHAR(255).
+
+    Specs live in ``TEAM_STATIC_LONG_TEXT_SPECS`` (models.py). Same widening
+    path as per-session task / message long fields.
+    """
+    inspector = inspect(sync_conn)
+    table_names = set(inspector.get_table_names())
+    for table_name, specs in TEAM_STATIC_LONG_TEXT_SPECS.items():
+        if table_name not in table_names:
+            continue
+        _widen_text_columns(
+            sync_conn,
+            table_name,
+            {c["name"]: c for c in inspector.get_columns(table_name)},
+            specs,
+        )
 
 
 def _has_table(sync_conn, table_name: str) -> bool:
@@ -826,17 +1078,16 @@ def _ensure_message_meta_column(sync_conn) -> None:
         return
     if "meta" in columns:
         return
-    _add_column_idempotent(sync_conn, table_name, "meta", "TEXT")
+    _add_column_idempotent(sync_conn, table_name, "meta", _dialect_long_text_ddl(sync_conn))
     team_logger.info("Migrated legacy message table %s: added meta column", table_name)
 
 
 def _current_session_migration_tables() -> list[str]:
-    """The current session's 3 migration-candidate dynamic table names.
+    """The current session's migration-candidate dynamic table names.
 
-    Only ``team_task_*`` / ``team_task_dependency_*`` / ``team_message_*`` are
-    touched by ``_ensure_dynamic_table_indexes``; ``message_read_status_*`` and
-    ``team_review_vote_*`` have no legacy-structure gap (they are created on the
-    current scheme and never migrated), so they are deliberately excluded.
+    ``team_task_*`` / ``team_task_dependency_*`` / ``team_message_*`` get index
+    rebuilds + long-text widen; ``team_review_vote_*`` only widens ``feedback``.
+    ``message_read_status_*`` has no legacy-structure gap and stays excluded.
 
     Returns an empty list when no session is bound — the migration then becomes
     a no-op, same as before.
@@ -849,6 +1100,7 @@ def _current_session_migration_tables() -> list[str]:
         f"team_task_{suffix}",
         f"team_task_dependency_{suffix}",
         f"team_message_{suffix}",
+        f"team_review_vote_{suffix}",
     ]
 
 
@@ -874,8 +1126,13 @@ def _ensure_dynamic_table_indexes(
         dead ``updated_at`` index (no query filters/orders by it). ``status``
         keeps its standalone index.
 
-    Every statement is idempotent (``IF EXISTS`` / ``IF NOT EXISTS``), so a
-    table already on the new scheme is a cheap no-op.
+    Index DROP/CREATE probes ``inspector.get_indexes`` so an up-to-date table
+    skips DDL. MySQL/MariaDB have no ``IF [NOT] EXISTS`` on these statements;
+    a concurrent peer's 1091/1061 is treated as success. InnoDB errno 1553
+    (``team_name`` index still required by the FK) retains the index and does
+    not fail the bind — A1 cannot drop that covering index while the FK stays.
+    SQLite / PostgreSQL keep ``IF [NOT] EXISTS``. Identifiers are dialect-quoted
+    so MySQL gets backticks instead of hard-coded double quotes.
 
     Scope: ``candidates`` are the current session's tables (computed from
     ``get_session_id``). ``existing_before_create`` is the snapshot of which of
@@ -892,18 +1149,34 @@ def _ensure_dynamic_table_indexes(
         is_message = table_name.startswith("team_message_")
         is_dependency = table_name.startswith("team_task_dependency_")
         is_task = table_name.startswith("team_task_") and not is_dependency
-        if not (is_message or is_dependency or is_task):
+        is_review_vote = table_name.startswith("team_review_vote_")
+        if not (is_message or is_dependency or is_task or is_review_vote):
             continue
         if table_name not in existing_before_create:
             # Created fresh this bind → already on the current scheme; touching
             # it would only burn a ``get_indexes``/``get_columns`` PRAGMA lock.
             continue
 
+        if is_review_vote:
+            # Widen only — review-vote tables have no legacy index rebuild.
+            # Skip get_columns on non-MySQL: widen is a no-op there.
+            if _is_mysql_family(sync_conn):
+                vote_column_defs = {
+                    c["name"]: c for c in inspector.get_columns(table_name)
+                }
+                _widen_text_columns(
+                    sync_conn,
+                    table_name,
+                    vote_column_defs,
+                    TEAM_REVIEW_VOTE_LONG_TEXT_SPECS,
+                )
+            continue
+
+        q_table = _quote_ident(sync_conn, table_name)
         index_names = {idx["name"] for idx in inspector.get_indexes(table_name)}
 
         team_name_index = f"ix_{table_name}_team_name"
-        if team_name_index in index_names:
-            sync_conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{team_name_index}"')
+        if _drop_index_if_present(sync_conn, table_name, team_name_index, index_names):
             team_logger.info("Migrated %s: dropped dead team_name index", table_name)
 
         if is_task:
@@ -914,21 +1187,30 @@ def _ensure_dynamic_table_indexes(
             )
             if needs_task_migration:
                 for legacy in legacy_task_indexes:
-                    sync_conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{legacy}"')
-                sync_conn.exec_driver_sql(
-                    f'CREATE INDEX IF NOT EXISTS "{assignee_status_index}" ON "{table_name}" (assignee, status)'
+                    _drop_index_if_present(sync_conn, table_name, legacy, index_names)
+                _create_index_if_absent(
+                    sync_conn,
+                    table_name,
+                    assignee_status_index,
+                    "assignee, status",
+                    index_names,
                 )
                 team_logger.info(
                     "Migrated task table %s: folded assignee into (assignee, status), dropped dead updated_at index",
                     table_name,
                 )
 
+            # One get_columns for ADD probes and (on MySQL) widen — avoid a
+            # second reflection solely for LONGTEXT MODIFY.
+            task_column_defs = {c["name"]: c for c in inspector.get_columns(table_name)}
+            task_columns = set(task_column_defs)
+            text_ddl = _dialect_long_text_ddl(sync_conn)
+
             # F_59: add the verify-gate ``reviewer`` column to pre-existing tables.
             # Wrapped in _add_column_idempotent for cross-process TOCTOU
             # (issue #115 review round 14, same as _ensure_team_member_role_column).
-            task_columns = {c["name"] for c in inspector.get_columns(table_name)}
             if "reviewer" not in task_columns:
-                _add_column_idempotent(sync_conn, table_name, "reviewer", "TEXT")
+                _add_column_idempotent(sync_conn, table_name, "reviewer", text_ddl)
                 team_logger.info("Migrated task table %s: added reviewer column", table_name)
 
             # F_62: review voting — round counter + per-task round ceiling.
@@ -943,12 +1225,12 @@ def _ensure_dynamic_table_indexes(
 
             # F_118: author's completion note, read by handoff briefs / view_task.
             if "note" not in task_columns:
-                _add_column_idempotent(sync_conn, table_name, "note", "TEXT")
+                _add_column_idempotent(sync_conn, table_name, "note", text_ddl)
                 team_logger.info("Migrated task table %s: added note column", table_name)
 
             # F_119: author's one-line completion summary, read by digests / briefs.
             if "summary" not in task_columns:
-                _add_column_idempotent(sync_conn, table_name, "summary", "TEXT")
+                _add_column_idempotent(sync_conn, table_name, "summary", text_ddl)
                 team_logger.info("Migrated task table %s: added summary column", table_name)
 
             # F_128: member subtasks — parent link + creator.
@@ -972,8 +1254,17 @@ def _ensure_dynamic_table_indexes(
                     )
                     team_logger.info("Migrated task table %s: added %s column", table_name, column)
             if "change_notes" not in task_columns:
-                _add_column_idempotent(sync_conn, table_name, "change_notes", "TEXT")
+                _add_column_idempotent(sync_conn, table_name, "change_notes", text_ddl)
                 team_logger.info("Migrated task table %s: added change_notes column", table_name)
+
+            # MySQL/MariaDB create() used to emit VARCHAR(255) for bare str
+            # Fields. Widen existing short columns so long notes/content land.
+            _widen_text_columns(
+                sync_conn,
+                table_name,
+                task_column_defs,
+                TEAM_TASK_LONG_TEXT_SPECS,
+            )
 
             # F_59: fold the legacy execution states into the condition-named
             # IN_PROGRESS. claimed / started / plan_approved were all "a member
@@ -982,7 +1273,7 @@ def _ensure_dynamic_table_indexes(
             # best-effort refinement deferred (rare, and the row is still
             # completable via the normal flow once re-owned).
             legacy_status_result = sync_conn.exec_driver_sql(
-                f"UPDATE \"{table_name}\" SET status='in_progress' "
+                f"UPDATE {q_table} SET status='in_progress' "
                 "WHERE status IN ('claimed', 'started', 'plan_approved')"
             )
             migrated_rows = legacy_status_result.rowcount or 0
@@ -997,6 +1288,17 @@ def _ensure_dynamic_table_indexes(
         if not is_message:
             continue
 
+        if _is_mysql_family(sync_conn):
+            message_column_defs = {
+                c["name"]: c for c in inspector.get_columns(table_name)
+            }
+            _widen_text_columns(
+                sync_conn,
+                table_name,
+                message_column_defs,
+                TEAM_MESSAGE_LONG_TEXT_SPECS,
+            )
+
         legacy_message_indexes = [
             f"ix_{table_name}_to_member_name",
             f"ix_{table_name}_timestamp",
@@ -1010,12 +1312,20 @@ def _ensure_dynamic_table_indexes(
             continue
 
         for legacy in legacy_message_indexes:
-            sync_conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{legacy}"')
-        sync_conn.exec_driver_sql(
-            f'CREATE INDEX IF NOT EXISTS "{inbox_index}" ON "{table_name}" (to_member_name, is_read, timestamp)'
+            _drop_index_if_present(sync_conn, table_name, legacy, index_names)
+        _create_index_if_absent(
+            sync_conn,
+            table_name,
+            inbox_index,
+            "to_member_name, is_read, timestamp",
+            index_names,
         )
-        sync_conn.exec_driver_sql(
-            f'CREATE INDEX IF NOT EXISTS "{bcast_index}" ON "{table_name}" (broadcast, timestamp)'
+        _create_index_if_absent(
+            sync_conn,
+            table_name,
+            bcast_index,
+            "broadcast, timestamp",
+            index_names,
         )
         team_logger.info("Migrated message table %s: rebuilt to composite indexes", table_name)
 
@@ -1282,6 +1592,7 @@ async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
             await conn.run_sync(_ensure_team_member_role_column)
             await conn.run_sync(_ensure_team_member_options_column)
             await conn.run_sync(_ensure_team_info_capability_columns)
+            await conn.run_sync(_ensure_team_static_long_text_columns)
     except BaseException:
         # The engines never reach the caller, so nobody else can dispose them:
         # a failed DDL (e.g. ``database is locked``) retried by a poller would
@@ -1328,6 +1639,7 @@ async def _ensure_session_tables(session: AsyncSession) -> None:
     message_model = _get_message_model()
     read_status_model = _get_message_read_status_model()
     review_vote_model = _get_review_vote_model()
+    notification_model = _get_group_notification_model()
     conn = await session.connection()
     # Snapshot which migration-candidate tables already exist *before* create
     # runs. ``create(checkfirst=True)`` leaves a pre-existing table untouched,
@@ -1335,11 +1647,15 @@ async def _ensure_session_tables(session: AsyncSession) -> None:
     # scheme and can be skipped without a single ``get_indexes`` PRAGMA call.
     candidates = _current_session_migration_tables()
     existing_before_create = await conn.run_sync(_snapshot_existing_tables, candidates)
-    for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
+    for model in (
+        task_model, dep_model, message_model, read_status_model, review_vote_model, notification_model,
+    ):
         await conn.run_sync(_create_idempotent, model.__table__)
     await conn.run_sync(_ensure_message_protocol_column)
     await conn.run_sync(_ensure_message_meta_column)
-    await conn.run_sync(_ensure_dynamic_table_indexes, candidates, existing_before_create)
+    await conn.run_sync(
+        _ensure_dynamic_table_indexes, candidates, existing_before_create
+    )
 
 
 # Preserve the shared DDL retry/drop layout while develop updates its write protocol.
@@ -1427,11 +1743,14 @@ async def drop_cur_session_tables(sessions: DbSessions) -> None:
     message_model = _get_message_model()
     read_status_model = _get_message_read_status_model()
     review_vote_model = _get_review_vote_model()
+    notification_model = _get_group_notification_model()
 
     async with sessions.ddl_lock():
         async with sessions.write() as session:
             conn = await session.connection()
-            for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
+            for model in (
+                task_model, dep_model, message_model, read_status_model, review_vote_model, notification_model,
+            ):
                 await conn.run_sync(model.__table__.drop, checkfirst=True)
             await session.commit()
 

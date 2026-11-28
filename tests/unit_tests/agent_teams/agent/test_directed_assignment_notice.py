@@ -111,8 +111,8 @@ class FakeHost:
     async def shutdown_self(self) -> None:
         return None
 
-    async def conclude_completed_round(self, member_count: int, task_count: int) -> None:
-        return None
+    async def conclude_completed_round(self, member_count: int, task_count: int) -> bool:
+        return True
 
 
 class FakePoll:

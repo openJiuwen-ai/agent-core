@@ -195,6 +195,13 @@ class SysOperation:
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     @property
+    def work_config(self) -> LocalWorkConfig | None:
+        """Return the effective local configuration, or None in sandbox mode."""
+        if self.mode == OperationMode.LOCAL:
+            return self._run_config
+        return None
+
+    @property
     def isolation_key_template(self) -> Optional[str]:
         """Return the sandbox isolation key template, or None for local mode."""
         if self.mode == OperationMode.SANDBOX:

@@ -9,6 +9,11 @@ from pathlib import Path
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.events import (
+    HostPackageInstallRequest,
+    PackageInstallOutcome,
+    register_host_package_lifecycle,
+)
 from openjiuwen.core.events.types import Event
 from openjiuwen.core.extension import package_manager as package_manager_module
 from openjiuwen.core.extension.errors import ExtensionFailure
@@ -17,6 +22,7 @@ from openjiuwen.core.extension.management import (
     EXTENSION_APPLY_EVENT,
     EXTENSION_PLAN_EVENT,
     EXTENSION_ROLLBACK_EVENT,
+    PACKAGE_INSTALL_EVENT,
     PACKAGE_PARSE_EVENT,
     PACKAGE_QUERY_EVENT,
     PACKAGE_RESOLVE_EVENT,
@@ -252,7 +258,16 @@ async def test_install_refuses_a_package_the_host_version_does_not_satisfy(tmp_p
 @pytest.mark.asyncio
 async def test_install_reports_a_source_that_cannot_be_parsed(tmp_path: Path) -> None:
     good = _source(tmp_path, "source", "demo")
-    registry, _ = await build_registry(tmp_path / "store")
+    registry, bus = await build_registry(tmp_path / "store")
+    outcomes: list[PackageInstallOutcome] = []
+
+    async def unused_install(_request: HostPackageInstallRequest) -> None:
+        return None
+
+    async def capture(outcome: PackageInstallOutcome) -> None:
+        outcomes.append(outcome)
+
+    register_host_package_lifecycle(bus, install_handler=unused_install, outcome_handler=capture)
 
     result = await registry.install([tmp_path / "absent", good])
 
@@ -263,6 +278,8 @@ async def test_install_reports_a_source_that_cannot_be_parsed(tmp_path: Path) ->
     assert broken.error.status == StatusCode.EXTENSION_SOURCE_INVALID
     demo = next(item for item in result if item.package_id == "demo")
     assert demo is not None and demo.status == "SUCCESS"
+    # A parse failure has no package identity, so only the parsed package publishes.
+    assert [outcome.package_id for outcome in outcomes] == ["demo"]
 
 
 @pytest.mark.asyncio
@@ -493,3 +510,224 @@ async def test_reload_of_an_unknown_package_is_reported(tmp_path: Path) -> None:
     assert result.status == "FAILED"
     assert result.error is not None
     assert result.error.status == StatusCode.EXTENSION_PACKAGE_NOT_INSTALLED
+
+
+def _bundle_root(tmp_path: Path) -> Path:
+    """Write a bundle root manifest without installing any member."""
+    root = tmp_path / "bundle"
+    root.mkdir()
+    (root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "package_type": "extension",
+                "schemaVersion": 1,
+                "is_bundle": True,
+                "package": {"id": "demo.suite", "version": "1.0.0"},
+                "members": [{"path": "plugins/demo"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return root
+
+
+@pytest.mark.asyncio
+async def test_parse_refuses_a_bundle_root(tmp_path: Path) -> None:
+    bundle = _bundle_root(tmp_path)
+    _, bus = await build_registry(tmp_path / "store")
+
+    parsed = await bus.trigger(Event(PACKAGE_PARSE_EVENT, ParseRequest(bus=bus, source=bundle)))
+
+    assert isinstance(parsed, ParseResult)
+    assert parsed.package is None
+    assert parsed.error is not None
+    assert parsed.error.status == StatusCode.EXTENSION_SOURCE_INVALID
+    assert "bundle root" in parsed.error.message
+
+
+@pytest.mark.asyncio
+async def test_install_refuses_a_bundle_root_without_copying(tmp_path: Path) -> None:
+    bundle = _bundle_root(tmp_path)
+    store = tmp_path / "store"
+    registry, _ = await build_registry(store)
+
+    result = await registry.install([bundle])
+
+    assert result[0].status == "FAILED"
+    assert result[0].error is not None
+    assert result[0].error.status == StatusCode.EXTENSION_SOURCE_INVALID
+    assert not (store / "demo.suite").exists()
+
+
+@pytest.mark.asyncio
+async def test_install_survives_an_outcome_listener_failure(tmp_path: Path) -> None:
+    source = _source(tmp_path, "source", "demo")
+    store = tmp_path / "store"
+    registry, bus = await build_registry(store)
+
+    async def unused_install(_request: HostPackageInstallRequest) -> None:
+        return None
+
+    async def broken_outcome(_outcome: PackageInstallOutcome) -> None:
+        raise RuntimeError("state store unavailable")
+
+    register_host_package_lifecycle(
+        bus,
+        install_handler=unused_install,
+        outcome_handler=broken_outcome,
+    )
+
+    result = await registry.install([source])
+
+    assert result[0].status == "SUCCESS"
+    assert (store / "demo" / "1.0.0").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_host_install_survives_an_outcome_listener_failure(tmp_path: Path) -> None:
+    _, bus = await build_registry(tmp_path / "store")
+
+    async def install_member(request: HostPackageInstallRequest) -> PackageInstallOutcome:
+        return PackageInstallOutcome(
+            event_id="event",
+            operation="install",
+            package_id=request.package_id,
+            version=request.version,
+            status="success",
+            active=True,
+            enabled=True,
+        )
+
+    async def broken_outcome(_outcome: PackageInstallOutcome) -> None:
+        raise RuntimeError("state store unavailable")
+
+    register_host_package_lifecycle(
+        bus,
+        install_handler=install_member,
+        outcome_handler=broken_outcome,
+    )
+
+    outcome = await bus.trigger(
+        Event(
+            PACKAGE_INSTALL_EVENT,
+            HostPackageInstallRequest(package_id="demo", version="1.0.0"),
+        )
+    )
+
+    assert isinstance(outcome, PackageInstallOutcome)
+    assert outcome.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_outcome_reflects_the_enabled_state_of_the_package(tmp_path: Path) -> None:
+    disabled = _source(tmp_path, "disabled", "demo")
+    document = json.loads((disabled / "manifest.json").read_text(encoding="utf-8"))
+    document["enable"] = False
+    (disabled / "manifest.json").write_text(json.dumps(document), encoding="utf-8")
+    enabled = _source(tmp_path, "enabled", "other")
+    registry, bus = await build_registry(tmp_path / "store")
+    outcomes: dict[str, PackageInstallOutcome] = {}
+
+    async def unused_install(_request: HostPackageInstallRequest) -> None:
+        return None
+
+    async def capture(outcome: PackageInstallOutcome) -> None:
+        outcomes[outcome.package_id] = outcome
+
+    register_host_package_lifecycle(
+        bus,
+        install_handler=unused_install,
+        outcome_handler=capture,
+    )
+
+    await registry.install([disabled, enabled])
+
+    assert outcomes["demo"].active is False
+    assert outcomes["demo"].enabled is False
+    assert outcomes["other"].active is True
+    assert outcomes["other"].enabled is True
+
+
+@pytest.mark.asyncio
+async def test_a_host_member_token_skips_the_report_dependency_check(tmp_path: Path) -> None:
+    from openjiuwen.core.extension.management import context_for
+
+    source = _source(
+        tmp_path,
+        "member",
+        "demo.member",
+        requires=(PackageDependency(package_id="demo.missing", version=">=1.0.0"),),
+    )
+    registry, bus = await build_registry(tmp_path / "store")
+    service = context_for(bus).install_report
+    assert service is not None
+    manifest = load_manifest(source)
+
+    from openjiuwen.core.extension.errors import operation_error
+
+    failed = ActivationReport(
+        "", "demo.member", "install", "FAILED", None, None,
+        operation_error(StatusCode.EXTENSION_LOAD_FAILED, reason="test"),
+    )
+    token = await service.begin_operation(manifest, "install", skip_dependencies=True)
+    await service.wait_for_dependencies(token)
+    await service.validate_operation(token, manifest, "install")
+    await service.finish_operation(token, report=failed, active=None)
+
+    blocked = await service.begin_operation(manifest, "install")
+    with pytest.raises(ExtensionFailure) as error:
+        await service.wait_for_dependencies(blocked)
+    assert error.value.status is StatusCode.EXTENSION_DEPENDENCY_NOT_MET
+    await service.finish_operation(blocked, report=failed, active=None)
+
+
+@pytest.mark.asyncio
+async def test_invalid_host_install_result_publishes_a_failure(tmp_path: Path) -> None:
+    _, bus = await build_registry(tmp_path / "store")
+    outcomes: list[PackageInstallOutcome] = []
+
+    async def install_member(_request: HostPackageInstallRequest) -> None:
+        return None
+
+    async def capture(outcome: PackageInstallOutcome) -> None:
+        outcomes.append(outcome)
+
+    register_host_package_lifecycle(bus, install_handler=install_member, outcome_handler=capture)
+
+    outcome = await bus.trigger(
+        Event(
+            PACKAGE_INSTALL_EVENT,
+            HostPackageInstallRequest(package_id="demo.member", version="1.0.0"),
+        )
+    )
+
+    assert isinstance(outcome, PackageInstallOutcome)
+    assert outcome.status == "failed"
+    assert outcomes[-1].status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_failed_install_of_a_parsed_package_publishes_a_failure(tmp_path: Path) -> None:
+    source = _source(
+        tmp_path,
+        "source",
+        "demo",
+        requires=(PackageDependency(package_id="demo.missing", version=">=1.0.0"),),
+    )
+    registry, bus = await build_registry(tmp_path / "store")
+    outcomes: list[PackageInstallOutcome] = []
+
+    async def unused_install(_request: HostPackageInstallRequest) -> None:
+        return None
+
+    async def capture(outcome: PackageInstallOutcome) -> None:
+        outcomes.append(outcome)
+
+    register_host_package_lifecycle(bus, install_handler=unused_install, outcome_handler=capture)
+
+    result = await registry.install([source])
+
+    assert result[0].status == "FAILED"
+    assert [outcome.package_id for outcome in outcomes] == ["demo"]
+    assert outcomes[0].status == "failed"
+    assert outcomes[0].error

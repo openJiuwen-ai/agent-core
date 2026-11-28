@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import os
+import time
+from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -25,9 +28,95 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails._multimodal import (
     build_read_image_multimodal_resolver,
 )
+from openjiuwen.harness.rails.skills.skill_lifecycle_events import (
+    is_skill_complete_call,
+)
 from openjiuwen.harness.skills.mount import SkillRootMount, split_skill_front_matter
 from openjiuwen.harness.tools import BashTool, ReadFileTool, ListSkillTool, SkillTool
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
+
+# Per-task skill name for tool-call attribution.
+# ContextVar is a same-task fast path; session state is the cross-tool source of
+# truth (tool execution contexts often do not inherit the ContextVar binding).
+# Set only after skill_tool succeeds; cleared on skill_complete and at end of invoke.
+_current_skill_name: ContextVar[Optional[str]] = ContextVar(
+    "current_skill_name",
+    default=None,
+)
+
+# Top-level AgentSession global_state key (not nested under skill_use baseline).
+_CURRENT_SKILL_SESSION_KEY = "current_skill_name"
+
+
+def _read_session_current_skill_name(session: Any) -> Optional[str]:
+    """Read active skill name from session state, or None when unset/unavailable."""
+    if session is None or not callable(getattr(session, "get_state", None)):
+        return None
+    try:
+        stored = session.get_state(_CURRENT_SKILL_SESSION_KEY)
+    except Exception:
+        logger.debug("read current_skill_name from session failed", exc_info=True)
+        return None
+    if stored is None:
+        return None
+    cleaned = str(stored).strip()
+    return cleaned or None
+
+
+def _write_session_current_skill_name(session: Any, name: Optional[str]) -> None:
+    """Persist or clear active skill name on session state when supported."""
+    if session is None or not callable(getattr(session, "update_state", None)):
+        return
+    cleaned = str(name or "").strip() or None
+    try:
+        session.update_state({_CURRENT_SKILL_SESSION_KEY: cleaned})
+    except Exception:
+        logger.debug("write current_skill_name to session failed", exc_info=True)
+
+
+def get_current_skill_name(session: Any = None) -> Optional[str]:
+    """Return the active skill name, or None when unset.
+
+    When ``session`` is provided, session state is preferred (survives tool
+    execution context switches). ContextVar is used as a same-task fast path
+    when session has no binding or is omitted.
+    """
+    if session is not None:
+        stored = _read_session_current_skill_name(session)
+        if stored is not None:
+            return stored
+    name = _current_skill_name.get()
+    if name is None:
+        return None
+    cleaned = str(name).strip()
+    return cleaned or None
+
+
+def set_current_skill_name(name: str, session: Any = None) -> Token[Optional[str]]:
+    """Bind the active skill name for the current task.
+
+    Always updates the ContextVar. When ``session`` is provided, also persists
+    to session state so later tool rails can resolve ``source_skill``.
+    Returns a ContextVar reset token.
+    """
+    cleaned = str(name or "").strip() or None
+    token = _current_skill_name.set(cleaned)
+    if session is not None:
+        _write_session_current_skill_name(session, cleaned)
+    return token
+
+
+def clear_current_skill_name(session: Any = None) -> Token[Optional[str]]:
+    """Clear the active skill name.
+
+    Always clears the ContextVar. When ``session`` is provided, also clears
+    session state. Returns a ContextVar reset token.
+    """
+    token = _current_skill_name.set(None)
+    if session is not None:
+        _write_session_current_skill_name(session, None)
+    return token
+
 
 # Lines read when probing a SKILL.md for its YAML front matter. Bodies run to
 # tens of KB while the front matter is a handful of lines; a file whose front
@@ -46,6 +135,14 @@ _SKILL_SCAN_SKIP_DIRS: frozenset[str] = frozenset(
         "node_modules",
     }
 )
+
+
+def _read_skill_refresh_ttl() -> float:
+    """Seconds to reuse the last skill-directory scan. ``0`` disables the cache."""
+    try:
+        return max(0.0, float(os.environ.get("SKILL_REFRESH_TTL_SECONDS", "0") or 0))
+    except ValueError:
+        return 0.0
 
 
 class SkillUseRail(DeepAgentRail):
@@ -143,6 +240,15 @@ class SkillUseRail(DeepAgentRail):
 
         # Snapshot of visible skill directories and SKILL.md mtimes.
         self._skills_snapshot_signature: Optional[Tuple[Tuple[str, float], ...]] = None
+        # Directory-scan TTL. 0 keeps the existing per-invoke refresh. A
+        # performance-sensitive deploy opts in with SKILL_REFRESH_TTL_SECONDS
+        # (for example 30); within the window the last scan is reused, so a
+        # newly installed skill shows up at latest TTL seconds later.
+        # clear_skills() drops the stamp, so an explicit install/unmount still
+        # refreshes on the next invoke. Read once at construction: the value
+        # is a process deploy knob, not a per-request setting.
+        self._last_full_refresh_ts: Optional[float] = None
+        self._skill_refresh_ttl_s = _read_skill_refresh_ttl()
 
     @property
     def skills_meta(self) -> List[Skill]:
@@ -162,6 +268,7 @@ class SkillUseRail(DeepAgentRail):
         self._skill_order.clear()
         self.skills = []
         self._skills_snapshot_signature = None
+        self._last_full_refresh_ts = None
 
     def mount_skill_root(self, directory: str | Path) -> SkillRootMount:
         """Append a native discovery root and return its ownership handle."""
@@ -435,8 +542,25 @@ class SkillUseRail(DeepAgentRail):
         self._skills_snapshot_signature = self._build_skills_snapshot_signature()
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
-        """Prepare skills before invoke."""
-        await self.refresh_skill_prompt(ctx)
+        """Prepare skills before invoke.
+
+        The directory walk plus signature is on the order of a hundred
+        milliseconds per turn even when no skill changed. Skill installs are
+        rare, so a deploy can set ``SKILL_REFRESH_TTL_SECONDS`` and reuse the
+        last scan inside that window. The default ``0`` keeps a full refresh
+        every turn. A failed refresh does not stamp the window, so the next
+        turn retries immediately. The session baseline and prompt sync still
+        run on a cache hit; only the filesystem scan is skipped.
+        """
+        if not self._skill_refresh_within_ttl():
+            try:
+                await self.refresh_skill_prompt(ctx)
+            except Exception:
+                # Do not stamp the TTL: the next turn must scan again instead
+                # of serving whatever partial state the failure left behind.
+                self._last_full_refresh_ts = None
+                raise
+            self._last_full_refresh_ts = time.monotonic()
         self._ensure_session_baseline(ctx)
         if self.system_prompt_builder is not None:
             await self._sync_skill_prompt_and_attachment(ctx)
@@ -469,8 +593,22 @@ class SkillUseRail(DeepAgentRail):
             desc = f"{desc}\n  演进经验:\n{evo_text}"
         return desc
 
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Clear skill attribution when the model ends the skill via skill_complete.
+
+        Aligns with skill_authorization_rail: skill_complete means the skill is
+        over, so later tools in the same invoke must not keep the old source_skill.
+        after_invoke still clears as a cross-turn safety net.
+        """
+        inputs = getattr(ctx, "inputs", None)
+        tool_name = str(getattr(inputs, "tool_name", "") or "")
+        if not is_skill_complete_call(tool_name):
+            return
+        clear_current_skill_name(session=getattr(ctx, "session", None))
+
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
-        _ = ctx
+        """Drop skill activation at the end of an invoke to avoid cross-turn bleed."""
+        clear_current_skill_name(session=getattr(ctx, "session", None))
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Update system_prompt_builder with current skills before model call.
@@ -507,13 +645,43 @@ class SkillUseRail(DeepAgentRail):
             self.system_prompt_builder.remove_section(SectionName.SKILLS)
         await self._update_runtime_skill_attachment(ctx, baseline_skills)
 
+    def _skill_refresh_within_ttl(self) -> bool:
+        """Whether the last successful directory scan is still inside the TTL.
+
+        ``SKILL_REFRESH_TTL_SECONDS <= 0`` (the default) is always a miss, so
+        every invoke keeps today's full refresh. ``enable_cache=False`` also
+        forces a miss: that flag means every invoke must re-read the disk, and
+        a TTL hit would skip ``_prepare_skills`` entirely.
+        """
+        if not self.enable_cache:
+            return False
+        ttl = self._skill_refresh_ttl_s
+        if ttl <= 0 or self._last_full_refresh_ts is None:
+            return False
+        return (time.monotonic() - self._last_full_refresh_ts) < ttl
+
     async def _refresh_skill_prompt_if_changed(self, ctx: AgentCallbackContext) -> None:
-        """Refresh skills when visible skill directories or SKILL.md mtimes changed."""
+        """Refresh skills when visible skill directories or SKILL.md mtimes changed.
+
+        Inside an opted-in TTL window the signature walk is the same directory
+        scan ``before_invoke`` just skipped, so it is skipped here too.
+        ``before_model_call`` reaches this without a preceding ``before_invoke``
+        on some task-loop paths; a live window still reuses the last scan.
+        A successful refresh here stamps the TTL so those paths open the
+        window instead of rescanning every call.
+        """
+        if self._skill_refresh_within_ttl():
+            return
         current_signature = self._build_skills_snapshot_signature()
         if current_signature == self._skills_snapshot_signature:
             return
 
-        await self.refresh_skill_prompt(ctx)
+        try:
+            await self.refresh_skill_prompt(ctx)
+        except Exception:
+            self._last_full_refresh_ts = None
+            raise
+        self._last_full_refresh_ts = time.monotonic()
 
     def _build_skills_snapshot_signature(self) -> Tuple[Tuple[str, float], ...]:
         """Build the same incremental-refresh signature used by _prepare_skills."""

@@ -950,5 +950,73 @@ class TestRoundTrip:
             assert result.get("memories_used") == 1
 
 
+class TestCancelledRoundGating:
+    """Auto-summarize must not run when the round was hard-cancelled.
+
+    The executor's cancelled path fires AFTER_TASK_ITERATION with a
+    result carrying ``stop_reason="cancelled"``; the multi-second
+    summarize LLM call must be skipped there while still running for
+    ordinary failures.
+    """
+
+    CANCELLED = {"result_type": "error", "stop_reason": "cancelled", "error": "cancelled"}
+    FAILED = {"result_type": "error", "error": "boom"}
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_context_rail_skips_summarize_on_cancelled():
+        """ContextEvolutionRail: cancelled → no summarize; plain failure → summarize."""
+        mw = _make_middleware(
+            memory_service=_make_memory_service(),
+            summarize_cfg=_SummarizeCfg(enabled=True),
+        )
+        mw._current_query = "q"
+        mw.extract_trajectory = MagicMock(return_value="USER: q\nTHOUGHT: ok")
+
+        with patch(
+            "openjiuwen.harness.rails.evolution.context_evolution_rail._evaluate_trial",
+            return_value=("success", 1),
+        ), patch(
+            "openjiuwen.harness.rails.evolution.context_evolution_rail._summarize_trajectories",
+            new=AsyncMock(return_value={"memory": []}),
+        ) as mock_summ:
+            await mw.after_task_iteration(_make_ctx(query="q", result=dict(TestCancelledRoundGating.CANCELLED)))
+            mock_summ.assert_not_called()
+
+            await mw.after_task_iteration(_make_ctx(query="q", result=dict(TestCancelledRoundGating.FAILED)))
+            mock_summ.assert_called_once()
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_team_rail_skips_writes_on_cancelled():
+        """TeamContextEvolutionRail: cancelled → no personal/shared writes."""
+        from openjiuwen.harness.rails.evolution.team_context_evolution_rail import (
+            TeamContextEvolutionRail,
+        )
+
+        rail = TeamContextEvolutionRail(
+            team_id="t",
+            agent_role="r",
+            personal_service=MagicMock(),
+            shared_service=MagicMock(),
+            auto_summarize=True,
+        )
+        rail._current_query = "q"
+        with patch.object(
+            TeamContextEvolutionRail,
+            "_write_personal_and_handoff",
+            new=AsyncMock(),
+        ) as mock_write, patch.object(
+            TeamContextEvolutionRail,
+            "synthesize_team_summary",
+            new=AsyncMock(),
+        ) as mock_shared:
+            await rail.after_task_iteration(
+                _make_ctx(query="q", result=dict(TestCancelledRoundGating.CANCELLED))
+            )
+            mock_write.assert_not_called()
+            mock_shared.assert_not_called()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

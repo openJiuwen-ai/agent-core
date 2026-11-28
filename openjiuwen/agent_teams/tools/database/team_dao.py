@@ -142,3 +142,26 @@ class TeamDao:
             result = await session.execute(select(Team.updated_at).where(Team.team_name == team_name))
             value = result.scalar_one_or_none()
             return int(value) if value is not None else 0
+
+    async def list_teams(self) -> list[tuple]:
+        """List every team as light projection rows, oldest first.
+
+        Selects only the routing/identity columns (no ``desc`` / ``prompt``
+        heavy fields) so listing scales with team count, not team content.
+        Consumers assemble their own summary models from these rows.
+
+        Returns:
+            Rows of ``(team_name, display_name, leader_member_name,
+            created, updated_at)``, ordered by ``created`` ascending.
+        """
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(
+                    Team.team_name,
+                    Team.display_name,
+                    Team.leader_member_name,
+                    Team.created,
+                    Team.updated_at,
+                ).order_by(Team.created)
+            )
+            return list(result.all())

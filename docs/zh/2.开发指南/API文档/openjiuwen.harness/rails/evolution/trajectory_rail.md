@@ -101,6 +101,11 @@ trajectories = store.query(session_id=session_id)
 observability 文件 exporter 和 `TrajectoryStore` 是两类不同输出：前者记录原始 span 用于可观测性，后者由
 `TrajectoryRail` 写入单次 invoke 的 canonical archive。不要把 exporter 文件读回 Rail。
 
+`TrajectoryRail` 只依赖 `trajectory_span_processor`，不依赖 exporter。只需要轨迹、不需要导出原始 span 时，
+可以调用 `acquire_observability(config, export=False)`：provider 照常启动、processor 照常收到 span，
+按配置构建的 exporter 不会收到 span。该开关按进程生效，同一进程内任一 runtime 以 `export=True`
+（默认值）acquire 时都会恢复导出；通过 `span_exporter_override` 显式传入的 exporter 不受该开关影响。
+
 ## 属性
 
 ### trajectory_store -> TrajectoryStore
