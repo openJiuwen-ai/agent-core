@@ -110,10 +110,12 @@ class RolloutEncoder:
             )
         
         # Fallback to tokenizer-based encoding
-        input_messages = rollout.input_prompt["message"]
+        input_prompt = rollout.input_prompt or {}
+        input_prompt = rollout.input_prompt or {}
+        input_messages = input_prompt.get("message", [])
         output_messages = [rollout.output_response]
         full_messages = input_messages + output_messages
-        tools_info = rollout.input_prompt.get("tools", [])
+        tools_info = input_prompt.get("tools", [])
 
         full_text = self.tokenizer.apply_chat_template(
             full_messages,
@@ -190,12 +192,14 @@ class RolloutEncoder:
     ) -> RolloutWithReward:
         """Internal implementation of whole-trajectory sample construction."""
         last_turn = rolloutmsg.rollout_info[-1]
-        all_messages = last_turn.input_prompt["message"] + [
+        last_prompt = last_turn.input_prompt or {}
+        first_prompt = rolloutmsg.rollout_info[0].input_prompt or {}
+        all_messages = last_prompt["message"] + [
             last_turn.output_response
         ]
-        tools_info = rolloutmsg.rollout_info[0].input_prompt.get("tools", [])
+        tools_info = first_prompt.get("tools", [])
 
-        initial_messages = rolloutmsg.rollout_info[0].input_prompt["message"]
+        initial_messages = first_prompt["message"]
         prompt_text = self.tokenizer.apply_chat_template(
             initial_messages,
             tokenize=False,
@@ -223,7 +227,7 @@ class RolloutEncoder:
         loss_mask = [0] * len(response_ids)
 
         for rollout in rolloutmsg.rollout_info:
-            msgs_before = rollout.input_prompt["message"]
+            msgs_before = (rollout.input_prompt or {})["message"]
             text_before = self.tokenizer.apply_chat_template(
                 msgs_before,
                 tokenize=False,
