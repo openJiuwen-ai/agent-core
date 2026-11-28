@@ -227,7 +227,7 @@ transformer is an interface used for custom data formatting. When adding a compo
 The `inputs_transformer` for an LLM component is defined as follows (if the input is empty, a default input is set):
 
 ```python
-from openjiuwen.core.session.state import ReadableStateLike
+from openjiuwen.core.session.state.base import ReadableStateLike
 
 def llm_inputs_transformer(state: ReadableStateLike):
     query = state.get("start.query")
@@ -266,7 +266,7 @@ Add the LLM component to the workflow, set the component ID to `llm`, and specif
 
 ```python
   from openjiuwen.core.workflow import LLMComponent, Workflow
-  from openjiuwen.core.session.state import ReadableStateLike
+  from openjiuwen.core.session.state.base import ReadableStateLike
 
   def llm_inputs_transformer(state: ReadableStateLike):
       query = state.get("start.query")

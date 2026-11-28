@@ -291,7 +291,7 @@ result = await model.invoke(messages=[
 IntelliRouter uses a **config-hash caching mechanism**: multiple agents that use the same `ModelClientConfig` automatically share the same `ReliableRouter` instance.
 
 ```python
-from openjiuwen.core.single_agent.agents import ReActAgent, ReActAgentConfig
+from openjiuwen.core.single_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent import AgentCard
 
 # Agent A and Agent B use the same model_client_config
