@@ -1,0 +1,12 @@
+# Additional numerical/optimization dependencies for this example.
+# Install agent-core from the repository first; pyproject.toml remains the
+# canonical source for the SDK's dependencies. These versions were verified
+# together in the external openjiuwen-agent-core environment.
+torch==2.13.0
+numpy==2.5.1
+sentence-transformers==6.0.1
+transformers==5.14.1
+textgrad==0.1.8
+tiktoken==0.13.0
+huggingface-hub==1.25.1
+httpx==0.28.1
