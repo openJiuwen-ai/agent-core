@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from agent_shield.tool_permission import get_permission_manager
+from agent_shield.tool_permission import PermissionLevel, get_permission_manager
 
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -187,3 +187,48 @@ def test_failed_persist_publishes_nothing() -> None:
 
     assert rail._persist_allow_always("bash", {"command": "echo hi"}) is False
     assert get_permission_manager().get_config(_KEY) == _ASK_BASH
+
+
+_HIGH_RISK_PATTERNS = [r"\brm\s+-[^\s]*[rf][^\s]*[rf]\b", r"\brm\s+.*--force\b"]
+
+
+def test_sparse_update_config_keeps_always_on_components() -> None:
+    """Sparse snapshots (hot patches / yaml publish) must not silently drop the
+    disabled-mode guard floor: keep_keys preserves ``always_on_components``."""
+    base = {**_CONFIG, "always_on_components": ["host_guard"]}
+    rail = PermissionInterruptRail(config=base, permission_key=_KEY)
+
+    rail.update_config({"enabled": False})
+
+    published = get_permission_manager().get_config(_KEY)
+    assert published["enabled"] is False
+    assert published["always_on_components"] == ["host_guard"]
+    assert rail._static_config["always_on_components"] == ["host_guard"]
+
+
+@pytest.mark.asyncio
+async def test_disabled_with_always_on_publishes_active_policy() -> None:
+    """disabled + always_on: the rail publishes a policy the engine still judges.
+
+    Transport-level pin (rail → manager → engine): a whitelisted-component hit
+    keeps ASK under ``enabled: false``; a miss is allowed. Component judgment
+    semantics are covered by agent-security's own tests.
+    """
+    cfg = {
+        "enabled": False,
+        "always_on_components": ["high_risk_command"],
+        "package_builtin_rules": False,
+        "high_risk_command": {"enabled": True, "patterns": list(_HIGH_RISK_PATTERNS)},
+        "defaults": {"*": "allow"},
+        "tools": {"bash": "allow"},
+        "rules": [],
+    }
+    rail = PermissionInterruptRail(config=cfg, permission_key=_KEY)
+    assert rail.enabled is False
+
+    manager = get_permission_manager()
+    miss = await manager.check_permission("bash", {"command": "ls"}, _KEY)
+    hit = await manager.check_permission("bash", {"command": "rm -rf /tmp/x"}, _KEY)
+
+    assert miss.permission is PermissionLevel.ALLOW
+    assert hit.permission is PermissionLevel.ASK

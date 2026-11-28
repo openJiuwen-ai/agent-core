@@ -75,7 +75,7 @@ description: 给修改 openjiuwen/harness（及被 spec 点名的 openjiuwen/cor
 | `openjiuwen/harness/rails/interrupt/interrupt_base.py` | `BaseInterruptRail` 三态决策封闭 | S_15 |
 | `openjiuwen/harness/rails/interrupt/confirm_rail.py` | `ConfirmInterruptRail` 基类（权限 rail 与子代理审批 rail 的父类） | S_13 / S_15 / S_16 |
 | `openjiuwen/harness/rails/interrupt/ask_user_rail.py` | `AskUserRail`（空 answers 必收口不 re-pend，S_15 N11） | S_15 |
-| `openjiuwen/harness/rails/security/tool_security_rail.py` | `PermissionInterruptRail`（拦截一切工具的判定序 / auto_confirm / batch allow 双 key / 授权三级记忆 / persist 回滚） | S_16 |
+| `openjiuwen/harness/rails/security/tool_security_rail.py` | `PermissionInterruptRail`（拦截一切工具的判定序 / auto_confirm / batch allow 双 key / 授权三级记忆 / persist 回滚）；`update_config` keep_keys 保留 `always_on_components`（disabled 底线白名单） | S_16 / S_17 |
 | `openjiuwen/harness/security/host.py` | `ToolPermissionHost` 回调契约（宿主实现归 S_17） | S_16 / S_17 |
 | `openjiuwen/harness/security/models.py` | `PermissionConfirmResponse` / `PermissionLevel` / `PermissionResult` | S_16 / S_17 |
 | `openjiuwen/harness/security/patterns.py` | 授权规则 merge / 写盘（persist 三真与写盘回滚） | S_16 |

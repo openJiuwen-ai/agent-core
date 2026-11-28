@@ -208,8 +208,16 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 merged["runtime"] = deepcopy(existing_runtime)
         # Hot patches (trusted_dirs / workspace_root) and sparse YAML snapshots
         # often omit these keys. Missing shell_allowlist re-enables default-30;
-        # dropping host_guard disables HostGuard. Preserve from the last publish.
-        for keep_key in ("shell_allowlist", "host_guard", "package_builtin_rules"):
+        # dropping host_guard disables HostGuard; dropping always_on_components
+        # silently removes the disabled-mode guard floor (the engine then allows
+        # everything while ``enabled`` is false — hosts depend on this key being
+        # preserved, do NOT remove it from keep_keys). Preserve from publish.
+        for keep_key in (
+            "shell_allowlist",
+            "host_guard",
+            "package_builtin_rules",
+            "always_on_components",
+        ):
             if keep_key in merged:
                 continue
             existing_val = self._static_config.get(keep_key, _MISSING)
