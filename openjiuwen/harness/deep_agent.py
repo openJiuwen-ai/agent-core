@@ -71,6 +71,7 @@ from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.kv_cache.kv_cache_metadata import KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.session import with_session
 from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream.base import OutputSchema, StreamMode
@@ -3135,6 +3136,7 @@ class DeepAgent(BaseAgent):
         state.turn_state = turn
         return turn
 
+    @with_session()
     async def _bind_turn_state(
         self,
         ctx: AgentCallbackContext,
@@ -3200,6 +3202,7 @@ class DeepAgent(BaseAgent):
             updated["usage"] = output.usage
         return updated
 
+    @with_session()
     async def _trigger_turn_complete(
         self,
         ctx: AgentCallbackContext,
@@ -4407,11 +4410,11 @@ class DeepAgent(BaseAgent):
             self.clear_state(session)
             proposal_succeeded = True
             return RoundOutcome(next_work=next_work)
-        except Exception:
+        except Exception as exc:
             logger.exception("[DeepAgent] interaction round execution failed")
             return RoundOutcome(
                 error_code="round_execution_error",
-                error_message="interaction round execution failed",
+                error_message=str(exc) or "interaction round execution failed",
             )
         finally:
             if proposal_binding is not None:

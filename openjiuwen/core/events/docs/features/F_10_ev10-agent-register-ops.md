@@ -234,3 +234,7 @@ uv run pytest tests/unit_tests/core/events/test_agent_register_ops.py -q
 - 本文的测试证明“定义、登记与绑定通过验证”，不代表 JiuwenSwarm 业务入口已经接入。
 
 参考：[F_07 总体方案](F_07_ev07-agent-runtime-business-events.md)、[S_01 公共契约](../specs/S_01_events-contract.md)、[Events 模块规则](../../AGENTS.md)、[DeepAgent Extension Binder](../../../../harness/extension_binder.py)。
+
+注册只登记类型，不启动任务。需要执行时，将返回的 `registered.agent` 传给 `AgentSpawnInput.subagent_type`，
+再调用 `ops.agent.spawn`；已有类型可以直接启动。两个方法的独立说明、调用前提及示例见
+[开发指南：内置 agent 能力](../designs/events-extension-development-guide.md#56-内置-agent-能力)。

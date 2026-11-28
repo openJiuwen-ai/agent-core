@@ -516,3 +516,72 @@ Handler 可使用预置的 `ops.package` 能力读取所属包的根目录和包
 输入、输出、匹配与失败规则见 [S_02](../specs/S_02_store.md)，
 实现与验证见 [F_14](../features/F_14_ops-store.md)。宿主通过 `Registry.init(store=JsonStore(directory))`
 注入明确目录，插件不需要传目录或包 ID。监听 store 事件时调用 next 获取下游结果，避免同名 Ops 递归。
+
+### 5.6 内置 agent 能力
+
+以下方法在 Handler 内使用，要求宿主已完成 `ops.build`，当前 `SessionContext` 对应已初始化并绑定到 Runtime 的 `DeepAgent`。
+两者分别触发 `agent.register`、`agent.spawn` 事件链，均不会自动推进原事件；需要继续原链时调用 `return await event_next(event)`。
+
+#### 5.6.1 `ops.agent.register(data)`：登记子 Agent 类型
+
+接受 `SubAgentConfig` 或 `AgentRegisterInput`，返回 `AgentRegisterValue`。
+成功返回的 `registered.agent` 等于类型的 `agent_card.name`；登记只保存类型配置，不创建实例或启动任务。
+
+```python
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.schema.config import SubAgentConfig
+
+config = SubAgentConfig(
+    agent_card=AgentCard(id="reviewer-agent", name="reviewer", description="检查代码"),
+    system_prompt="检查代码并报告问题。",
+)
+registered = await ops.agent.register(config)
+# registered.agent == "reviewer"
+```
+
+上例展示最小类型声明；实际任务需要的工具、工作区及系统操作等资源由注册方配置。
+完整配置责任、重复登记和拒绝规则见 [F_10 agent.register](../features/F_10_ev10-agent-register-ops.md)。
+
+#### 5.6.2 `ops.agent.spawn(request)`：创建实例并提交任务
+
+接受 `AgentSpawnInput`，四个字段均为非空字符串：`subagent_type` 是已登记的类型名称，
+`task_description` 是任务内容，`display_name` 和 `role` 是本次实例的展示名称与角色。
+除上述公共前提外，调用时还必须存在与事件上下文身份匹配的当前真实 Session。
+
+```python
+from openjiuwen.core.events.builtins.event_types.agent_spawn import AgentSpawnInput
+
+# 前提：当前父 DeepAgent 已登记名为 reviewer 的类型。
+spawned = await ops.agent.spawn(
+    AgentSpawnInput(
+        subagent_type="reviewer",
+        task_description="检查本次代码修改并报告问题。",
+        display_name="代码检查员",
+        role="reviewer",
+    )
+)
+# spawned.subagent_id 是实例 ID，spawned.status 是初始状态；返回值不包含最终任务结果。
+```
+
+可以直接使用宿主已登记的类型；若需自定义类型，先调用 `ops.agent.register(config)`，
+再将返回的 `registered.agent` 传给 `AgentSpawnInput.subagent_type`。
+`agent_card.id`、类型名称和 `spawned.subagent_id` 含义不同；未知类型不能通过 `spawn` 自动登记。
+
+### 5.7 内置 tool.check 能力
+
+`tool.check` 的自然触发与显式 Ops 调用需要区分：
+
+- **自然触发：** 模型调用工具时，宿主须已发布 `ExtensionEventBus`，当前 Agent 须挂载 `PermissionInterruptRail`，
+  并进入其首次权限检查分支。SDK 默认通过以下宿主配置自动挂载该 Rail：
+
+  ```yaml
+  permissions:
+    enabled: true
+  ```
+
+  权限结果为 `allow`、`ask` 或 `deny` 都可以触发事件；仅注册 Handler 不会自动挂载 Rail。
+  宿主自行实现权限检查时，还需确认该路径是否接入 `tool.check`。
+- **显式调用：** Handler 中的 `await ops.tool.check(tool_name, arguments)` 会主动触发 `tool.check`，
+  不以 `permissions.enabled: true` 为前提，但仍要求 Ops 已构建、当前会话对应已初始化并绑定的 `DeepAgent`。
+  返回 `ToolCheckOutput`（`decision`、`reason`）；没有权限 Rail 时，默认 CORE 返回 `decision="allow"`。
+  该方法只查询权限，不执行工具，也不推进原事件链。
