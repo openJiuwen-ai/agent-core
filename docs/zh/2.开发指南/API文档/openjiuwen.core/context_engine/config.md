@@ -32,6 +32,9 @@ class openjiuwen.core.context_engine.ContextEngineConfig()
 **参数：**
 
 - `max_context_message_num` (`int | None`)：单个 context 允许的消息总数硬上限。
+  若截断点将工具调用与其结果拆开，该组剩余的工具结果也会被丢弃，因此实际
+  保留的消息数可能小于上限。
+  恢复历史时，开头缺少对应工具调用的孤立工具结果也会被移除。
   默认 `None`，表示不限制。
 - `default_window_message_num` (`int | None`)：未显式指定窗口大小时保留的最新
   消息数量。默认 `None`，表示不按消息数截断；设置时必须大于 `0`。
