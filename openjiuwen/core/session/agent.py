@@ -27,6 +27,7 @@ from openjiuwen.core.session.workflow import Session as WorkflowSession
 from openjiuwen.core.common.logging import logger
 
 if TYPE_CHECKING:
+    from openjiuwen.core.session.checkpointer.step_storage import StepResume
     from openjiuwen.core.single_agent import AgentCard
 
 
@@ -310,6 +311,28 @@ class Session:
     async def commit_interrupt(self):
         """Persist an interrupt checkpoint without closing the stream."""
         await self._inner.checkpointer().interrupt_agent_execute(self._inner)
+
+    async def save_agent_step(self, iteration: int, query: str = "", final: bool = False) -> None:
+        """Append the current ReAct iteration as a durable increment."""
+        await self._inner.checkpointer().save_agent_step(
+            self._inner, iteration, query=query, final=final
+        )
+
+    def begin_agent_steps(self) -> "StepResume | None":
+        """Take the pending step resume point, if this run resumes one."""
+        return self._inner.checkpointer().begin_agent_steps(self._inner)
+
+    def peek_agent_step_resume(self) -> "StepResume | None":
+        """Read the pending step resume point without consuming it."""
+        return self._inner.checkpointer().peek_agent_step_resume(self._inner)
+
+    async def end_agent_steps(self, interrupted: bool) -> None:
+        """Close this run's step records, marking how it stopped."""
+        await self._inner.checkpointer().end_agent_steps(self._inner, interrupted)
+
+    def settle_agent_steps(self) -> None:
+        """Mark a replayed run idle without recording a new step."""
+        self._inner.checkpointer().settle_agent_steps(self._inner)
 
     def create_workflow_session(self) -> WorkflowSession:
         return WorkflowSession(parent=self._inner, session_id=self.get_session_id())

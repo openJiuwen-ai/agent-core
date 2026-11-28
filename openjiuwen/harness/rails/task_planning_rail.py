@@ -3,6 +3,7 @@
 """TaskPlanningRail — registers todo tools on DeepAgent."""
 from __future__ import annotations
 
+import os
 from typing import Dict, Optional, List
 
 from openjiuwen.core.common.logging import logger
@@ -26,6 +27,11 @@ from openjiuwen.harness.schema.task import (
 )
 from openjiuwen.harness.tools import TodoTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
+
+# Snapshot of the authoritative todo.json taken at each completed ReAct
+# iteration. It rides in the step increment; a resumed run uses it to pull
+# the file back to the last persisted step.
+STEP_TODO_SNAPSHOT_KEY = "__step_todo_snapshot__"
 
 
 class TaskPlanningRail(DeepAgentRail):
@@ -289,6 +295,136 @@ class TaskPlanningRail(DeepAgentRail):
     async def after_task_iteration(self, ctx: AgentCallbackContext) -> None:
         """Sync todo list from task_plan after each iteration."""
         await self._sync_todos_from_plan(ctx)
+
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Align todo.json with the last persisted step before a resume."""
+        if ctx.session is None:
+            return
+        await self._rollback_todo_for_step_resume(ctx)
+
+    async def after_react_iteration(self, ctx: AgentCallbackContext) -> None:
+        """Snapshot todo.json so an unpersisted round can be rolled back.
+
+        Runs before the step record is written, so the snapshot lands in the
+        same increment as the iteration that produced it. Only active when the
+        agent persists per-iteration checkpoints.
+        """
+        if ctx.session is None or not self._iteration_checkpoint_enabled(ctx):
+            return
+        tool = self._find_todo_tool()
+        if tool is None:
+            return
+        session_id = ctx.session.get_session_id()
+        path = os.path.abspath(tool.get_file_path(session_id))
+        snapshot = await self._read_todo_file(tool, path)
+        if snapshot is None:
+            logger.debug(
+                "TaskPlanningRail: todo file state unknown session_id=%s", session_id
+            )
+            return
+        exists, content = snapshot
+        ctx.session.update_state({
+            STEP_TODO_SNAPSHOT_KEY: {"exists": exists, "content": content}
+        })
+
+    async def _rollback_todo_for_step_resume(self, ctx: AgentCallbackContext) -> None:
+        """Pull todo.json back to the last persisted step before a resume.
+
+        The todo file is rewritten as tools run, so it can be ahead of the last
+        step record that made it to disk. Restored items are stamped with the
+        session's current generation token so a host that starts a new
+        generation on this request does not filter the plan away.
+        """
+        peek = getattr(ctx.session, "peek_agent_step_resume", None)
+        if not callable(peek) or peek() is None:
+            return
+        snapshot = ctx.session.get_state(STEP_TODO_SNAPSHOT_KEY)
+        if not isinstance(snapshot, dict) or not snapshot.get("exists"):
+            # No file was recorded at that step. There is no delete API on the
+            # fs operation either, so a file created by the unpersisted round
+            # stays; the rerun's todo_create overwrites the whole list.
+            logger.info(
+                "TaskPlanningRail: step resume without a todo file snapshot; "
+                "leaving todo.json untouched"
+            )
+            return
+        tool = self._find_todo_tool()
+        if tool is None:
+            return
+        session_id = ctx.session.get_session_id()
+        path = os.path.abspath(tool.get_file_path(session_id))
+        content = snapshot.get("content") or ""
+
+        current = await self._read_todo_file(tool, path)
+        if current is not None and current[0] and current[1] == content:
+            return
+        try:
+            write = await tool.fs.write_file(
+                path, content, mode="text", prepend_newline=False
+            )
+        except Exception:
+            logger.warning(
+                "TaskPlanningRail: failed to roll back todo.json session_id=%s",
+                session_id,
+                exc_info=True,
+            )
+            return
+        if getattr(write, "code", -1) != 0:
+            logger.warning(
+                "TaskPlanningRail: todo.json rollback write returned code=%s session_id=%s",
+                getattr(write, "code", None),
+                session_id,
+            )
+            return
+        self._todos_cache.pop(session_id, None)
+
+    @staticmethod
+    def _iteration_checkpoint_enabled(ctx: AgentCallbackContext) -> bool:
+        """Whether the agent run persists step checkpoints (on by default)."""
+        config = getattr(getattr(ctx, "agent", None), "_config", None)
+        engine_config = getattr(config, "context_engine_config", None)
+        if engine_config is None:
+            return True
+        return bool(getattr(engine_config, "enable_iteration_checkpoint", True))
+
+    @staticmethod
+    async def _read_todo_file(tool, path: str) -> Optional[tuple[bool, str]]:
+        """Return ``(exists, content)``, or None when the backend cannot tell.
+
+        Backends without snapshot support report a missing file as an error or
+        as an empty successful read, so the parent directory is probed before
+        concluding the file is absent.
+        """
+        content = None
+        try:
+            result = await tool.fs.read_file(path, mode="text")
+        except Exception:
+            result = None
+        if result is not None and getattr(result, "code", -1) == 0 and result.data is not None:
+            content = getattr(result.data, "content", "") or ""
+            if content:
+                return True, content
+
+        listed = await TaskPlanningRail._probe_todo_file(tool, path)
+        if listed is True:
+            return True, content or ""
+        if listed is False:
+            return False, ""
+        return None
+
+    @staticmethod
+    async def _probe_todo_file(tool, path: str) -> Optional[bool]:
+        """Whether ``path`` is listed in its parent directory, or None."""
+        try:
+            listing = await tool.fs.list_files(os.path.dirname(path))
+        except Exception:
+            return None
+        if getattr(listing, "code", -1) != 0 or listing.data is None:
+            # A missing parent directory is the normal "no todo list yet" case.
+            return False
+        name = os.path.basename(path)
+        items = getattr(listing.data, "list_items", None) or []
+        return any(getattr(item, "name", None) == name for item in items)
 
     # -- internal helpers --
 

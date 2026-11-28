@@ -17,7 +17,7 @@ from typing import (
     Tuple,
 )
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     create_async_engine,
@@ -56,6 +56,8 @@ from openjiuwen.core.session.checkpointer import (
     Storage,
     WORKFLOW_NAMESPACE_GRAPH,
 )
+from openjiuwen.core.session.checkpointer.base import safe_agent_id
+from openjiuwen.core.session.checkpointer.step_storage import AgentStepStorage, StepResume
 from openjiuwen.core.session.constants import FORCE_DEL_WORKFLOW_STATE_KEY
 
 
@@ -169,8 +171,13 @@ class BaseSingleStateStorage(BaseStorage, ABC):
         log_kwargs.update(self._entity_log_extra(entity_id))
         return log_kwargs
 
-    async def save(self, session: BaseSession):
-        """Save state to KV store."""
+    async def save(self, session: BaseSession) -> bool:
+        """Save state to KV store.
+
+        Returns:
+            True when the blob was written, False when it could not be
+            serialized. KV failures still raise.
+        """
         state = self._get_state_to_save(session)
         session_id = session.session_id()
         entity_id = self._get_entity_id(session)
@@ -181,7 +188,7 @@ class BaseSingleStateStorage(BaseStorage, ABC):
                 f"Failed to serialize {self._entity_label} state",
                 **self._log_kwargs(session_id, entity_id, "serialize"),
             )
-            return
+            return False
 
         try:
             dump_type, blob = state_blob
@@ -204,6 +211,7 @@ class BaseSingleStateStorage(BaseStorage, ABC):
                 **self._log_kwargs(session_id, entity_id, "save"),
             )
             raise
+        return True
 
     async def recover(self, session: BaseSession, inputs: InteractiveInput = None):
         """Recover state from KV store."""
@@ -742,17 +750,28 @@ class PersistenceCheckpointer(Checkpointer):
         self._agent_team_storage = AgentTeamStorage(kv_store)
         self._workflow_storage = WorkflowStorage(kv_store)
         self._graph_state = GraphStore(kv_store)
+        self._step_storage = AgentStepStorage(kv_store)
 
     async def pre_agent_execute(self, session: BaseSession, inputs):
         """Prepare agent execution by recovering agent state."""
+        agent_id = safe_agent_id(session)
         session_logger.info(
             "Agent checkpoint restore initiated",
             event_type=LogEventType.CHECKPOINT_RESTORE,
             session_id=session.session_id(),
-            agent_id=session.agent_id(),
+            agent_id=agent_id,
             metadata={"operation": "pre_execute", "storage_type": "persistence"}
         )
+        if agent_id is None:
+            # No agent id: nothing is keyed for this session, but interaction
+            # inputs still belong to the caller.
+            if inputs is not None:
+                session.state().update({INTERACTIVE_INPUT: [inputs]})
+            return
         await self._agent_storage.recover(session)
+        # Step increments carry the whole state, so they must be applied after
+        # the older blob and before the interaction inputs.
+        await self._step_storage.recover(session)
         if inputs is not None:
             session.state().update({INTERACTIVE_INPUT: [inputs]})
 
@@ -769,25 +788,67 @@ class PersistenceCheckpointer(Checkpointer):
             session.state().update_global({INTERACTIVE_INPUT: [inputs]})
 
     async def interrupt_agent_execute(self, session: BaseSession):
-        """Save agent state when interaction is required."""
+        """Record the interrupt as a step increment instead of a full blob."""
+        agent_id = safe_agent_id(session)
         session_logger.info(
             "Agent checkpoint save on interrupt",
             event_type=LogEventType.CHECKPOINT_SAVE,
             session_id=session.session_id(),
-            agent_id=session.agent_id(),
+            agent_id=agent_id,
             metadata={"reason": "interaction_required", "storage_type": "persistence"}
         )
-        await self._agent_storage.save(session)
+        if agent_id is None:
+            return
+        await self._step_storage.end(session, interrupted=True)
 
     async def post_agent_execute(self, session: BaseSession):
         """Save agent state after execution completes."""
+        agent_id = safe_agent_id(session)
         session_logger.info(
             "Agent checkpoint save on completion",
             event_type=LogEventType.CHECKPOINT_SAVE,
             session_id=session.session_id(),
-            agent_id=session.agent_id(),
+            agent_id=agent_id,
             metadata={"reason": "agent_finished", "storage_type": "persistence"}
         )
+        if agent_id is None:
+            return
+        log_base = dict(
+            session_id=session.session_id(),
+            agent_id=agent_id,
+        )
+        if self._step_storage.has_records(session):
+            status = self._step_storage.status(session)
+            if status in ("active", "resume_pending"):
+                session_logger.debug(
+                    "Agent steps still in progress, skipping commit",
+                    event_type=LogEventType.CHECKPOINT_SAVE,
+                    **log_base,
+                    metadata={"reason": "step_active", "storage_type": "persistence"},
+                )
+                return
+            if status in ("interrupted", "idle"):
+                if status == "interrupted":
+                    # Keep the post-interrupt memory state on disk for a crash
+                    # that lands before the blob is written below.
+                    await self._step_storage.append(session, kind="interrupt")
+                saved = await self._agent_storage.save(session)
+                if saved:
+                    await self._step_storage.clear(session.session_id(), agent_id)
+                    session_logger.info(
+                        "Agent steps cleared after completion",
+                        event_type=LogEventType.CHECKPOINT_CLEAR,
+                        **log_base,
+                        metadata={"reason": "step_cleanup", "storage_type": "persistence"},
+                    )
+                else:
+                    session_logger.warning(
+                        "Agent step records kept: completion state was not saved",
+                        event_type=LogEventType.CHECKPOINT_ERROR,
+                        **log_base,
+                        metadata={"reason": "step_cleanup_skipped", "storage_type": "persistence"},
+                    )
+                return
         await self._agent_storage.save(session)
 
     async def post_agent_team_execute(self, session: BaseSession):
@@ -912,10 +973,12 @@ class PersistenceCheckpointer(Checkpointer):
         if self._kv_store is None:
             return False
 
-        # Check if any keys exist with the session_id prefix
+        # Check if any keys exist with the session_id prefix. The prefix is
+        # compiled into a LIKE pattern by the KV store, so filter exactly:
+        # ``_`` / ``%`` in a session id would otherwise match other sessions.
         prefix = f"{session_id}:"
         keys = await self._kv_store.get_by_prefix(prefix)
-        return len(keys) > 0
+        return any(key.startswith(prefix) for key in keys)
 
     async def release(self, session_id: str, agent_id: Optional[str] = None):
         """
@@ -943,6 +1006,7 @@ class PersistenceCheckpointer(Checkpointer):
                 metadata={"operation": "release", "storage_type": "persistence"}
             )
             await self._agent_storage.clear(agent_id, session_id)
+            await self._step_storage.clear(session_id, agent_id)
         else:
             session_logger.info(
                 "Session cleared",
@@ -950,9 +1014,15 @@ class PersistenceCheckpointer(Checkpointer):
                 session_id=session_id,
                 metadata={"operation": "release_all", "storage_type": "persistence"}
             )
-            # Delete all keys matching the session prefix
+            # Delete all keys matching the session prefix. Filtered in Python:
+            # ``delete_by_prefix`` compiles the prefix into a LIKE pattern, so a
+            # session id containing ``_`` or ``%`` would also wipe other sessions.
             prefix = f"{session_id}:"
-            await self._kv_store.delete_by_prefix(prefix)
+            keys = await self._kv_store.get_by_prefix(prefix)
+            exact = [key for key in sorted(keys) if key.startswith(prefix)]
+            if exact:
+                await self._kv_store.batch_delete(exact)
+            self._step_storage.forget_session(session_id)
             session_logger.debug(
                 "All session resources released",
                 event_type=LogEventType.CHECKPOINT_CLEAR,
@@ -963,6 +1033,32 @@ class PersistenceCheckpointer(Checkpointer):
     def graph_store(self) -> Store:
         """Return the graph store instance."""
         return self._graph_state
+
+    async def save_agent_step(
+        self,
+        session: BaseSession,
+        iteration: int,
+        query: str = "",
+        final: bool = False,
+    ) -> None:
+        await self._step_storage.append(
+            session,
+            kind="final" if final else "step",
+            iteration=iteration,
+            query=query,
+        )
+
+    def begin_agent_steps(self, session: BaseSession) -> StepResume | None:
+        return self._step_storage.begin(session)
+
+    def peek_agent_step_resume(self, session: BaseSession) -> StepResume | None:
+        return self._step_storage.peek_resume(session)
+
+    async def end_agent_steps(self, session: BaseSession, interrupted: bool) -> None:
+        await self._step_storage.end(session, interrupted=interrupted)
+
+    def settle_agent_steps(self, session: BaseSession) -> None:
+        self._step_storage.settle(session)
 
 
 def _enable_sqlite_wal(engine: AsyncEngine) -> None:
@@ -977,6 +1073,58 @@ def _enable_sqlite_wal(engine: AsyncEngine) -> None:
         cursor = dbapi_conn.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.close()
+
+
+def _enable_sqlite_full_sync(engine: AsyncEngine) -> None:
+    """Make SQLite commits durable before ``set`` returns.
+
+    SQLite's default ``synchronous=FULL`` is not something the step checkpoint
+    can rely on across builds, and WAL mode does not change the requirement:
+    a step record must be on disk (fsynced), not merely in the OS cache, before
+    the round counts as complete. Set explicitly on every new connection.
+    """
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_sqlite_full_sync(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA synchronous=FULL")
+        cursor.close()
+
+
+async def _commit_durability_issue(engine: AsyncEngine) -> str | None:
+    """Describe why a server-side database may lose committed rows, if it can.
+
+    SQLite is configured by this provider, so it is not checked here. MySQL and
+    PostgreSQL are owned by the host: their durability depends on a global
+    setting a DBA controls, so this only reports a problem and never changes
+    server configuration.
+
+    Returns:
+        A human-readable issue, or None when commits are durable or the
+        dialect needs no check.
+    """
+    dialect = getattr(getattr(engine, "dialect", None), "name", "")
+    try:
+        if dialect == "mysql":
+            async with engine.connect() as conn:
+                value = (await conn.execute(text("SELECT @@innodb_flush_log_at_trx_commit"))).scalar()
+            if str(value).strip() != "1":
+                return (
+                    f"innodb_flush_log_at_trx_commit={value}, committed step records "
+                    "may be lost on power failure"
+                )
+            return None
+        if dialect == "postgresql":
+            async with engine.connect() as conn:
+                value = (await conn.execute(text("SHOW synchronous_commit"))).scalar()
+            if str(value).strip().lower() == "off":
+                return (
+                    "synchronous_commit=off, committed step records "
+                    "may be lost on power failure"
+                )
+            return None
+    except Exception as exc:
+        return f"cannot read commit durability setting: {exc}"
+    return None
 
 
 @CheckpointerFactory.register("persistence")
@@ -1015,6 +1163,14 @@ class PersistenceCheckpointerProvider(CheckpointerProvider):
         if db_type == "sqlite":
             db_client = conf.get("db_client")
             if db_client is not None and isinstance(db_client, AsyncEngine):
+                issue = await _commit_durability_issue(db_client)
+                if issue:
+                    session_logger.warning(
+                        "Checkpoint database does not guarantee durable commits: %s",
+                        issue,
+                        event_type=LogEventType.CHECKPOINT_ERROR,
+                        metadata={"operation": "durability_check", "storage_type": "persistence"},
+                    )
                 kv_store = DbBasedKVStore(db_client)
             else:
                 if not db_path.endswith(".db"):
@@ -1031,6 +1187,8 @@ class PersistenceCheckpointerProvider(CheckpointerProvider):
                 # Enable WAL mode if configured (default: True)
                 if conf.get("db_enable_wal", True):
                     _enable_sqlite_wal(engine)
+                # Step records must be fsynced before the round counts as done.
+                _enable_sqlite_full_sync(engine)
                 kv_store = DbBasedKVStore(engine)
         elif db_type == "shelve":
             if db_path.endswith(".db"):

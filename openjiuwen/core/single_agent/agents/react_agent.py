@@ -76,6 +76,8 @@ from openjiuwen.core.kv_cache.kv_cache_metadata import (
 )
 from openjiuwen.core.session import with_session
 from openjiuwen.core.session.agent import Session, create_agent_session
+from openjiuwen.core.session.checkpointer.step_storage import StepResume
+from openjiuwen.core.session.interaction.base import AgentInterrupt
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
@@ -3254,6 +3256,8 @@ class ReActAgent(BaseAgent):
         )
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
         abort_persisted = False
+        steps_started = False
+        agent_interrupted = False
         stream_lifecycle_owner = bool(kwargs.get("_stream_lifecycle_owner"))
         commit_on_abort = self._session_supports_agent_lifecycle(session)
         invocation_token = bind_usage_invocation_id(invocation_id)
@@ -3324,6 +3328,16 @@ class ReActAgent(BaseAgent):
                         self._clear_interruption_state(session)
                     # Restore original query so MemoryRail.after_invoke writes the right UserMessage
                     ctx.extra["_original_query"] = interruption_state.original_query
+                # Step increments are consumed once per run, right after the
+                # HITL state is known and before the loop picks its first round.
+                step_checkpoint = (
+                    self._iteration_checkpoint_enabled()
+                    and self._session_has_step_sink(session)
+                )
+                step_resume = self._begin_agent_steps(session) if step_checkpoint else None
+                steps_started = step_checkpoint
+                if not step_checkpoint:
+                    await self._settle_stale_agent_steps(session)
 
                 state_loaded_at = time.monotonic()
 
@@ -3398,6 +3412,17 @@ class ReActAgent(BaseAgent):
                             pass  # invoke_inputs.result already set by _handle_resume/_commit_interrupt
                         else:
                             start_iteration = ctx.extra.pop(RESUME_START_ITERATION_KEY, 0)
+                elif step_resume is not None:
+                    # Crash resume: the replayed context already holds the
+                    # original question, so only a different query is added.
+                    start_iteration = step_resume.iteration + 1
+                    if not resume_continuation and self._step_query(ctx, user_input) != step_resume.query:
+                        await self._admit_user_message(
+                            ctx,
+                            context,
+                            self._extract_user_parts(ctx, user_input),
+                            source="query",
+                        )
                 elif not resume_continuation:
                     await self._admit_user_message(
                         ctx,
@@ -3525,6 +3550,11 @@ class ReActAgent(BaseAgent):
                                     )
                                     continue
                                 await self.context_engine.save_contexts(session)
+                                if step_checkpoint:
+                                    await self._save_agent_step(
+                                        session, iteration,
+                                        self._step_query(ctx, user_input), final=True,
+                                    )
                                 invoke_inputs.result = {
                                     "output": EMPTY_RESPONSE_MSG,
                                     "result_type": "error",
@@ -3536,6 +3566,12 @@ class ReActAgent(BaseAgent):
                                 break
                             await self.context_engine.save_contexts(session)
                             result = {"output": ai_message.content, "result_type": "answer"}
+                            # The final answer is a completed step too.
+                            if step_checkpoint:
+                                await self._save_agent_step(
+                                    session, iteration,
+                                    self._step_query(ctx, user_input), final=True,
+                                )
                             invoke_inputs.result = result
                             ctx.finish(AgentTerminationReason.TEXT_TERMINATION)
                             break
@@ -3580,6 +3616,13 @@ class ReActAgent(BaseAgent):
                         # all written). Fire AFTER_REACT_ITERATION so rails (e.g.
                         # SnapshotRail) can capture a safe-state snapshot.
                         await ctx.fire(AgentCallbackEvent.AFTER_REACT_ITERATION)
+                        if step_checkpoint:
+                            # Persist the increment after rails had their say, so
+                            # a todo snapshot they wrote belongs to this record.
+                            await self.context_engine.save_contexts(session)
+                            await self._save_agent_step(
+                                session, iteration, self._step_query(ctx, user_input)
+                            )
                     else:
                         # The loop exhausted its iteration budget. Honor a
                         # force_finish requested by the final iteration's
@@ -3611,9 +3654,11 @@ class ReActAgent(BaseAgent):
                 session,
                 marker="[Request cancelled by user]",
                 commit_session=commit_on_abort,
+                close_steps=steps_started,
             )
             raise  # Re-raise to propagate cancellation signal
-        except Exception:
+        except Exception as exc:
+            agent_interrupted = isinstance(exc, AgentInterrupt)
             # A model/rail/context failure may happen after the current turn has
             # already been appended to the in-memory context. Preserve the same
             # safe prefix used for cancellation instead of falling back to the
@@ -3624,9 +3669,23 @@ class ReActAgent(BaseAgent):
                 session,
                 marker="[Request interrupted by an unexpected error]",
                 commit_session=commit_on_abort,
+                close_steps=steps_started,
             )
             raise  # Preserve the original ReAct failure for the caller
         finally:
+            # Close this run's step records before any commit, so
+            # post_agent_execute sees an idle or interrupted agent. An invoke
+            # rejected before the loop began keeps its resume point.
+            if steps_started:
+                step_result = invoke_inputs.result
+                await self._end_agent_steps(
+                    session,
+                    interrupted=agent_interrupted
+                    or (
+                        isinstance(step_result, dict)
+                        and step_result.get("result_type") == "interrupt"
+                    ),
+                )
             try:
                 if need_cleanup and not stream_lifecycle_owner:
                     if not abort_persisted:
@@ -4052,12 +4111,120 @@ class ReActAgent(BaseAgent):
             callable(getattr(session, method_name, None)) for method_name in ("pre_run", "close_stream", "commit")
         )
 
+    @staticmethod
+    def _session_has_step_sink(session) -> bool:
+        """Whether the session really implements the step API.
+
+        Duck-typed doubles (MagicMock sessions used by older tests) expose the
+        attribute without being a bound method; they do not participate, so the
+        loop keeps its pre-feature save pattern for them.
+        """
+        save = getattr(session, "save_agent_step", None)
+        return inspect.ismethod(save) or inspect.isfunction(save)
+
+    def _iteration_checkpoint_enabled(self) -> bool:
+        """Whether this run persists a step after each completed iteration."""
+        config = getattr(self._config, "context_engine_config", None)
+        return bool(getattr(config, "enable_iteration_checkpoint", True))
+
+    @staticmethod
+    def _begin_agent_steps(session) -> "StepResume | None":
+        """Take the step resume point, if this session keeps step records."""
+        begin = getattr(session, "begin_agent_steps", None)
+        if not callable(begin):
+            return None
+        try:
+            resume = begin()
+        except Exception:  # noqa: BLE001 - a broken checkpointer must not break the turn
+            logger.debug("[ReActAgent] begin_agent_steps failed", exc_info=True)
+            return None
+        return resume if isinstance(resume, StepResume) else None
+
+    async def _save_agent_step(
+        self,
+        session,
+        iteration: int,
+        query: str,
+        *,
+        final: bool = False,
+    ) -> None:
+        """Append this iteration's increment without failing the run."""
+        save = getattr(session, "save_agent_step", None)
+        if not callable(save):
+            return
+        try:
+            result = save(iteration, query, final=final)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.warning(
+                "[ReActAgent] failed to persist agent step session_id=%s iteration=%s final=%s",
+                session.get_session_id() if hasattr(session, "get_session_id") else "",
+                iteration,
+                final,
+                exc_info=True,
+            )
+
+    async def _end_agent_steps(self, session, *, interrupted: bool) -> None:
+        """Close step records without masking the exception that got us here."""
+        end = getattr(session, "end_agent_steps", None)
+        if not callable(end):
+            return
+        try:
+            result = end(interrupted)
+            if inspect.isawaitable(result):
+                await asyncio.shield(result)
+        except (Exception, asyncio.CancelledError):
+            logger.warning(
+                "[ReActAgent] failed to close agent steps session_id=%s interrupted=%s",
+                session.get_session_id() if hasattr(session, "get_session_id") else "",
+                interrupted,
+                exc_info=True,
+            )
+
+    async def _settle_stale_agent_steps(self, session) -> None:
+        """Drop a replayed resume point when this run writes no step records.
+
+        A host that turned ``enable_iteration_checkpoint`` off never begins a
+        new track. Without settling the replayed ``resume_pending`` track, every
+        ``post_agent_execute`` would skip the blob and the session would never
+        persist again.
+        """
+        if not self._session_has_step_sink(session):
+            return
+        peek = getattr(session, "peek_agent_step_resume", None)
+        settle = getattr(session, "settle_agent_steps", None)
+        if not callable(peek) or not callable(settle):
+            return
+        try:
+            if peek() is None:
+                return
+            result = settle()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:  # noqa: BLE001 - a broken checkpointer must not break the turn
+            logger.warning(
+                "[ReActAgent] failed to settle leftover agent steps session_id=%s",
+                session.get_session_id() if hasattr(session, "get_session_id") else "",
+                exc_info=True,
+            )
+
+    @staticmethod
+    def _step_query(ctx, user_input) -> str:
+        """Query the step records belong to."""
+        original = ctx.extra.get("_original_query")
+        if original:
+            return original
+        return user_input if isinstance(user_input, str) else repr(user_input)
+
+
     async def _handle_context_abort(
         self,
         session: Session,
         *,
         marker: str,
         commit_session: Optional[bool] = None,
+        close_steps: bool = False,
     ) -> bool:
         """Clean and persist the current turn after cancellation or failure.
 
@@ -4083,6 +4250,7 @@ class ReActAgent(BaseAgent):
         return await self._persist_context_after_abort(
             session,
             commit_session=commit_session,
+            close_steps=close_steps,
         )
 
     async def _cleanup_context_after_abort(
@@ -4118,6 +4286,7 @@ class ReActAgent(BaseAgent):
         session: Session,
         *,
         commit_session: Optional[bool] = None,
+        close_steps: bool = False,
     ) -> bool:
         """Persist cleaned context and commit only agent-owned sessions.
 
@@ -4150,6 +4319,11 @@ class ReActAgent(BaseAgent):
         commit = getattr(session, "commit", None)
         if not callable(commit):
             return True
+
+        if close_steps:
+            # post_agent_execute writes the full state only once the agent is
+            # idle, so close the track before committing the cleaned prefix.
+            await self._end_agent_steps(session, interrupted=False)
 
         try:
             commit_result = commit()
