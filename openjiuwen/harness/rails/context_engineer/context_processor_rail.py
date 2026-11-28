@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Dict, List, Tuple, Union
 
 from pydantic import BaseModel
@@ -96,6 +97,7 @@ class ContextProcessorRail(DeepAgentRail):
         ] = None,
         preset: bool = True,
         session_memory: SessionMemoryConfig | Dict[str, Any] | None = None,
+        history_flush=None,
     ):
         """Initialize ContextProcessorRail.
 
@@ -114,6 +116,7 @@ class ContextProcessorRail(DeepAgentRail):
         ``SessionMemoryCompressorConfig.memory``.
         """
         super().__init__()
+        self.history_flush = history_flush
         self._preset = preset
         self._user_processors: List[Tuple[str, Union[BaseModel, Dict]]] = []
         if processors is not None:
@@ -273,6 +276,11 @@ class ContextProcessorRail(DeepAgentRail):
         config = getattr(getattr(agent, "react_agent", None), "_config", None)
         if config is None:
             return
+        if self.history_flush is not None:
+            context_engine = agent.react_agent.context_engine
+            context_engine._history_flush = self.history_flush
+            for context in context_engine._context_pool.values():
+                context.history_flush = self.history_flush
 
         model_config = getattr(config, "model_config_obj", None)
         model_client_config = getattr(config, "model_client_config", None)
@@ -438,6 +446,19 @@ class ContextProcessorRail(DeepAgentRail):
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         self._refresh_task_state_runtime(ctx)
+
+    async def after_react_iteration(self, ctx: AgentCallbackContext) -> None:
+        if ctx.session is None or ctx.context is None:
+            return
+        try:
+            flush_history = getattr(ctx.context, "history_flush", None) or self.history_flush
+            if not callable(flush_history) or not await flush_history():
+                return
+            await ctx.agent.context_engine.save_contexts(ctx.session)
+            ctx.session.update_state({"_last_committed_history_timestamp": time.time()})
+            await ctx.session.commit()
+        except Exception as exc:
+            logger.warning("[ContextProcessorRail] iteration checkpoint failed: %s", exc)
 
     async def on_model_exception(self, ctx: AgentCallbackContext) -> None:
         """Attempt to fix incomplete tool context when LLM call fails.

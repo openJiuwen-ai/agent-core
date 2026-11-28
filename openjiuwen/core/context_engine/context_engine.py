@@ -44,6 +44,7 @@ class ContextEngine:
                  config: ContextEngineConfig = None,
                  workspace=None,
                  sys_operation=None,
+                 history_flush: Callable[[], Awaitable[bool]] = None,
                  ):
         self._config = config or ContextEngineConfig()
         self._workspace = workspace
@@ -130,6 +131,7 @@ class ContextEngine:
             processors=processor_instances,
             token_counter=token_counter,
             session_ref=session,
+            history_flush=getattr(self, "_history_flush", None),
             workspace=self._workspace,
             sys_operation=self._sys_operation,
             window_mutators=self._window_mutators,

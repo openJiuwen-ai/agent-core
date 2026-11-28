@@ -50,6 +50,7 @@ class SessionModelContext(ModelContext):
         processors: List[ContextProcessor] = None,
         token_counter: TokenCounter = None,
         session_ref=None,
+        history_flush: Callable[[], Awaitable[bool]] = None,
         workspace=None,
         sys_operation=None,
         window_mutators: List[Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]] = None,
@@ -72,6 +73,7 @@ class SessionModelContext(ModelContext):
         self._sys_operation = sys_operation
         self._window_mutators = window_mutators if window_mutators is not None else []
         self._session_ref = session_ref
+        self.history_flush = history_flush
         self._default_dialogue_round = config.default_window_round_num
         self._compression_recall_config = config.compression_recall_config.model_copy(deep=True)
         self._token_counter = token_counter
@@ -524,6 +526,23 @@ class SessionModelContext(ModelContext):
                                 model_client_config=kwargs.get("model_client_config"),
                             )
                         )
+                        if (
+                            event is not None
+                            and ContextUtils.is_compression_processor(processor)
+                            and self._session_ref is not None
+                        ):
+                            try:
+                                if callable(self.history_flush) and not await self.history_flush():
+                                    raise RuntimeError("history flush failed")
+                                from openjiuwen.core.context_engine.context_engine import ContextEngine
+
+                                ContextEngine._save_state_to_session(
+                                    self._session_ref, {self._context_id: self.save_state()}
+                                )
+                                self._session_ref.update_state({"_last_committed_history_timestamp": time.time()})
+                                await self._session_ref.commit()
+                            except Exception as e:
+                                logger.warning(f"Failed to persist passive context processing, reason: {str(e)}")
                 except asyncio.CancelledError:
                     if started_emitted:
                         await self._build_and_emit_processor_cancelled_state(
