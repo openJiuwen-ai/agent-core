@@ -41,7 +41,7 @@ class _StubExecutable:
         return ""
 
 
-def _make_session(node_id: str, max_retries: int = 0):
+def _make_session(node_id: str, max_retries: int = 0, timeout: float = -1.0):
     session = WorkflowSession(workflow_id="test_wf")
     config = Config()
     from openjiuwen.core.workflow.workflow_config import WorkflowConfig, WorkflowSpec, NodeSpec, CompIOConfig
@@ -53,6 +53,7 @@ def _make_session(node_id: str, max_retries: int = 0):
                 io_configs=CompIOConfig(),
                 abilities=[ComponentAbility.INVOKE],
                 max_retries=max_retries,
+                timeout=timeout,
             )
         }
     )
@@ -63,10 +64,10 @@ def _make_session(node_id: str, max_retries: int = 0):
     return session
 
 
-def _make_vertex(node_id: str = "test_node", max_retries: int = 0):
+def _make_vertex(node_id: str = "test_node", max_retries: int = 0, timeout: float = -1.0):
     executable = _StubExecutable()
     vertex = Vertex(node_id, executable=executable)
-    session = _make_session(node_id, max_retries)
+    session = _make_session(node_id, max_retries, timeout)
     vertex.init(session)
     return vertex, executable, session
 
@@ -96,6 +97,40 @@ async def test_call_succeeds_without_retry():
     await vertex.call()
 
     assert executable.invoke_fn.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout", [-1.0, 0.0, 1.0], ids=["negative", "zero", "positive"])
+@pytest.mark.parametrize("max_retries", [0, 2], ids=["no-retry", "with-retries"])
+async def test_call_completes_with_configured_timeout(timeout, max_retries):
+    vertex, executable, _ = _make_vertex(max_retries=max_retries, timeout=timeout)
+
+    async def _yielding_invoke(inputs, session=None, **kwargs):
+        await asyncio.sleep(0)
+        return {"result": "ok"}
+
+    executable.invoke_fn = AsyncMock(side_effect=_yielding_invoke)
+
+    await vertex.call()
+
+    executable.invoke_fn.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_retries", [0, 1], ids=["no-retry", "with-retries"])
+async def test_call_preserves_positive_timeout(max_retries):
+    vertex, executable, _ = _make_vertex(max_retries=max_retries, timeout=0.01)
+
+    async def _blocked_invoke(inputs, session=None, **kwargs):
+        await asyncio.Event().wait()
+
+    executable.invoke_fn = AsyncMock(side_effect=_blocked_invoke)
+
+    with pytest.raises(BaseError) as exc_info:
+        await vertex.call()
+
+    assert exc_info.value.code == StatusCode.WORKFLOW_EXECUTION_TIMEOUT.code
+    assert executable.invoke_fn.await_count == max_retries + 1
 
 
 @pytest.mark.asyncio

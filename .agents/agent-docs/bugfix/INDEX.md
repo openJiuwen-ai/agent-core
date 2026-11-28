@@ -22,6 +22,7 @@ generated: true
 | [core/controller](#module-core-controller) |
 | [core/foundation/llm](#module-core-foundation-llm) |
 | [core/foundation/llm/model_clients](#module-core-foundation-llm-model_clients) |
+| [core/graph](#module-core-graph) |
 | [core/runner/drunner/dmessage_queue](#module-core-runner-drunner-dmessage_queue) |
 | [core/session](#module-core-session) |
 | [core/session/checkpointer](#module-core-session-checkpointer) |
@@ -129,6 +130,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261117_1727_anthropic-output-limit-errors](openjiuwen/core/B_20261117_1727_anthropic-output-limit-errors.md) | B | 模型输出上限截断可见错误修复 | lizhiyuan | 无独立 D：用户在本轮会话确认的 Anthropic 输出上限错误处理范围，未形成独立设计文档。 |
+
+<a id="module-core-graph"></a>
+
+## core/graph
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261110_2011_zero-node-timeout](core_runtime/B_20261110_2011_zero-node-timeout.md) | B | 工作流节点零超时误触发立即超时 | 羿寒 王 | 无独立 D：恢复 NodeSpec 与 add_workflow_comp 已声明的非正数不设超时契约。 |
 
 <a id="module-core-runner-drunner-dmessage_queue"></a>
 

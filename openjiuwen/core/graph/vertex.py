@@ -245,7 +245,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
 
         for attempt in range(max_retries + 1):
             try:
-                if timeout < 0:
+                if timeout <= 0:
                     return await self._run_executable(ability, is_subgraph, config, event)
                 return await asyncio.wait_for(
                     self._run_executable(ability, is_subgraph, config, event),
