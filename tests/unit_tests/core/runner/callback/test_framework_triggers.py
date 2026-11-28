@@ -242,6 +242,36 @@ async def test_trigger_parallel_concurrent(framework):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("needs_session_first", [True, False])
+async def test_trigger_parallel_injects_session_per_callback(framework, needs_session_first):
+    """Each callback's ``session`` requirement is judged from its own signature.
+
+    ``trigger_parallel`` builds its coroutines in a loop. Reading the loop variable
+    inside the coroutine made every callback use the last registered callback's
+    signature, so exactly one of these two always ran with a wrong ``session``
+    argument and was silently dropped from the results.
+    """
+    calls = []
+
+    async def needs_session(session):
+        calls.append(("needs_session", session))
+        return "needs_session"
+
+    async def plain():
+        calls.append(("plain", None))
+        return "plain"
+
+    registration = (needs_session, plain) if needs_session_first else (plain, needs_session)
+    for callback in registration:
+        framework.on("parallel_session")(callback)
+
+    results = await framework.trigger_parallel("parallel_session")
+
+    assert sorted(results) == ["needs_session", "plain"]
+    assert sorted(name for name, _ in calls) == ["needs_session", "plain"]
+
+
+@pytest.mark.asyncio
 async def test_trigger_parallel_handles_errors(framework):
     """Test parallel execution handles errors gracefully."""
 

@@ -1333,8 +1333,14 @@ class AsyncCallbackFramework:
                         return None
 
                     final_args = filter_result.modified_args or args
-                    final_kwargs = filter_result.modified_kwargs or kwargs
-                    _inject_session_if_needed(callback, final_args, final_kwargs)
+                    # Copy: without a filter ``modified_kwargs`` is the shared dict the
+                    # caller passed in, and session injection below mutates it. Copying
+                    # keeps each parallel callback's kwargs independent.
+                    final_kwargs = dict(filter_result.modified_kwargs or kwargs)
+                    # ``callback`` is the loop variable of the enclosing scope and is
+                    # late-bound: by the time these tasks run it holds the last
+                    # registered callback. Use the per-task default argument instead.
+                    _inject_session_if_needed(cb, final_args, final_kwargs)
 
                     # Execute with timeout if specified
                     if cb_info.timeout:
