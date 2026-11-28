@@ -26,6 +26,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import uuid
 import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager
@@ -83,7 +84,10 @@ ADX_RECREATE_RETRIES = 5
 ADX_RECREATE_SLEEP_SECONDS = 1
 _SDK_LIST_DEPTH = 20
 _ADX_ENVIRONMENTS = "/api/environment/v1/environments"
+_ADX_INSTANCES = "/api/instances"
 _ADX_INVOKE = "/direct"
+_ADX_RESUME_TIMEOUT_SECONDS = 330.0
+_PROCESS_IDENTITY = uuid.uuid4().hex
 
 _T = TypeVar("_T")
 
@@ -387,6 +391,50 @@ def _adx_mount(mount: dict) -> dict:
     }
 
 
+def _adx_network_policy(network: Any) -> Any:
+    """Convert the serializable tool network settings to ADX schema v2.
+
+    AgentOS writes the traffic/DNS sections with snake_case field names, while
+    the ADX create contract uses the schema v2 camelCase form. Legacy
+    ``block_network``/``dns_blacklist`` policies are already in the wire shape.
+    """
+    if not isinstance(network, dict):
+        return network
+    if "traffic" not in network and "dns" not in network:
+        return network
+    result = dict(network)
+    result["schemaVersion"] = 2
+    traffic = result.get("traffic")
+    if isinstance(traffic, dict):
+        traffic = dict(traffic)
+        if "ingress_default_action" in traffic:
+            traffic.setdefault("ingressDefaultAction", traffic.pop("ingress_default_action"))
+        if "egress_default_action" in traffic:
+            traffic.setdefault("egressDefaultAction", traffic.pop("egress_default_action"))
+        traffic.setdefault("ingressDefaultAction", "allow")
+        traffic.setdefault("egressDefaultAction", "allow")
+        traffic.setdefault("mode", "stateful")
+        rules = []
+        for rule in traffic.get("rules") or []:
+            if isinstance(rule, dict):
+                rule = dict(rule)
+                if "port_range" in rule:
+                    rule.setdefault("portRange", rule.pop("port_range"))
+                if "environment_port_range" in rule:
+                    rule.setdefault("environmentPortRange", rule.pop("environment_port_range"))
+            rules.append(rule)
+        traffic["rules"] = rules
+        result["traffic"] = traffic
+    dns = result.get("dns")
+    if isinstance(dns, dict):
+        dns = dict(dns)
+        if "default_action" in dns:
+            dns.setdefault("defaultAction", dns.pop("default_action"))
+        dns.setdefault("defaultAction", "allow")
+        result["dns"] = dns
+    return result
+
+
 def _adx_create_body(extra: dict[str, Any], executor: str) -> dict[str, Any]:
     """Build the native create fields while accepting legacy rootfs configuration."""
     rootfs = _normalize_rootfs(extra)
@@ -399,6 +447,17 @@ def _adx_create_body(extra: dict[str, Any], executor: str) -> dict[str, Any]:
         "memory": int(extra.get("memory", DEFAULT_DOCKER_MEMORY)),
         "idleTimeoutSeconds": _idle_timeout_seconds(extra),
     }
+    idle_action = _idle_action(extra)
+    body["idleAction"] = idle_action
+    if idle_action == "pause":
+        if body["runtime"] == "conch":
+            raise ValueError("ADX tool idle_action=pause is not supported by the conch runtime")
+        if body["idleTimeoutSeconds"] <= 0:
+            raise ValueError("ADX tool idle_action=pause requires a positive idle_timeout")
+        options = _pause_options(extra)
+        if options is not None:
+            body["pauseOptions"] = options
+    body["failover"] = _failover_flag(extra)
     cwd = extra.get("workdir") or rootfs_fields.get("workdir")
     if cwd:
         body["cwd"] = cwd
@@ -407,7 +466,7 @@ def _adx_create_body(extra: dict[str, Any], executor: str) -> dict[str, Any]:
         body["mounts"] = [_adx_mount(mount) for mount in mounts]
     for key in ("cpu_limit", "mem_limit", "env", "network"):
         if extra.get(key) is not None:
-            body[key] = extra[key]
+            body[key] = _adx_network_policy(extra[key]) if key == "network" else extra[key]
     for config_key, request_key in (
         ("restart_policy", "restartPolicy"),
         ("create_timeout", "createTimeoutSeconds"),
@@ -439,6 +498,73 @@ def _idle_timeout_seconds(extra: dict[str, Any]) -> int:
     if idle_timeout < 0:
         return 0
     return idle_timeout
+
+
+_IDLE_ACTIONS = ("delete", "pause")
+_PAUSE_STORAGE = ("configured", "local", "shared")
+_PAUSE_FIELDS = frozenset({"retention", "timeoutSeconds", "storage"})
+
+
+def _idle_action(extra: dict[str, Any]) -> str:
+    value = extra.get("idle_action")
+    if value is None:
+        return "delete"
+    if not isinstance(value, str) or value not in _IDLE_ACTIONS:
+        raise ValueError("ADX tool idle_action must be delete or pause")
+    return value
+
+
+def _pause_options(extra: dict[str, Any]) -> Optional[dict[str, Any]]:
+    value = extra.get("pause_policy")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("ADX tool pause_policy must be a mapping")
+    unknown = sorted(set(value) - _PAUSE_FIELDS)
+    if unknown:
+        raise ValueError("ADX tool pause_policy has unsupported fields: " + ", ".join(unknown))
+    retention = value.get("retention")
+    if not isinstance(retention, dict):
+        raise ValueError("ADX tool pause_policy.retention is required")
+    kind = retention.get("kind")
+    if kind == "forever" and set(retention) == {"kind"}:
+        mapped: dict[str, Any] = {"kind": "forever"}
+    elif kind == "ttl" and set(retention) == {"kind", "ttlSeconds"}:
+        ttl = retention["ttlSeconds"]
+        if isinstance(ttl, bool) or not isinstance(ttl, int) or ttl <= 0:
+            raise ValueError("ADX tool pause_policy.retention.ttlSeconds must be a positive integer")
+        mapped = {"kind": "ttl", "ttlSeconds": ttl}
+    else:
+        raise ValueError("ADX tool pause_policy.retention requires kind forever or ttl with ttlSeconds")
+    timeout = value.get("timeoutSeconds", 300)
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 3600:
+        raise ValueError("ADX tool pause_policy.timeoutSeconds must be between 1 and 3600")
+    storage = value.get("storage", "configured")
+    if storage not in _PAUSE_STORAGE:
+        raise ValueError("ADX tool pause_policy.storage must be configured, local or shared")
+    return {"retention": mapped, "timeoutSeconds": timeout, "storage": storage}
+
+
+def _failover_flag(extra: dict[str, Any]) -> bool:
+    value = extra.get("failover", False)
+    if not isinstance(value, bool):
+        raise ValueError("ADX tool failover must be a boolean")
+    return value
+
+
+def _lifecycle_signature(extra: dict[str, Any]) -> str:
+    action = _idle_action(extra)
+    if action == "delete":
+        return ""
+    lifecycle: dict[str, Any] = {"idle_action": action}
+    if extra.get("idle_timeout") is not None:
+        lifecycle["idle_timeout"] = extra["idle_timeout"]
+    if extra.get("pause_policy") is not None:
+        lifecycle["pause_policy"] = extra["pause_policy"]
+    if _failover_flag(extra):
+        lifecycle["failover"] = True
+    payload = json.dumps(lifecycle, sort_keys=True, separators=(",", ":"))
+    return "|lifecycle=" + hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _exec_args(
@@ -490,6 +616,27 @@ def _http_error_message(body: Any) -> str:
         if message:
             return str(message)
     return "ADX request failed"
+
+
+def _error_detail(body: Any) -> dict[str, Any]:
+    if isinstance(body, dict):
+        detail = body.get("error")
+        if isinstance(detail, dict):
+            return detail
+    return {}
+
+
+def _definitive_restore_rejection(status: int, body: Any) -> bool:
+    """Return whether ADX definitively rejected resuming the restore point.
+
+    Expired checkpoints, incompatible release/recovery profiles and local
+    restore points that cannot move to another node are reported as 400 or 409
+    with ``retry=never`` and ``outcome=not_started``.
+    """
+    if status not in (400, 409):
+        return False
+    detail = _error_detail(body)
+    return detail.get("retry") == "never" and detail.get("outcome") == "not_started"
 
 
 def _decode_mgmt_data(body: Any) -> dict[str, Any]:
@@ -637,9 +784,23 @@ class _AdxProviderMixin:
         self._timeout_seconds = int(getattr(config, "timeout_seconds", 30) or 30)
         extra = self._launcher_extra_params()
         token_env = extra.get("token_env")
-        token = os.getenv(token_env) if token_env else None
+        token = os.getenv(token_env) if isinstance(token_env, str) and token_env else None
+        connection = extra.get("connection")
+        if token is None and isinstance(connection, dict):
+            raw = connection.get("token")
+            if isinstance(raw, str) and raw:
+                token = raw
+            else:
+                token_env = connection.get("token_env")
+                token = os.getenv(token_env) if isinstance(token_env, str) and token_env else None
+        if token is None:
+            # The AgentOS entry point exports the ADX tenant token for the tool
+            # sandbox; keep it working when the configuration carries no
+            # connection section.
+            token = os.getenv("ADX_TOKEN")
         if token:
             self._auth_headers.setdefault("Authorization", f"Bearer {token}")
+            self._auth_headers.setdefault("X-Auth", token)
         self._executor = _normalize_executor(extra.get("executor"))
 
     def _base_url(self) -> str:
@@ -670,6 +831,7 @@ class _AdxProviderMixin:
         rootfs = _local_rootfs(self._launcher_extra_params())
         if rootfs is not None:
             key += "|rootfs=" + hashlib.sha256(rootfs["path"].encode()).hexdigest()
+        key += _lifecycle_signature(self._launcher_extra_params())
         return key
 
     @classmethod
@@ -681,8 +843,19 @@ class _AdxProviderMixin:
                 cls._lifecycle_locks[shared_key] = lock
             return lock
 
-    def _create_instance(self) -> Tuple[str, str]:
+    def _environment_name(self) -> str:
+        """Pin the ADX name from ``JIUWENSWARM_ADX_AGENT_KEY`` like the SDK provider.
+
+        Without the key this process gets its own identity, matching the SDK
+        provider's ``_PROCESS_IDENTITY`` fallback.
+        """
+        agent_key = os.environ.get("JIUWENSWARM_ADX_AGENT_KEY") or _PROCESS_IDENTITY
+        identity = self._shared_scope_key() + "|agent=" + agent_key
+        return "tools-" + hashlib.sha256(identity.encode()).hexdigest()[:40]
+
+    def _create_instance(self, *, retry_conflict: bool = True) -> Tuple[str, str]:
         body = _adx_create_body(self._launcher_extra_params(), self._executor)
+        body["name"] = self._environment_name()
         status, response = _adx_request(
             "POST",
             f"{self._base_url()}{_ADX_ENVIRONMENTS}",
@@ -690,6 +863,18 @@ class _AdxProviderMixin:
             headers=self._auth_headers,
             timeout=self._request_timeout(body.get("createTimeoutSeconds")),
         )
+        if status == 409:
+            environment_id = _error_detail(response).get("environmentId")
+            if isinstance(environment_id, str) and environment_id and environment_id != "unknown":
+                recovered = self._recover_conflicting_instance(environment_id, response)
+                if recovered is not None:
+                    runtime = body.get("runtime")
+                    executor = runtime if isinstance(runtime, str) and runtime else self._executor
+                    return recovered, executor
+                if retry_conflict:
+                    # The paused record disappeared between create and attach.
+                    return self._create_instance(retry_conflict=False)
+            raise AdxHttpError(status, _http_error_message(response))
         if status != 200:
             raise AdxHttpError(status, _http_error_message(response))
         environment_id = _decode_mgmt_data(response).get("environmentId")
@@ -698,6 +883,65 @@ class _AdxProviderMixin:
         runtime = body.get("runtime")
         executor = runtime if isinstance(runtime, str) and runtime else self._executor
         return environment_id, executor
+
+    def _instance_state(self, environment_id: str) -> Optional[str]:
+        quoted = urllib.parse.quote(environment_id, safe="")
+        status, body = _adx_request(
+            "GET",
+            f"{self._base_url()}{_ADX_INSTANCES}?instance_id={quoted}",
+            headers=self._auth_headers,
+            timeout=self._request_timeout(),
+        )
+        if status != 200 or not isinstance(body, list):
+            return None
+        for item in body:
+            if isinstance(item, dict) and item.get("id") == environment_id:
+                return str(item.get("status") or "").lower()
+        return None
+
+    def _wait_for_stable_instance_state(self, environment_id: str, timeout: float = 10.0) -> Optional[str]:
+        deadline = time.monotonic() + timeout
+        while True:
+            state = self._instance_state(environment_id)
+            if state is None or state in ("paused", "running", "failed", "deleted"):
+                return state
+            if time.monotonic() >= deadline:
+                return state
+            time.sleep(0.5)
+
+    def _recover_conflicting_instance(self, environment_id: str, conflict: Any) -> Optional[str]:
+        """Attach to an existing paused environment, resuming or discarding it.
+
+        Returns the environment ID when it can be reused, ``None`` when the
+        record vanished so the caller may create once more, and raises the
+        original conflict for any environment that is not resumable.
+        """
+        state = self._wait_for_stable_instance_state(environment_id)
+        if state is None:
+            return None
+        if state == "running":
+            return environment_id
+        if state != "paused":
+            raise AdxHttpError(409, _http_error_message(conflict))
+        status, body = _adx_request(
+            "POST",
+            f"{_environment_url(self._base_url(), environment_id)}/resume",
+            payload={},
+            headers={**self._auth_headers, "X-ADX-Request-ID": f"resume-{uuid.uuid4()}"},
+            timeout=max(self._request_timeout(), _ADX_RESUME_TIMEOUT_SECONDS),
+        )
+        if status == 200:
+            logger.info("[adx] resumed paused environment %s", environment_id)
+            return environment_id
+        if _definitive_restore_rejection(status, body):
+            if self._wait_for_stable_instance_state(environment_id) == "paused":
+                logger.warning(
+                    "[adx] discarding environment %s after an unusable restore point: %s",
+                    environment_id,
+                    _http_error_message(body),
+                )
+                _delete_environment(self._base_url(), environment_id, self._auth_headers)
+        raise AdxHttpError(status, _http_error_message(body))
 
     def _bind_instance(self, environment_id: str, executor: str) -> Tuple[str, str]:
         self._instance = environment_id
