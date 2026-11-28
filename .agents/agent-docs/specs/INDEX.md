@@ -21,6 +21,7 @@ generated: true
 | [core/runner/drunner/dmessage_queue](#module-core-runner-drunner-dmessage_queue) |
 | [core/session](#module-core-session) |
 | [extensions/a2a](#module-extensions-a2a) |
+| [extensions/semantic_cache](#module-extensions-semantic_cache) |
 | [harness](#module-harness) |
 
 <a id="module-agent_evolving-ttse"></a>
@@ -108,6 +109,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | — |
+
+<a id="module-extensions-semantic_cache"></a>
+
+## extensions/semantic_cache
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [S_01_semantic_response_cache](extensions/S_01_semantic_response_cache.md) | S | Opt-in read-only semantic response cache | Liuchenbing-2026 | — |
 
 <a id="module-harness"></a>
 

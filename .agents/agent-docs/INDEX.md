@@ -41,6 +41,7 @@ generated: true
 | [extensions.tracer_otel](#module-extensions-tracer_otel) |
 | [extensions/a2a](#module-extensions-a2a) |
 | [extensions/observability](#module-extensions-observability) |
+| [extensions/semantic_cache](#module-extensions-semantic_cache) |
 | [extensions/tracer_otel](#module-extensions-tracer_otel) |
 | [harness](#module-harness) |
 | [harness/moa](#module-harness-moa) |
@@ -537,6 +538,16 @@ generated: true
 | [F_20261123_1139_trajectory-sequence-store](features/F_20261123_1139_trajectory-sequence-store.md) | F | 演进轨迹消息序列共享 | zhangzhongteng | 无独立 D：依据用户在本次任务中提供并要求执行的方案，无独立 D 文件。 |
 | [F_20261123_1804_observability-export-gate](features/F_20261123_1804_observability-export-gate.md) | F | 采集需求与导出需求拆分：observability 导出闸门 | hh0205 | 无独立 D：落实 GitCode jiuwenswarm issue 4327 第 3 条（trajectory_ui 不能影响 observability 功能）的 Core 侧能力，无独立 D 文档。 |
 | [B_20261102_1120_avatar-child-session-trace-root](bugfix/agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
+
+<a id="module-extensions-semantic_cache"></a>
+
+## extensions/semantic_cache
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [D-20261120-2155-semantic-response-cache](designs/proposals/D-20261120-2155-semantic-response-cache/design.md) | D | 可选 RedisVL 语义响应缓存扩展设计方案 | Liuchenbing-2026 | — |
+| [F_20261118_0930_semantic_response_cache](features/F_20261118_0930_semantic_response_cache.md) | F | Optional RedisVL read-only response cache implementation | Liuchenbing-2026 | [D-20261120-2155-semantic-response-cache](designs/proposals/D-20261120-2155-semantic-response-cache/design.md) |
+| [S_01_semantic_response_cache](specs/extensions/S_01_semantic_response_cache.md) | S | Opt-in read-only semantic response cache | Liuchenbing-2026 | — |
 
 <a id="module-extensions-tracer_otel"></a>
 
