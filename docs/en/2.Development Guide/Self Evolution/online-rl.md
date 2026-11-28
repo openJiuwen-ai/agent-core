@@ -1,12 +1,11 @@
 # Online RL/SFT Backend Operations
 
-This document supplements
-[Online RL Service Operations](./online-rl-service-operations.md). It describes
-the RL and SFT paths after JiuwenSwarm injects an Online Rail, and the SWE
-rollout skill path for collecting high-quality SFT data.
+This document describes the RL and SFT paths after JiuwenSwarm injects an
+Online Rail, and the SWE rollout skill path for collecting high-quality SFT
+data.
 
-For the Chinese version, see
-[online-rl-service-operations-backends.zh.md](./online-rl-service-operations-backends.zh.md).
+The Chinese version lives at
+`docs/zh/2.开发指南/自演进/在线强化学习.md`.
 
 The injection entry point is:
 
