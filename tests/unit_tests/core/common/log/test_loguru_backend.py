@@ -12,6 +12,7 @@ pytest.importorskip("loguru")
 from openjiuwen.core.common.exception.errors import BaseError  # noqa: E402
 from openjiuwen.core.common.logging import (  # noqa: E402
     LogManager,
+    reset_session_id,
     set_session_id,
 )
 from openjiuwen.core.common.logging.events import (  # noqa: E402
@@ -385,6 +386,211 @@ def test_exception_can_emit_event_first_json_failure_payload(tmp_path):
     assert payload["error_message"] == "boom"
     assert "RuntimeError" in payload["stacktrace"]
     assert payload["metadata"]["_log_context"]["log_type"] == "common"
+
+
+def test_exc_info_prints_traceback_in_payload(tmp_path):
+    """``logger.error(msg, exc_info=True)`` maps onto ``opt(exception=...)`` so
+    loguru formats the traceback and ``_enrich_exception_payload`` fills the
+    event JSON ``exception``/``error_message``/``stacktrace`` fields (same path
+    as ``.exception()``)."""
+    config_file_path = os.path.join(tmp_path, "loguru_event_first_exc_info.yaml")
+    write_yaml_config(config_file_path, _make_event_first_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        set_session_id("TRACE-EXC-INFO")
+
+        try:
+            raise RuntimeError("exc-info-boom")
+        except RuntimeError:
+            logger.error("plain failure", exc_info=True)
+
+    payload = _read_last_json_record(os.path.join(tmp_path, "common.jsonl"))
+
+    assert payload["message"] == "plain failure"
+    assert payload["exception"] == "exc-info-boom"
+    assert payload["error_message"] == "exc-info-boom"
+    assert "RuntimeError" in payload["stacktrace"]
+
+
+def test_exc_info_false_omits_exception_in_payload(tmp_path):
+    """``exc_info=False`` is an explicit boundary: no exception payload is
+    fabricated, mirroring the Default backend contract."""
+    config_file_path = os.path.join(tmp_path, "loguru_event_first_exc_info_false.yaml")
+    write_yaml_config(config_file_path, _make_event_first_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        set_session_id("TRACE-EXC-INFO-FALSE")
+
+        try:
+            raise RuntimeError("should-not-enrich")
+        except RuntimeError:
+            logger.error("plain failure", exc_info=False)
+
+    payload = _read_last_json_record(os.path.join(tmp_path, "common.jsonl"))
+
+    assert payload["message"] == "plain failure"
+    assert not payload.get("exception")
+    assert not payload.get("stacktrace")
+
+
+def test_loguru_pops_control_params_before_event_build(tmp_path):
+    """exc_info/stack_info are control params, not structured-event fields:
+    they are popped before ``_build_structured_event_dict`` so they neither
+    leak into the event JSON nor reach ``create_log_event`` (whose unknown-field
+    filtering would mask the regression)."""
+    from unittest import mock
+
+    config_file_path = os.path.join(tmp_path, "loguru_event_first_control_params.yaml")
+    write_yaml_config(config_file_path, _make_event_first_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        set_session_id("TRACE-CONTROL-PARAMS")
+
+        with mock.patch.object(
+            logger, "_build_structured_event_dict",
+            wraps=logger._build_structured_event_dict,
+        ) as spy:
+            logger.info("isolated", exc_info=False, stack_info=True)
+
+        assert spy.called
+        assert "exc_info" not in spy.call_args.kwargs
+        assert "stack_info" not in spy.call_args.kwargs
+
+    payload = _read_last_json_record(os.path.join(tmp_path, "common.jsonl"))
+    assert payload["message"] == "isolated"
+    assert "stack_info" not in payload
+
+
+def test_loguru_no_context_trace_id_slot_is_empty_not_sentinel(tmp_path):
+    """DEF-05: with no request context the Loguru trace_id slot is empty, not
+    the internal sentinel. _patch_record normalizes default_trace_id to an
+    empty slot, matching Default's ContextFilter."""
+    config_file_path = os.path.join(tmp_path, "loguru_no_context_trace.yaml")
+    write_yaml_config(config_file_path, _make_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        # reset_log_manager fixture left context at the sentinel (no real request)
+        logger.info("no-context-trace-slot")
+
+    payload = _read_last_json_record(os.path.join(tmp_path, "common.jsonl"))
+    record = payload["record"]
+
+    assert record["message"] == "no-context-trace-slot"
+    assert record["extra"]["trace_id"] == ""
+    # the sentinel must not leak anywhere in the record
+    assert "default_trace_id" not in json.dumps(payload)
+
+
+def test_loguru_stack_info_downgraded_not_fabricated(tmp_path):
+    """§8 (accepted by作业单 B01, user decision 2026-09-19): Loguru has no
+    native stack_info. It is consumed (not leaked into the event, not
+    fabricated via capture=True, no hand-stitched stack in the message) — a
+    deliberate downgrade. Default's stack_info=True outputs the stdlib call
+    stack; Loguru does not, and must not fake one."""
+    config_file_path = os.path.join(tmp_path, "loguru_stack_info_downgrade.yaml")
+    write_yaml_config(config_file_path, _make_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        set_session_id("TRACE-STACK-DOWNGRADE")
+        logger.info("plain with stack info", stack_info=True)
+
+    payload = _read_last_json_record(os.path.join(tmp_path, "common.jsonl"))
+    record = payload["record"]
+
+    assert record["message"] == "plain with stack info"
+    # stack_info is consumed at _emit, not leaked into the record/event
+    assert "stack_info" not in record["extra"]
+    event = record["extra"].get("event") or {}
+    assert "stack_info" not in event
+    # no fabricated call stack: stacktrace only comes from exc_info via
+    # _enrich_exception_payload; stack_info must not fabricate one
+    assert "stacktrace" not in event
+    assert "call_stack" not in event
+
+
+def test_exc_info_none_omits_exception_in_payload(tmp_path):
+    """B01: exc_info=None does not enrich the payload (boundary parity with
+    exc_info=False)."""
+    config_file_path = os.path.join(tmp_path, "loguru_exc_info_none.yaml")
+    write_yaml_config(config_file_path, _make_event_first_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        set_session_id("TRACE-EXC-NONE")
+        try:
+            raise RuntimeError("none-should-not-enrich")
+        except RuntimeError:
+            logger.error("plain failure", exc_info=None)
+
+    payload = _read_last_json_record(os.path.join(tmp_path, "common.jsonl"))
+    assert payload["message"] == "plain failure"
+    assert not payload.get("exception")
+    assert not payload.get("stacktrace")
+
+
+def test_exc_info_tuple_enriches_payload(tmp_path):
+    """B01: exc_info=(type, value, tb) enriches the payload via
+    _enrich_exception_payload (same path as .exception() and exc_info=True)."""
+    config_file_path = os.path.join(tmp_path, "loguru_exc_info_tuple.yaml")
+    write_yaml_config(config_file_path, _make_event_first_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        set_session_id("TRACE-EXC-TUPLE")
+        try:
+            raise RuntimeError("tuple-boom")
+        except RuntimeError as e:
+            logger.error("plain failure", exc_info=(type(e), e, e.__traceback__))
+
+    payload = _read_last_json_record(os.path.join(tmp_path, "common.jsonl"))
+    assert payload["message"] == "plain failure"
+    assert payload["exception"] == "tuple-boom"
+    assert "RuntimeError" in payload["stacktrace"]
+
+
+def test_loguru_log_method_exc_info_enriches_payload(tmp_path):
+    """B01 (generic log() entry, Loguru): log() shares _emit with the level
+    methods; exc_info=True through log() enriches the payload via
+    _enrich_exception_payload (same path as .error())."""
+    config_file_path = os.path.join(tmp_path, "loguru_log_exc_info.yaml")
+    write_yaml_config(config_file_path, _make_event_first_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        set_session_id("TRACE-LOG-EXC")
+        try:
+            raise RuntimeError("log-entry-boom")
+        except RuntimeError:
+            logger.log(logging.ERROR, "plain failure", exc_info=True)
+
+    payload = _read_last_json_record(os.path.join(tmp_path, "common.jsonl"))
+    assert payload["message"] == "plain failure"
+    assert payload["exception"] == "log-entry-boom"
+    assert "RuntimeError" in payload["stacktrace"]
+
+
+def test_loguru_trace_id_slot_after_reset_is_empty(tmp_path):
+    """B02: after set_session_id then reset_session_id, the Loguru trace_id
+    slot returns to empty (sentinel does not re-leak)."""
+    config_file_path = os.path.join(tmp_path, "loguru_trace_reset.yaml")
+    write_yaml_config(config_file_path, _make_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        token = set_session_id("real-trace")
+        logger.info("with-real-trace")
+        reset_session_id(token)
+        logger.info("after-reset")
+
+    records = _read_json_records(os.path.join(tmp_path, "common.jsonl"))
+    assert records[-1]["record"]["extra"]["trace_id"] == ""
+    assert records[-2]["record"]["extra"]["trace_id"] == "real-trace"
+    assert "default_trace_id" not in json.dumps(records[-1])
 
 
 def test_logger_level_override_affects_only_logger_threshold(tmp_path, capsys):
