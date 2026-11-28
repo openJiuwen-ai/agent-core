@@ -87,6 +87,7 @@ _ADX_ENVIRONMENTS = "/api/environment/v1/environments"
 _ADX_INSTANCES = "/api/instances"
 _ADX_INVOKE = "/direct"
 _ADX_RESUME_TIMEOUT_SECONDS = 330.0
+_PROCESS_IDENTITY = uuid.uuid4().hex
 
 _T = TypeVar("_T")
 
@@ -390,6 +391,50 @@ def _adx_mount(mount: dict) -> dict:
     }
 
 
+def _adx_network_policy(network: Any) -> Any:
+    """Convert the serializable tool network settings to ADX schema v2.
+
+    AgentOS writes the traffic/DNS sections with snake_case field names, while
+    the ADX create contract uses the schema v2 camelCase form. Legacy
+    ``block_network``/``dns_blacklist`` policies are already in the wire shape.
+    """
+    if not isinstance(network, dict):
+        return network
+    if "traffic" not in network and "dns" not in network:
+        return network
+    result = dict(network)
+    result["schemaVersion"] = 2
+    traffic = result.get("traffic")
+    if isinstance(traffic, dict):
+        traffic = dict(traffic)
+        if "ingress_default_action" in traffic:
+            traffic.setdefault("ingressDefaultAction", traffic.pop("ingress_default_action"))
+        if "egress_default_action" in traffic:
+            traffic.setdefault("egressDefaultAction", traffic.pop("egress_default_action"))
+        traffic.setdefault("ingressDefaultAction", "allow")
+        traffic.setdefault("egressDefaultAction", "allow")
+        traffic.setdefault("mode", "stateful")
+        rules = []
+        for rule in traffic.get("rules") or []:
+            if isinstance(rule, dict):
+                rule = dict(rule)
+                if "port_range" in rule:
+                    rule.setdefault("portRange", rule.pop("port_range"))
+                if "environment_port_range" in rule:
+                    rule.setdefault("environmentPortRange", rule.pop("environment_port_range"))
+            rules.append(rule)
+        traffic["rules"] = rules
+        result["traffic"] = traffic
+    dns = result.get("dns")
+    if isinstance(dns, dict):
+        dns = dict(dns)
+        if "default_action" in dns:
+            dns.setdefault("defaultAction", dns.pop("default_action"))
+        dns.setdefault("defaultAction", "allow")
+        result["dns"] = dns
+    return result
+
+
 def _adx_create_body(extra: dict[str, Any], executor: str) -> dict[str, Any]:
     """Build the native create fields while accepting legacy rootfs configuration."""
     rootfs = _normalize_rootfs(extra)
@@ -421,7 +466,7 @@ def _adx_create_body(extra: dict[str, Any], executor: str) -> dict[str, Any]:
         body["mounts"] = [_adx_mount(mount) for mount in mounts]
     for key in ("cpu_limit", "mem_limit", "env", "network"):
         if extra.get(key) is not None:
-            body[key] = extra[key]
+            body[key] = _adx_network_policy(extra[key]) if key == "network" else extra[key]
     for config_key, request_key in (
         ("restart_policy", "restartPolicy"),
         ("create_timeout", "createTimeoutSeconds"),
@@ -739,9 +784,23 @@ class _AdxProviderMixin:
         self._timeout_seconds = int(getattr(config, "timeout_seconds", 30) or 30)
         extra = self._launcher_extra_params()
         token_env = extra.get("token_env")
-        token = os.getenv(token_env) if token_env else None
+        token = os.getenv(token_env) if isinstance(token_env, str) and token_env else None
+        connection = extra.get("connection")
+        if token is None and isinstance(connection, dict):
+            raw = connection.get("token")
+            if isinstance(raw, str) and raw:
+                token = raw
+            else:
+                token_env = connection.get("token_env")
+                token = os.getenv(token_env) if isinstance(token_env, str) and token_env else None
+        if token is None:
+            # The AgentOS entry point exports the ADX tenant token for the tool
+            # sandbox; keep it working when the configuration carries no
+            # connection section.
+            token = os.getenv("ADX_TOKEN")
         if token:
             self._auth_headers.setdefault("Authorization", f"Bearer {token}")
+            self._auth_headers.setdefault("X-Auth", token)
         self._executor = _normalize_executor(extra.get("executor"))
 
     def _base_url(self) -> str:
@@ -784,8 +843,19 @@ class _AdxProviderMixin:
                 cls._lifecycle_locks[shared_key] = lock
             return lock
 
+    def _environment_name(self) -> str:
+        """Pin the ADX name from ``JIUWENSWARM_ADX_AGENT_KEY`` like the SDK provider.
+
+        Without the key this process gets its own identity, matching the SDK
+        provider's ``_PROCESS_IDENTITY`` fallback.
+        """
+        agent_key = os.environ.get("JIUWENSWARM_ADX_AGENT_KEY") or _PROCESS_IDENTITY
+        identity = self._shared_scope_key() + "|agent=" + agent_key
+        return "tools-" + hashlib.sha256(identity.encode()).hexdigest()[:40]
+
     def _create_instance(self, *, retry_conflict: bool = True) -> Tuple[str, str]:
         body = _adx_create_body(self._launcher_extra_params(), self._executor)
+        body["name"] = self._environment_name()
         status, response = _adx_request(
             "POST",
             f"{self._base_url()}{_ADX_ENVIRONMENTS}",
