@@ -39,12 +39,6 @@ from openjiuwen.core.graph.store import (
     Serializer,
     Store,
 )
-from openjiuwen.core.session import (
-    BaseSession,
-    Checkpointer,
-    InteractiveInput,
-    NodeSession,
-)
 from openjiuwen.core.session.checkpointer import (
     build_key,
     build_key_with_namespace,
@@ -56,7 +50,11 @@ from openjiuwen.core.session.checkpointer import (
     Storage,
     WORKFLOW_NAMESPACE_GRAPH,
 )
+from openjiuwen.core.session.checkpointer.base import Checkpointer
 from openjiuwen.core.session.constants import FORCE_DEL_WORKFLOW_STATE_KEY
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.session.internal.workflow import NodeSession
+from openjiuwen.core.session.session import BaseSession
 
 
 class BaseStorage(Storage, ABC):
