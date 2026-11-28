@@ -1,529 +1,80 @@
-# coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Bilingual descriptions and input params for Todo tools."""
-from __future__ import annotations
+"""Bilingual metadata for the shared todo_write tool."""
 
-from typing import Any, Dict
+from typing import Any
 
-from openjiuwen.harness.prompts.tools.base import (
-    ToolMetadataProvider,
-)
+from openjiuwen.harness.prompts.tools.base import ToolMetadataProvider
+from openjiuwen.harness.schema.task import TodoStatus
 
-# ---------------------------------------------------------------------------
-# Todo-create description
-# ---------------------------------------------------------------------------
-TODO_CREATE_DESCRIPTION_CN = """
-创建当前会话的待办事项列表，用于跟踪进度、组织复杂任务，帮助用户了解整体执行情况。
-
-## 使用方式
-
-入参为 JSON 数组（每个任务必须包含 id 字段）：
-    {"todos": [{"id": "translate_doc", "content": "翻译文档", "activeForm": "正在翻译文档", "description": "将文档翻译为目标语言", "selected_model_id": "fast"}, {"id": "analyze_arch", "content": "分析代码架构", "activeForm": "正在分析代码架构", "description": "梳理代码模块结构与依赖关系", "selected_model_id": "smart"}]}
-
-## 规则
-
-- **id 字段为必填**：必须为每个任务指定简短、语义清晰的唯一字符串 ID（如 "translate_doc"、"analyze_code"），禁止使用随机字符或 UUID。同一会话内 ID 不得重复。此 ID 在后续 todo_modify 中用于精准定位任务，是跨轮次更新状态的唯一依据
-- 第一个任务自动设为 in_progress，其余为 pending
-- 同一时间只能有一个 in_progress 任务
-- 任务描述必须具体、可执行、清晰明确
-- 调用本工具会覆盖当前会话的任务列表；若需追加任务，请使用 todo_modify
-- 当没有获取到当前可用模型信息时，不要添加 selected_model_id 字段；否则必须添加 selected_model_id 指定执行任务的模型 ID
-"""
-
-TODO_CREATE_DESCRIPTION_EN = """
-Create a todo list for the current session to track progress, organize complex tasks, and help the user understand overall execution status.
-
-## Usage
-
-Input is a JSON array (each task must include an id field):
-    {"todos": [{"id": "translate_doc", "content": "Translate document", "activeForm": "Translating document", "description": "Translate the document into the target language", "selected_model_id": "fast"}, {"id": "analyze_arch", "content": "Analyze code architecture", "activeForm": "Analyzing code architecture", "description": "Map out module structure and dependencies", "selected_model_id": "smart"}]}
-
-## Rules
-
-- **id is required**: You must provide a short, semantically meaningful unique string ID for each task (e.g. "translate_doc", "analyze_code"). Do NOT use random characters or UUIDs. IDs must be unique within a session. This ID is used by todo_modify to precisely locate tasks and is the sole key for cross-turn status updates
-- First task is automatically set to in_progress, others to pending
-- Only one task can be in_progress at a time
-- Task descriptions must be specific, actionable, and clear
-- Calling this tool replaces the current session's task list; use todo_modify to append tasks
-- When the currently available model information is not obtained, the selected_model_id field should not be added; otherwise, selected_model_id must be added to specify the model ID for executing the task.
-"""
-
-TODO_CREATE_DESCRIPTION: Dict[str, str] = {
-    "cn": TODO_CREATE_DESCRIPTION_CN,
-    "en": TODO_CREATE_DESCRIPTION_EN,
-}
-
-# ---------------------------------------------------------------------------
-# Todo-list description
-# ---------------------------------------------------------------------------
-TODO_LIST_DESCRIPTION_CN = """
-检索并显示当前会话的所有待办事项。
-
-## 何时使用 todo_list（而非 todo_modify）
-
-使用 todo_list 的场景：
-- 需要查看当前任务全貌和各任务ID，再决定如何更新
-- 不确定当前有哪些任务处于 in_progress 或 pending
-
-使用 todo_modify 的场景（不需要先调用 todo_list）：
-- 已知任务 ID，直接更新任务信息
-- 任务刚完成，立即标记为 completed
-"""
-
-TODO_LIST_DESCRIPTION_EN = """
-Retrieve and display all todo items for the current session
-
-## When to Use todo_list (vs. todo_modify)
-
-Use todo_list when:
-- You need an overview of all tasks and their IDs before deciding how to update
-- You are unsure which tasks are currently in_progress or pending
-
-Use todo_modify directly (no need to call todo_list first) when:
-- You already know the task ID and want to update task information
-- A task just finished and you want to mark it completed immediately
-"""
-
-TODO_LIST_DESCRIPTION: Dict[str, str] = {
-    "cn": TODO_LIST_DESCRIPTION_CN,
-    "en": TODO_LIST_DESCRIPTION_EN,
-}
-
-# ---------------------------------------------------------------------------
-# Todo-modify description
-# ---------------------------------------------------------------------------
-TODO_MODIFY_DESCRIPTION_CN = """
-修改当前会话的待办事项，包括：更新（update）、删除（delete）、取消（cancel）、追加（append）、在其后插入（insert_after）、在其前插入（insert_before）
-
-重要说明：
-- 若需重新规划整个任务列表，请调用 todo_create
-- 支持批量处理同一时点发生的结构变更，避免连续多次调用。状态流转应随执行进度即时更新：单次 update 的状态变更通常只涉及当前任务和下一任务，不要将多个 pending 任务批量改为 completed
-- **id 使用你在 todo_create 时自定义的语义 ID**（如 "translate_doc"），不要使用 UUID
-- **只传入发生变化的字段**：update 每次调用只需给出 id 加上实际改变的字段（通常只是 status），不要把 content、description、activeForm 等未变化的字段重新完整传一遍
-
-action 支持的操作类型：
-
-update：修改现有任务的状态或标题（id 不可修改，只需传入发生变化的字段，其余字段保持不传即可）：
-    {
-        "action": "update",
-        "todos": [
-            {"id": "translate_doc", "status": "completed"},
-            {"id": "analyze_code", "status": "in_progress"}
-        ]
-    }
-
-支持修改 selected_model_id：若任务 selected_model_id 不为空，且执行结果质量不佳（输出不准确、逻辑错误、未达预期），应根据模型描述更新质量更高的模型ID：
-    {
-        "action": "update",
-        "todos": [
-            {"id": "translate_doc", "selected_model_id": "smart", "status": "pending"}
-        ]
-    }
-
-cancel：将指定任务标记为 cancelled（任务将被忽略，不再执行）：
-    {
-        "action": "cancel",
-        "ids": ["translate_doc", "analyze_code"]
-    }
-
-delete：从列表中永久删除指定任务：
-    {
-        "action": "delete",
-        "ids": ["translate_doc"]
-    }
-
-append：在列表末尾追加新任务（id 由你指定，须简短语义且唯一）：
-    {
-        "action": "append",
-        "todos": [
-            {"id": "write_report", "content": "新任务内容", "activeForm": "执行新任务", "description": "任务的详细描述", "status": "pending"}
-        ]
-    }
-
-insert_after：在指定任务之后插入新任务（目标任务状态须为 in_progress 或 pending）：
-    {
-        "action": "insert_after",
-        "todo_data": {"target_id": "translate_doc", "items": [{"id": "review_translation", "content": "插入的任务", "activeForm": "执行插入的任务", "description": "任务的详细描述", "status": "pending", "selected_model_id": "fast"}]}
-    }
-
-insert_before：在指定任务之前插入新任务（目标任务状态须为 pending）：
-    {
-        "action": "insert_before",
-        "todo_data": {"target_id": "analyze_code", "items": [{"id": "setup_env", "content": "插入的任务", "activeForm": "执行插入的任务", "description": "任务的详细描述", "status": "pending"}]}
-    }
-
-核心规则：
-- update 操作：id 字段不可修改，其他字段支持部分更新
-- 同一时间只能有一个任务处于 in_progress
-- insert_after：目标任务状态必须为 in_progress 或 pending
-- insert_before：目标任务状态必须为 pending
-- 如果任务的 selected_model_id 为空时，任何操作都不要更改 selected_model_id 字段
-"""
-
-TODO_MODIFY_DESCRIPTION_EN = """
-Modify todo items for the current session, including: update, delete, cancel, append, insert_after, and insert_before.
-
-Important notes:
-- To re-plan the entire task list, call todo_create instead
-- Batch structural changes that occur at the same time to avoid repeated calls. Status transitions should be updated immediately as execution progresses: a single update should normally change only the current task and the next task; do not change multiple pending tasks to completed in one call
-- **Use the semantic id you assigned in todo_create** (e.g. "translate_doc"); never use UUIDs
-- **Only send the fields that changed**: for update, each call only needs the id plus the fields that actually changed (usually just status) — do not resend unchanged fields like content, description, or activeForm
-
-Supported action types:
-
-update: Modify status or content of existing tasks (id cannot be changed; only send the fields that changed, omit the rest):
-    {
-        "action": "update",
-        "todos": [
-            {"id": "translate_doc", "status": "completed"},
-            {"id": "analyze_code", "status": "in_progress"}
-        ]
-    }
-
-Support modifying selected_model_id: If the task's selected_model_id is not empty and the execution result is of poor quality (inaccurate output, logical errors, or failure to meet expectations), the model ID should be updated according to the model description to a higher-quality model:
-    {
-        "action": "update",
-        "todos": [
-            {"id": "translate_doc", "selected_model_id": "smart", "status": "pending"}
-        ]
-    }
-
-cancel: Mark specified tasks as cancelled (tasks will be ignored and not executed):
-    {
-        "action": "cancel",
-        "ids": ["translate_doc", "analyze_code"]
-    }
-
-delete: Permanently remove specified tasks from the list:
-    {
-        "action": "delete",
-        "ids": ["translate_doc"]
-    }
-
-append: Add new tasks at the end of the list (id must be a short semantic string you choose, unique within the session):
-    {
-        "action": "append",
-        "todos": [
-            {"id": "write_report", "content": "New task content", "activeForm": "Executing new task", "description": "Detailed description of the task", "status": "pending"}
-        ]
-    }
-
-insert_after: Insert new tasks after the specified task (target must be in_progress or pending):
-    {
-        "action": "insert_after",
-        "todo_data": {"target_id": "translate_doc", "items": [{"id": "review_translation", "content": "Inserted task", "activeForm": "Executing inserted task", "description": "Detailed description of the task", "status": "pending", "selected_model_id": "fast"}]}
-    }
-
-insert_before: Insert new tasks before the specified task (target must be pending):
-    {
-        "action": "insert_before",
-        "todo_data": {"target_id": "analyze_code", "items": [{"id": "setup_env", "content": "Inserted task", "activeForm": "Executing inserted task", "description": "Detailed description of the task", "status": "pending"}]}
-    }
-
-Core rules:
-- update: the id field cannot be modified; all other fields support partial updates
-- Only one task can be in_progress at a time
-- insert_after: target task status must be in_progress or pending
-- insert_before: target task status must be pending
-- If the task's selected_model_id is empty, do not modify the selected_model_id field in any operation.
-"""
-
-TODO_MODIFY_DESCRIPTION: Dict[str, str] = {
-    "cn": TODO_MODIFY_DESCRIPTION_CN,
-    "en": TODO_MODIFY_DESCRIPTION_EN,
-}
-
-# ---------------------------------------------------------------------------
-# Todo-get description
-# ---------------------------------------------------------------------------
-TODO_GET_DESCRIPTION_CN = """
-根据任务 ID 获取单个任务的完整详情。
-
-入参：id（任务唯一标识符）
-
-返回：完整的任务信息，包括 id、content（任务摘要）、activeForm、description（任务详细内容）、status、depends_on、result_summary、meta_data、selected_model_id。
-"""
-
-TODO_GET_DESCRIPTION_EN = """
-Get full details of a single task by its ID.
-
-Input: id (unique task identifier)
-
-Returns: complete task info including id, content (task summary), activeForm, description (detailed content), status, depends_on, result_summary, meta_data, selected_model_id.
-"""
-
-TODO_GET_DESCRIPTION: Dict[str, str] = {
-    "cn": TODO_GET_DESCRIPTION_CN,
-    "en": TODO_GET_DESCRIPTION_EN,
-}
-
-# ---------------------------------------------------------------------------
-# Parameter-level bilingual descriptions
-# ---------------------------------------------------------------------------
-TODO_CREATE_PARAMS: Dict[str, Dict[str, str]] = {
-    "todos": {
-        "cn": (
-            "子任务列表，JSON 数组格式。每个元素为任务对象，必填字段：\n"
-            "- id：任务唯一标识符，由你自行指定，必须简短且语义清晰（如 \"translate_doc\"、\"analyze_code\"），"
-            "禁止使用随机字符或 UUID；同一会话内 ID 不得重复；后续 todo_modify 按此 ID 精准定位任务\n"
-            "- content：任务摘要描述\n"
-            "- activeForm：content 的进行语态（如 content 为「翻译文档」，activeForm 为「正在翻译文档」）\n"
-            "- description：任务详细内容\n"
-            "可选字段：\n"
-            "- selected_model_id：执行任务的模型 ID，见系统提示词「模型选择策略」"
+_DESCRIPTIONS = {
+    "cn": {
+        "tool": (
+            "规划多步任务并展示进度。简单单步任务直接做。开始前按可验证的里程碑列待办，遵循用户指定的计划结构。"
+            "开工标为 in_progress，首项可在首次提交时标记。同时最多一项进行中，里程碑内可并行。"
+            "验证后及时标为 completed。切换到下一项时，在同一次整表提交中更新两项状态。"
         ),
-        "en": (
-            "List of subtasks in JSON array format. Each element is a task object with required fields:\n"
-            "- id: unique task identifier that YOU provide; must be short and semantically meaningful "
-            "(e.g. 'translate_doc', 'analyze_code'); do NOT use random chars or UUIDs; "
-            "IDs must be unique within a session; todo_modify uses this ID to locate tasks precisely\n"
-            "- content: task summary description\n"
-            "- activeForm: present-tense form of content "
-            "(e.g., content 'Translate document' -> activeForm 'Translating document')\n"
-            "- description: detailed task content\n"
-            "Optional field:\n"
-            "- selected_model_id: model ID, see 'Model Selection Strategy' in system prompt"
+        "todos": "完整有序列表，替换当前待办。带上要保留的条目及其原 ID。省略已有 ID 即删除，[] 仅用于清空。",
+        "revision": (
+            "首次建表省略。更新必填，取最新 todo_snapshot 或写入结果中的版本。"
+            "遇到 conflict=true，将变更合入返回列表，用返回的版本重试。"
         ),
+        "id": "会话内唯一的简短语义 ID。",
+        "content": "可验证的阶段成果，用简短行动语句描述。",
+        "status": "pending 待开始，in_progress 进行中，completed 已完成，cancelled 已取消并保留记录。",
+        "description": "验收标准、约束或并行子项。省略时保留原值。",
+        "selected_model_id": "当前会话提供的可用模型 ID。省略时保留原值。",
     },
-}
-
-_TODO_ITEM_PARAMS: Dict[str, Dict[str, str]] = {
-    "id": {
-        "cn": "任务唯一标识符，由你自行指定的简短语义字符串（如 \"translate_doc\"），禁止使用 UUID，同一会话内须唯一",
-        "en": (
-            "Unique task identifier — a short semantic string you provide (e.g. 'translate_doc'); "
-            "do NOT use UUIDs; must be unique within a session"
+    "en": {
+        "tool": (
+            "Plan multi-step work and show progress. Skip simple single-step tasks. Before starting, "
+            "list verifiable milestones and follow the user's plan structure. "
+            "Mark items in_progress when they start, including on the first write. "
+            "Keep at most one in_progress item. Its subtasks may run in parallel. "
+            "Mark items completed promptly after verification. When moving to the next item, "
+            "update both statuses in one full-list write."
         ),
-    },
-    "content": {"cn": "任务摘要描述", "en": "Task summary description"},
-    "activeForm": {"cn": "content 的进行语态", "en": "Present-tense form of content"},
-    "description": {"cn": "任务详细内容", "en": "Detailed task content"},
-    "status": {"cn": "任务状态", "en": "Task status"},
-    "selected_model_id": {
-        "cn": (
-            "执行此任务使用的模型 ID。见系统提示词「模型选择策略」。"
-            "若任务结果不满意，可通过 todo_modify 更换更强的模型 ID 后重试。"
+        "todos": (
+            "Full ordered list replacing the current todos. Include all retained items with their original IDs. "
+            "Omitting an existing ID deletes it. Use [] only to clear the list."
         ),
-        "en": (
-            "Model ID for this task. See 'Model Selection Strategy' in system prompt. "
-            "If task result is unsatisfactory, update via todo_modify and retry."
+        "revision": (
+            "Omit on first write. Updates require the revision from the latest todo_snapshot or write result. "
+            "On conflict=true, merge changes into the returned list and retry with its revision."
         ),
-    },
-}
-
-TODO_MODIFY_PARAMS: Dict[str, Dict[str, str]] = {
-    "action": {"cn": "要执行的操作类型", "en": "Operation type to perform"},
-    "ids": {"cn": "要操作的任务 ID 列表", "en": "List of task IDs to operate on"},
-    "ids_item": {"cn": "任务唯一标识符", "en": "Unique task identifier"},
-    "todos": {
-        "cn": (
-            "根据 action 字段处理的待办事项数组。"
-            "支持修改 selected_model_id：若某任务执行结果质量不佳（输出不准确、逻辑错误、未达预期），"
-            "应将 selected_model_id 更新为更高等级的模型 ID，然后将任务状态重置为 pending 或 in_progress 以触发重新执行。"
-        ),
-        "en": (
-            "Array of todo items to process based on the action field. "
-            "Supports updating selected_model_id: if a task produces poor results (inaccurate output, "
-            "logical errors, unmet objectives), update selected_model_id to a model ID whose description "
-            "indicates stronger capability, "
-            "and reset the task status to pending or in_progress to trigger re-execution."
-        ),
-    },
-    "todo_data": {"cn": "用于 insert_after/insert_before 操作的对象", "en": "Object for insert_after/insert_before actions"},
-    "todo_data_target_id": {"cn": "目标任务 ID", "en": "Target task ID"},
-    "todo_data_items": {"cn": "要插入的任务列表", "en": "Tasks to insert"},
-}
-
-
-TODO_GET_PARAMS: Dict[str, Dict[str, str]] = {
-    "id": {
-        "cn": "任务唯一标识符",
-        "en": "Unique task identifier",
+        "id": "Short, meaningful, session-unique ID.",
+        "content": "Brief action phrase describing a verifiable milestone outcome.",
+        "status": "pending (not started), in_progress (active), completed (done), cancelled (dropped, record kept).",
+        "description": "Acceptance criteria, constraints or parallel subtasks. Omitting preserves the existing value.",
+        "selected_model_id": "An available model ID from this session. Omitting preserves the existing value.",
     },
 }
 
 
-def _todo_item_properties(language: str = "cn") -> Dict[str, Any]:
-    """Return the shared todo item sub-schema properties."""
-    p = _TODO_ITEM_PARAMS
-
-    def _d(key: str) -> str:
-        return p[key].get(language, p[key]["cn"])
-
-    return {
-        "id": {"type": "string", "description": _d("id")},
-        "content": {"type": "string", "description": _d("content")},
-        "activeForm": {"type": "string", "description": _d("activeForm")},
-        "description": {"type": "string", "description": _d("description")},
-        "status": {
-            "type": "string",
-            "description": _d("status"),
-            "enum": ["pending", "in_progress", "completed", "cancelled"],
-        },
-        "selected_model_id": {
-            "type": "string",
-            "description": _d("selected_model_id"),
-        },
-    }
-
-
-def get_todo_create_input_params(language: str = "cn") -> Dict[str, Any]:
-    """Return the full JSON Schema for todo_create tool input_params."""
-    p = TODO_CREATE_PARAMS
-    todos_desc = p["todos"].get(language, p["todos"]["cn"])
-    item_props = _todo_item_properties(language)
-    return {
-        "type": "object",
-        "properties": {
-            "todos": {
-                "type": "array",
-                "description": todos_desc,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "id": item_props["id"],
-                        "content": item_props["content"],
-                        "activeForm": item_props["activeForm"],
-                        "description": item_props["description"],
-                        "selected_model_id": item_props["selected_model_id"],
-                    },
-                    "required": ["id", "content", "activeForm", "description"],
-                },
-            },
-        },
-        "required": ["todos"],
-    }
-
-
-def get_todo_list_input_params(language: str = "cn") -> Dict[str, Any]:
-    """Return the full JSON Schema for todo_read tool input_params."""
-    return {
-        "type": "object",
-        "properties": {},
-        "required": [],
-    }
-
-
-def get_todo_modify_input_params(language: str = "cn") -> Dict[str, Any]:
-    """Return the full JSON Schema for todo_modify tool input_params."""
-    p = TODO_MODIFY_PARAMS
-
-    def _d(key: str) -> str:
-        return p[key].get(language, p[key]["cn"])
-    item_props = _todo_item_properties(language)
-    todo_item_schema = {
-        "type": "object",
-        "properties": {
-            "id": item_props["id"],
-            "content": item_props["content"],
-            "activeForm": item_props["activeForm"],
-            "description": item_props["description"],
-            "status": item_props["status"],
-            "selected_model_id": item_props["selected_model_id"],
-        },
-        "required": ["id"],
-    }
-    return {
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "description": _d("action"),
-                "enum": ["update", "delete", "cancel", "append", "insert_after", "insert_before"],
-            },
-            "ids": {
-                "type": "array",
-                "description": _d("ids"),
-                "items": {"type": "string"},
-            },
-            "todos": {
-                "type": "array",
-                "description": _d("todos"),
-                "items": todo_item_schema,
-            },
-            "todo_data": {
-                "type": "object",
-                "description": _d("todo_data"),
-                "properties": {
-                    "target_id": {"type": "string", "description": _d("todo_data_target_id")},
-                    "items": {
-                        "type": "array",
-                        "description": _d("todo_data_items"),
-                        "items": todo_item_schema,
-                    },
-                },
-                "required": ["target_id", "items"],
-            },
-        },
-        "required": ["action"],
-    }
-
-
-def get_todo_get_input_params(language: str = "cn") -> Dict[str, Any]:
-    """Return the full JSON Schema for todo_get tool input_params."""
-    p = TODO_GET_PARAMS
-    return {
-        "type": "object",
-        "properties": {
-            "id": {"type": "string", "description": p["id"].get(language, p["id"]["cn"])},
-        },
-        "required": ["id"],
-    }
-
-
-class TodoCreateMetadataProvider(ToolMetadataProvider):
-    """TodoCreate 工具的元数据 provider。"""
-
+class TodoWriteMetadataProvider(ToolMetadataProvider):
     def get_name(self) -> str:
-        return "todo_create"
+        return "todo_write"
 
     def get_description(self, language: str = "cn") -> str:
-        return TODO_CREATE_DESCRIPTION.get(
-            language, TODO_CREATE_DESCRIPTION["cn"]
-        )
+        return _DESCRIPTIONS.get(language, _DESCRIPTIONS["cn"])["tool"]
 
-    def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
-        return get_todo_create_input_params(language)
-
-
-class TodoListMetadataProvider(ToolMetadataProvider):
-    """TodoList 工具的元数据 provider。"""
-
-    def get_name(self) -> str:
-        return "todo_list"
-
-    def get_description(self, language: str = "cn") -> str:
-        return TODO_LIST_DESCRIPTION.get(
-            language, TODO_LIST_DESCRIPTION["cn"]
-        )
-
-    def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
-        return get_todo_list_input_params(language)
-
-
-class TodoModifyMetadataProvider(ToolMetadataProvider):
-    """TodoModify 工具的元数据 provider。"""
-
-    def get_name(self) -> str:
-        return "todo_modify"
-
-    def get_description(self, language: str = "cn") -> str:
-        return TODO_MODIFY_DESCRIPTION.get(
-            language, TODO_MODIFY_DESCRIPTION["cn"]
-        )
-
-    def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
-        return get_todo_modify_input_params(language)
-
-
-class TodoGetMetadataProvider(ToolMetadataProvider):
-    """TodoGet 工具的元数据 provider。"""
-
-    def get_name(self) -> str:
-        return "todo_get"
-
-    def get_description(self, language: str = "cn") -> str:
-        return TODO_GET_DESCRIPTION.get(language, TODO_GET_DESCRIPTION["cn"])
-
-    def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
-        return get_todo_get_input_params(language)
+    def get_input_params(self, language: str = "cn") -> dict[str, Any]:
+        descriptions = _DESCRIPTIONS.get(language, _DESCRIPTIONS["cn"])
+        item = {
+            "type": "object",
+            "properties": {
+                name: {"type": "string", "description": descriptions[name]}
+                for name in ("id", "content", "status", "description", "selected_model_id")
+            },
+            "required": ["id", "content", "status"],
+            "additionalProperties": False,
+        }
+        item["properties"]["status"]["enum"] = [status.value for status in TodoStatus]
+        return {
+            "type": "object",
+            "properties": {
+                "revision": {"type": "string", "description": descriptions["revision"]},
+                "todos": {"type": "array", "description": descriptions["todos"], "items": item},
+            },
+            "required": ["todos"],
+            "additionalProperties": False,
+        }

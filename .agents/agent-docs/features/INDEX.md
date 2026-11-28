@@ -32,6 +32,7 @@ generated: true
 | [harness/rails](#module-harness-rails) |
 | [harness/rails/evolution](#module-harness-rails-evolution) |
 | [harness/subagents](#module-harness-subagents) |
+| [harness/tools](#module-harness-tools) |
 | [harness/tools/browser_move](#module-harness-tools-browser_move) |
 | [harness_providers](#module-harness_providers) |
 
@@ -344,6 +345,7 @@ generated: true
 | [F_20261104_1720_tool-execution-environment](F_20261104_1720_tool-execution-environment.md) | F | 工具执行环境作用域 | alan_cheng | 无独立 D：无独立 D；在现有 harness 工具调用与 team 会话存储契约上的小范围扩展。 |
 | [F_20261110_1922_team-goal-mode](F_20261110_1922_team-goal-mode.md) | F | Team Leader 与成员 Goal 模式实施与决策归档 | alan_cheng | [D-20261110-1903-team-goal-mode](../designs/active/D-20261110-1903-team-goal-mode/design.md) |
 | [F_20261112_1120_goal-assessment-isolation](F_20261112_1120_goal-assessment-isolation.md) | F | Goal 评估调用的观测隔离实施 | alan_cheng | [D-20261112-1120-goal-assessment-isolation](../designs/active/D-20261112-1120-goal-assessment-isolation/design.md) |
+| [F_20261124_1130_prompt-source-consolidation](F_20261124_1130_prompt-source-consolidation.md) | F | 共享英文提示词与工具元数据原地精简 | MengHan18 | 无独立 D：依据用户明确授权的提交版整理任务及已确认的共享英文原地精简范围，无独立仓内设计编号。 |
 | [F_20_react-iteration-limit](harness/F_20_react-iteration-limit.md) | F | F_20 ReAct 迭代耗尽后的结构化结果 | openJiuwen-bot | 待核实 |
 | [F_21_browser-decision-observation-handoff](harness/F_21_browser-decision-observation-handoff.md) | F | Browser decision observation and local handoff | 待确认 | 待核实 |
 | [F_21_cua-desktop-subagent](harness/F_21_cua-desktop-subagent.md) | F | cua_agent desktop subagent | kwangyyinc | 待核实 |
@@ -395,6 +397,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [F_20261029_1852_optional-handoff-and-resume](F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
+
+<a id="module-harness-tools"></a>
+
+## harness/tools
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261128_1442_submit-upstream-develop-merge](F_20261128_1442_submit-upstream-develop-merge.md) | F | submit 同步 upstream develop 冲突处理 | MengHan18 | 无独立 D：已授权的上游同步，不引入独立新设计 |
 
 <a id="module-harness-tools-browser_move"></a>
 

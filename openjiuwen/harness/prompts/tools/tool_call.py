@@ -10,21 +10,11 @@ from openjiuwen.harness.prompts.tools.base import ToolMetadataProvider
 
 DESCRIPTION: Dict[str, str] = {
     "cn": (
-        "执行 tool_search 返回的 deferred 工具。"
-        "name 必须使用最近一次 tool_search 返回的准确工具名称，args 必须符合该结果中的完整 parameters schema。"
-        "搜索结果工具不会加入顶层 tools，不能直接调用搜索结果中的工具名称，也不能猜测工具名称。"
-        "工具未变化时可以复用之前的搜索结果；如果工具已修改，应重新搜索获取最新 schema；"
-        "如果当前目录后来显示该工具已删除，之前的搜索结果和授权立即失效，不能继续调用，也不能改用 task_tool 或子代理间接调用。"
+        "用当前 tool_search 结果的准确名称和符合 Schema 的参数执行工具。定义变更后重新查询，目录已移除的工具不可通过任何路径调用。"
     ),
     "en": (
-        "Execute a deferred tool returned by tool_search. "
-        "The name must exactly match a tool name returned by the latest tool_search, "
-        "and args must conform to that result's complete parameters schema. "
-        "Search-result tools are not added to the top-level tools list; do not call a result tool by its own name "
-        "or guess a tool name. An unchanged tool may reuse a previous result; if a later "
-        "directory update changes its schema, search again, and if it marks the tool as "
-        "removed, the previous result and authorization are invalid; do not invoke it "
-        "through task_tool or a subagent."
+        "Execute a current tool_search result with exact name/schema-compatible args. Re-search "
+        "changed contracts; removed tools cannot run by any route."
     ),
 }
 
@@ -35,11 +25,8 @@ TOOL_CALL_PARAMS: Dict[str, Dict[str, str]] = {
         "en": "Exact tool name returned by tool_search",
     },
     "args": {
-        "cn": "按照 tool_search 返回的完整 parameters schema 填写工具参数；无参数工具使用空对象",
-        "en": (
-            "Arguments matching the complete parameters schema returned by tool_search; "
-            "use an empty object for no-argument tools"
-        ),
+        "cn": "按 tool_search 返回的 Schema 填写参数，无参数时用 {}。",
+        "en": "Arguments matching the searched schema; {} for no-argument tools.",
     },
 }
 

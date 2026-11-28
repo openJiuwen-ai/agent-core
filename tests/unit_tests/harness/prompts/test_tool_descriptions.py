@@ -34,11 +34,6 @@ from openjiuwen.harness.prompts.tools.filesystem import (
 from openjiuwen.harness.prompts.tools.list_skill import (
     DESCRIPTION as LIST_SKILL_DESCRIPTION,
 )
-from openjiuwen.harness.prompts.tools.todo import (
-    TODO_CREATE_DESCRIPTION,
-    TODO_LIST_DESCRIPTION,
-    TODO_MODIFY_DESCRIPTION,
-)
 from openjiuwen.harness.prompts.tools.vision import (
     IMAGE_OCR_DESCRIPTION,
     VISUAL_QUESTION_ANSWERING_DESCRIPTION,
@@ -73,9 +68,7 @@ class TestBilingualDescriptions:
             GLOB_DESCRIPTION,
             LIST_DIR_DESCRIPTION,
             GREP_DESCRIPTION,
-            TODO_CREATE_DESCRIPTION,
-            TODO_LIST_DESCRIPTION,
-            TODO_MODIFY_DESCRIPTION,
+            {lang: get_tool_description("todo_write", lang) for lang in ("cn", "en")},
             IMAGE_OCR_DESCRIPTION,
             VISUAL_QUESTION_ANSWERING_DESCRIPTION,
             AUDIO_TRANSCRIPTION_DESCRIPTION,
@@ -116,9 +109,7 @@ class TestGetToolDescription:
             "list_files",
             "grep",
             "list_skill",
-            "todo_create",
-            "todo_list",
-            "todo_modify",
+            "todo_write",
             "image_ocr",
             "visual_question_answering",
             "audio_transcription",

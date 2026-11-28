@@ -21,7 +21,7 @@ from openjiuwen.harness.moa.state import MoAState
 from openjiuwen.harness.moa.verifier.redaction import redact
 from openjiuwen.harness.prompts.moa_jev import build_jev_question
 from openjiuwen.harness.schema.task import TodoItem
-from openjiuwen.harness.tools.todo import TodoTool
+from openjiuwen.harness.tools.todo import TodoWriteTool
 
 _QUESTION_KEY = "consult_reference"
 
@@ -104,7 +104,7 @@ async def _read_todos(agent: Any, session: Any) -> tuple[list[TodoItem] | None, 
             if not isinstance(card, ToolCard):
                 continue
             tool = Runner.resource_mgr.get_tool(tool_id=card.id)
-            if isinstance(tool, TodoTool) and tool.card is card:
+            if isinstance(tool, TodoWriteTool) and tool.card is card:
                 todos = await tool.load_todos(get_session_id())
                 return todos, "todo_available" if todos else "todo_empty"
     except Exception:

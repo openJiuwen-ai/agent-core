@@ -34,11 +34,7 @@ from openjiuwen.harness.prompts.tools.filesystem import (
 from openjiuwen.harness.prompts.tools.list_skill import (
     get_list_skill_input_params,
 )
-from openjiuwen.harness.prompts.tools.todo import (
-    get_todo_create_input_params,
-    get_todo_list_input_params,
-    get_todo_modify_input_params,
-)
+from openjiuwen.harness.prompts.tools.todo import TodoWriteMetadataProvider
 from openjiuwen.harness.prompts.tools.vision import (
     get_image_ocr_input_params,
     get_visual_question_answering_input_params,
@@ -99,9 +95,7 @@ class TestBuilderInputParams:
             get_list_dir_input_params,
             get_grep_input_params,
             get_list_skill_input_params,
-            get_todo_create_input_params,
-            get_todo_list_input_params,
-            get_todo_modify_input_params,
+            TodoWriteMetadataProvider().get_input_params,
             get_image_ocr_input_params,
             get_visual_question_answering_input_params,
             get_audio_transcription_input_params,
@@ -121,7 +115,7 @@ class TestBuilderInputParams:
             "file_path",
             "content",
         }
-        assert get_todo_create_input_params("cn")["required"] == ["todos"]
+        assert get_tool_input_params("todo_write", "cn")["required"] == ["todos"]
         assert get_image_ocr_input_params("cn")["required"] == [
             "image_path_or_url"
         ]
@@ -155,9 +149,7 @@ class TestGetToolInputParams:
             "list_files",
             "grep",
             "list_skill",
-            "todo_create",
-            "todo_list",
-            "todo_modify",
+            "todo_write",
             "image_ocr",
             "visual_question_answering",
             "audio_transcription",

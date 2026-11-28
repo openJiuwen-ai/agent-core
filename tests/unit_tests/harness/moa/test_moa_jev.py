@@ -24,16 +24,15 @@ from openjiuwen.core.foundation.llm.system_one import (
     SystemOneResponse,
     SystemOneUsage,
 )
-from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.session.agent import Session
-from openjiuwen.core.sys_operation import SysOperation, SysOperationCard
 from openjiuwen.harness.moa import JevConfig, MoAConfig, VerifierConfig
 from openjiuwen.harness.moa.state import MoAState, get_moa_snapshot
 from openjiuwen.harness.moa.verifier.jev_verifier.verifier import _decode_decision, build_jev_state, decide_reference
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.build_context import BuildContext
 from openjiuwen.harness.schema.task import TodoItem, TodoStatus
-from openjiuwen.harness.tools.todo import TodoTool
+from openjiuwen.harness.tools.todo import TodoWriteTool
 from tests.unit_tests.harness.moa.helpers import Echo, _spec, agent, model, primary
 
 
@@ -527,16 +526,13 @@ async def test_timeout_continues_and_next_checkpoint_can_consult():
     assert "after timeout" in str(primary_model.invoke.await_args_list[2].kwargs["messages"])
 
 
-class _MemoryTodo(TodoTool):
+class _MemoryTodo(TodoWriteTool):
     """Registered native todo instance with deterministic in-memory persistence."""
 
     def __init__(self, todos):
-        super().__init__(
-            ToolCard(
-                id="jev-memory-todo", name="native_todo", description="Update todo", input_params={"type": "object"}
-            ),
-            SysOperation(SysOperationCard(id="jev-memory-todo-operation")),
-        )
+        Tool.__init__(self, ToolCard(
+            id="jev-memory-todo", name="native_todo", description="Update todo", input_params={"type": "object"}
+        ))
         self.todos = todos
         self.load_todos = AsyncMock(side_effect=lambda _session_id: self.todos)
 

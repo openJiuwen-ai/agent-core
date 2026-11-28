@@ -123,12 +123,7 @@ from openjiuwen.harness.prompts.tools.tool_search import (
 from openjiuwen.harness.prompts.tools.tool_call import (
     ToolCallMetadataProvider,
 )
-from openjiuwen.harness.prompts.tools.todo import (
-    TodoCreateMetadataProvider,
-    TodoGetMetadataProvider,
-    TodoListMetadataProvider,
-    TodoModifyMetadataProvider,
-)
+from openjiuwen.harness.prompts.tools.todo import TodoWriteMetadataProvider
 from openjiuwen.harness.prompts.tools.video_understanding import (
     VideoUnderstandingMetadataProvider,
 )
@@ -180,10 +175,7 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     SubagentCloseMetadataProvider(),
     SubagentResumeMetadataProvider(),
     SkillToolMetadataProvider(),
-    TodoCreateMetadataProvider(),
-    TodoListMetadataProvider(),
-    TodoModifyMetadataProvider(),
-    TodoGetMetadataProvider(),
+    TodoWriteMetadataProvider(),
     ImageOCRMetadataProvider(),
     VisualQuestionAnsweringMetadataProvider(),
     VideoUnderstandingMetadataProvider(),

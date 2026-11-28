@@ -25,19 +25,11 @@ RELOAD_HINT_CN = (
 )
 
 RELOAD_HINT_EN = (
-    "# Context Compression and Recovery\n\n"
-    "When the context becomes too long, it may be compressed and marked with:\n\n"
-    "```text\n"
-    "[[OFFLOAD: handle=<id>, type=<type>, path=<path>]]\n"
-    "```\n\n"
-    "When hidden original content is needed:\n\n"
-    "- If the marker contains `path`, use its exact value as `read_file.file_path`.\n"
-    "- `handle` identifies content and is not a file path; do not use it as `file_path`.\n"
-    "- If the marker has no `path`, do not guess or construct one; explain that `read_file` cannot recover it "
-    "precisely.\n"
-    "- When only specific content is needed, search for relevant portions instead of reading the entire file.\n\n"
-    "`filesystem` means the content is persisted at `path`; `in_memory` means it exists only in the session cache "
-    "and cannot be recovered with `read_file` when no `path` is present."
+    "# Context Compression and Recovery\nCompressed content may use `[[OFFLOAD: handle=<id>, "
+    "type=<type>, path=<path>]]`. Read needed portions via read_file using the exact path; handle is "
+    "an ID, never a path. Without path, do not guess one: explain precise read_file recovery is "
+    "unavailable. filesystem persists content at path; in_memory is session-cache-only and cannot be "
+    "recovered through read_file without path. Retrieve only needed content.\n"
 )
 
 

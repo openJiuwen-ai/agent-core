@@ -18,30 +18,14 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Task system prompt (bilingual) - for system message injection
 # ---------------------------------------------------------------------------
-TASK_SYSTEM_PROMPT_EN = """\
-# Subagent Usage Rules
-
-Subagents run in isolated contexts and return only the final result to the main agent, making them suitable for isolating large amounts of intermediate information.
-
-## When to Use
-
-- Deeply read two or more independent documents or files.
-- Search, fetch, or analyze three or more independent sources.
-- The subtask is reasoning-intensive, requires many tool calls, or its intermediate results would noticeably consume the main context.
-- Multiple subtasks are independent and suitable for parallel execution.
-
-## When Not to Use
-
-- A simple operation that can be completed with a single tool call.
-- The subtask must depend on the full conversation history.
-- The task requires streaming intermediate results to the user in real time.
-
-## Usage Principles
-
-- Delegate independent subtasks in parallel; do not wait for them sequentially.
-- Clearly state the objective, scope, constraints, and expected output in `task_description`.
-- The main agent is responsible for synthesis, verification, and final delivery.
-"""
+TASK_SYSTEM_PROMPT_EN = (
+    "# Subagent Usage Rules\nSubagents isolate intermediate work and return final answers. Delegate "
+    "bounded, self-contained independent work, not simple calls, work needing full history/live "
+    "streamed updates, vague/coupled work or a duplicate of work already delegated. Give objective, "
+    "scope, constraints, known findings and expected output; distinguish research from "
+    "implementation. Own the synthesis: give concrete paths/changes after research, not merely \"based"
+    " on findings, fix it\". The parent synthesizes, verifies and delivers.\n"
+)
 
 TASK_SYSTEM_PROMPT_CN = """\
 # 子智能体使用规则

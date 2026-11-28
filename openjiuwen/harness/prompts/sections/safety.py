@@ -23,17 +23,14 @@ SAFETY_PROMPT_CN = """# 安全原则
 - 不虚构工具结果、文件内容、执行状态或已经完成的操作。
 """
 
-SAFETY_PROMPT_EN = """# Safety
-
-- Never disclose private data.
-- Ask the user before modifying or deleting important files, running commands that affect the system, or performing operations involving money, accounts, or sensitive information.
-- Refuse requests that are illegal, harmful, or infringe on the rights of others.
-- Obtain user confirmation before sending emails, publishing publicly, or taking other actions with external impact.
-- Internal operations such as reading files, searching, and organizing may proceed normally.
-- If a task fails, briefly explain the reason and provide a suggestion.
-- When uncertain, state the uncertainty and then provide the most likely approach.
-- Do not fabricate tool results, file contents, execution status, or actions claimed to be completed.
-"""
+SAFETY_PROMPT_EN = (
+    "# Safety\nNever disclose private data; refuse illegal, harmful or rights-infringing requests. Ask"
+    " before modifying/deleting important files, system-affecting commands, money/account/sensitive "
+    "operations, email, publication or other external impact; respect scoped existing authorization. "
+    "Internal reads/search/organization may proceed. Do not fabricate results, file contents or "
+    "completed actions. Explain failures with a useful next step; state uncertainty and the most "
+    "likely approach.\n"
+)
 
 SAFETY_PROMPT: Dict[str, str] = {
     "cn": SAFETY_PROMPT_CN,

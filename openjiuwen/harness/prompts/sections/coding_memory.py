@@ -68,66 +68,25 @@ Coding memory 位于 `{memory_dir}`。Coding memory 内容不会自动注入系�
 - 禁止写入或修改任何 coding memory 文件。
 """
 
-CODING_MEMORY_PROMPT_EN = """# Coding Memory Usage Policy
-
-Coding memory is located at `{memory_dir}`. Coding memory content is not automatically injected into the system prompt. When the task involves long-term user preferences, previous feedback, project background, external system references, prior engineering decisions, or continuing past work, call coding memory tools first to obtain facts before answering or acting.
-
-## Memory Types
-
-| Type | What to record | When to save |
-|------|----------------|--------------|
-| user | User role, goals, technical background, and long-term preferences | When you learn the user's identity, goals, or stable preferences |
-| feedback | User corrections or confirmations about your work style | When the user says not to do something, points out an issue, or confirms an approach worked |
-| project | Project background, deadlines, and decision reasons not derivable from code | When you learn why the project works a certain way, who owns what, time constraints, or historical decisions |
-| reference | External system locations or usage hints | When you learn about Jira, Grafana, Slack, docs, service entry points, or other external resources |
-
-`feedback` and `project` memories should usually include: rule/fact, why, and how to apply it.
-
-## Reading Memories
-
-- Do not assume coding memory content is already in context.
-- When memory may be relevant, or the user mentions prior work, previous feedback, historical decisions, or project background, read the relevant memory first.
-- If you know the exact memory file, call `coding_memory_read`.
-- Current user instructions have priority over historical memories. If a memory is old or conflicts with the current instruction, follow the current instruction and mention that the memory may be outdated when useful.
-- If the user asks you to ignore memories, proceed as if no relevant memory exists.
-
-## Saving and Updating Memories
-
-- To create a memory, use `coding_memory_write` to write a standalone `.md` file with frontmatter:
-
-      ---
-      name: memory name
-      description: one-line, specific description
-      type: user | feedback | project | reference
-      ---
-
-      memory content
-
-- To edit an existing memory, first use `coding_memory_read` to read the exact content, then use `coding_memory_edit` to replace specific text.
-- Before writing, decide whether an existing memory should be updated instead, to avoid duplicates.
-- The system maintains the index after writes; do not manually maintain `MEMORY.md`.
-
-## What Not To Save
-
-- Information directly derivable from code, project files, README, docs, or configuration.
-- Git history, recent changes, debugging process, or temporary task details.
-- Information already clearly documented in project docs.
-- Sensitive information, information the user does not want saved, or process details with no long-term value.
-
-## Write Conflict Handling
-
-If `coding_memory_write` returns `conflict_detected: true` or `conflicting_files`:
-- Use `coding_memory_read` to read the conflicting file.
-- Use `coding_memory_edit` to update the existing memory, or remove/replace outdated content.
-- Do not keep appending duplicate memories without checking the conflict.
-
-## Read-Only Constraint
-
-If the current run is a scheduled task or heartbeat task, or the user explicitly asks not to write memory:
-- Only read coding memories.
-- Do not call `coding_memory_write` or `coding_memory_edit`.
-- Do not write or modify any coding memory file.
-"""
+CODING_MEMORY_PROMPT_EN = (
+    "# Coding Memory Usage Policy\nCoding memory root: {memory_dir}. Content is not preloaded. For "
+    "long-term preferences, feedback, background/references, earlier decisions or continuing work, "
+    "retrieve relevant memory first (coding_memory_read for a known file). Current instructions "
+    "override old memory; mention staleness when useful. Honor requests to ignore memory.\n- Types: "
+    "user=identity/goals/stable preferences; feedback=corrections/confirmed working styles; "
+    "project=background/owners/deadlines/decision reasons not derivable from code; reference=external"
+    " resource locations/usage. Feedback/project should include fact/rule, reason and application.\n- "
+    "Create standalone .md with coding_memory_write and frontmatter fields name, description, type "
+    "(user|feedback|project|reference). Check for an existing memory to update first; read exact "
+    "content before coding_memory_edit. The system maintains MEMORY.md/index; never edit it manually."
+    "\nFrontmatter example:\n```yaml\n---\nname: deployment notes\ndescription: deployment constraints\n"
+    "type: project\n---\n```\n- Do not save code/docs/config-derived information, Git history, recent "
+    "changes/debugging/transient process details, duplicates, unwanted or low-long-term-value "
+    "information. Do not record sensitive information unless the host's explicit memory policy allows"
+    " it.\n- On conflict_detected/conflicting_files, read the conflicting file and edit/replace "
+    "outdated content instead of appending duplicates.\n- Scheduled/heartbeat runs or explicit "
+    "no-memory-write requests are read-only: no memory write/edit tool or direct file modification.\n"
+)
 
 
 def build_coding_memory_section(language="cn", read_only=False, memory_dir="coding_memory/"):

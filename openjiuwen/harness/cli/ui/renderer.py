@@ -214,8 +214,10 @@ def _render_tool_result(
 
     # Task-list tools get special checkbox rendering
     if tool_name in TODO_TOOLS:
+        if tool_name == "todo_write":
+            tool_result = payload.get("rendered_result") or tool_result
         items = parse_todo_result(tool_result)
-        if items:
+        if items or (tool_name == "todo_write" and items is not None):
             for line in render_todo_list(items):
                 console.print(line)
             console.print()  # blank line after

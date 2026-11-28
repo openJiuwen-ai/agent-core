@@ -25,6 +25,7 @@ _TOOL_DISPLAY_NAMES: Dict[str, str] = {
     "glob": "Glob",
     "ls": "LS",
     "list_dir": "LS",
+    "todo_write": "TodoWrite",
     "todo_create": "TodoWrite",
     "todo_modify": "TodoWrite",
     "todo_list": "TodoList",
@@ -40,7 +41,7 @@ _TOOL_DISPLAY_NAMES: Dict[str, str] = {
 }
 
 # Tools whose results should be rendered as todo checkboxes
-TODO_TOOLS = {"todo_create", "todo_modify", "todo_list"}
+TODO_TOOLS = {"todo_write", "todo_create", "todo_modify", "todo_list"}
 
 
 def get_display_name(tool_name: str) -> str:

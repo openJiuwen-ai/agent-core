@@ -19,38 +19,27 @@ _LEGACY_READ_FILE_DESCRIPTION: Dict[str, str] = {
 
 READ_FILE_DESCRIPTION: Dict[str, str] = {
     "cn": (
-        "从本地文件系统读取文件。"
-        "file_path 必须是绝对路径。默认从文件开头最多读取 2000 行，结果带行号返回。"
-        "支持图片、PDF 和 Jupyter Notebook。只能读取文件，不能读取目录。"
-        "大文件请用 offset/limit 读取指定部分，或用 grep 搜索具体内容。"
+        "按绝对路径读取文件。文本默认最多返回 2000 行并带行号。"
+        "已知位置时用 offset/limit 读取所需范围，未知位置先用 grep 定位。"
+        "需要通读长文件时分段读取，复核时只回读待核对的部分及必要上下文。"
+        "支持 PDF 和 Jupyter Notebook，启用图片能力时可读图片。不支持读取目录。"
     ),
     "en": (
-        "Read a file from the local filesystem. "
-        "file_path must be an absolute path. By default, reads up to 2000 lines "
-        "from the beginning and returns results with line numbers. "
-        "Supports images, PDFs, and Jupyter notebooks. Can read files only, not directories. "
-        "For large files, use offset/limit to read a specific portion, or use grep to search for specific content."
+        "Read an absolute file path. Text defaults to up to 2,000 numbered lines. "
+        "Use offset/limit for known ranges and use grep to locate text first if its position is unknown. "
+        "Read long files in sections when full coverage is needed. For verification, reread only the parts being checked "
+        "and their necessary context. Supports PDF and Jupyter notebooks, and images when image input is enabled. "
+        "Does not read directories."
     ),
 }
 
 WRITE_FILE_DESCRIPTION: Dict[str, str] = {
     "cn": (
-        "向本地文件系统写入文件。\n\n"
-        "用法：\n"
-        "- 如果目标路径已有文件，本工具会覆盖该文件。\n"
-        "- 如果目标文件已存在，必须先使用 read_file 读取文件内容；否则本工具会失败。\n"
-        "- 修改已有文件时优先使用 edit_file；edit_file 只提交差异。write_file 主要用于创建新文件或完整重写文件。\n"
-        "- 除非用户明确要求，不要创建文档文件（*.md）或 README 文件。"
+        "创建或完整覆盖文件。覆盖前必须先读取原文件，局部修改用 edit_file。仅在用户要求时创建文档或 README。"
     ),
     "en": (
-        "Writes a file to the local filesystem.\n\n"
-        "Usage:\n"
-        "- This tool will overwrite the existing file if there is one at the provided path.\n"
-        "- If this is an existing file, you MUST use read_file first to read the file's contents. "
-        "This tool will fail if you did not read the file first.\n"
-        "- Prefer edit_file for modifying existing files; it only sends the diff. "
-        "Only use write_file to create new files or for complete rewrites.\n"
-        "- NEVER create documentation files (*.md) or README files unless explicitly requested by the User."
+        "Create/overwrite a complete file; existing content MUST be read first. Use edit_file for "
+        "targeted edits. Create docs/README only on request."
     ),
 }
 
@@ -61,32 +50,28 @@ _LEGACY_EDIT_FILE_DESCRIPTION: Dict[str, str] = {
 
 EDIT_FILE_DESCRIPTION: Dict[str, str] = {
     "cn": (
-        "对文件执行精确字符串替换。"
-        "编辑已有文件前必须先完整调用 read_file。"
-        "old_string 必须唯一匹配；如果有多个匹配，请提供更多上下文或设置 replace_all=true。"
-        "old_string 为空且目标文件不存在时，可创建新文件。"
-        "不支持编辑 .ipynb 文件。"
+        "精确替换文本。编辑已有文件前用 read_file 读取目标片段及必要上下文。"
+        "文件在读取后发生变更时，先检查改动范围和影响，再读取相关内容并基于最新版本编辑。"
+        "确认变更与本次编辑无关时，只需重读目标片段。"
+        "old_string 默认须唯一匹配，重复时补足上下文。仅在确实要替换所有匹配项时用 replace_all。"
+        "空 old_string 可创建缺失文件或写入已有空文件，不能清空非空文件。不支持 .ipynb。"
     ),
     "en": (
-        "Performs exact string replacements in files. "
-        "Existing files must be fully read with read_file before editing. "
-        "old_string must match exactly once; if multiple matches exist, provide more context or set replace_all=true. "
-        "Creates a new file when old_string is empty and the target file does not exist. "
-        "Does not support editing .ipynb files."
+        "Replace exact text. Before editing an existing file, use read_file for the target text and necessary context. "
+        "If the file changed since the read, check the scope and impact of the changes, then refresh the relevant content "
+        "before editing the latest version. Reread only the target text if the changes are confirmed to be "
+        "unrelated to the edit. "
+        "By default, old_string must match exactly once. Add context to distinguish matches. "
+        "Use replace_all only when every match should change. An empty old_string can create a missing file or write to "
+        "an existing empty file. It cannot clear a non-empty file. No .ipynb edits."
     ),
 }
 
 GLOB_DESCRIPTION: Dict[str, str] = {
     "cn": (
-        "快速按 glob 模式查找文件，适用于任意规模代码库。"
-        "支持 **/*.js、src/**/*.ts 等模式，返回按文件名排序的匹配路径。"
-        "默认最多返回 100 个结果。需要按文件名模式找文件时使用本工具。"
+        "按 glob 模式查找路径，按文件名排序，默认最多返回 100 条。"
     ),
-    "en": (
-        "Fast file pattern matching tool that works with any codebase size. "
-        "Supports glob patterns like **/*.js or src/**/*.ts and returns matching paths sorted by file name. "
-        "Returns up to 100 results by default. Use this tool when you need to find files by name patterns."
-    ),
+    "en": "Find glob-matched paths, filename-sorted; default max 100 results.",
 }
 
 LIST_DIR_DESCRIPTION: Dict[str, str] = {
@@ -96,18 +81,12 @@ LIST_DIR_DESCRIPTION: Dict[str, str] = {
 
 GREP_DESCRIPTION: Dict[str, str] = {
     "cn": (
-        "基于 ripgrep 的强大搜索工具。"
-        "搜索任务必须使用 grep，不要在 bash 命令中直接调用 `grep` 或 `rg`。"
-        "grep 工具已针对权限和访问控制做过优化。"
-        "支持完整正则语法、glob/type 文件过滤，以及输出模式："
-        "content、files_with_matches、count。"
+        "用正则搜索文件内容，可按 glob/type 过滤。输出支持 content、files_with_matches、count。请使用本工具，避免用 Shell 的 grep "
+        "或 rg 替代。"
     ),
     "en": (
-        "A powerful search tool built on ripgrep. "
-        "ALWAYS use grep for search tasks. NEVER invoke `grep` or `rg` as a bash command. "
-        "The grep tool has been optimized for correct permissions and access. "
-        "Supports full regex syntax, glob/type filters, and output modes: "
-        "content, files_with_matches, count."
+        "Regex content search with glob/type filters and content/files_with_matches/count output; "
+        "never substitute shell grep/rg."
     ),
 }
 
@@ -123,29 +102,20 @@ _LEGACY_READ_FILE_PARAMS: Dict[str, Dict[str, str]] = {
 READ_FILE_PARAMS: Dict[str, Dict[str, str]] = {
     "file_path": {"cn": "要读取的文件绝对路径", "en": "The absolute path to the file to read"},
     "offset": {
-        "cn": "开始读取的行号。仅当文件太大、无法一次读取，或已知道要读取的位置时提供。",
-        "en": (
-            "The line number to start reading from. "
-            "Only provide if the file is too large to read at once or you already know the needed location."
-        ),
+        "cn": "起始行号。用于长文件或已知起点。",
+        "en": "Start line; supply for large files or a known needed location.",
     },
     "limit": {
-        "cn": "要读取的行数。仅当文件太大、无法一次读取，或只需要指定范围时提供。",
-        "en": (
-            "The number of lines to read. "
-            "Only provide if the file is too large to read at once or only a specific range is needed."
-        ),
+        "cn": "读取行数。用于长文件或指定范围。",
+        "en": "Lines to read for large files or a known needed range.",
     },
     "pages": {
-        "cn": "PDF 专属页码范围，例如 '1-5'、'3'、'10-20'。每次最多 20 页",
-        "en": "PDF-only page range, e.g. '1-5', '3', '10-20'. Maximum 20 pages per request",
+        "cn": "PDF 页码范围（如 1-5），每次最多 20 页。",
+        "en": "PDF pages (e.g. 1-5); max 20 per call.",
     },
     "caption": {
-        "cn": "可选。读取 skills/… 下的图片时，填入 SKILL.md 中的图片说明文字（Markdown alt），用于多模态用户提示。",
-        "en": (
-            "Optional. When reading an image under skills/, pass the figure caption "
-            "(markdown alt text from SKILL.md) for the multimodal user prompt."
-        ),
+        "cn": "读取技能目录内的图片时，填 SKILL.md 中的图片说明（Markdown alt）。",
+        "en": "Skill image: use SKILL.md's figure alt text.",
     },
 }
 
@@ -168,17 +138,16 @@ EDIT_FILE_PARAMS: Dict[str, Dict[str, str]] = {
     },
     "old_string": {
         "cn": (
-            "要替换的原始文本（空字符串可用于创建新文件或向空文件写入内容）。"
-            "必须在文件中唯一匹配，否则须设置 replace_all=true 或提供更多上下文"
+            "精确的原始文本，默认只匹配一处。空值仅用于创建缺失文件或写入已有空文件。"
         ),
         "en": (
-            "The text to replace (empty string creates a new file or writes to an empty file). "
-            "Must match exactly once unless replace_all=true or more context is provided"
+            "Exact original text. Match once unless replace_all. Empty only for creating a missing "
+            "file or writing to an existing empty file."
         ),
     },
     "new_string": {
         "cn": "替换后的文本，必须与 old_string 不同",
-        "en": "The replacement text, must differ from old_string",
+        "en": "Replacement text, different from old_string.",
     },
     "replace_all": {
         "cn": "是否替换文件中所有匹配项，默认 false",
