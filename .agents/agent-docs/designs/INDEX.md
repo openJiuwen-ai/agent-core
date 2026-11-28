@@ -18,7 +18,10 @@ generated: true
 | [agent_evolving/trajectory](#module-agent_evolving-trajectory) |
 | [agent_teams](#module-agent_teams) |
 | [agent_teams/workflow](#module-agent_teams-workflow) |
+| [core/events](#module-core-events) |
 | [core/foundation/llm](#module-core-foundation-llm) |
+| [core/session](#module-core-session) |
+| [core/single_agent](#module-core-single_agent) |
 | [extensions/observability](#module-extensions-observability) |
 | [harness](#module-harness) |
 | [harness_providers](#module-harness_providers) |
@@ -65,6 +68,7 @@ generated: true
 |---|---|---|---|---|---|
 | [D-20261110-1839-leader-external-harness](active/D-20261110-1839-leader-external-harness/design.md) | Leader 三方 Harness 插拔设计方案 | in-development | alan_cheng | harness | 2026-11-10 |
 | [D-20261110-1903-team-goal-mode](active/D-20261110-1903-team-goal-mode/design.md) | Team Leader 与成员 Goal 模式设计方案 | in-development | alan_cheng | harness | 2026-11-10 |
+| [D-20261125-1725-team-prompt-event-identity](active/D-20261125-1725-team-prompt-event-identity/design.md) | Team 子 Agent Prompt 事件与复合身份恢复设计方案 | in-development | yangzequ | core | 2026-11-25 |
 
 ### 开发后 (archive)
 
@@ -109,6 +113,16 @@ generated: true
 | [SDD-0018](archive/SDD-0018-swarmflow-team-runtime-binding/design.md) | Swarmflow 启停与 Team 生命周期联动（小飞机控灯 / 恢复裁决 / 冷启动续跑） | shipped | @chenchunzhou | core | 2026-09-18 |
 | [SDD-0027](archive/SDD-0027-swarmflow-per-run-journal-wal-split/design.md) | Swarmflow Journal/WAL 按 run 拆分与 WAL 日志化治理 | shipped | @xiajing | core | 2026-09-16 |
 
+<a id="module-core-events"></a>
+
+## core/events
+
+### 开发中 (active)
+
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
+|---|---|---|---|---|---|
+| [D-20261125-1725-team-prompt-event-identity](active/D-20261125-1725-team-prompt-event-identity/design.md) | Team 子 Agent Prompt 事件与复合身份恢复设计方案 | in-development | yangzequ | core | 2026-11-25 |
+
 <a id="module-core-foundation-llm"></a>
 
 ## core/foundation/llm
@@ -118,6 +132,26 @@ generated: true
 | ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
 |---|---|---|---|---|---|
 | [D-20261112-1120-goal-assessment-isolation](active/D-20261112-1120-goal-assessment-isolation/design.md) | Goal 独立评估的轨迹与执行上下文隔离 | in-development | alan_cheng | observability | 2026-11-12 |
+
+<a id="module-core-session"></a>
+
+## core/session
+
+### 开发中 (active)
+
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
+|---|---|---|---|---|---|
+| [D-20261125-1725-team-prompt-event-identity](active/D-20261125-1725-team-prompt-event-identity/design.md) | Team 子 Agent Prompt 事件与复合身份恢复设计方案 | in-development | yangzequ | core | 2026-11-25 |
+
+<a id="module-core-single_agent"></a>
+
+## core/single_agent
+
+### 开发中 (active)
+
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
+|---|---|---|---|---|---|
+| [D-20261125-1725-team-prompt-event-identity](active/D-20261125-1725-team-prompt-event-identity/design.md) | Team 子 Agent Prompt 事件与复合身份恢复设计方案 | in-development | yangzequ | core | 2026-11-25 |
 
 <a id="module-extensions-observability"></a>
 
@@ -153,6 +187,7 @@ generated: true
 |---|---|---|---|---|---|
 | [D-20261110-1903-team-goal-mode](active/D-20261110-1903-team-goal-mode/design.md) | Team Leader 与成员 Goal 模式设计方案 | in-development | alan_cheng | harness | 2026-11-10 |
 | [D-20261112-1120-goal-assessment-isolation](active/D-20261112-1120-goal-assessment-isolation/design.md) | Goal 独立评估的轨迹与执行上下文隔离 | in-development | alan_cheng | observability | 2026-11-12 |
+| [D-20261125-1725-team-prompt-event-identity](active/D-20261125-1725-team-prompt-event-identity/design.md) | Team 子 Agent Prompt 事件与复合身份恢复设计方案 | in-development | yangzequ | core | 2026-11-25 |
 
 ### 开发后 (archive)
 

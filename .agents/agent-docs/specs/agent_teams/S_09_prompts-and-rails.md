@@ -24,7 +24,7 @@ author_email: chengshuo5@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-11-10 |
+| 最近一次修订日期 | 2026-11-25 |
 | 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md`、`F_73_avatar-controller-channel-separation.md`、`F_76_leader-progressive-policy-disclosure.md`、`F_78_steering-batch-quota-hook.md`、`F_80_fork-identity-conversion.md`、`F_122_framework-bootstrapped-generic-team.md`、`F_20261103_0928_model-group-routed-model.md` |
 
 ## 范围 / 边界
@@ -140,6 +140,10 @@ author_email: chengshuo5@huawei.com
 14. **探针语义**：`team_info` 用 `get_team_updated_at()`，名册用 `get_members_max_updated_at()`（状态变化不 bump，只有名册变动才 bump）；`identity` 恒定、无探针，靠基线里的一次性标志。**`team_info` 在团队行不存在时（leader 跑 `build_team` 之前，探针读 0）什么都不发**——工作区路径是 rail 构造参数、恒有值，不加这道闸就会渲染出一个「没有团队的团队信息」块，而真正完整的那条紧随其后，等于把同一件事说两遍、第一遍还是错的。名册同理只在有 peer 时才发：`list_members` 排除调用者本人，故 `build_team` 只写了 leader 自己那行时名册为空，不产出消息。探针推进但渲染为空时，基线在 `pending_text` 内部直接推进并落盘——没有东西会投递失败，不推进只会让每次调用重复读 DB。新增状态通道必须提供单调递增的探针；缺少探针的内容不应走这条路径。`MtimeSectionCache`（`prompts/section_cache.py`）作为通用原语保留，当前团队侧无使用者。
 
 ### Rail 注入契约
+
+进程内 Team 成员的 child Agent Session 共用团队的 `session_id`，各自携带自己的 `agent_id`。
+Agent Loop 使用这两个字段路由 `prompt.compose`、`prompt.section` 和 `prompt.attachment`，
+使 handler 的结果进入当前成员的模型请求。团队状态投递仍由不变量 13 规定。
 
 15. **Rail 通过 DeepAgent 的 rail registry 注入，不直接修改 `SystemPromptBuilder`**：`TeamPolicyRail` 在 `init(agent)` 里捕获 `agent.system_prompt_builder` 引用，于 `before_model_call` 写入 section；在 `uninit(agent)` 里按名移除。**禁止**绕过 rail 把 section 直接 `add_section` 到 *DeepAgent 的共享 builder* 上。**例外（外部 CLI 成员）**：非 DeepAgent 的外部 CLI 成员没有共享 builder，由 `sections.build_team_member_system_prompt(...)` 把同一批静态 section 装进一个**一次性 `SystemPromptBuilder`** 渲染成独立字符串(见不变量 18a / [[F_25_external-cli-hardening-and-gemini]])——这不违反本条，因为它不触碰任何 DeepAgent 的共享 builder，且**只装 team section、排除其它 rail**。
     - 18a. **静态 section 的单一真相源是 `sections.build_team_static_sections(...)`**：`TeamPolicyRail._build_static_sections`（非 leader 分支）、`build_team_member_system_prompt`（外部 CLI）与 `build_leader_policy_disclosure`（leader 的 `build_team` 披露，[[F_76]]）三条路径都委托它构建 role / HITT 契约（gate `hitt_enabled`）/ bridge 自契约（仅 BRIDGE_AGENT）/ workflow / dispatch / lifecycle / extra——**全部静态且成员间一致**，两条路径拿到一致的静态 section。成员**公开 `desc` 不进自己的 prompt**（只进他人的名册消息）；成员**私有 `prompt` 只发给自己**（identity 正文的 `## 私有工作约定` 子节）。团队状态（`team_info` / 名册）**不在其中**——它不是 section，由 `TeamContextTracker` 投递进对话（见不变量 13）。inbound_tags 说明 section **无条件**构造（见 [[F_51]] / [[F_70]]），它同时解释 `<team-context>` 与两种名册 `<team-event>`。**唯一按路径分化的是 `include_member_specific`**：外部 CLI 传 True，把 per-member 的 `team_identity` section 内联进静态 prompt（独立进程的一次性快照，无共享前缀可保护、启动期也没有对话可写）；进程内成员走默认 False、由 tracker 投进历史（见不变量 6a）。

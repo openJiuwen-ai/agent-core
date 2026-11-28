@@ -628,7 +628,6 @@ class ReActAgent(BaseAgent):
         self._llm = None
         self.prompt_builder: SystemPromptBuilder = SystemPromptBuilder()
         self.system_prompt_builder: SystemPromptBuilder = self.prompt_builder
-        self._is_team_agent = False
         self._usage_build_context: Any = None
         self._usage_agent_id: str | None = None
         super().__init__(card)
@@ -659,24 +658,13 @@ class ReActAgent(BaseAgent):
         """
         self._final_request_check = check
 
-    @property
-    def is_team_agent(self) -> bool:
-        """Whether this agent is running as a member of an agent team."""
-        return self._is_team_agent
-
     def set_runtime_context(
         self,
         *,
-        is_team_agent: bool,
         usage_build_context: Any = None,
         usage_agent_id: str | None = None,
     ) -> None:
-        """Set host-owned runtime metadata for nested harness execution.
-
-        Harnesses use this public boundary to configure prompt composition mode
-        and usage attribution without reaching into private agent state.
-        """
-        self._is_team_agent = is_team_agent
+        """Set host-owned usage attribution for nested harness execution."""
         self._usage_build_context = usage_build_context
         self._usage_agent_id = usage_agent_id
 
@@ -1329,12 +1317,11 @@ class ReActAgent(BaseAgent):
         sync_to_context = getattr(manager, "sync_to_context", None)
         if not callable(sync_to_context):
             return
-        session_id = ctx.session.get_session_id() if ctx.session is not None else context.session_id()
+        session = ctx.session
+        session_id = session.get_session_id() if session is not None else context.session_id()
+        agent_id = session.get_agent_id() if isinstance(session, Session) else None
         try:
-            if self._is_team_agent:
-                await sync_to_context(context, session_id, trigger_events=False)
-            else:
-                await sync_to_context(context, session_id)
+            await sync_to_context(context, session_id, agent_id=agent_id or None)
         except Exception as exc:  # noqa: BLE001 - attachment updates must not block the model
             logger.warning(
                 "[ReActAgent] prompt attachment history sync failed: %s",
@@ -1423,29 +1410,22 @@ class ReActAgent(BaseAgent):
         return context_window, usage_prompt_sections
 
     async def _compose_prompt_sections(self, ctx: AgentCallbackContext) -> PromptComposeOutput | None:
-        """Trigger prompt composition at the final post-rail render boundary.
-
-        Team members already have their own builder populated by
-        ``TeamPolicyRail``. They share a session id, so the CORE
-        ``prompt.compose`` handler cannot use that id to identify the current
-        member without risking another member's builder being rendered here.
-        """
-        if self._is_team_agent:
-            return None
-
-        from openjiuwen.core.events import Event
+        """Trigger prompt composition at the final post-rail render boundary."""
+        from openjiuwen.core.events import Event, SessionContext
         from openjiuwen.core.runner import Runner
 
         bus = Runner.get_extension_bus()
-        if bus is None:
-            return None
-        if ctx.session is None:
+        session = ctx.session
+        if bus is None or not isinstance(session, Session):
             return None
 
         from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
 
-        session_id = ctx.session.get_session_id()
-        bound_agent = get_agent_runtime().get(session_id)
+        session_context = SessionContext(
+            session.get_session_id(),
+            agent_id=session.get_agent_id() or None,
+        )
+        bound_agent = get_agent_runtime().get(session_context.session_id, agent_id=session_context.agent_id)
         if bound_agent is None or not callable(getattr(bound_agent, "compose_prompt_sections", None)):
             # Standalone ReActAgent callers can publish the Bus for unrelated
             # events without having a DeepAgent composition owner.
@@ -1470,7 +1450,7 @@ class ReActAgent(BaseAgent):
         )
         output = await bus.trigger(
             Event(PROMPT_COMPOSE, compose_input),
-            ctx.session,
+            session_context,
         )
         if not isinstance(output, PromptComposeOutput):
             raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="prompt.compose returned an invalid output")

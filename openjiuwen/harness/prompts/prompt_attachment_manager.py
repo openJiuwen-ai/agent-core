@@ -564,7 +564,7 @@ class PromptAttachmentManager:
         context: ModelContext,
         session_id: str,
         *,
-        trigger_events: bool = True,
+        agent_id: str | None = None,
     ) -> UserMessage | None:
         """Persist an attachment snapshot or delta into the context history.
 
@@ -576,8 +576,7 @@ class PromptAttachmentManager:
         Args:
             context: Conversation context receiving the attachment history.
             session_id: Session whose attachments should be synchronized.
-            trigger_events: Whether to run the ``prompt.attachment`` event
-                before rendering the history message.
+            agent_id: Current session's agent identity for attachment events.
         """
 
         async with self._history_lock:
@@ -602,8 +601,7 @@ class PromptAttachmentManager:
                     return None
                 mode = _PROMPT_ATTACHMENT_HISTORY_DELTA
 
-            if trigger_events:
-                changed = await self._run_attachment_events(changed, session_id)
+            changed = await self._run_attachment_events(changed, session_id, agent_id)
             if not changed and not removed:
                 return None
             rendered = (
@@ -634,27 +632,30 @@ class PromptAttachmentManager:
         self,
         prompt_attachments: list[PromptAttachment],
         session_id: str,
+        agent_id: str | None,
     ) -> list[PromptAttachment]:
         """Run one optional extension event per candidate and keep source order."""
         event_bus = self.event_bus
         if event_bus is None or not prompt_attachments:
             return prompt_attachments
 
+        session_context = SessionContext(session_id=session_id, agent_id=agent_id)
         results = await asyncio.gather(
-            *(self._run_attachment_event(item, session_id, event_bus) for item in prompt_attachments)
+            *(self._run_attachment_event(item, session_context, event_bus) for item in prompt_attachments)
         )
         return [item for item in results if item is not None]
 
     async def _run_attachment_event(
         self,
         prompt_attachment: PromptAttachment,
-        session_id: str,
+        session_context: SessionContext,
         event_bus: "ExtensionEventBusProtocol",
     ) -> PromptAttachment | None:
         event_input = PromptAttachmentInput(
             type=_kind_value(prompt_attachment.kind),
             text=prompt_attachment.content or "",
             origin=prompt_attachment.origin,
+            agent_id=session_context.agent_id,
             detail={
                 "id": prompt_attachment.id,
                 "section": prompt_attachment.section,
@@ -667,7 +668,7 @@ class PromptAttachmentManager:
         try:
             output = await event_bus.trigger(
                 Event(PROMPT_ATTACHMENT, event_input),
-                SessionContext(session_id=session_id),
+                session_context,
             )
             if not isinstance(output, PromptAttachmentOutput):
                 raise TypeError("prompt.attachment returned an invalid output")
@@ -685,7 +686,7 @@ class PromptAttachmentManager:
         except Exception as exc:  # noqa: BLE001 - one extension must not block the batch
             logger.warning(
                 "[PromptAttachmentManager] prompt.attachment failed: session_id=%s attachment_id=%s error=%s",
-                session_id,
+                session_context.session_id,
                 prompt_attachment.id,
                 exc,
                 exc_info=True,

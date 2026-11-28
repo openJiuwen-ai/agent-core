@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from openjiuwen.agent_teams.extensions.events import register_team_event_types
+from openjiuwen.agent_teams.paths import configure_openjiuwen_home, reset_openjiuwen_home
 from openjiuwen.agent_teams.rails.team_context import (
     TeamHandleKey,
     get_extension_bus,
@@ -60,6 +61,16 @@ def _policy_rails(harness: Any) -> list[TeamPolicyRail]:
     return [rail for rail in (*native._pending_rails, *native._registered_rails) if isinstance(rail, TeamPolicyRail)]
 
 
+@pytest.fixture
+def isolated_team_home(tmp_path):
+    configure_openjiuwen_home(tmp_path / "openjiuwen")
+    try:
+        yield
+    finally:
+        reset_openjiuwen_home()
+
+
+@pytest.mark.usefixtures("isolated_team_home")
 @pytest.mark.asyncio
 async def test_leader_spec_build_reaches_the_policy_rail() -> None:
     """Manager seeding → spec.build() → the leader's rail defers its build."""
@@ -78,46 +89,21 @@ async def test_leader_spec_build_reaches_the_policy_rail() -> None:
     assert rail._policy_build_input.team_name == "research-team"
 
 
+@pytest.mark.usefixtures("isolated_team_home")
 @pytest.mark.asyncio
-async def test_native_harness_marks_inner_react_agent_as_team_mode(tmp_path) -> None:
-    from openjiuwen.agent_teams.paths import configure_openjiuwen_home, reset_openjiuwen_home
+async def test_team_prompt_wiring_survives_inner_react_agent_replacement() -> None:
+    bus = await _ready_bus()
+    spec = _seeded_spec(bus)
+    agent = spec.build()
+    native = agent.harness._native
 
-    configure_openjiuwen_home(tmp_path / "openjiuwen")
-    try:
-        bus = await _ready_bus()
-        spec = _seeded_spec(bus)
-        agent = spec.build()
+    native.set_react_agent(native._create_react_agent())
 
-        assert agent.harness._native._react_agent.is_team_agent is True
-    finally:
-        reset_openjiuwen_home()
-
-
-def test_standalone_native_harness_keeps_inner_react_agent_out_of_team_mode() -> None:
-    from openjiuwen.agent_teams.harness.native_harness import NativeHarness
-    from tests.unit_tests.agent_teams.harness.fixtures import make_spec
-
-    native = NativeHarness(make_spec())
-
-    assert native._react_agent.is_team_agent is False
-
-
-@pytest.mark.asyncio
-async def test_team_mode_survives_inner_react_agent_replacement(tmp_path) -> None:
-    from openjiuwen.agent_teams.paths import configure_openjiuwen_home, reset_openjiuwen_home
-
-    configure_openjiuwen_home(tmp_path / "openjiuwen")
-    try:
-        bus = await _ready_bus()
-        spec = _seeded_spec(bus)
-        agent = spec.build()
-        native = agent.harness._native
-
-        native.set_react_agent(native._create_react_agent())
-
-        assert native._react_agent.is_team_agent is True
-    finally:
-        reset_openjiuwen_home()
+    inner = native.react_agent
+    assert inner.prompt_builder is native.system_prompt_builder
+    assert inner.prompt_attachment_manager is native.prompt_attachment_manager
+    assert inner._usage_build_context is native.build_context
+    assert inner._usage_agent_id == native.card.id
 
 
 @pytest.mark.asyncio
@@ -148,6 +134,7 @@ async def test_derive_carries_the_bus_to_inprocess_teammates() -> None:
     assert rail._static_sections == []
 
 
+@pytest.mark.usefixtures("isolated_team_home")
 @pytest.mark.asyncio
 async def test_unseeded_spec_builds_the_rail_locally() -> None:
     """Without a bus the same chain builds the sections at construction."""

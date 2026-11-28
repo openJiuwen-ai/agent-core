@@ -12,7 +12,7 @@ author_email: chengshuo5@huawei.com
 
 # S_18 Harness 交互契约（HarnessProtocol / MemberRuntime）
 
-最近一次修订日期：2026-11-23
+最近一次修订日期：2026-11-26
 
 本 spec 定义 agent_teams harness 层的对外交互契约。阶段 1（NativeHarness 接管 task
 loop）的实现细节见 [[F_27_native-harness-task-loop]]；阶段 B（NativeHarness 收编
@@ -131,6 +131,9 @@ StreamController 经 `subscribe(on_state=_map_state, on_round=_map_round)` 一�
   DeepAgent 完全一致。构造即配置：`__init__` 末尾同步跑 `_prepare_config()`（forward
   construction：resolve_parts + apply_deep_agent_parts），异步初始化在
   `_prepare()`（ensure_initialized）+ `start(session)`，二者均私有/内部，外部不再可见。
+  supervisor 接收首轮输入前将当前 NativeHarness 按 `(session_id, agent_id)` 登记到
+  `AgentRuntime`。supervisor 停止或异常退出时释放当前实例的绑定，同一会话的其他成员继续可用。
+  流式 Agent Loop 通过该绑定解析 `prompt.compose` 的当前成员。
 - **TeamHarness**：组合单个 `NativeHarness`（per-cycle）。build 时只构造 native——native
   在构造函数内已同步配好（configurator 可立即读 workspace / sys_operation）；
   `start(team_session)` 建 child agent_session（复用 team session_id，

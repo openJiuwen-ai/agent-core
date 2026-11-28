@@ -387,12 +387,13 @@ state 能力的自动依赖收集由宿主构建入口与状态服务协作，�
 
 CORE 由 builtin bootstrap 自动登记。业务宿主将候选 attachment 逐条触发事件；USER / BUILTIN
 handler 按普通事件的既有 USER → BUILTIN → CORE 顺序运行，handler 可构造同类型新输入改写
-`text`，或直接返回合法输出短路。输入 origin 只表示 attachment 的产生通道，handler 改写
-不改变它；当前没有真实 agent id 时不得由宿主凭空补齐。
+`text`，或直接返回合法输出短路。输入 origin 表示 attachment 的产生通道，handler 改写
+文本时保持 origin。Agent Loop（含进程内 Team 成员）将当前 Session 的身份同时填入
+`PromptAttachmentInput.agent_id` 和 `SessionContext.agent_id`。无身份或卡片 ID 为空串时，两处均为 `None`。
 
 该事件不使用 Ops，不接收或暴露 `PromptAttachment` 实例、DeepAgent 或 ContextVar。异常、
 取消和普通 handler 的 skip 继续遵循本规约 4.7 节；history 写入前的批量并发、原始 hash/state
-和无 bus 兼容语义由 Harness [S_06](../../../harness/docs/specs/S_06_prompts-and-l10n.md)
+和无 bus 兼容语义由 Harness [S_06](../../../../../.agents/agent-docs/specs/harness/S_06_prompts-and-l10n.md)
 与 [F_16](../features/F_16_prompt-attachment-event.md) 共同定义。
 
 ### 4.6.4 Prompt section 与 compose 事件
@@ -401,9 +402,9 @@ Core 预置 `prompt.section` 和 `prompt.compose` 两个提示词事件，详细
 
 - `prompt.section` 的输入为 `PromptSectionInput(name, text, detail)`，输出为 `PromptSectionOutput(text)`。它只允许影响当前 section 的可见文本；`None`/空白文本表示本次省略。CORE 透传，不访问 builder 或 ContextWindow；本事件没有同名 Ops。
 - `prompt.compose` 的输入为不包含 `sections` 的 `PromptComposeInput(model, prompt_model, surfaces, tools, output_style, traits, detail)`，输出为有序的 `PromptComposeOutput(sections)`，其中每项是 `PromptSectionSpec(id, text, priority, category, carrier, detail)`。输出 `id` 在一次结果中必须唯一，renderer 必须保留返回顺序，不得再次按 priority 重排。
-- `prompt.compose CORE` 必须从 `ops.session_context.session_id` 查找已绑定的 DeepAgent，并在其内部 composition 入口中按 native effective section 顺序串行触发 `prompt.section`；CORE 不调用同名 Ops，不把 Agent、builder、rail 或 section 列表放入 EventInput。
+- `prompt.compose CORE` 按 `ops.session_context` 中的 `(session_id, agent_id)` 查找已绑定的 DeepAgent。只有 `agent_id` 缺省时才按 session 查询。CORE 使用同一 SessionContext，在该 Agent 的 composition 入口中按 native effective section 顺序串行触发 `prompt.section`。CORE 不调用同名 Ops，也不把 Agent、builder、rail 或 section 列表放入 EventInput。
 - `ops.prompt.compose(input)` 是显式触发一条新的 `prompt.compose` 事件链的方法，使用当前 Ops 的 `SessionContext`，不推进调用方当前 EventNext；`prompt.section` 不提供同名方法。
-- Agent Loop 在所有 `BEFORE_MODEL_CALL` rail 完成后、最终 system message 渲染前触发 compose；无 Bus 时保留 native builder fallback。最终 SystemMessage、ContextWindow 和 usage report 复用同一 request-local section snapshot，不建立跨请求 prompt cache。
+- Agent Loop（含进程内 Team 成员）在所有 `BEFORE_MODEL_CALL` rail 完成后、最终 system message 渲染前触发 compose。没有 Bus 或当前 Session 无法解析到 composition owner 时沿用当前 Agent 的 native builder。最终 SystemMessage、ContextWindow 和 usage report 复用同一 request-local section snapshot。
 
 ### 4.6.5 Agent Runtime 与成员 Ops
 
@@ -416,9 +417,8 @@ Core 预置 `prompt.section` 和 `prompt.compose` 两个提示词事件，详细
   工具执行和 spawn 在使用真实 Session 前，同时检查会话 ID 与已提供的成员 ID，归属不一致时拒绝执行。
 - `turn.start/step/complete`、`tool.check/call` 沿用当前真实 Session 与私有 TriggerContext；Bus 为其
   Handler 保留成员身份。执行闭包不再通过 Runtime 重建；已有 `tool.check` 输入同步暴露当前 Agent ID。
-- 调用方负责注册和释放 Agent。本次身份契约不新增 Team 成员生命周期绑定，也不恢复 Team 的
-  `prompt.compose/section` 或 `prompt.attachment` 旁路；未迁移的 session-only 消费方保留最后绑定语义，
-  不保证成员隔离。
+- 调用方负责注册和释放 Agent。Team 的 `prompt.compose/section` 和 `prompt.attachment` 事件
+  传递当前成员身份。仅提供 `session_id` 的旧消费者保留最后绑定语义。
 
 ### 4.7 错误码与取消
 

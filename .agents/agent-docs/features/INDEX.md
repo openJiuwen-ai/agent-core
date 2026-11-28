@@ -22,7 +22,9 @@ generated: true
 | [agent_teams/observability](#module-agent_teams-observability) |
 | [core.runner.resources_manager](#module-core-runner-resources_manager) |
 | [core.session.tracer](#module-core-session-tracer) |
+| [core/events](#module-core-events) |
 | [core/foundation/llm](#module-core-foundation-llm) |
+| [core/single_agent](#module-core-single_agent) |
 | [core/sys_operation](#module-core-sys_operation) |
 | [extensions.tracer_otel](#module-extensions-tracer_otel) |
 | [extensions/observability](#module-extensions-observability) |
@@ -123,6 +125,7 @@ generated: true
 | [F_20261117_1752_host-managed-group-member](F_20261117_1752_host-managed-group-member.md) | F | 宿主管理群成员角色 | weichenhao | jiuwenclaw/D-20261116-1201-colleague-swarmchat-membership（非本仓或待定位） |
 | [F_20261121_0906_group-member-notification](F_20261121_0906_group-member-notification.md) | F | 群聊成员通知入口实施记录 | weichenhao | [D-20261121-0832-group-member-notification](../designs/proposals/D-20261121-0832-group-member-notification/design.md) |
 | [F_20261123_1059_external-member-execution-environment](F_20261123_1059_external-member-execution-environment.md) | F | 三方 harness 成员的执行环境注入 | alan_cheng | 无独立 D：无独立 D；把 F_20261104_1720 的成员执行环境扩展到三方 harness 成员，沿用既有 BuildContext 扩展点与 HarnessContext.env 协议字段。 |
+| [F_20261125_1828_team-prompt-event-identity](F_20261125_1828_team-prompt-event-identity.md) | F | Team 成员 Prompt 事件的身份隔离 | yangzequ | [D-20261125-1725-team-prompt-event-identity](../designs/active/D-20261125-1725-team-prompt-event-identity/design.md) |
 | [F_20_human-agent-mailbox-unread-flip](agent_teams/F_20_human-agent-mailbox-unread-flip.md) | F | Human-Agent Mailbox: Flip Auto-Read Off | alan_cheng | 待核实 |
 | [F_21_external-agent-access](agent_teams/F_21_external-agent-access.md) | F | External Agent Access: skill+cli / mcp Wrappers | alan_cheng | 待核实 |
 | [F_21_team-completion-auto-pause](agent_teams/F_21_team-completion-auto-pause.md) | F | Team Completion Auto-Pause | alan_cheng | 待核实 |
@@ -258,6 +261,14 @@ generated: true
 |---|---|---|---|---|
 | [F_20261105_1405_otel-decorator-llm-telemetry](F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
 
+<a id="module-core-events"></a>
+
+## core/events
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261125_1828_team-prompt-event-identity](F_20261125_1828_team-prompt-event-identity.md) | F | Team 成员 Prompt 事件的身份隔离 | yangzequ | [D-20261125-1725-team-prompt-event-identity](../designs/active/D-20261125-1725-team-prompt-event-identity/design.md) |
+
 <a id="module-core-foundation-llm"></a>
 
 ## core/foundation/llm
@@ -266,6 +277,14 @@ generated: true
 |---|---|---|---|---|
 | [F_20261103_0928_model-group-routed-model](F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | 无独立 D：issue |
 | [F_20261112_1120_goal-assessment-isolation](F_20261112_1120_goal-assessment-isolation.md) | F | Goal 评估调用的观测隔离实施 | alan_cheng | [D-20261112-1120-goal-assessment-isolation](../designs/active/D-20261112-1120-goal-assessment-isolation/design.md) |
+
+<a id="module-core-single_agent"></a>
+
+## core/single_agent
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261125_1828_team-prompt-event-identity](F_20261125_1828_team-prompt-event-identity.md) | F | Team 成员 Prompt 事件的身份隔离 | yangzequ | [D-20261125-1725-team-prompt-event-identity](../designs/active/D-20261125-1725-team-prompt-event-identity/design.md) |
 
 <a id="module-core-sys_operation"></a>
 
@@ -344,6 +363,7 @@ generated: true
 | [F_20261104_1720_tool-execution-environment](F_20261104_1720_tool-execution-environment.md) | F | 工具执行环境作用域 | alan_cheng | 无独立 D：无独立 D；在现有 harness 工具调用与 team 会话存储契约上的小范围扩展。 |
 | [F_20261110_1922_team-goal-mode](F_20261110_1922_team-goal-mode.md) | F | Team Leader 与成员 Goal 模式实施与决策归档 | alan_cheng | [D-20261110-1903-team-goal-mode](../designs/active/D-20261110-1903-team-goal-mode/design.md) |
 | [F_20261112_1120_goal-assessment-isolation](F_20261112_1120_goal-assessment-isolation.md) | F | Goal 评估调用的观测隔离实施 | alan_cheng | [D-20261112-1120-goal-assessment-isolation](../designs/active/D-20261112-1120-goal-assessment-isolation/design.md) |
+| [F_20261125_1828_team-prompt-event-identity](F_20261125_1828_team-prompt-event-identity.md) | F | Team 成员 Prompt 事件的身份隔离 | yangzequ | [D-20261125-1725-team-prompt-event-identity](../designs/active/D-20261125-1725-team-prompt-event-identity/design.md) |
 | [F_20_react-iteration-limit](harness/F_20_react-iteration-limit.md) | F | F_20 ReAct 迭代耗尽后的结构化结果 | openJiuwen-bot | 待核实 |
 | [F_21_browser-decision-observation-handoff](harness/F_21_browser-decision-observation-handoff.md) | F | Browser decision observation and local handoff | 待确认 | 待核实 |
 | [F_21_cua-desktop-subagent](harness/F_21_cua-desktop-subagent.md) | F | cua_agent desktop subagent | kwangyyinc | 待核实 |

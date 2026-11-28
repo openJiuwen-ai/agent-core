@@ -13,6 +13,7 @@ import pytest
 
 from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
 from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
 from tests.unit_tests.agent_teams.harness.fixtures import (
     aborted_markers,
@@ -122,11 +123,15 @@ async def test_rollback_preserves_history_without_duplication() -> None:
 
 @pytest.mark.asyncio
 async def test_supervisor_handler_crash_does_not_hang_caller() -> None:
-    """Finding #4: a crashing handler must reject the caller's ack, not hang it."""
+    """A crashed supervisor rejects pending commands and releases the runtime binding."""
     await Runner.start()
     try:
         harness = NativeHarness(make_spec())
         await start_harness(harness)
+        runtime = get_agent_runtime()
+        session_id = harness.session_id
+        assert session_id is not None
+        assert runtime.get(session_id, agent_id=harness.card.id) is harness
 
         def boom(session):  # noqa: ANN001, ANN202
             raise RuntimeError("snapshot boom")
@@ -138,6 +143,7 @@ async def test_supervisor_handler_crash_does_not_hang_caller() -> None:
         with pytest.raises(Exception):  # noqa: B017
             await asyncio.wait_for(harness.send("trigger"), timeout=2.0)
         assert harness.state is HarnessState.TERMINATED
+        assert runtime.get(session_id, agent_id=harness.card.id) is None
     finally:
         await harness.stop()
         await Runner.stop()

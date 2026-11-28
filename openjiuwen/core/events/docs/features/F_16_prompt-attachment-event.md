@@ -28,6 +28,9 @@ attachment 集合后触发，一次处理一个 attachment。Handler 接收不�
 最终返回 `PromptAttachmentOutput`，由 manager 交给原 renderer 和
 `context.add_messages()`。
 
+Agent Loop 将当前 Agent Session 的身份同时传给事件输入和 `SessionContext`。同会话的 Team
+成员各用自己的 `agent_id`，Handler 可以按该字段匹配。直接调用管理器而未提供身份时，两个字段都为 `None`。
+
 该事件只有事件链，没有同名或等价的 `EventHandlerOps` 方法。它不能通过返回值新增 attachment；
 如果扩展需要产生新的 attachment，应使用产生该 attachment 的业务入口，而不是在本事件中伪造新条目。
 
@@ -98,7 +101,7 @@ from openjiuwen.core.events.builtins.event_types.prompt_attachment import (
 | `type` | `str` | 必填 | `PromptAttachment.kind` 的字符串值 | 用于区分 attachment 类型；可被 Matcher 使用，不应由 handler 改写 |
 | `text` | `str` | 必填 | `PromptAttachment.content`；`None` 按 `""` 传入 | 唯一允许通过事件结果改变的业务正文 |
 | `origin` | `Mapping[str, str]` | 默认 `{ "kind": "engine" }` | attachment 的显式来源；默认由 `PromptAttachment` 提供 | 递归冻结为只读快照；表示产生通道，不因 handler 改写而变化 |
-| `agent_id` | `str \| None` | 非必填，默认 `None` | 当前 manager 没有真实 agent id 时保持 `None` | 只能使用宿主已有的真实身份；宿主不得凭空补值 |
+| `agent_id` | `str \| None` | 非必填，默认 `None` | 取当前 Agent Session 的真实身份，与 `SessionContext.agent_id` 一致 | 无真实身份时保持 `None` |
 | `detail` | `Mapping[str, object]` | 非必填，默认空映射 | `id`、`section`、`priority`、`source`、`content_kind` 和 `metadata` 快照 | 递归冻结为只读事实；不传 `PromptAttachment` 实例或可变 context |
 
 `origin` 只接受以下形状：
