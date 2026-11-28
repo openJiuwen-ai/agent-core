@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import time
 from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
 from typing import (
     TYPE_CHECKING,
     Optional,
@@ -70,7 +72,7 @@ from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_worktrees
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import raise_error
+from openjiuwen.core.common.exception.errors import BaseError, raise_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.context_engine.context.cancellation import (
@@ -86,6 +88,7 @@ from openjiuwen.core.session.agent_team import (
 )
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.harness_protocol.state import HarnessState
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams import extensions as team_extensions
@@ -111,6 +114,189 @@ class TeamSessionReleaseInfo:
 
     team_names: list[str]
     db_config: DatabaseConfig
+
+
+# A resumed approval round clears sibling interrupt state until it commits
+# again. The click arrives while that round is still running. The wait is
+# outside the interact gate, and a confirmed id mismatch does not enter it.
+_INTERRUPT_RESUME_BUSY_WAIT_SECONDS = 15.0
+_INTERRUPT_RESUME_UNOWNED_WAIT_SECONDS = 15.0
+_INTERRUPT_RESUME_RETRY_DELAY_SECONDS = 0.25
+
+
+def _member_round_in_flight(agent: object) -> bool:
+    """Return whether ``agent`` still has a round that can restore a pending interrupt."""
+    probe = getattr(agent, "has_in_flight_round", None)
+    if not callable(probe):
+        return False
+    try:
+        if probe():
+            return True
+        # PAUSING can still restore an interrupt cleared by its current round.
+        harness = getattr(agent, "harness", None)
+        return getattr(harness, "state", None) is HarnessState.PAUSING
+    except Exception:
+        team_logger.warning("interrupt resume could not read in-flight round state", exc_info=True)
+        return False
+
+
+def _holds_a_different_interrupt(teammate: object) -> bool:
+    """Return whether ``teammate`` is paused on an interrupt this answer did not select.
+
+    Admission already resumes a member whose pending matches the answer.
+    A member with a different pending interrupt is not the round that may
+    restore this card.
+    """
+    probe = getattr(teammate, "has_pending_interrupt", None)
+    if not callable(probe):
+        return False
+    try:
+        return bool(probe())
+    except Exception:
+        team_logger.warning("interrupt resume could not read pending interrupt state", exc_info=True)
+        return True
+
+
+def _in_flight_teammate_may_own_answer(leader: "TeamAgent") -> bool:
+    """Return whether a teammate round may still restore a cleared interrupt.
+
+    The leader's own running round is reported as ``interrupt_resume_busy``
+    by ``resume_interrupt``. This probe is only for a teammate whose pending
+    state was cleared while that teammate's round is still running. Another
+    member that is running, or paused on its own card, is not that round.
+    """
+    spawn_manager = getattr(leader, "spawn_manager", None)
+    handles = getattr(spawn_manager, "spawned_handles", {}) or {}
+    for handle in handles.values():
+        teammate = getattr(handle, "agent_ref", None)
+        if teammate is None or teammate is leader or not _member_round_in_flight(teammate):
+            continue
+        if _holds_a_different_interrupt(teammate):
+            continue
+        return True
+    return False
+
+
+def _wait_for_sibling_interrupt(leader: "TeamAgent", result: DeliverResult) -> bool:
+    """Return whether this rejection is the in-flight sibling-approval race.
+
+    A confirmed id mismatch is final. An empty pending list is retried only
+    while a teammate round may write that state back. Neither that round nor
+    its completion proves this answer was consumed.
+    """
+    if result.reason == "interrupt_resume_busy":
+        return True
+    if result.reason != "interrupt_resume_unavailable":
+        return False
+    return _in_flight_teammate_may_own_answer(leader)
+
+
+async def _admit_interactive_input(
+    leader: "TeamAgent",
+    payload: InteractiveInput,
+    run_context: RunContext | None,
+) -> DeliverResult:
+    """Admit an answer on the leader, then on the in-process teammate that owns it."""
+    result = await leader.resume_interrupt(payload, run_context=run_context)
+    # The leader being busy is its own round, not proof it owns this card.
+    # A teammate can be idle with the permission interrupt while the leader
+    # keeps working. A confirmed mismatch or an empty pending list can also
+    # belong to an in-process teammate.
+    if result.ok or result.reason not in {
+        "unsupported_interactive_input",
+        "interrupt_resume_unavailable",
+        "interrupt_resume_busy",
+    }:
+        return result
+    spawn_manager = getattr(leader, "spawn_manager", None)
+    handles = getattr(spawn_manager, "spawned_handles", {})
+    for handle in list(handles.values()):
+        teammate = getattr(handle, "agent_ref", None)
+        if teammate is None or teammate is leader:
+            continue
+        owns = getattr(teammate, "owns_pending_interrupt_answer", None)
+        if owns is None or not owns(payload):
+            continue
+        try:
+            member_result = await teammate.resume_interrupt(payload, run_context=run_context)
+        except BaseError:
+            team_logger.warning(
+                "teammate interrupt resume failed before admission; keeping the answer unclaimed",
+                exc_info=True,
+            )
+            return DeliverResult.failure("interrupt_resume_unavailable")
+        if member_result.ok or member_result.reason != "unsupported_interactive_input":
+            return member_result
+    if result.reason != "unsupported_interactive_input":
+        return result
+    if (
+        callable(getattr(leader, "has_pending_interrupt", None))
+        and not _holds_a_different_interrupt(leader)
+        and _in_flight_teammate_may_own_answer(leader)
+    ):
+        # An empty leader cannot settle ownership while a member may restore it.
+        return DeliverResult.failure("interrupt_resume_unavailable")
+    return result
+
+
+async def _resume_interactive_input(
+    leader: "TeamAgent",
+    payload: InteractiveInput,
+    run_context: RunContext | None,
+) -> DeliverResult:
+    """Admit an answer on the leader, then on the in-process teammate that owns it.
+
+    A teammate is selected only when its current pending fully matches. The
+    teammate's existing ``resume_interrupt`` still decides the receipt. Handles
+    without an in-process agent keep the leader receipt; those members continue
+    to consume the durable approval mail they already poll.
+
+    Parallel permission cards share one round. Admitting the first answer
+    clears the others until that round commits them again. Retrying that
+    window is :func:`_resume_interactive_input_when_ready`, which waits
+    outside the interact gate.
+    """
+    return await _admit_interactive_input(leader, payload, run_context)
+
+
+async def _resume_interactive_input_when_ready(
+    leader: "TeamAgent",
+    attempt: Callable[[], Awaitable[DeliverResult]],
+) -> DeliverResult:
+    """Retry a sibling-approval race without holding the interact gate.
+
+    ``attempt`` admits one gate ticket, tries once, and releases the ticket
+    before this function sleeps. A closed gate or a confirmed mismatch
+    returns immediately.
+    """
+    busy_deadline: float | None = None
+    unowned_deadline: float | None = None
+    while True:
+        result = await attempt()
+        if result.ok:
+            return result
+        owner_in_flight = (
+            result.reason == "interrupt_resume_unavailable"
+            and _in_flight_teammate_may_own_answer(leader)
+        )
+        if owner_in_flight:
+            # The running round may restore a sibling interrupt. Waiting only
+            # bounds retries; it does not establish this answer's consumption.
+            now = time.monotonic()
+            if unowned_deadline is None:
+                unowned_deadline = now + _INTERRUPT_RESUME_UNOWNED_WAIT_SECONDS
+            if now < unowned_deadline:
+                await asyncio.sleep(_INTERRUPT_RESUME_RETRY_DELAY_SECONDS)
+                continue
+            return result
+        if not _wait_for_sibling_interrupt(leader, result):
+            return result
+        now = time.monotonic()
+        if busy_deadline is None:
+            busy_deadline = now + _INTERRUPT_RESUME_BUSY_WAIT_SECONDS
+        if now >= busy_deadline:
+            return result
+        await asyncio.sleep(_INTERRUPT_RESUME_RETRY_DELAY_SECONDS)
 
 
 class TeamRuntimeManager:
@@ -528,6 +714,15 @@ class TeamRuntimeManager:
                 if member is not None:
                     await member.update_status(target)
                 return
+            from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+
+            harness = getattr(getattr(agent, "resources", None), "harness", None)
+            if isinstance(harness, TeamHarness) and harness.pending_approval_startup() is not None:
+                # A targeted restart did not become live. The leader's recovery
+                # task owns the claim and will release it after this teardown.
+                await agent.stop_coordination()
+                return
+
             team_logger.info(
                 "finalize_member: pausing team member {}; marking READY for next assignment",
                 member_name,
@@ -621,52 +816,60 @@ class TeamRuntimeManager:
         if entry is None:
             return DeliverResult.failure("not_active")
 
-        if isinstance(payload, InteractiveInput):
-            if entry.agent.has_pending_interrupt():
-                await entry.agent.resume_interrupt(
-                    payload,
-                    run_context=run_context,
+        if not isinstance(payload, InteractiveInput):
+            try:
+                external_event = (
+                    payload
+                    if isinstance(payload, ExternalTeamEvent)
+                    else ExternalTeamEvent.from_wire(payload)
                 )
-                return DeliverResult.success(None)
-            return DeliverResult.failure("unsupported_interactive_input")
+            except ValueError:
+                return DeliverResult.failure("invalid_external_event")
+            if external_event is not None:
+                return await self._route_external_team_event(entry, external_event)
 
-        try:
-            external_event = payload if isinstance(payload, ExternalTeamEvent) else ExternalTeamEvent.from_wire(payload)
-        except ValueError:
-            return DeliverResult.failure("invalid_external_event")
-        if external_event is not None:
-            return await self._route_external_team_event(entry, external_event)
+            try:
+                group_input = GroupChatMessage.from_wire(payload)
+            except ValueError:
+                return DeliverResult.failure("invalid_group_chat")
+            if group_input is not None:
+                payload = group_input
 
-        try:
-            group_input = GroupChatMessage.from_wire(payload)
-        except ValueError:
-            return DeliverResult.failure("invalid_group_chat")
-        if group_input is not None:
-            payload = group_input
+            backend = getattr(entry.agent, "team_backend", None)
+            requested_mode = self._conversation_mode(payload)
+            # An explicit GodViewMessage is a private leader wake (e.g. a scheduled
+            # heartbeat), not a conversation turn, so it does not trip the mode
+            # lock — same as ``deliver_organization_prompt``. Free-form strings
+            # still do: they are user turns in the team conversation mode.
+            if backend is not None and requested_mode is not None and not isinstance(payload, GodViewMessage):
+                if getattr(backend, "conversation_mode", "team") != requested_mode:
+                    return DeliverResult.failure("conversation_mode_mismatch")
 
-        backend = getattr(entry.agent, "team_backend", None)
-        requested_mode = self._conversation_mode(payload)
-        # An explicit GodViewMessage is a private leader wake (e.g. a scheduled
-        # heartbeat), not a conversation turn, so it does not trip the mode
-        # lock — same as ``deliver_organization_prompt``. Free-form strings
-        # still do: they are user turns in the team conversation mode.
-        if backend is not None and requested_mode is not None and not isinstance(payload, GodViewMessage):
-            if getattr(backend, "conversation_mode", "team") != requested_mode:
-                return DeliverResult.failure("conversation_mode_mismatch")
+            if isinstance(payload, str):
+                parsed = parse_interact_str(payload)
+                payloads: list[InteractPayload] = parsed or [GodViewMessage(body=payload)]
+            else:
+                payloads = [payload]
 
-        if isinstance(payload, str):
-            parsed = parse_interact_str(payload)
-            payloads: list[InteractPayload] = parsed or [GodViewMessage(body=payload)]
-        else:
-            payloads = [payload]
+            # A swarmflow human-session reply is addressed by correlation id, not a
+            # roster member — route it straight to the run's reply topic before the
+            # roster-matching dispatch would fold it as an unknown mention. It bypasses
+            # the interact gate (a lightweight publish, not a leader round).
+            reply = self._as_swarmflow_human_reply(payloads)
+            if reply is not None:
+                return await self._route_swarmflow_human_reply(entry, reply[0], reply[1], reply[2])
 
-        # A swarmflow human-session reply is addressed by correlation id, not a
-        # roster member — route it straight to the run's reply topic before the
-        # roster-matching dispatch would fold it as an unknown mention. It bypasses
-        # the interact gate (a lightweight publish, not a leader round).
-        reply = self._as_swarmflow_human_reply(payloads)
-        if reply is not None:
-            return await self._route_swarmflow_human_reply(entry, reply[0], reply[1], reply[2])
+        if isinstance(payload, InteractiveInput):
+            async def _attempt_interactive_input() -> DeliverResult:
+                ticket = await entry.interact_gate.admit()
+                if ticket is None:
+                    return DeliverResult.failure("gate_closed")
+                try:
+                    return await _resume_interactive_input(entry.agent, payload, run_context=run_context)
+                finally:
+                    await entry.interact_gate.consume_done(ticket)
+
+            return await _resume_interactive_input_when_ready(entry.agent, _attempt_interactive_input)
 
         ticket = await entry.interact_gate.admit()
         if ticket is None:

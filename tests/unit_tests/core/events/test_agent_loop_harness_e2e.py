@@ -29,6 +29,7 @@ from openjiuwen.core.events.ops import EventHandlerOps
 from openjiuwen.core.events.types import HandlerLevel
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
 from openjiuwen.harness.factory import create_deep_agent
 from tests.system_tests.agent.react_agent.interrupt.test_base import assert_answer_result
 from tests.unit_tests.core.events.conftest import (
@@ -60,6 +61,7 @@ class FullLoopTrace:
     starts: list[TurnStartInput] = field(default_factory=list)
     steps: list[TurnStepInput] = field(default_factory=list)
     completes: list[TurnCompleteInput] = field(default_factory=list)
+    owners: list[tuple[str, str | None]] = field(default_factory=list)
 
 
 def _turn_tracing_handler(event_type: str, trace: TurnLifecycleTrace) -> Callable:
@@ -82,7 +84,8 @@ def _turn_tracing_handler(event_type: str, trace: TurnLifecycleTrace) -> Callabl
 
 def _full_loop_tracing_handler(event_type: str, trace: FullLoopTrace) -> Callable:
     async def handler(event: Event, ops: EventHandlerOps | None, event_next: EventNext) -> object:
-        del ops
+        assert ops is not None and ops.session_context is not None
+        trace.owners.append((event_type, ops.session_context.agent_id))
         trace.lines.append(f"{event_type}:before")
         if event_type == TURN_START and isinstance(event.event_input, TurnStartInput):
             trace.starts.append(event.event_input)
@@ -217,7 +220,10 @@ async def test_extension_turn_complete_rewrites_terminal_output(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_tool_round_traces_full_agent_loop_event_order(tmp_path, invoke_counter: list[int]) -> None:
+@pytest.mark.parametrize("shared_session", [False, True])
+async def test_tool_round_traces_full_agent_loop_event_order(
+    tmp_path, invoke_counter: list[int], shared_session: bool,
+) -> None:
     """One tool round: start, two steps, check inside call, then complete."""
     trace = FullLoopTrace()
     bus = await _bus_with_full_loop_tracers(trace)
@@ -243,11 +249,26 @@ async def test_tool_round_traces_full_agent_loop_event_order(tmp_path, invoke_co
             system_prompt="Execute mock tool calls.",
             **default_agent_options(tmp_path),
         )
-        with patch_mock_llm(mock_llm):
-            result = await Runner.run_agent(
-                agent=agent,
-                inputs={"query": "call probe", "conversation_id": f"loop_evt_{uuid.uuid4().hex[:8]}"},
+        session_id = f"loop_evt_{uuid.uuid4().hex[:8]}"
+        sibling = None
+        if shared_session:
+            sibling = create_deep_agent(
+                model=fake_model(), card=AgentCard(id=f"sibling_{uuid.uuid4().hex}"),
+                **default_agent_options(tmp_path),
             )
+            get_agent_runtime().bind(session_id, sibling)
+            agent.react_agent.set_runtime_context(is_team_agent=True)
+        try:
+            with patch_mock_llm(mock_llm):
+                result = await Runner.run_agent(
+                    agent=agent,
+                    inputs={"query": "call probe", "conversation_id": session_id},
+                )
+        finally:
+            get_agent_runtime().unbind(session_id, agent)
+            if sibling is not None:
+                get_agent_runtime().unbind(session_id, sibling)
+                await sibling.aclose()
 
     assert_answer_result(result)
     assert result.get("output") == llm_answer
@@ -264,6 +285,10 @@ async def test_tool_round_traces_full_agent_loop_event_order(tmp_path, invoke_co
     assert trace.completes[0].answer == llm_answer
     assert trace.lines.count(f"{TOOL_CALL}:before") == 1
     assert trace.lines.count(f"{TOOL_CHECK}:before") == 1
+    assert {event_type for event_type, _ in trace.owners} == {
+        TURN_START, TURN_STEP, TURN_COMPLETE, TOOL_CHECK, TOOL_CALL,
+    }
+    assert {owner for _, owner in trace.owners} == {agent.card.id}
     _assert_full_tool_round_order(trace)
 
 

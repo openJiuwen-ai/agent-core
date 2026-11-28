@@ -506,6 +506,14 @@ class TaskBoardHandler(BaseCoordinationHandler):
         )
         await self._round.deliver_input(content)
 
+    async def _consume_acceptance(self, event: EventMessage) -> None:
+        if event.event_type not in self._LEADER_COMPLETION_EVENTS:
+            return
+        payload = event.get_payload()
+        version = getattr(payload, "acceptance_version", None)
+        if isinstance(version, str) and version and payload.member_name == self._blueprint.member_name:
+            await self._infra.task_manager.notify_task_acceptance(payload.task_id, version)
+
     async def on_task_verified(self, event: EventMessage) -> None:
         """A reviewer passed the task; free its author to pick up new work.
 
@@ -522,6 +530,7 @@ class TaskBoardHandler(BaseCoordinationHandler):
         if payload.member_name != member_name:
             await self.on_task_board_event(event)
             return
+        await self._consume_acceptance(event)
         await self._poll.resume_polls()
         content = render_event(
             kind="task-verified",
@@ -559,6 +568,7 @@ class TaskBoardHandler(BaseCoordinationHandler):
         member_name = self._blueprint.member_name
         if not member_name or self._infra.task_manager is None:
             return
+        await self._consume_acceptance(event)
         await self._poll.resume_polls()
         if self._blueprint.role != TeamRole.LEADER and event.event_type not in self._TEAMMATE_NUDGE_EVENTS:
             team_logger.debug(
@@ -809,6 +819,7 @@ class ScheduledTaskBoardHandler(TaskBoardHandler):
         member_name = self._blueprint.member_name
         if not member_name or self._infra.task_manager is None:
             return
+        await self._consume_acceptance(event)
         await self._poll.resume_polls()
         team_logger.debug(
             "[{}] scheduled dispatch: board event {} observed, no nudge",

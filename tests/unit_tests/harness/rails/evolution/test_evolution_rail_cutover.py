@@ -290,3 +290,188 @@ async def test_clean_window_preserves_scopes_across_increments() -> None:
         ]
     finally:
         await rail.after_invoke(ctx)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hook_name", ["iteration", "model", "tool"])
+async def test_rail_normalizes_only_the_new_span_at_the_capture_hooks(monkeypatch, hook_name) -> None:
+    from openjiuwen.agent_evolving.trajectory import spans
+
+    processor = TrajectorySpanProcessor()
+    rail = _HookRail(processor)
+    inputs = InvokeInputs(query="q", conversation_id="s")
+    invoke = _ctx(AgentCallbackEvent.BEFORE_INVOKE, inputs)
+    iteration = _ctx(AgentCallbackEvent.AFTER_TASK_ITERATION, inputs)
+    await rail.before_invoke(invoke)
+    for span_id in range(1, 201):
+        processor.on_end(_span("llm.call", span_id))
+    await rail.after_task_iteration(iteration)
+    old_snapshot = rail.hooks[-1][1]
+    old_payload = old_snapshot.to_otlp()
+
+    seen = []
+    normalize = spans.normalize_span
+
+    def track(span):
+        seen.append(spans.span_identity(span))
+        return normalize(span)
+
+    monkeypatch.setattr(spans, "normalize_span", track)
+    if hook_name == "model":
+        processor.on_end(_span("llm.call", 201))
+        await rail.after_model_call(
+            _ctx(
+                AgentCallbackEvent.AFTER_MODEL_CALL,
+                ModelCallInputs(messages=[], response={"prompt_token_ids": [7]}),
+            )
+        )
+    elif hook_name == "tool":
+        processor.on_end(_span("tool.read", 201))
+        await rail.after_tool_call(
+            _ctx(AgentCallbackEvent.AFTER_TOOL_CALL, ToolCallInputs(tool_name="read", tool_result="ok"))
+        )
+    else:
+        processor.on_end(_span("llm.call", 201))
+        await rail.after_task_iteration(iteration)
+
+    assert seen == [(f"{1:032x}", f"{201:016x}")]
+    projected = rail.hooks[-1][1]
+    payload = projected.to_otlp()
+    assert [span["spanId"] for span in spans.iter_payload_spans(payload)] == [
+        f"{span_id:016x}" for span_id in range(2, 202)
+    ]
+    if hook_name == "model":
+        latest = list(spans.iter_payload_spans(payload))[-1]
+        assert spans.read_rl_fields(latest) == {"prompt_token_ids": [7]}
+
+    processor.on_end(_span("llm.call", 201))
+    seen.clear()
+    await rail.after_task_iteration(iteration)
+    assert seen == []
+    assert list(spans.iter_payload_spans(rail.hooks[-1][1].to_otlp())) == list(spans.iter_payload_spans(payload))
+
+    rail._reset_current_scope()
+    assert rail.get_trajectory(session_id="s", member_id="card-id") is None
+    assert old_snapshot.to_otlp() == old_payload
+    await rail.after_invoke(invoke)
+
+
+@pytest.mark.asyncio
+async def test_same_scope_update_is_atomic_on_failure_and_serializes_writers(monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from openjiuwen.agent_evolving.trajectory import spans
+
+    processor = TrajectorySpanProcessor()
+    rail = _HookRail(processor)
+    invoke = _ctx(AgentCallbackEvent.BEFORE_INVOKE, InvokeInputs(query="q", conversation_id="s"))
+    await rail.before_invoke(invoke)
+    capture = rail._current_capture()
+    assert capture is not None
+    for span_id in (1, 2, 3):
+        processor.on_end(_span("llm.call", span_id))
+    first_batch, issues = processor.drain(capture.subscription)
+    assert first_batch is not None and not issues
+    processor.on_end(_span("llm.call", 4))
+    second_batch, issues = processor.drain(capture.subscription)
+    assert second_batch is not None and not issues
+
+    # Seed one old span, then fail after one new identity has been staged.
+    seed = rail._merge_clean_increment(capture, second_batch)
+    original_window = rail._scope_windows[capture.scope_key]
+    original_index = original_window._identities
+    normalize = spans.normalize_span
+
+    def fail_mid_batch(span):
+        if span["spanId"] == f"{2:016x}":
+            raise ValueError("injected normalization failure")
+        return normalize(span)
+
+    monkeypatch.setattr(spans, "normalize_span", fail_mid_batch)
+    with pytest.raises(ValueError, match="injected normalization failure"):
+        rail._merge_clean_increment(capture, first_batch)
+    assert rail._scope_windows[capture.scope_key] is original_window
+    assert original_window._identities == original_index
+    old = rail.get_trajectory(session_id="s", member_id="card-id")
+    assert old is not None
+    assert list(spans.iter_payload_spans(old.to_otlp())) == list(spans.iter_payload_spans(seed.to_otlp()))
+
+    monkeypatch.setattr(spans, "normalize_span", normalize)
+    for span_id in (3, 5):
+        processor.on_end(_span("llm.call", span_id))
+    overlapping_batch, issues = processor.drain(capture.subscription)
+    assert overlapping_batch is not None and not issues
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        retry = workers.submit(rail._merge_clean_increment, capture, first_batch)
+        overlap = workers.submit(rail._merge_clean_increment, capture, overlapping_batch)
+        retry_snapshot = retry.result(timeout=5)
+        assert {f"{span_id:016x}" for span_id in range(1, 5)} <= {
+            span["spanId"] for span in spans.iter_payload_spans(retry_snapshot.to_otlp())
+        }
+        overlap.result(timeout=5)
+
+    combined = rail.get_trajectory(session_id="s", member_id="card-id")
+    assert combined is not None
+    assert [span["spanId"] for span in spans.iter_payload_spans(combined.to_otlp())] == [
+        f"{span_id:016x}" for span_id in range(1, 6)
+    ]
+    expected_index = {spans.span_identity(span) for span in spans.iter_payload_spans(combined.to_otlp())}
+    assert rail._scope_windows[capture.scope_key]._identities == expected_index
+
+    rail._reset_current_scope()
+    reset = rail._merge_clean_increment(capture, first_batch)
+    assert list(spans.iter_payload_spans(reset.to_otlp())) == list(spans.iter_payload_spans(first_batch.to_otlp()))
+    rail.uninit(invoke.agent)
+    assert rail.get_trajectory(session_id="s", member_id="card-id") is None
+    assert len(list(spans.iter_payload_spans(seed.to_otlp()))) == 1
+
+
+@pytest.mark.asyncio
+async def test_uninit_during_update_cannot_publish_stale_index(monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from openjiuwen.agent_evolving.trajectory import spans
+
+    processor = TrajectorySpanProcessor()
+    rail = _HookRail(processor)
+    invoke = _ctx(AgentCallbackEvent.BEFORE_INVOKE, InvokeInputs(query="q", conversation_id="s"))
+    await rail.before_invoke(invoke)
+    capture = rail._current_capture()
+    assert capture is not None
+
+    processor.on_end(_span("llm.call", 1))
+    await rail.after_task_iteration(invoke)
+    processor.on_end(_span("llm.call", 2))
+    stale_batch, issues = processor.drain(capture.subscription)
+    assert stale_batch is not None and not issues
+
+    entered = Event()
+    resume = Event()
+    normalize = spans.normalize_span
+
+    def pause_update(span):
+        if span["spanId"] == f"{2:016x}":
+            entered.set()
+            assert resume.wait(5)
+        return normalize(span)
+
+    monkeypatch.setattr(spans, "normalize_span", pause_update)
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        old_update = worker.submit(rail._merge_clean_increment, capture, stale_batch)
+        try:
+            assert entered.wait(5)
+            rail.uninit(invoke.agent)
+            await rail.before_invoke(invoke)
+            processor.on_end(_span("llm.call", 3))
+            await rail.after_task_iteration(invoke)
+        finally:
+            resume.set()
+        old_update.result(timeout=5)
+
+    current = rail.get_trajectory(session_id="s", member_id="card-id")
+    assert current is not None
+    assert [span["spanId"] for span in spans.iter_payload_spans(current.to_otlp())] == [f"{3:016x}"]
+    assert rail._scope_windows[capture.scope_key]._identities == {(f"{1:032x}", f"{3:016x}")}
+    await rail.after_invoke(invoke)

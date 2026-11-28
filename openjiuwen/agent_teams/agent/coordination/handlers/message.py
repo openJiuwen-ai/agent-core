@@ -47,6 +47,7 @@ from openjiuwen.agent_teams.schema.external_runtime_reliability import ExternalR
 from openjiuwen.agent_teams.schema.status import MemberStatus, retire_target
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.timefmt import format_absolute_time
+from openjiuwen.agent_teams.tools.message_manager import parse_approval_message, validate_approval_payload
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session import InteractiveInput
 
@@ -258,7 +259,7 @@ class MessageHandler(BaseCoordinationHandler):
                     seen_ids.add(msg.message_id)
                     approval_data = self._try_parse_approval_payload(msg)
                     if approval_data is not None:
-                        approval_data = self._validate_approval_payload(approval_data)
+                        approval_data = validate_approval_payload(approval_data)
                         leader = None
                         if approval_data is not None:
                             if backend is not None:
@@ -285,46 +286,45 @@ class MessageHandler(BaseCoordinationHandler):
                         if self._round.has_in_flight_round():
                             interrupted = True
                             continue
-                        if self._round.has_pending_interrupt():
-                            team_logger.info(
-                                "[{}] admitting approval message {} to resume interrupt",
+                        team_logger.info(
+                            "[{}] admitting approval message {} to resume interrupt",
+                            member_name,
+                            msg.message_id,
+                        )
+                        reply = InteractiveInput()
+                        reply.update(
+                            approval_data["tool_call_id"],
+                            {key: approval_data[key] for key in ("approved", "feedback", "auto_confirm")},
+                        )
+                        try:
+                            result = await self._round.resume_interrupt(reply)
+                        except asyncio.CancelledError:
+                            team_logger.debug(
+                                "[{}] approval message {} admission cancelled; keeping it unread",
                                 member_name,
                                 msg.message_id,
                             )
-                            reply = InteractiveInput()
-                            reply.update(
-                                approval_data["tool_call_id"],
-                                {key: approval_data[key] for key in ("approved", "feedback", "auto_confirm")},
+                            raise
+                        except Exception:
+                            team_logger.error(
+                                "[{}] approval message {} admission failed; keeping it unread",
+                                member_name,
+                                msg.message_id,
+                                exc_info=True,
                             )
-                            try:
-                                await self._round.resume_interrupt(reply)
-                            except asyncio.CancelledError:
-                                team_logger.debug(
-                                    "[{}] approval message {} admission cancelled; keeping it unread",
-                                    member_name,
-                                    msg.message_id,
-                                )
-                                raise
-                            except Exception:
-                                team_logger.error(
-                                    "[{}] approval message {} admission failed; keeping it unread",
-                                    member_name,
-                                    msg.message_id,
-                                    exc_info=True,
-                                )
-                                raise
-                            await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
+                            raise
+                        if not result.ok:
+                            # Only a confirmed mismatch can terminate an unclaimed reply.
+                            if result.reason == "unsupported_interactive_input":
+                                await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
+                                continue
+                            if result.reason == "interrupt_resume_unavailable":
+                                # Keep this reply unread and check later approvals in the batch.
+                                interrupted = True
+                                continue
                             return
-                        # A settled runtime with no interrupt cannot use this
-                        # reply. Never feed stale control data as a new query.
-                        team_logger.debug(
-                            "[{}] discarding settled approval message {} for tool_call_id={}",
-                            member_name,
-                            msg.message_id,
-                            approval_data["tool_call_id"],
-                        )
                         await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
-                        continue
+                        return
                     if interrupted or self._round.has_pending_interrupt():
                         team_logger.info(
                             "[{}] deferring mailbox message {} until pending interrupt is resolved",
@@ -787,38 +787,9 @@ class MessageHandler(BaseCoordinationHandler):
             note_text=note_text,
         )
 
-    def _try_parse_approval_payload(self, msg: Any) -> dict | None:
-        """Recognize control mail independently of its validity and sender."""
-        if msg.protocol != "json" or not msg.content or msg.broadcast:
-            return None
-        try:
-            data = json.loads(msg.content)
-        except (json.JSONDecodeError, TypeError):
-            return None
-        if not isinstance(data, dict) or data.get("type") != "tool_approval_result":
-            return None
-        return data
-
     @staticmethod
-    def _validate_approval_payload(data: dict) -> dict | None:
-        """Keep historical optional nulls compatible without coercing decisions."""
-        tool_call_id = data.get("tool_call_id")
-        if not isinstance(tool_call_id, str) or not tool_call_id.strip() or not isinstance(data.get("approved"), bool):
-            return None
-        feedback = data.get("feedback", "")
-        auto_confirm = data.get("auto_confirm", False)
-        if feedback is None:
-            feedback = ""
-        if auto_confirm is None:
-            auto_confirm = False
-        if not isinstance(feedback, str) or not isinstance(auto_confirm, bool):
-            return None
-        return {
-            "tool_call_id": tool_call_id,
-            "approved": data["approved"],
-            "feedback": feedback,
-            "auto_confirm": auto_confirm,
-        }
+    def _try_parse_approval_payload(msg: Any) -> dict | None:
+        return parse_approval_message(msg)
 
     @staticmethod
     def _render_external_runtime_failed(msg: Any) -> str | None:

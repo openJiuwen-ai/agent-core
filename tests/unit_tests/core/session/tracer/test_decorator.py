@@ -420,6 +420,168 @@ class TestDecator:
             print(item)
         assert results[0][2].get("inputs", {}) == {'inputs': [BaseMessage(role='aa', content='', name=None)]}
 
+    async def test_decorate_foundation_model(self):
+        # Foundation Model carries ModelRequestConfig at the top level (no
+        # `.config` wrapper): the probe must fall through to it instead of the
+        # class-name fallback, so shell spans get the real model name.
+        class FoundationModelStub:
+            def __init__(self):
+                self.model_config = ModelRequestConfig(model="qwen3-max")
+
+            async def invoke(self, **kwargs):
+                return {}
+
+            async def stream(self, **kwargs):
+                if False:
+                    yield {}
+
+        results = []
+
+        async def mock_trigger(handler_class_name: str, event_name: str, **kwargs):
+            results.append([handler_class_name, event_name, kwargs])
+
+        def mock_sync_trigger(handler_class_name: str, event_name: str, **kwargs):
+            results.append([handler_class_name, event_name, kwargs])
+
+        mock_tracer = MagicMock()
+        mock_tracer.trigger = mock_trigger
+        mock_tracer.sync_trigger = mock_sync_trigger
+
+        mock_session = MagicMock()
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+
+        mocked_model = decorate_model_with_trace(FoundationModelStub(), mock_session)
+
+        await mocked_model.invoke(model="a", messages=[BaseMessage(role="aa")])
+
+        assert results[0][1] == "on_llm_start"
+        assert results[0][2].get("instance_info", {}).get("class_name", "") == "qwen3-max"
+
+    async def test_decorate_model_display_name_wins_over_service_id(self):
+        """Gateway models put a service id in model_name; the optional
+        model_display_name on the client config makes the span (name and
+        gen_ai.request.model) carry the human-readable name instead."""
+
+        class _DisplayModel:
+            def __init__(self, model: str, display):
+                self.model_config = ModelRequestConfig(model=model)
+                self.model_client_config = (
+                    type("_Cfg", (), {"model_display_name": display})() if display else None
+                )
+
+            async def invoke(self, messages, **kwargs):
+                return BaseMessage(role="assistant", content="ok")
+
+            async def stream(self, messages, **kwargs):
+                yield BaseMessage(role="assistant", content="ok")
+
+        results = []
+
+        async def mock_trigger(handler_class_name: str, event_name: str, **kwargs):
+            results.append([handler_class_name, event_name, kwargs])
+
+        mock_tracer = MagicMock()
+        mock_tracer.trigger = mock_trigger
+        mock_tracer.tracer_agent_span_manager = MagicMock()
+        mock_session = MagicMock()
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+        mock_inner_session.span.return_value = MagicMock()
+
+        wrapped = decorate_model_with_trace(_DisplayModel("3f2b8c1e-uuid", "Qwen-Max"), mock_session)
+        await wrapped.invoke([BaseMessage(role="user", content="hi")])
+
+        assert results[0][2]["instance_info"]["class_name"] == "Qwen-Max"
+
+    async def test_decorate_model_without_display_name_keeps_probe_result(self):
+        """Red line: no display name set — class_name stays the probe's
+        model_name exactly as before."""
+
+        class _PlainModel:
+            def __init__(self):
+                # 组件配置形态：ModelRequestConfig 挂在 .config 下（develop
+                # 探针支持的第一跳）。
+                self.config = type(
+                    "_CompCfg", (), {"model_config": ModelRequestConfig(model="3f2b8c1e-uuid")}
+                )()
+                self.model_client_config = None
+
+            async def invoke(self, messages, **kwargs):
+                return BaseMessage(role="assistant", content="ok")
+
+            async def stream(self, messages, **kwargs):
+                yield BaseMessage(role="assistant", content="ok")
+
+        results = []
+
+        async def mock_trigger(handler_class_name: str, event_name: str, **kwargs):
+            results.append([handler_class_name, event_name, kwargs])
+
+        mock_tracer = MagicMock()
+        mock_tracer.trigger = mock_trigger
+        mock_tracer.tracer_agent_span_manager = MagicMock()
+        mock_session = MagicMock()
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+        mock_inner_session.span.return_value = MagicMock()
+
+        wrapped = decorate_model_with_trace(_PlainModel(), mock_session)
+        await wrapped.invoke([BaseMessage(role="user", content="hi")])
+
+        assert results[0][2]["instance_info"]["class_name"] == "3f2b8c1e-uuid"
+
+    async def test_decorate_model_display_name_set_directly_on_model(self):
+        """Lowest-priority carrier: a display name set directly on the model
+        object by wiring code wins over the probe when no config carries
+        one, and loses to the client-config carrier when both are set."""
+
+        class _DirectModel:
+            def __init__(self, direct, on_client_config):
+                self.model_config = ModelRequestConfig(model="3f2b8c1e-uuid")
+                self.model_client_config = (
+                    type("_Cfg", (), {"model_display_name": on_client_config})
+                    if on_client_config
+                    else None
+                )
+                if direct:
+                    self.model_display_name = direct
+
+            async def invoke(self, messages, **kwargs):
+                return BaseMessage(role="assistant", content="ok")
+
+            async def stream(self, messages, **kwargs):
+                yield BaseMessage(role="assistant", content="ok")
+
+        results = []
+
+        async def mock_trigger(handler_class_name: str, event_name: str, **kwargs):
+            results.append([handler_class_name, event_name, kwargs])
+
+        mock_tracer = MagicMock()
+        mock_tracer.trigger = mock_trigger
+        mock_tracer.tracer_agent_span_manager = MagicMock()
+        mock_session = MagicMock()
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+        mock_inner_session.span.return_value = MagicMock()
+
+        # Direct-set only: wins over the probe's service id.
+        wrapped = decorate_model_with_trace(_DirectModel("Qwen-Max", None), mock_session)
+        await wrapped.invoke([BaseMessage(role="user", content="hi")])
+        assert results[0][2]["instance_info"]["class_name"] == "Qwen-Max"
+
+        # Both set: the client-config carrier wins — direct-set is the
+        # lowest-priority carrier, same order as the rail-side probe.
+        results.clear()
+        wrapped = decorate_model_with_trace(_DirectModel("Direct-Name", "Config-Name"), mock_session)
+        await wrapped.invoke([BaseMessage(role="user", content="hi")])
+        assert results[0][2]["instance_info"]["class_name"] == "Config-Name"
+
     async def test_decorate_model_identity_passthrough(self):
         """identity= merges definition-scoped keys flat into instance_info.
 

@@ -17,10 +17,12 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.exception.errors import BaseError, ValidationError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
+from openjiuwen.core.events.package_lifecycle import PackageInstallOutcome
 from openjiuwen.core.events.types import Event
+from openjiuwen.core.extension.bundle import is_bundle_document, read_bundle_json
 from openjiuwen.core.extension.data.files import run_file_operation
 from openjiuwen.core.extension.errors import ExtensionFailure, OperationError, operation_error
 from openjiuwen.core.extension.install_report import PackageInstallReport, PackageOperationToken
@@ -50,6 +52,7 @@ from openjiuwen.core.extension.management.types import (
     UninstallRequest,
 )
 from openjiuwen.core.extension.manifest import has_manifest, load_manifest
+from openjiuwen.core.extension.package_manager import PackageManager
 from openjiuwen.core.extension.schema.manifest import Manifest
 from openjiuwen.core.extension.schema.mcp import McpServerSpec, declarations
 from openjiuwen.core.extension.schema.records import ActivationReport, ActivePackageRecord, ExtensionPlan
@@ -64,6 +67,11 @@ def _management_context(bus: ExtensionEventBusProtocol) -> ManagementContext:
     return context
 
 
+def _unknown_event(error: Exception) -> bool:
+    """Return True when a bus does not know the lifecycle event types."""
+    return isinstance(error, ValidationError) and error.status is StatusCode.EVENTS_UNKNOWN_EVENT_INVALID
+
+
 async def handle_package_parse(request: ParseRequest) -> ParseResult:
     """Read one local source: package root, manifest, and entry boundaries."""
     context = _management_context(request.bus)
@@ -72,6 +80,15 @@ async def handle_package_parse(request: ParseRequest) -> ParseResult:
         opened = context.package_manager.open_source(source)
     except ExtensionFailure as exc:
         return ParseResult(source=source, error=exc.as_error())
+    if is_bundle_document(read_bundle_json(opened.root)):
+        opened.close()
+        return ParseResult(
+            source=source,
+            error=operation_error(
+                StatusCode.EXTENSION_SOURCE_INVALID,
+                reason="a bundle root must be installed by the host container layer",
+            ),
+        )
     return ParseResult(
         source=source,
         package=ParsedPackage(
@@ -138,22 +155,19 @@ async def handle_package_query(request: QueryRequest) -> QueryResult:
             raise ExtensionFailure(StatusCode.EXTENSION_DOMAIN_MISMATCH, reason="query belongs to another domain")
     active = runtime.active_packages()
     domain = context.package_manager.domain
-    roots = []
-    for root in context.package_manager.list_installed():
-        try:
-            manifest = load_manifest(root, require_domain=context.package_manager.require_domain)
-        except ExtensionFailure:
+    installed_roots: list[Path] = []
+    for manifest, root in _package_roots(context.package_manager):
+        if request.package_id is not None and manifest.package_id != request.package_id:
             continue
         if (request.package_id == manifest.package_id and domain is not None
                 and manifest.domain != domain):
             raise ExtensionFailure(StatusCode.EXTENSION_DOMAIN_MISMATCH,
                                    reason="query belongs to another domain")
         if domain is None or manifest.domain == domain:
-            roots.append(root)
-    installed = tuple(roots)
+            installed_roots.append(root)
+    installed = tuple(installed_roots)
     if request.package_id is not None:
         active = tuple(item for item in active if item.package_id == request.package_id)
-        installed = tuple(item for item in installed if item.parent.name == request.package_id)
     return QueryResult(
         active=active,
         installed=installed,
@@ -249,6 +263,38 @@ async def handle_package_install(request: InstallRequest) -> PackageOperationRes
         for item in parsed:
             if item.opened is not None:
                 item.opened.close()
+
+    versions = {item.manifest.package_id: item.manifest.version for item in parsed}
+    enabled = {item.manifest.package_id: item.manifest.enable for item in parsed}
+    for report in reports:
+        if report.package_id not in versions:
+            # A parse failure reports its source path, not a package identity.
+            continue
+        success = report.status == "SUCCESS"
+        error = getattr(getattr(report, "error", None), "message", None) or ""
+        active = success and context.runtime.get_active(report.package_id) is not None
+        outcome = Event(
+            "package.install_finish" if success else "package.install_failed",
+            PackageInstallOutcome(
+                event_id="",
+                operation="install",
+                package_id=report.package_id,
+                version=versions.get(report.package_id, ""),
+                status="success" if success else "failed",
+                active=active,
+                enabled=active and enabled.get(report.package_id, False),
+                error="" if success else str(error),
+            ),
+        )
+        try:
+            await bus.trigger(outcome)
+        except Exception as exc:  # noqa: BLE001 - the install result is already committed
+            if not _unknown_event(exc):
+                logger.warning(
+                    "could not publish package install outcome for %s",
+                    report.package_id,
+                    exc_info=True,
+                )
     return PackageOperationResult(operation="install", reports=tuple(reports))
 
 
@@ -514,7 +560,7 @@ async def _managed_existing(
                 record.root, require_domain=manager.require_domain,
             )
         else:
-            roots = [root for root in manager.list_installed() if root.parent.name == request.package_id]
+            roots = _package_roots(manager, request.package_id)
             if not roots:
                 states = await service.read_packages(request.package_id)
                 state = states.get(request.package_id)
@@ -526,7 +572,12 @@ async def _managed_existing(
                         StatusCode.EXTENSION_PACKAGE_NOT_INSTALLED, package_id=request.package_id,
                         reason="no package is installed"))
             else:
-                manifest = load_manifest(roots[-1], require_domain=manager.require_domain)
+                manifest = max(roots, key=lambda item: parse_version(item[0].version))[0]
+        if manifest.is_bundle:
+            return _single(operation, request.package_id, operation_error(
+                StatusCode.EXTENSION_SOURCE_INVALID,
+                reason="a bundle root is managed by the host container layer",
+            ))
         manager.validate_manifest(manifest)
         token = await service.begin_operation(manifest, operation)
         if operation == "reload":
@@ -633,18 +684,37 @@ async def set_package_enabled(
     return await _disable_installed_package(context, bus, manifest)
 
 
+def _package_roots(
+    manager: PackageManager, package_id: str | None = None,
+) -> list[tuple[Manifest, Path]]:
+    """Return readable installed copies, matching the manifest package id."""
+
+    result: list[tuple[Manifest, Path]] = []
+    for root in manager.list_installed():
+        try:
+            manifest = load_manifest(root, require_domain=manager.require_domain)
+        except ExtensionFailure:
+            continue
+        if package_id is not None and manifest.package_id != package_id:
+            continue
+        result.append((manifest, root))
+    return result
+
+
 def _installed_manifest(context: ManagementContext, package_id: str) -> tuple[Manifest, Path]:
     """Return the highest verified managed version for one package identifier."""
     candidates: list[tuple[Manifest, Path]] = []
-    for root in context.package_manager.list_installed():
-        if root.parent.name != package_id:
-            continue
+    for manifest, root in _package_roots(context.package_manager, package_id):
+        if manifest.is_bundle:
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_SOURCE_INVALID,
+                reason="a bundle root is managed by the host container layer",
+            )
         try:
-            manifest = load_manifest(root, require_domain=context.package_manager.require_domain)
             context.package_manager.validate_manifest(manifest)
         except ExtensionFailure:
             continue
-        if manifest.package_id == package_id and manifest.version == root.name:
+        if manifest.version == root.name:
             candidates.append((manifest, root))
     if not candidates:
         raise ExtensionFailure(
@@ -660,14 +730,23 @@ async def _enable_installed_package(
     bus: ExtensionEventBusProtocol,
     manifest: Manifest,
     root: Path,
+    *,
+    skip_dependencies: bool = False,
 ) -> ActivationReport:
     service = context.install_report
+    if manifest.is_bundle:
+        raise ExtensionFailure(
+            StatusCode.EXTENSION_SOURCE_INVALID,
+            reason="a bundle root is managed by the host container layer",
+        )
     target_manifest = replace(manifest, enable=True)
     token = None
     report = None
     enable_written = False
     try:
-        token = await service.begin_operation(target_manifest, "install")
+        token = await service.begin_operation(
+            target_manifest, "install", skip_dependencies=skip_dependencies,
+        )
         await service.wait_for_dependencies(token)
         await service.validate_operation(token, target_manifest, "install")
         with service.operation_scope(token):

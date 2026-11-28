@@ -5,7 +5,7 @@
 | 项 | 说明 |
 | --- | --- |
 | 类型 | 目标设计草案；尚未完成实现与验收 |
-| 最近一次修订日期 | 2026-10-22 |
+| 最近一次修订日期 | 2026-11-24 |
 | 责任人 | Core Extension 模块维护者；与 Events 的协作由双方维护者共同确认 |
 | 所属模块 | `agent-core/openjiuwen/core/extension/` |
 | 详细设计 | [Extension 详细架构](extension-architecture.md) |
@@ -113,6 +113,12 @@ flowchart TB
 | Report | 单包 Plan 的执行结果，以及管理请求中各包的成功、失败或跳过原因 | Runtime 提供执行事实，管理 Core Handler 汇总，Registry 交回 | 报告应反映实际注册和清理情况，不能代替这些记录 |
 
 Handler 的包身份使用 Events 的 `PackageMetadata`（`package_id`、`package_version`、`root`）。扩展作者的受限 `register` 不接收该参数；`extension.apply` 在向 EventBus 调用 `register_event_handler(..., package_metadata=...)` 时由 Runtime 填入 Plan 上已核实的包信息。业务 `trigger` 进入该 Handler 时，Ops 按登记时保存的 `PackageMetadata` 提供包上下文。业务输入或 Session metadata 中自行填写的包身份不能作为依据。
+
+#### 2.2.1 bundle 容器与外部托管根
+
+bundle 根是 `package_type: extension` 且 `is_bundle: true` 的包根：它不声明 `package.domain` 和 `extensions`，通过 `members` 携带子包。Core 只负责根清单与成员校验、成员依赖分层和布局识别，把 bundle 根视为不可激活的容器；成员不复制到 `<id>/<version>`，由宿主把当前允许加载的成员根注册为 managed root，Core 在启动快照和加载时就地使用，不删除宿主所有的副本。
+
+宿主负责 bundle 的安装、版本切换、成员启停和冲突裁决；同一个成员 ID 可以同时存在于组合包和独立插件，但同一宿主同一时刻只加载一个实例。宿主的成员生命周期通过 `package.install_finish` / `package.install_failed` 回传，Core 不自行编排容器状态。
 
 ### 2.3 贯穿设计的原则
 

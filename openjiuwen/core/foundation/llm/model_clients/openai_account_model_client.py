@@ -29,6 +29,7 @@ from openjiuwen.core.foundation.llm.utils.responses_utils import (
 )
 from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 from openjiuwen.core.foundation.llm.utils.provider_error import format_provider_exception
+from openjiuwen.core.foundation.llm.utils.request_parameter_fallback import RequestParameterFallback
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.schema.config import ProviderType
 from openjiuwen.core.foundation.llm.schema.generation_response import (
@@ -69,6 +70,9 @@ class OpenAIAccountModelClient(BaseModelClient):
             refresh_timeout_seconds=model_client_config.timeout,
         )
         self._transport_override = extra.get("openai_account_transport")
+        self._request_fallback = RequestParameterFallback(
+            model_client_config.client_provider, "OpenAI Responses", retry_without_stop=True,
+        )
         self._model_catalog_override = extra.get("openai_account_model_catalog")
         self._model_catalog_transport = extra.get("openai_account_models_transport")
         self._model_catalog_cache_path = extra.get("openai_account_models_cache_path")
@@ -154,6 +158,20 @@ class OpenAIAccountModelClient(BaseModelClient):
         except Exception as exc:
             await self._emit_error(body, messages, tools, exc, is_stream=False)
             raise self._wrap_model_error(exc, "invoke") from exc
+
+        llm_logger.info(
+            "OpenAI account API response received.",
+            event_type=LogEventType.LLM_CALL_END,
+            model_name=body.get("model"),
+            model_provider=self.model_client_config.client_provider,
+            messages=messages,
+            tools=tools,
+            temperature=body.get("temperature"),
+            top_p=body.get("top_p"),
+            max_tokens=body.get("max_output_tokens"),
+            is_stream=False,
+            metadata={"response": str(response)},
+        )
 
         if output_parser and response.content:
             response.parser_content = await self._parse_content(response.content, output_parser)
@@ -494,6 +512,7 @@ class OpenAIAccountModelClient(BaseModelClient):
             verify=verify,
             proxy=UrlUtils.get_global_proxy_url(self.model_client_config.api_base),
             max_retries=0,
+            request_fallback=self._request_fallback,
         )
 
     def _get_model_catalog(self) -> OpenAIAccountModelCatalog:

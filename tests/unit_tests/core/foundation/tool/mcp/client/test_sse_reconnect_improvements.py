@@ -9,18 +9,23 @@
       asyncio.TimeoutError within the configured bound).
 - Race between public disconnect() and concurrent reconnect() should
       not interleave into an inconsistent half-torn state.
-- Retryable-error classification: the "not connected" guard must not be
-      treated as a retryable transport error, and marker matching is
-      case-insensitive.
+- Retryable-error classification: bare ``Not connected`` is not a
+      transport-error marker for RuntimeError; lazy reconnect may still
+      recover after a prior successful connect.
 """
 from __future__ import annotations
 
 import asyncio
 import pytest
 from typing import Any
+from unittest.mock import patch
 
 from openjiuwen.core.foundation.tool.mcp.base import McpServerConfig
-from openjiuwen.core.foundation.tool.mcp.client.reconnect import is_retryable_transport_error
+from openjiuwen.core.foundation.tool.mcp.client import sse_client as sse_mod
+from openjiuwen.core.foundation.tool.mcp.client.reconnect import (
+    is_retryable_transport_error,
+    should_attempt_reconnect,
+)
 from openjiuwen.core.foundation.tool.mcp.client.sse_client import SseClient
 
 
@@ -37,12 +42,15 @@ def _install_fake_lifecycle(client: SseClient) -> dict[str, Any]:
     state: dict[str, Any] = {
         "connect_tasks": [],
         "disconnect_tasks": [],
+        "connects": 0,
     }
 
     async def _fake_connect(*, timeout: float = -1) -> bool:
         state["connect_tasks"].append(asyncio.current_task())
+        state["connects"] += 1
         client._session = object()
         client._is_disconnected = False
+        client._lazy_reconnect = True
         return True
 
     async def _fake_disconnect(*, timeout: float = -1) -> bool:
@@ -193,13 +201,37 @@ class TestSseReconnectR1R2R6:
 
     @pytest.mark.asyncio
     async def test_not_connected_guard_not_treated_as_retryable(self) -> None:
-        """The ``RuntimeError("Not connected to SSE server")`` guard raised
-        when ``_session`` is None must NOT be treated as a retryable transport
-        error. Otherwise a call made while not connected triggers a wasteful
-        disconnect+connect instead of failing fast. The decorator lets the
-        RuntimeError propagate without reconnecting."""
+        """Bare ``Not connected`` remains excluded from transport-error markers.
+
+        Lazy recovery is gated by ``should_attempt_reconnect`` +
+        ``_lazy_reconnect``, not by flipping this marker to always-true.
+        """
         err = RuntimeError("Not connected to SSE server")
         assert is_retryable_transport_error(err) is False
+
+    @pytest.mark.asyncio
+    async def test_not_connected_guard_only_retries_after_transport_failure(self) -> None:
+        """Never-connected stays closed; post-connect empty session may recover."""
+        client = _make_client()
+        guard = RuntimeError("Not connected to SSE server")
+        assert client._lazy_reconnect is False
+        assert should_attempt_reconnect(client, guard) is False
+
+        client._lazy_reconnect = True
+        assert should_attempt_reconnect(client, guard) is True
+
+    @pytest.mark.asyncio
+    async def test_explicit_disconnect_clears_lazy_reconnect(self) -> None:
+        client = _make_client()
+        _install_fake_lifecycle(client)
+        await client.connect()
+        assert client._lazy_reconnect is True
+
+        await client.disconnect()
+        assert client._lazy_reconnect is False
+        assert should_attempt_reconnect(
+            client, RuntimeError("Not connected to SSE server")
+        ) is False
 
     @pytest.mark.asyncio
     async def test_retryable_markers_match_case_insensitively(self) -> None:
@@ -234,10 +266,9 @@ class TestSseReconnectR1R2R6:
 
     @pytest.mark.asyncio
     async def test_call_tool_when_not_connected_does_not_reconnect(self) -> None:
-        """Calling call_tool with no active session raises the guard error
-        directly and does NOT invoke the (mocked) reconnect path."""
+        """Never-connected call_tool fails fast and does not reconnect."""
         client = _make_client()
-        # No connect() called → _session is None → call_tool hits the guard.
+        # No connect() called → _session is None, _lazy_reconnect is False.
         reconnect_calls: list[int] = []
         original_reconnect = client.reconnect
 
@@ -250,6 +281,41 @@ class TestSseReconnectR1R2R6:
         with pytest.raises(RuntimeError, match="Not connected to SSE server"):
             await client.call_tool("t", {}, timeout=0.05)
         assert reconnect_calls == []
+        await _stop(client)
+
+    @pytest.mark.asyncio
+    async def test_call_tool_recovers_after_failed_reconnect_cleared_session(
+        self,
+    ) -> None:
+        """After a transport teardown left ``_session`` empty, lazy reconnect
+        rebuilds the transport when the peer is available again."""
+        client = _make_client()
+        state = _install_fake_lifecycle(client)
+        await client.connect()
+        assert client._lazy_reconnect is True
+        # Simulate: automatic reconnect already ran once, cleared the session,
+        # and left the client marked for lazy recovery.
+        client._session = None
+        client._reconnect_cooldown_until = 0.0
+
+        class _OkSession:
+            async def call_tool(self, name: str, arguments: Any = None) -> Any:
+                return object()
+
+        async def _recover_connect(*, timeout: float = -1) -> bool:
+            state["connects"] += 1
+            client._session = _OkSession()
+            client._is_disconnected = False
+            client._lazy_reconnect = True
+            return True
+
+        client._do_connect = _recover_connect
+        with patch.object(
+            sse_mod, "extract_mcp_tool_result_content", lambda *a, **k: {"ok": True}
+        ):
+            assert await client.call_tool("t", {}, timeout=0.5) == {"ok": True}
+        # Initial connect + recovery connect.
+        assert state["connects"] >= 2
         await _stop(client)
 
     @pytest.mark.asyncio
@@ -282,3 +348,145 @@ class TestSseReconnectR1R2R6:
         assert await client.connect() is True
         assert client._owner_task is not None and not client._owner_task.done()
         await _stop(client)
+
+    @pytest.mark.asyncio
+    async def test_invalidate_for_lazy_reconnect_keeps_lazy_flag(self) -> None:
+        """Call-timeout detach must clear the session but keep lazy reconnect.
+
+        Public ``disconnect()`` clears ``_lazy_reconnect`` (final teardown).
+        Timeout recovery needs the opposite: tear down the zombie transport
+        while still allowing the next ``call_tool`` to rebuild.
+        """
+        client = _make_client()
+        state = _install_fake_lifecycle(client)
+        await client.connect()
+        assert client._session is not None
+        assert client._lazy_reconnect is True
+
+        ok = await client.invalidate_for_lazy_reconnect(timeout=0.5)
+        assert ok is True
+        assert client._session is None
+        assert client._lazy_reconnect is True
+        assert len(state["disconnect_tasks"]) >= 1
+        await _stop(client)
+
+    @pytest.mark.asyncio
+    async def test_do_disconnect_aclose_cleans_after_session_nulled(self) -> None:
+        """Even if ``_session`` was nulled early, aclose still tears the stack.
+
+        Call-timeout paths used to null ``_session`` then skip manual
+        ``__aexit__``; zombie SSE generators stayed open. aclose-based
+        teardown must still run when the ref is already gone.
+        """
+        client = _make_client()
+        aclose_calls: list[int] = []
+
+        class _Stack:
+            async def aclose(self) -> None:
+                aclose_calls.append(1)
+
+        client._exit_stack = _Stack()  # type: ignore[assignment]
+        client._session = None  # simulate timeout half-detach
+        client._client = object()
+        client._read = object()
+        client._write = object()
+
+        assert await client._do_disconnect(timeout=1.0) is True
+        assert aclose_calls == [1]
+        assert client._session is None
+        assert client._client is None
+        assert client._read is None
+        assert client._write is None
+        assert client._is_disconnected is True
+
+    @pytest.mark.asyncio
+    async def test_disconnect_releases_waiter_for_cancelled_teardown_group(self) -> None:
+        """aclose raising a CancelledError group must not hang disconnect/lock.
+
+        anyio teardown often wraps CancelledError in BaseExceptionGroup. The
+        group is not an instance of CancelledError, so a naive ``raise`` would
+        bypass the disconnect handler and leave ``await fut`` unfinished while
+        ``_lifecycle_lock`` is still held.
+        """
+        client = _make_client()
+
+        class _CancelledTeardown:
+            async def aclose(self) -> None:
+                raise BaseExceptionGroup("teardown", [asyncio.CancelledError()])
+
+        client._exit_stack = _CancelledTeardown()  # type: ignore[assignment]
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(client.disconnect(), timeout=0.2)
+        assert client._session is None
+        assert client._is_disconnected is True
+        # Lock must be free; a stuck lock would block past this timeout.
+        async with asyncio.timeout(0.2):
+            async with client._lifecycle_lock:
+                pass
+        await _stop(client)
+
+    @pytest.mark.asyncio
+    async def test_disconnect_preserves_real_error_from_mixed_teardown_group(self) -> None:
+        """A mixed teardown group must surface the real Exception to the caller."""
+        client = _make_client()
+
+        class _MixedTeardown:
+            async def aclose(self) -> None:
+                raise BaseExceptionGroup(
+                    "teardown",
+                    [asyncio.CancelledError(), RuntimeError("real teardown failure")],
+                )
+
+        client._exit_stack = _MixedTeardown()  # type: ignore[assignment]
+        with pytest.raises(RuntimeError, match="real teardown failure"):
+            await asyncio.wait_for(client.disconnect(), timeout=0.2)
+        assert client._session is None
+        assert client._is_disconnected is True
+        await _stop(client)
+
+    @pytest.mark.asyncio
+    async def test_invalidate_releases_lock_after_cancelled_teardown_group(self) -> None:
+        """invalidate_for_lazy_reconnect must release _lifecycle_lock on group cancel."""
+        client = _make_client()
+        _install_fake_lifecycle(client)
+        await client.connect()
+
+        class _CancelledTeardown:
+            async def aclose(self) -> None:
+                raise BaseExceptionGroup("teardown", [asyncio.CancelledError()])
+
+        # Drive the real _do_disconnect path (not the lifecycle fake).
+        client._do_disconnect = SseClient._do_disconnect.__get__(client, SseClient)
+        client._exit_stack = _CancelledTeardown()  # type: ignore[assignment]
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(client.invalidate_for_lazy_reconnect(), timeout=0.2)
+        # Restore fakes so a second invalidate can succeed; hang here means lock stuck.
+        _install_fake_lifecycle(client)
+        assert await asyncio.wait_for(
+            client.invalidate_for_lazy_reconnect(timeout=0.5), timeout=0.5
+        ) is True
+        await _stop(client)
+
+    @pytest.mark.asyncio
+    async def test_do_disconnect_watchdog_swallows_cancelled_teardown_group(self) -> None:
+        """Watchdog cancel re-wrapped as BaseExceptionGroup still returns False."""
+        client = _make_client()
+        started = asyncio.Event()
+
+        class _GroupOnCancel:
+            async def aclose(self) -> None:
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    raise BaseExceptionGroup(
+                        "teardown", [asyncio.CancelledError()]
+                    )
+
+        client._exit_stack = _GroupOnCancel()  # type: ignore[assignment]
+        task = asyncio.create_task(client._do_disconnect(timeout=0.05))
+        await started.wait()
+        assert await asyncio.wait_for(task, timeout=0.5) is False
+        assert client._session is None
+        assert client._is_disconnected is True

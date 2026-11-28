@@ -114,7 +114,7 @@ class EvolutionReviewRuntime:
             session_id=session_id,
             evolution_review_ref=ref,
             user_intent=user_intent,
-            trajectory=Trajectory.from_otlp(trajectory.to_otlp()) if trajectory is not None else None,
+            trajectory=trajectory.snapshot() if trajectory is not None else None,
         )
         self._scopes_by_ref[ref] = scope
         return EvolutionReviewLaunch(

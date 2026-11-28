@@ -3,13 +3,13 @@
 import asyncio
 import json
 import re
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from openjiuwen.symphony import EvolutionSubmitResult, SymphonyConfig, SymphonyRuntime
+from openjiuwen.symphony import CapabilityDescriptor, EvolutionSubmitResult, SymphonyConfig, SymphonyRuntime
+from openjiuwen.symphony.discovery import CapabilityCandidate
 
 
 def make_config(tmp_path, **overrides):
@@ -49,12 +49,12 @@ async def test_constructor_is_lazy_isolated_and_does_not_close_host_model(tmp_pa
     assert not (tmp_path / "runtime").exists()
 
 
-def test_runtime_rejects_multiple_sources_before_creating_artifacts(tmp_path):
+def test_runtime_validates_every_source_before_creating_artifacts(tmp_path):
     config = make_config(tmp_path, capability={"sources": [
         {"type": "skill", "root": str(tmp_path / "skills")},
-        {"type": "expert", "root": str(tmp_path / "experts")},
+        {"type": "expert", "root": str(tmp_path / "runtime" / "experts")},
     ]})
-    with pytest.raises(ValueError, match=r"exactly one capability\.sources entry"):
+    with pytest.raises(ValueError, match=r"capability\.sources\.1\.root"):
         SymphonyRuntime(None, config)
     assert not (tmp_path / "runtime").exists()
 
@@ -71,7 +71,9 @@ async def test_independent_disabled_capabilities_are_queryable_but_reject_execut
     with pytest.raises(RuntimeError, match="disabled"):
         runtime.retrieval.read()
     with pytest.raises(RuntimeError, match="disabled"):
-        runtime.retrieval.create_session(config=runtime.config.retrieval.model_copy(update={"enabled": True}))
+        runtime.retrieval.bind_search(config=runtime.config.retrieval.model_copy(update={"enabled": True}))
+    with pytest.raises(RuntimeError, match="disabled"):
+        await runtime.retrieval.search(query="invoice")
     with pytest.raises(RuntimeError, match="disabled"):
         await runtime.flow.start()
     await runtime.aclose()
@@ -96,30 +98,92 @@ async def test_disabled_experience_rejects_all_new_evidence_without_creating_sto
         await runtime.aclose()
 
 
-@pytest.mark.parametrize("kind", ["expert", "connector", "mcp"])
+@pytest.mark.parametrize("with_skill", [True, False])
 @pytest.mark.asyncio
-async def test_unimplemented_reader_fails_explicitly_on_use(tmp_path, kind):
-    config = make_config(tmp_path, capability={"sources": [{"type": kind, "root": str(tmp_path / "capabilities")}]})
-    runtime = SymphonyRuntime(None, config)
-    with pytest.raises(ValueError, match="Unsupported capability reader"):
-        runtime.retrieval.status()
-    assert not (tmp_path / "runtime").exists()
-    await runtime.aclose()
+async def test_host_mcp_catalog_binds_independently_of_directory_readers(tmp_path, with_skill):
+    # A valid Skill inside the MCP package must stay out of the static inventory.
+    write_capability(tmp_path / "mcp", "package-only")
+    sources = [{"type": "mcp", "root": str(tmp_path / "mcp" / "capabilities")}]
+    expected = []
+    if with_skill:
+        write_capability(tmp_path)
+        sources.append({"type": "skill", "root": str(tmp_path / "capabilities")})
+        expected = ["alpha"]
+    runtime = SymphonyRuntime(None, make_config(tmp_path, capability={"sources": sources}))
+    catalog = AsyncMock(return_value=[CapabilityCandidate(
+        CapabilityDescriptor(capability_type="mcp", capability_id="office", name="Office", description="ledger"),
+    )])
+    try:
+        runtime.retrieval.bind_search(catalog_candidates=catalog)
+        tool, = runtime.retrieval.get_tools()
+        assert tool.card.name == "capability_search"
+        selector = tool.card.input_params["properties"]["type"]
+        assert selector["type"] == "array" and selector["items"]["enum"] == ["skill", "expert", "mcp"]
+        result = await tool.invoke({"type": "mcp", "query": ["ledger"], "top_k": 2})
+        assert [(item["type"], item["id"]) for item in result["matches"]] == [("mcp", "office")]
+        catalog.assert_awaited_once_with("mcp")
+        with pytest.raises(ValueError, match="type must be one of"):
+            await runtime.retrieval.search("ledger", type="connector")
+        result = await runtime.retrieval.search(type=["skill"], operation="list")
+        assert result.detailed_output["observed_skill_ids"] == expected
+        assert runtime.retrieval.status()["counts"]["capability_count"] == len(expected)
+        if with_skill:
+            assert runtime.retrieval.artifact_root == tmp_path / "runtime" / "tree"
+            assert (await runtime.retrieval.build())["success"]
+            assert runtime.retrieval.status()["indexed_count"] == 1
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_discovery_skips_invalid_manifest_and_preserves_published_index(tmp_path):
+    write_capability(tmp_path)
+    write_capability(tmp_path, "broken")
+    runtime = SymphonyRuntime(None, make_config(tmp_path, retrieval={"use_existing_index": True}))
+    try:
+        built = await runtime.retrieval.build()
+        assert built["success"], built
+        fingerprint = tmp_path / "runtime" / "cache" / "fingerprints" / "fingerprint.json"
+        published_fingerprint = fingerprint.read_bytes()
+        write_capability(tmp_path, "broken", "Unquoted key: value")
+
+        tool, = runtime.retrieval.get_tools()
+        assert tool.card.name == "capability_search"
+        result = await tool.invoke({"type": ["skill"], "query": "invoice"})
+        assert result.detailed_output["observed_skill_ids"] == ["alpha"]
+
+        status = runtime.retrieval.status()
+        assert status["index_exists"] and status["version"] == built["version"]
+        assert not status["fresh"]
+        assert any(
+            diagnostic.get("code") == "invalid_frontmatter" and diagnostic.get("path") == "broken/SKILL.md"
+            for diagnostic in status["diagnostics"]
+        )
+        with pytest.raises(ValueError, match=r"invalid_frontmatter.*broken/SKILL\.md"):
+            await runtime.retrieval.build()
+        assert runtime.retrieval.read()["version"] == built["version"]
+        assert fingerprint.read_bytes() == published_fingerprint
+
+        write_capability(tmp_path, "broken")
+        result = await tool.invoke({"type": ["skill"], "query": "invoice"})
+        assert set(result.detailed_output["observed_skill_ids"]) == {"alpha", "broken"}
+    finally:
+        await runtime.aclose()
 
 
 @pytest.mark.asyncio
 async def test_no_model_discovery_and_fallback_build_with_real_directory(tmp_path):
     write_capability(tmp_path)
     runtime = SymphonyRuntime(None, make_config(tmp_path, retrieval={"prompt": {"context_window_tokens": 4000}, "output": {"max_results": 2}}))
-    session = runtime.retrieval.create_session(session_scope="test")
-    settings = session.environment.settings
+    directory = runtime.retrieval.bind_search(session_scope="test")
+    settings = directory.settings
     assert settings == runtime.config.retrieval
     assert settings is not runtime.config.retrieval
     runtime.config.retrieval.prompt.preferred_capability_ids.append("runtime-mutation")
     assert "runtime-mutation" not in settings.prompt.preferred_capability_ids
-    assert [r.worker_id for r in session.records()] == ["alpha"]
+    assert [r.worker_id for r in directory.records()] == ["alpha"]
     assert settings.prompt.candidate_budget_tokens == 40
-    result = await session.skill_index(operation="search", query="invoice")
+    result = await runtime.retrieval.search(query="invoice")
     assert "alpha" in str(result)
     built = await runtime.retrieval.build()
     assert built["success"], built
@@ -128,7 +192,7 @@ async def test_no_model_discovery_and_fallback_build_with_real_directory(tmp_pat
     with pytest.raises(ValueError, match="requires a model"):
         await runtime.orchestration.build()
     with pytest.raises(ValueError, match="requires a model"):
-        await runtime.orchestration.plan("invoice")
+        await runtime.orchestration.plan("invoice", type="skill")
     await runtime.aclose()
 
 
@@ -139,13 +203,13 @@ async def test_live_session_visibility_and_additional_directory_do_not_enter_con
     write_capability(overlay, "session-only")
     disabled = set()
     runtime = SymphonyRuntime(None, make_config(tmp_path))
-    session = runtime.retrieval.create_session(
+    directory = runtime.retrieval.bind_search(
         session_scope="overlay", capability_directories=[tmp_path / "capabilities", overlay / "capabilities"],
         disabled_capability_ids=lambda: disabled, visible_capability_ids=lambda: {"alpha", "session-only"},
     )
-    assert set(session.environment.selection_cards()) == {"alpha", "session-only"}
+    assert set(directory.selection_cards()) == {"alpha", "session-only"}
     disabled.add("session-only")
-    assert set(session.environment.selection_cards(refresh=True)) == {"alpha"}
+    assert set(directory.selection_cards(refresh=True)) == {"alpha"}
     assert runtime.config.capability.sources[0].root == str(tmp_path / "capabilities")
     await runtime.aclose()
 
@@ -172,6 +236,66 @@ async def test_layout_rejects_legacy_and_different_collection_without_deleting_f
     with pytest.raises(ValueError, match="different collection"):
         other.retrieval.read()
     await other.aclose()
+
+
+@pytest.mark.asyncio
+async def test_graph_build_binds_root_with_catalog_fingerprints_and_finder_metadata(tmp_path):
+    write_capability(tmp_path)
+    experts = tmp_path / "experts"
+    experts.mkdir()
+    root = tmp_path / "runtime"
+    fingerprints = root / "cache" / "fingerprints"
+    catalog_files = []
+    for kind in ("expert", "connector", "mcp"):
+        cache = fingerprints / kind / "fingerprint.json"
+        cache.parent.mkdir(parents=True)
+        cache.write_text("{}")
+        catalog_files.append(cache)
+    finder_files = [directory / ".DS_Store" for directory in (root, root / "cache", fingerprints)]
+    config = make_config(tmp_path, capability={"sources": [
+        {"type": "skill", "root": str(tmp_path / "capabilities")},
+        {"type": "expert", "root": str(experts)},
+    ]})
+    runtime = SymphonyRuntime(GraphModel(), config)
+    try:
+        taxonomy_root = runtime.retrieval.artifact_root.parent
+        taxonomy_root.mkdir(parents=True)
+        finder_files.append(taxonomy_root / ".DS_Store")
+        for path in finder_files:
+            path.write_bytes(b"finder metadata")
+
+        assert not runtime.orchestration.status().exists
+        assert not (root / "runtime.json").exists()
+
+        built = await runtime.orchestration.build(force=True)
+        assert runtime.orchestration.status().version == built.version
+        assert runtime.orchestration.read()["schema_version"] == "2.0"
+        assert (root / "runtime.json").is_file()
+        assert (taxonomy_root / "runtime.json").is_file()
+        assert all(path.read_text() == "{}" for path in catalog_files)
+        assert all(path.read_bytes() == b"finder metadata" for path in finder_files)
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_graph_binding_rejects_unowned_skill_fingerprints_alongside_catalog_cache(tmp_path):
+    write_capability(tmp_path)
+    root = tmp_path / "runtime"
+    fingerprints = root / "cache" / "fingerprints"
+    (fingerprints / "connector").mkdir(parents=True)
+    legacy = fingerprints / "fingerprint.json"
+    legacy.write_text("historical")
+    runtime = SymphonyRuntime(GraphModel(), make_config(tmp_path))
+    try:
+        with pytest.raises(ValueError, match="Unsupported Symphony artifact layout"):
+            runtime.orchestration.status()
+        with pytest.raises(ValueError, match="populated before collection binding"):
+            await runtime.orchestration.build()
+        assert not (root / "runtime.json").exists()
+        assert legacy.read_text() == "historical"
+    finally:
+        await runtime.aclose()
 
 
 @pytest.mark.asyncio
@@ -258,6 +382,64 @@ class GraphModel:
 
 
 @pytest.mark.asyncio
+async def test_retrieval_build_and_graph_share_fingerprint_extraction(tmp_path):
+    skill = write_capability(tmp_path) / "SKILL.md"
+
+    class FingerprintModel(GraphModel):
+        model_config = SimpleNamespace(model_name="fixture")
+        extractions = 0
+
+        async def invoke(self, messages, **kwargs):
+            if "Extract a capability fingerprint" in messages[0]["content"]:
+                self.extractions += 1
+                return SimpleNamespace(content=json.dumps({
+                    "semantic_profile": {"summary": "Invoice helper", "use_cases": ["escrowreconciliation"]},
+                }))
+            return await super().invoke(messages, **kwargs)
+
+    config = make_config(tmp_path, orchestration={"enabled": False}).model_dump()
+    config["capability"]["fingerprint"]["extraction"]["llm_enabled"] = True
+    model = FingerprintModel()
+    runtime = SymphonyRuntime(model, SymphonyConfig.model_validate(config))
+    disabled = set()
+    try:
+        assert (await runtime.retrieval.build())["success"]
+        assert model.extractions == 1
+        runtime.retrieval.bind_search(disabled_capability_ids=lambda: disabled)
+        tool, = runtime.retrieval.get_tools()
+        result = await tool.invoke({"type": "skill", "query": "escrowreconciliation"})
+        assert result.detailed_output["observed_skill_ids"] == ["alpha"]
+        assert "Invoice helper" in result
+        assert model.extractions == 1
+    finally:
+        await runtime.aclose()
+
+    config["orchestration"]["enabled"] = True
+    runtime = SymphonyRuntime(model, SymphonyConfig.model_validate(config))
+    try:
+        graph = await runtime.orchestration.build()
+        assert graph.counts["reused_count"] == 1
+        assert model.extractions == 1
+        published = graph.graph_path.with_name("fingerprint.json")
+        shared = tmp_path / "runtime" / "cache" / "fingerprints" / "fingerprint.json"
+        assert published.read_bytes() == shared.read_bytes()
+        runtime.retrieval.bind_search(disabled_capability_ids=lambda: disabled)
+        disabled.add("alpha")
+        hidden = await runtime.retrieval.search("escrowreconciliation", type="skill")
+        assert not hidden.detailed_output["observed_skill_ids"]
+        disabled.clear()
+        skill.write_text(skill.read_text().replace("Process invoice documents", "Prepare payroll"))
+        stale = await runtime.retrieval.search("escrowreconciliation", type="skill")
+        assert not stale.detailed_output["observed_skill_ids"]
+        current = await runtime.retrieval.search("payroll", type="skill")
+        assert "Prepare payroll" in current
+        assert (await runtime.retrieval.build())["success"]
+        assert model.extractions == 2
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
 async def test_experience_distills_on_third_success_and_planning_can_read_after_disabling_it(tmp_path):
     for name in ("alpha", "beta"):
         write_capability(tmp_path, name)
@@ -296,7 +478,7 @@ async def test_experience_distills_on_third_success_and_planning_can_read_after_
     reader = SymphonyRuntime(GraphModel(), config)
     try:
         assert not reader.flow.enabled
-        planned = (await reader.orchestration.plan("invoice", candidate_ids=[])).to_dict()["planned_graph"]
+        planned = (await reader.orchestration.plan("invoice", type="skill", candidate_ids=[])).to_dict()["planned_graph"]
         assert planned["graph_snapshot"]["observation_revision"] == learned["observation_revision"]
     finally:
         await reader.aclose()
@@ -311,7 +493,7 @@ async def test_empty_or_unknown_candidate_set_never_expands_to_inventory(tmp_pat
     runtime = SymphonyRuntime(model, make_config(tmp_path, orchestration={"plan": {"mode": mode}}))
     await runtime.orchestration.build()
     calls_before = model.calls
-    result = (await runtime.orchestration.plan("invoice", candidate_ids=candidates)).to_dict()["planned_graph"]["graph"]
+    result = (await runtime.orchestration.plan("invoice", type="skill", candidate_ids=candidates)).to_dict()["planned_graph"]["graph"]
     assert result["metadata"]["status"] == "no_plan"
     assert result["nodes"] == {} and result["edges"] == []
     assert model.calls == calls_before
@@ -344,11 +526,11 @@ async def test_inventory_change_in_prepare_hook_keeps_previous_version(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_first_discovery_session_does_not_claim_unbound_storage(tmp_path):
+async def test_first_search_does_not_claim_unbound_storage(tmp_path):
     write_capability(tmp_path)
     runtime = SymphonyRuntime(None, make_config(tmp_path, retrieval={"use_existing_index": True}))
-    session = runtime.retrieval.create_session(pin_index_revision=True)
-    assert session.records()
+    result = await runtime.retrieval.search(query="invoice")
+    assert [(row["type"], row["id"]) for row in result["matches"]] == [("skill", "alpha")]
     assert not (tmp_path / "runtime").exists()
     assert (await runtime.retrieval.build())["success"]
     await runtime.aclose()
@@ -382,19 +564,81 @@ async def test_close_drains_graph_mutation_before_it_can_publish(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_discovery_limits_and_source_ids_apply_through_session(tmp_path):
+async def test_runtime_and_tool_share_search_limits_source_ids_and_cursors(tmp_path):
     for index in range(6):
         write_capability(tmp_path, f"object-{index}")
     path = tmp_path / "capabilities" / "object-0" / "SKILL.md"
     path.write_text(path.read_text().replace("name: object-0", "name: Display Name"))
     runtime = SymphonyRuntime(None, make_config(tmp_path, retrieval={"output": {"max_results": 2, "max_list_entries": 1}}))
-    session = runtime.retrieval.create_session(source_by_id={"object-0": "session"})
-    assert next(item for item in session.records() if item.worker_id == "object-0").source == "session"
-    listed = await session.skill_index(operation="list")
-    searched = await session.skill_index(operation="search", query=["invoice", "documents"])
+    directory = runtime.retrieval.bind_search(source_by_id={"object-0": "session"})
+    assert next(item for item in directory.records() if item.worker_id == "object-0").source == "session"
+    listed = await runtime.retrieval.search(type=("skill",), operation="list")
+    tool, = runtime.retrieval.get_tools()
+    searched = await tool.invoke({"type": ["skill"], "query": ["invoice", "documents"]})
     assert listed.detailed_output["shown_count"] <= 1
     assert searched.detailed_output["shown_count"] <= 2
+    next_page = await runtime.retrieval.search(cursor=searched.detailed_output["next_cursor"])
+    assert next_page.detailed_output["observed_skill_ids"]
+    assert set(searched.detailed_output["observed_skill_ids"]).isdisjoint(next_page.detailed_output["observed_skill_ids"])
     await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_rebinding_search_revokes_the_previous_tool_and_cursor(tmp_path):
+    for name in ("alpha", "beta", "gamma"):
+        write_capability(tmp_path, name)
+    runtime = SymphonyRuntime(None, make_config(tmp_path))
+    other = SymphonyRuntime(None, make_config(tmp_path))
+    try:
+        previous = runtime.retrieval.bind_search(session_scope="first", visible_capability_ids={"alpha", "beta"})
+        old_tool, = runtime.retrieval.get_tools()
+        assert old_tool.is_bound_to(runtime.retrieval, previous, "first")
+        assert not old_tool.is_bound_to(other.retrieval, previous, "first")
+        first = await runtime.retrieval.search(type=["skill"], operation="list", top_k=1)
+        cursor = first.detailed_output["next_cursor"]
+        assert cursor
+
+        current = runtime.retrieval.bind_search(session_scope="second", visible_capability_ids={"gamma"})
+        tool, = runtime.retrieval.get_tools()
+        assert tool.is_bound_to(runtime.retrieval, current, "second")
+        assert not tool.is_bound_to(runtime.retrieval, previous, "first")
+        assert not old_tool.is_bound_to(runtime.retrieval, previous, "first")
+        with pytest.raises(RuntimeError, match="closed"):
+            await old_tool.invoke({"operation": "list"})
+        with pytest.raises(ValueError, match="cursor"):
+            await runtime.retrieval.search(operation="list", cursor=cursor)
+        result = await tool.invoke({"type": ["skill"], "operation": "list"})
+        assert result.detailed_output["observed_skill_ids"] == ["gamma"]
+    finally:
+        await other.aclose()
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_runtime_close_drains_search_started_before_rebinding(tmp_path):
+    write_capability(tmp_path)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def catalog(kind):
+        started.set()
+        await release.wait()
+        return [CapabilityCandidate(CapabilityDescriptor(capability_type=kind, capability_id="first", name="first"))]
+
+    runtime = SymphonyRuntime(None, make_config(tmp_path))
+    runtime.retrieval.bind_search(catalog_candidates=catalog)
+    pending = asyncio.create_task(runtime.retrieval.search("first", type="mcp"))
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        runtime.retrieval.bind_search()
+        assert await runtime.retrieval.search("second", type="mcp") == {"matches": [], "next_cursor": None}
+        closing = asyncio.create_task(runtime.aclose())
+        done, _ = await asyncio.wait({closing}, timeout=0.05)
+        assert not done
+    finally:
+        release.set()
+        await runtime.aclose()
+    assert [row["id"] for row in (await pending)["matches"]] == ["first"]
+    await closing
 
 
 @pytest.mark.asyncio
@@ -408,7 +652,7 @@ async def test_cancelled_close_waiter_still_drains_nested_graph_operation_and_fl
     flow._worker_task = asyncio.create_task(release_flow.wait())
 
     async def prepare(_path):
-        await runtime.orchestration.plan("invoice", candidate_ids=[])
+        await runtime.orchestration.plan("invoice", type="skill", candidate_ids=[])
         entered.set()
         await asyncio.Event().wait()
 

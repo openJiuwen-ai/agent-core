@@ -190,6 +190,7 @@ class PowerShellTool(Tool):
                         exit_code=res.data.exit_code if res.data.exit_code is not None else -1,
                         warning=warning,
                         max_output_chars=p.max_output_chars,
+                        operation=self._operation,
                     ),
                     res.message,
                 )
@@ -215,6 +216,7 @@ class PowerShellTool(Tool):
                 exit_code=exit_code,
                 warning=warning,
                 max_output_chars=p.max_output_chars,
+                operation=self._operation,
             ),
             meaning.is_error,
         )
@@ -314,6 +316,7 @@ class PowerShellTool(Tool):
                 exit_code=final_exit_code,
                 warning=warning,
                 max_output_chars=p.max_output_chars,
+                operation=self._operation,
             ),
             meaning.is_error,
         )

@@ -27,6 +27,19 @@ class AskUserRequest(InterruptRequest):
     questions: List[dict] = Field(default_factory=list, description="Questions to present to the user")
 
 
+def parse_ask_user_payload(value: Any, questions: list[dict]) -> AskUserPayload:
+    """Normalize the answer shapes accepted by the ask_user interrupt."""
+    if isinstance(value, AskUserPayload):
+        return value
+    if isinstance(value, dict) and isinstance(value.get("answers"), dict):
+        return AskUserPayload(answers=value["answers"])
+    if isinstance(value, dict) and len(questions) == 1 and "answer" in value:
+        return AskUserPayload(answers={questions[0].get("question", ""): value["answer"]})
+    if isinstance(value, str) and value and questions:
+        return AskUserPayload(answers={questions[0].get("question", ""): value})
+    return AskUserPayload()
+
+
 class AskUserRail(BaseInterruptRail):
     """Ask-user rail: returns user input without executing tool.
 
@@ -74,22 +87,8 @@ class AskUserRail(BaseInterruptRail):
             return self.interrupt(self._build_ask_request(tool_call))
 
         try:
-            if isinstance(user_input, AskUserPayload):
-                payload = user_input
-            elif isinstance(user_input, dict):
-                payload = self._parse_user_input_dict(user_input, tool_call)
-            elif isinstance(user_input, str):
-                if not user_input:
-                    return self.interrupt(self._build_ask_request(tool_call))
-                args = self._parse_tool_args(tool_call)
-                questions = args.get("questions", [])
-                if questions:
-                    first_question = questions[0].get("question", "")
-                    payload = AskUserPayload(answers={first_question: user_input})
-                else:
-                    return self.interrupt(self._build_ask_request(tool_call))
-            else:
-                return self.interrupt(self._build_ask_request(tool_call))
+            questions = self._parse_tool_args(tool_call).get("questions", [])
+            payload = parse_ask_user_payload(user_input, questions)
         except Exception:
             return self.interrupt(self._build_ask_request(tool_call))
 
@@ -98,18 +97,6 @@ class AskUserRail(BaseInterruptRail):
 
         tool_result = self._format_tool_result(tool_call, payload)
         return self.reject(tool_result=tool_result)
-
-    def _parse_user_input_dict(self, user_input: dict, tool_call: Optional[ToolCall]) -> AskUserPayload:
-        """Parse user input dict to AskUserPayload."""
-        if "answers" in user_input and isinstance(user_input["answers"], dict):
-            return AskUserPayload(answers=user_input["answers"])
-        args = self._parse_tool_args(tool_call)
-        questions = args.get("questions", [])
-        if questions and len(questions) == 1:
-            first_question = questions[0].get("question", "")
-            if "answer" in user_input:
-                return AskUserPayload(answers={first_question: user_input["answer"]})
-        return AskUserPayload()
 
     def _format_tool_result(self, tool_call: Optional[ToolCall], payload: AskUserPayload) -> str:
         """Format tool result in Claude Code style."""

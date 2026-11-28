@@ -2,8 +2,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from abc import ABC, abstractmethod
 
-from pymilvus.client.utils import is_successful
-
 from openjiuwen.core.common.constants.constant import INTERACTIVE_INPUT
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
@@ -167,6 +165,11 @@ class InMemoryCheckpointer(Checkpointer):
             if is_succeed:
                 session_logger.info(f"Succeed to clear all of current workflow's checkpoints on {reason}",
                                     **log_message)
+
+    def agent_checkpoint_token(self, session_id: str, agent_id: str) -> object | None:
+        """Identify the exact saved snapshot without reading or restoring its state."""
+        storage = self._agent_stores.get(session_id)
+        return storage.state_blobs.get(agent_id) if storage is not None else None
 
     async def pre_agent_execute(self, session: BaseSession, inputs):
         agent_id = session.agent_id() if hasattr(session, "agent_id") else 'Na'

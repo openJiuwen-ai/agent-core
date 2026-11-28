@@ -12,7 +12,7 @@ author_email: chengshuo5@huawei.com
 
 # S_18 Harness 交互契约（HarnessProtocol / MemberRuntime）
 
-最近一次修订日期：2026-11-10
+最近一次修订日期：2026-11-23
 
 本 spec 定义 agent_teams harness 层的对外交互契约。阶段 1（NativeHarness 接管 task
 loop）的实现细节见 [[F_27_native-harness-task-loop]]；阶段 B（NativeHarness 收编
@@ -274,3 +274,12 @@ replace 使用 expected_version 做 CAS。平台应在成员执行前初始化�
 
 冷恢复接入当前 runtime_spec.build_context 时，build_context_seed 同步深拷贝当前值（包括 None），
 避免 leader 使用新策略而进程派生成员从 checkpoint 的旧 seed 重建。见 `B_20261104_2054_recovered-context-seed-and-execution-environment`。
+
+## Team 文档记忆生命周期
+
+NativeHarness.dispose 永久退出时调用 close_team_memory，排空该回答者 JiuwenTeamMemoryRail 的写入，
+注销其主/子 Agent 使用者并关闭 Provider。TeamHarness.start/run_once 替换 TERMINATED 实例前也执行
+该清理，但不释放新周期复用的 sys_operation。stop/pause 保留记忆引用；清理幂等且单个 Rail 失败不阻断其他资源清理。
+每位回答者独立持有 Rail/Provider，共享 Runtime 的最后引用释放由宿主持有者判断，Core 不直接关闭共享 Runtime。
+
+任务完成或提交评审后，任务管理器将已提交的任务 ID 和版本关联到执行者当前回合。验收通知以任务修订号和评审轮次标识同一版本，原作者的记忆 Rail 可将该轮成功回复与验收材料合并。

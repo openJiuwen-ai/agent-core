@@ -9,6 +9,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from unittest.mock import AsyncMock
 import pytest_asyncio
 
 from openjiuwen.core.common.constants.constant import INTERACTION
@@ -21,8 +22,9 @@ from openjiuwen.harness.rails.memory import jiuwen_memory_rail as memory_module
 from openjiuwen.harness.rails.memory import memory_turn as turn_module
 from openjiuwen.harness.rails.memory.jiuwen_memory_coding_rail import JiuwenMemoryCodingRail
 from openjiuwen.harness.rails.memory.jiuwen_memory_rail import JiuwenMemoryRail
+from openjiuwen.harness.rails.memory.jiuwen_team_memory_rail import JiuwenTeamMemoryRail
 from tests.unit_tests.fixtures.deep_agent_interrupts import (
-    APPROVE, ask_permissions, by_call_id, by_interrupt_id,
+    APPROVE, CountingTool, ask_permissions, by_call_id, by_interrupt_id,
     make_deep_agent, pending, run, scripted,
 )
 from tests.unit_tests.fixtures.mock_llm import (
@@ -120,6 +122,64 @@ async def test_real_ask_user_turn_is_synced_once(tmp_path, runner, rail_type, st
         await drive(agent, "新任务", streaming)
         await wait_for_sync(rail)
         assert provider.sync_calls[-1] == ("新任务", "下一轮回复")
+
+
+async def test_team_ask_user_keeps_verified_selection_separate_from_question(tmp_path, runner):
+    provider = MockMemoryProvider()
+    provider.sync_turn = AsyncMock()
+    rail = JiuwenTeamMemoryRail(provider)
+    agent = make_deep_agent(tmp_path, rails=[AskUserRail(), rail])
+    question = "交接文档要用什么格式？"
+    call = create_tool_call_response("ask_user", json.dumps({"questions": [{
+        "header": "交接", "question": question, "options": [{"label": "A", "description": "PDF"}],
+    }]}), tool_call_id="ask_selection")
+    llm = MockLLMModel()
+    llm.set_responses([call, create_text_response("按你选的格式交接")])
+    with scripted(llm):
+        [(_, request)] = pending(await run(agent, "完成交接", "team-memory-selection"))
+        await run(agent, by_interrupt_id(request, {"answers": {question: "A"}}), "team-memory-selection")
+        await rail.drain()
+    provider.sync_turn.assert_awaited_once()
+    sources = provider.sync_turn.await_args.kwargs["sources"]
+    assert any(source["role"] == "agent" and source["text"] == question for source in sources)
+    assert [{key: value for key, value in source.items() if key != "id"}
+            for source in sources if source["role"] == "user"] == [{
+                "role": "user", "text": "A", "selection": {"question": question, "description": "PDF"},
+            }]
+
+
+async def test_team_acceptance_uses_its_own_final_reply(tmp_path, runner):
+    from openjiuwen.agent_teams.schema.events import TaskAcceptedEvent
+
+    provider = MockMemoryProvider()
+    provider.sync_turn = AsyncMock()
+    rail = JiuwenTeamMemoryRail(provider)
+
+    class CompleteTask(CountingTool):
+        async def invoke(self, inputs, **kwargs):
+            task_id = inputs["x"]
+            rail.record_task_delivery(task_id, "1:0")
+            await rail.on_task_accepted(TaskAcceptedEvent(task_id, "1:0", "Make a report", "", ""))
+            return {"completed": True}
+
+    agent = make_deep_agent(tmp_path, tools=[CompleteTask("complete")], rails=[rail])
+    llm = MockLLMModel()
+    llm.set_responses([
+        create_tool_call_response("complete", '{"x":"file-only"}', tool_call_id="complete_1"),
+        create_text_response("已完成"),
+        create_tool_call_response("complete", '{"x":"report"}', tool_call_id="complete_2"),
+        create_text_response("Keep source order when consolidating duplicate rows."),
+    ])
+    with scripted(llm):
+        await run(agent, "交付附件", "accepted-file")
+        await rail.drain()
+        provider.sync_turn.assert_not_awaited()
+        await run(agent, "整理表格", "accepted-report")
+        await rail.drain()
+    provider.sync_turn.assert_awaited_once()
+    sources = provider.sync_turn.await_args.kwargs["sources"]
+    assert all(source["id"].startswith("report:1:0:") for source in sources)
+    assert sources[-1]["text"] == "Keep source order when consolidating duplicate rows."
 
 
 @pytest.mark.parametrize("streaming", [False, True])

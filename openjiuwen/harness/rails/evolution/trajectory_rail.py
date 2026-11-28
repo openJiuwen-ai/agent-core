@@ -84,7 +84,7 @@ class TrajectoryRail(EvolutionRail):
         atomic across concurrent Agent invokes or Team runs.
         """
 
-        payload = increment.to_otlp()
+        payload = increment.copy_compact_payload()
         selected = False
         for resource_span in payload.get("resourceSpans") or []:
             for scope_span in resource_span.get("scopeSpans") or []:

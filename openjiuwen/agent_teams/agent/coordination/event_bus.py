@@ -35,6 +35,9 @@ from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
 
 
+EVENT_BUS_STOP_TIMEOUT_SECONDS = 5.0
+
+
 # ------------------------------------------------------
 # Inner event types (local to the coordination layer)
 # ------------------------------------------------------
@@ -188,7 +191,7 @@ class EventBus:
             try:
                 await asyncio.wait_for(
                     self._loop_task,
-                    timeout=5.0,
+                    timeout=EVENT_BUS_STOP_TIMEOUT_SECONDS,
                 )
             except (
                 asyncio.TimeoutError,

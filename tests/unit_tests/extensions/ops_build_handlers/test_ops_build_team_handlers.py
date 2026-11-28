@@ -11,6 +11,7 @@ from openjiuwen.agent_teams.extensions.models import TeamPolicyContext
 from openjiuwen.agent_teams.extensions.ops import (
     TaskDependencyInfo,
     TeamReadView,
+    TeamSummary,
     bind_policy_context_scope,
     bind_team_scope,
 )
@@ -84,10 +85,14 @@ class _FakeResolver:
     def __init__(self, views: dict[str, _FakeView]) -> None:
         self.views = views
         self.requests: list[tuple[str | None, str]] = []
+        self.listing: list[TeamSummary] = []
 
     async def resolve(self, session_id: str | None, team_name: str):
         self.requests.append((session_id, team_name))
         return self.views.get(team_name)
+
+    async def list_teams(self) -> list[TeamSummary]:
+        return list(self.listing)
 
 
 def _member(member_name: str) -> MemberInfo:
@@ -209,6 +214,34 @@ async def test_inaccessible_team_raises() -> None:
     team = await _view_methods(resolver)
     with pytest.raises(BaseError):
         await team.info(team_name="research-team")
+
+
+@pytest.mark.asyncio
+async def test_list_returns_every_team_without_session_scoping() -> None:
+    """list passes the resolver's summaries through, with no session requirement."""
+    resolver = _FakeResolver({})
+    resolver.listing = [
+        TeamSummary(
+            team_name="research-team",
+            display_name="Research",
+            leader_member_name="leader",
+            created=1,
+            updated_at=2,
+            member_count=3,
+        ),
+        TeamSummary(
+            team_name="solo-team",
+            display_name=None,
+            leader_member_name=None,
+            created=None,
+            updated_at=None,
+            member_count=0,
+        ),
+    ]
+    team = await _view_methods(resolver)
+    assert await team.list() == resolver.listing
+    # list is global: it never goes through the session-scoped resolve.
+    assert resolver.requests == []
 
 
 @pytest.mark.asyncio

@@ -72,6 +72,9 @@ def _make_kernel_host(
         ),
         spawn_manager=SimpleNamespace(
             spawned_handles={},
+            arm_approval_recovery=MagicMock(),
+            disarm_approval_recovery=MagicMock(),
+            cancel_approval_recovery_tasks=AsyncMock(),
             cancel_recovery_tasks=AsyncMock(),
             shutdown_all_handles=AsyncMock(),
         ),
@@ -90,6 +93,36 @@ def _make_kernel_host(
         ),
         persist_allocator_state=MagicMock(),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize("operation", ["pause", "stop"])
+async def test_kernel_drains_host_notifications_before_session_release(operation):
+    host = _make_kernel_host()
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+    kernel._event_bus = SimpleNamespace(stop=AsyncMock(), is_running=True)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def drain():
+        kernel._event_bus.stop.assert_awaited_once()
+        entered.set()
+        await release.wait()
+        host.session_manager.release_session.assert_not_called()
+
+    kernel._dispatcher = SimpleNamespace(
+        group_message=SimpleNamespace(cancel_host_notifications=drain),
+        team_completion=SimpleNamespace(wait_for_completion_publish=AsyncMock()),
+    )
+    task = asyncio.create_task(getattr(kernel, operation)())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        host.session_manager.release_session.assert_not_called()
+    finally:
+        release.set()
+        await task
+    host.session_manager.release_session.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -635,3 +668,18 @@ async def test_start_never_builds_a_team_for_a_non_leader():
     await kernel.start(session)
 
     backend.build_team.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_jiuwen_writes_drain_before_session_release():
+    host = _make_kernel_host()
+    events = []
+    rail = SimpleNamespace(drain=AsyncMock(side_effect=lambda: events.append("drain")))
+    host.resources.harness.find_rails = MagicMock(return_value=[rail])
+    host.session_manager.release_session.side_effect = lambda: events.append("release")
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+    await kernel.pause()
+    await kernel.stop()
+    rail.drain.assert_awaited_once()
+    assert events[0] == "drain" and "release" in events

@@ -2091,7 +2091,8 @@ async def test_dream_time_gate_retains_count_until_next_eligible_iteration(tmp_p
     monkeypatch.setattr("openjiuwen.agent_evolving.ttse.dream.time.time", lambda: now + 24 * 3600 + 1)
     original_save = rail._ttse_store.save
 
-    async def failed_save():
+    async def failed_save(*, strict=False):
+        assert strict is True
         raise RuntimeError("bank save failed")
 
     monkeypatch.setattr(rail._ttse_store, "save", failed_save)

@@ -25,6 +25,7 @@ from openjiuwen.core.events.ops_impl.fs.models import (
 )
 from openjiuwen.core.events.types import OPS_BUILD_EVENT_TYPE, Event, SessionContext
 from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation.result.fs_operation_result import (
     FileSystemData,
     FileSystemItem,
@@ -111,6 +112,7 @@ class _DeepConfig:
 
 class _Agent:
     def __init__(self, operation: _FakeSysOperation | None, cwd: str) -> None:
+        self.card = AgentCard(id="fs-ops-agent")
         self.deep_config = _DeepConfig(operation, cwd)
 
 

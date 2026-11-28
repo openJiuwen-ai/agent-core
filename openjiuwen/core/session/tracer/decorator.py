@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+import inspect
 import time
 from typing import Any
 
@@ -274,11 +275,42 @@ def async_trace_stream(func, session, invoke_type: InvokeType, instance_info,
     async def _as_async_gen(*args, **kwargs):
         """Normalize func to async generator so create_wrap_decorator takes the generator path."""
         result = func(*args, **kwargs)
+        if inspect.iscoroutine(result):
+            # Plain ``async def`` streaming entry (returns an async iterator,
+            # or raises before any chunk): await it first, otherwise the
+            # coroutine is dropped un-awaited and the decorated stream
+            # silently runs empty.
+            result = await result
         if hasattr(result, "__aiter__") or hasattr(result, "__anext__"):
             async for item in result:
                 yield item
 
     return create_wrap_decorator(handler)(_as_async_gen)
+
+
+def _model_display_name(model) -> str:
+    """Optional human-readable model display name, when the caller set one.
+
+    Probes the client-config carriers first (the foundation ``Model`` keeps
+    its ``ModelClientConfig`` at the top level; component configs nest it
+    under ``config``), then the request configs (``extra="allow"`` field),
+    and last a display name set directly on the model object by wiring
+    code — the same lowest-priority carrier the rail-side
+    ``_resolve_model_display_name`` probe reads, so both producers agree
+    on one name.
+    Empty when absent — the probe result below stays untouched, so spans of
+    models built without a display name are byte-identical to before.
+    """
+    for config in (
+        getattr(model, "model_client_config", None),
+        getattr(getattr(model, "config", None), "model_client_config", None),
+        getattr(model, "model_config", None),
+        getattr(getattr(model, "config", None), "model_config", None),
+    ):
+        display = getattr(config, "model_display_name", None)
+        if display:
+            return str(display)
+    return str(getattr(model, "model_display_name", None) or "")
 
 
 def decorate_model_with_trace(model, agent_session, identity: dict | None = None):
@@ -300,7 +332,17 @@ def decorate_model_with_trace(model, agent_session, identity: dict | None = None
     try:
         model_name = model.config.model_config.model_name
     except Exception:
-        model_name = type(model).__name__
+        try:
+            # foundation Model keeps its ModelRequestConfig at the top level.
+            model_name = model.model_config.model_name
+        except Exception:
+            model_name = type(model).__name__
+    # Gateway models carry a service id as model_name; a display name set by
+    # the caller (client config or request-config extra field) wins so the
+    # span name and gen_ai.request.model show the human-readable model.
+    display_name = _model_display_name(model)
+    if display_name:
+        model_name = display_name
     instance_info = {"class_name": model_name, "type": "llm"}
     if identity:
         instance_info.update({k: v for k, v in identity.items() if v})
@@ -321,6 +363,22 @@ def decorate_tool_with_trace(tool, agent_session):
     instance_info = {"class_name": tool.card.name if hasattr(tool, "card") else type(tool).__name__, "type": "tool"}
     proxy = _TraceProxy(tool)
     proxy.invoke = async_trace(tool.invoke, session, InvokeType.PLUGIN, instance_info)
+    tool_astream = getattr(tool, "astream", None)
+    if callable(tool_astream):
+        # Streaming tool executions (e.g. studio's FlowApi/FlowCustomApi stream
+        # paths) go through astream, not invoke; wrap it the same way so they
+        # emit plugin spans too (start at first chunk, end at exhaustion),
+        # mirroring decorate_workflow_with_trace's stream wrapping. Tools
+        # without astream are untouched; on cores predating this wrapper the
+        # proxy's __getattr__ passes astream through undecorated.
+        # setattr form: the platform linter (G.CLS.08) rejects instance
+        # attributes assigned outside __init__ on diff lines; the baseline
+        # ``proxy.invoke = ...`` above predates this rule and is untouched.
+        setattr(
+            proxy,
+            "astream",
+            async_trace_stream(tool_astream, session, InvokeType.PLUGIN, instance_info),
+        )
     return proxy
 
 

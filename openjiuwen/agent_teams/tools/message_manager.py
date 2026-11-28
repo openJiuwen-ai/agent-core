@@ -6,6 +6,7 @@
 This module provides messaging functionality for team members and team leader.
 """
 
+import json
 import uuid
 from typing import (
     List,
@@ -22,6 +23,40 @@ from openjiuwen.agent_teams.schema.events import (
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database import TeamDatabase, TeamMessageBase
 from openjiuwen.core.common.logging import team_logger
+
+
+def parse_approval_message(msg: TeamMessageBase) -> dict | None:
+    """Recognize control mail independently of its validity and sender."""
+    if msg.protocol != "json" or not msg.content or msg.broadcast:
+        return None
+    try:
+        data = json.loads(msg.content)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict) or data.get("type") != "tool_approval_result":
+        return None
+    return data
+
+
+def validate_approval_payload(data: dict) -> dict | None:
+    """Keep historical optional nulls compatible without coercing decisions."""
+    tool_call_id = data.get("tool_call_id")
+    if not isinstance(tool_call_id, str) or not tool_call_id.strip() or not isinstance(data.get("approved"), bool):
+        return None
+    feedback = data.get("feedback", "")
+    auto_confirm = data.get("auto_confirm", False)
+    if feedback is None:
+        feedback = ""
+    if auto_confirm is None:
+        auto_confirm = False
+    if not isinstance(feedback, str) or not isinstance(auto_confirm, bool):
+        return None
+    return {
+        "tool_call_id": tool_call_id,
+        "approved": data["approved"],
+        "feedback": feedback,
+        "auto_confirm": auto_confirm,
+    }
 
 
 class TeamMessageManager:
@@ -57,6 +92,10 @@ class TeamMessageManager:
         self.db = db
         self.messager = messager
 
+    async def host_managed_recipients(self, names: list[str]) -> set[str]:
+        """Identify direct recipients that require a public group mention instead."""
+        return await self.db.member.host_managed_members(self.team_name, names)
+
     async def send_message(
         self,
         content: str,
@@ -79,6 +118,9 @@ class TeamMessageManager:
                 framework (scheduler handoffs) sets it. See
                 ``message_template.py``.
         """
+        if await self.host_managed_recipients([to_member_name]):
+            team_logger.warning("Direct message rejected for host-managed recipient %s", to_member_name)
+            return None
         sender = from_member_name or self.member_name
         message_id = str(uuid.uuid4())
 
@@ -200,6 +242,10 @@ class TeamMessageManager:
         if not to_member_names:
             return []
 
+        blocked = await self.host_managed_recipients(to_member_names)
+        if blocked:
+            team_logger.warning("Multicast rejected for host-managed recipients %s", sorted(blocked))
+            return []
         pairs = [(str(uuid.uuid4()), to) for to in to_member_names]
         created = await self.db.message.create_direct_messages(
             team_name=self.team_name,

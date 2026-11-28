@@ -304,7 +304,12 @@ def _bind_subagent(agent: DeepAgent, subagent: SubAgentConfig) -> ResourceRef:
     subagents = list(config.subagents or [])
     subagents.append(subagent)
     config.subagents = subagents
-    agent.ability_manager.add(subagent.agent_card)
+    # Keep the card in the runtime registry for identity checks and direct
+    # lookup, but let the parent SubagentRail remain the model-facing dispatch
+    # surface. Exposing this card as a second model tool would diverge from the
+    # legacy static path, and the card has no standalone Agent resource behind
+    # it; task_tool/subagent_spawn owns sub-agent creation.
+    agent.ability_manager.add(subagent.agent_card, expose_agent_cards=False)
     return ResourceRef(kind=ResourceKind.SUBAGENT, identity=identity)
 
 

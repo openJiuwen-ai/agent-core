@@ -38,3 +38,5 @@ class Manifest:
     extensions: tuple[ExtensionDecl, ...]
     domain: str | None = None
     enable: bool = True
+    #: A bundle root carries member packages and is never loaded as a package.
+    is_bundle: bool = False

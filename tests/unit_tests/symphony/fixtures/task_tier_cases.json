@@ -1,0 +1,276 @@
+[
+  {
+    "id": "direct-facts",
+    "query": "根据本轮已给出的三项数字计算总和。",
+    "expected": {
+      "strategy": "direct_answer",
+      "requires_planning": false
+    },
+    "rationale": "上下文已包含全部输入"
+  },
+  {
+    "id": "direct-knowledge",
+    "query": "解释什么是拓扑排序。",
+    "expected": {
+      "strategy": "direct_answer",
+      "requires_planning": false
+    },
+    "rationale": "通用知识无需外部能力"
+  },
+  {
+    "id": "direct-summary",
+    "query": "用两句话总结上文已贴出的会议纪要。",
+    "expected": {
+      "strategy": "direct_answer",
+      "requires_planning": false
+    },
+    "rationale": "内容已读入上下文"
+  },
+  {
+    "id": "direct-planning-only",
+    "query": "仅根据已提供的需求提出思路，不调用工具。",
+    "expected": {
+      "strategy": "direct_answer",
+      "requires_planning": false
+    },
+    "rationale": "仅给思路且材料齐全"
+  },
+  {
+    "id": "direct-many-points",
+    "query": "回答以下五个基础概念问题，资料均在本消息中。",
+    "expected": {
+      "strategy": "direct_answer",
+      "requires_planning": false
+    },
+    "rationale": "多个问题不等于多专家"
+  },
+  {
+    "id": "single-capability-skill",
+    "query": "使用 read Skill 解读附件。",
+    "expected": {
+      "strategy": "single_capability",
+      "skill_ids": [
+        "read"
+      ],
+      "requires_planning": false
+    },
+    "rationale": "指定一个Skill"
+  },
+  {
+    "id": "single-capability-skill-internals",
+    "query": "使用 write Skill 产出报告；它内部需要读文件和运行脚本。",
+    "expected": {
+      "strategy": "single_capability",
+      "skill_ids": [
+        "write"
+      ],
+      "requires_planning": false
+    },
+    "rationale": "Skill内部多工具仍为单Skill"
+  },
+  {
+    "id": "single-capability-unread-file",
+    "query": "读取工作区中的说明.txt并概括。",
+    "expected": {
+      "strategy": "single_capability",
+      "tool_ids": [
+        "read_file"
+      ],
+      "requires_planning": false
+    },
+    "rationale": "未读文件不能直接回答"
+  },
+  {
+    "id": "single-capability-search",
+    "query": "检索一个已知关键词的当前资料。",
+    "expected": {
+      "strategy": "single_capability",
+      "tool_ids": [
+        "search"
+      ],
+      "requires_planning": false
+    },
+    "rationale": "一个宿主工具足够"
+  },
+  {
+    "id": "single-capability-missing-material",
+    "query": "读取我提供的文件；如果路径缺失先询问路径。",
+    "expected": {
+      "strategy": "single_capability",
+      "tool_ids": [
+        "read_file"
+      ],
+      "missing_inputs": [
+        "文件路径"
+      ],
+      "requires_planning": false
+    },
+    "rationale": "缺失材料是前提提示"
+  },
+  {
+    "id": "workflow-skills",
+    "query": "先用 read Skill 提取内容，再用 write Skill 生成报告。",
+    "expected": {
+      "strategy": "capability_workflow",
+      "skill_ids": [
+        "read",
+        "write"
+      ],
+      "requires_planning": true
+    },
+    "rationale": "多Skill依赖需要规划"
+  },
+  {
+    "id": "workflow-tools",
+    "query": "搜索资料，再读取搜索到的本地文件。",
+    "expected": {
+      "strategy": "capability_workflow",
+      "tool_ids": [
+        "search",
+        "read_file"
+      ],
+      "requires_planning": false
+    },
+    "rationale": "工具流程继续由主智能体执行"
+  },
+  {
+    "id": "workflow-mixed",
+    "query": "搜索资料，再用 write Skill 形成报告。",
+    "expected": {
+      "strategy": "capability_workflow",
+      "tool_ids": [
+        "search"
+      ],
+      "skill_ids": [
+        "write"
+      ],
+      "requires_planning": false
+    },
+    "rationale": "混合流程不生成工具DAG"
+  },
+  {
+    "id": "workflow-no-experts",
+    "query": "不要使用子智能体，依次读取文件和搜索补充资料。",
+    "expected": {
+      "strategy": "capability_workflow",
+      "tool_ids": [
+        "read_file",
+        "search"
+      ],
+      "requires_planning": false
+    },
+    "rationale": "禁止委派的明确约束"
+  },
+  {
+    "id": "workflow-many-steps",
+    "query": "完成十项简单的读取和检索操作，不需要专家隔离。",
+    "expected": {
+      "strategy": "capability_workflow",
+      "tool_ids": [
+        "read_file",
+        "search"
+      ],
+      "requires_planning": false
+    },
+    "rationale": "步骤多不自动升级多专家"
+  },
+  {
+    "id": "single-expert-installed",
+    "query": "请 reviewer 专家独立审核给出的结论。",
+    "expected": {
+      "strategy": "single_expert",
+      "expert_ids": [
+        "reviewer"
+      ],
+      "requires_planning": true
+    },
+    "rationale": "一个具名专家足够"
+  },
+  {
+    "id": "single-expert-inline",
+    "query": "用一个临时统计审查角色独立检查这份分析。",
+    "expected": {
+      "strategy": "single_expert",
+      "requires_planning": true
+    },
+    "rationale": "无需安装专家也能委派"
+  },
+  {
+    "id": "single-expert-isolation",
+    "query": "在隔离上下文中安排一名审查者检查推导过程。",
+    "expected": {
+      "strategy": "single_expert",
+      "requires_planning": true
+    },
+    "rationale": "单角色上下文隔离"
+  },
+  {
+    "id": "single-expert-persona",
+    "query": "让一名无障碍设计专家审阅现有页面说明。",
+    "expected": {
+      "strategy": "single_expert",
+      "requires_planning": true
+    },
+    "rationale": "明确专家工作规则"
+  },
+  {
+    "id": "single-expert-many-subtasks",
+    "query": "由一名 reviewer 完成五个相关检查并给出统一报告。",
+    "expected": {
+      "strategy": "single_expert",
+      "expert_ids": [
+        "reviewer"
+      ],
+      "requires_planning": true
+    },
+    "rationale": "一个专家的多个任务不要求多专家"
+  },
+  {
+    "id": "multi-expert-complementary",
+    "query": "分别安排安全和性能专家独立审查，再合并结论。",
+    "expected": {
+      "strategy": "multi_expert",
+      "requires_planning": true
+    },
+    "rationale": "互补专业与独立上下文"
+  },
+  {
+    "id": "multi-expert-handoff",
+    "query": "由分析专家交付模型，再由验证专家独立复核结果。",
+    "expected": {
+      "strategy": "multi_expert",
+      "requires_planning": true
+    },
+    "rationale": "专家间有交付依赖"
+  },
+  {
+    "id": "multi-expert-independent",
+    "query": "安排两名互不共享中间推理的专家交叉验证关键结论。",
+    "expected": {
+      "strategy": "multi_expert",
+      "requires_planning": true
+    },
+    "rationale": "独立验证需求"
+  },
+  {
+    "id": "multi-expert-parallel",
+    "query": "把两项上下文互相干扰的研究分给独立专家并行完成。",
+    "expected": {
+      "strategy": "multi_expert",
+      "requires_planning": true
+    },
+    "rationale": "明确并行与隔离收益"
+  },
+  {
+    "id": "multi-expert-reviewer",
+    "query": "由临时研究角色产生结论，再交 reviewer 复核。",
+    "expected": {
+      "strategy": "multi_expert",
+      "expert_ids": [
+        "reviewer"
+      ],
+      "requires_planning": true
+    },
+    "rationale": "inline与安装专家交接"
+  }
+]

@@ -21,6 +21,7 @@ from openjiuwen.extensions.observability.gen_ai_semconv import (
     GEN_AI_SYSTEM_INSTRUCTIONS,
 )
 from openjiuwen.extensions.observability.semconv import OJ_MODEL_GROUP_ID, OJ_MODEL_GROUP_ROUTE_ID
+from openjiuwen.extensions.observability.sequence_registry import materialize_stated_value
 
 
 def _open_span(monkeypatch: pytest.MonkeyPatch, model: str) -> tuple[Any, Any, Any]:
@@ -122,7 +123,9 @@ async def test_recorded_input_names_the_model_the_prompt_was_sent_to(monkeypatch
         route_metadata={"status": "selected", "model_name": "glm-b", "routed_model": "GLM-B", "route_id": "rte_b"},
     )
 
-    recorded = span.attributes[GEN_AI_INPUT_MESSAGES] + span.attributes.get(GEN_AI_SYSTEM_INSTRUCTIONS, "")
+    recorded = materialize_stated_value(span.attributes[GEN_AI_INPUT_MESSAGES]) + materialize_stated_value(
+        span.attributes.get(GEN_AI_SYSTEM_INSTRUCTIONS, "")
+    )
     assert ROUTED_MODEL_PLACEHOLDER not in recorded
     assert "Current model: GLM-B" in recorded
     assert span.name == "chat glm-b"
@@ -141,7 +144,7 @@ async def test_request_that_fails_before_answering_still_names_its_route(monkeyp
     )
 
     assert span.name == "chat glm-a"
-    assert "Current model: GLM-A" in span.attributes[GEN_AI_INPUT_MESSAGES]
+    assert "Current model: GLM-A" in materialize_stated_value(span.attributes[GEN_AI_INPUT_MESSAGES])
     span.end()
     provider.shutdown()
 
@@ -155,7 +158,7 @@ async def test_failover_attempt_refills_the_recorded_input(monkeypatch: pytest.M
     await handler.on_llm_route(
         route_metadata={"status": "sending", "model_name": "glm-a", "routed_model": "GLM-A", "route_id": "rte_a"},
     )
-    first = span.attributes[GEN_AI_INPUT_MESSAGES]
+    first = materialize_stated_value(span.attributes[GEN_AI_INPUT_MESSAGES])
     await handler.on_llm_route(
         route_metadata={"status": "sending", "model_name": "glm-b", "routed_model": "GLM-B", "route_id": "rte_b"},
     )
@@ -163,7 +166,7 @@ async def test_failover_attempt_refills_the_recorded_input(monkeypatch: pytest.M
         route_metadata={"status": "selected", "model_name": "glm-b", "routed_model": "GLM-B", "route_id": "rte_b"},
     )
 
-    recorded = span.attributes[GEN_AI_INPUT_MESSAGES]
+    recorded = materialize_stated_value(span.attributes[GEN_AI_INPUT_MESSAGES])
     assert "Current model: GLM-A\\n- Other" in first
     assert "Current model: GLM-B\\n- Other" in recorded
     assert "<routed-model" not in recorded

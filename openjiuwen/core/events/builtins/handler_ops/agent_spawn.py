@@ -56,7 +56,10 @@ class _AgentSpawnOps:
                 StatusCode.EVENTS_STATE_INVALID,
                 reason="ops.agent.spawn requires a live session",
             )
-        if session.get_session_id() != session_context.session_id:
+        if (
+            session.get_session_id() != session_context.session_id
+            or (session_context.agent_id is not None and session.get_agent_id() != session_context.agent_id)
+        ):
             raise_error(
                 StatusCode.EVENTS_STATE_INVALID,
                 reason="ops.agent.spawn session does not match the event context",
@@ -66,7 +69,7 @@ class _AgentSpawnOps:
         from openjiuwen.harness.deep_agent import DeepAgent
         from openjiuwen.harness.tools.subagent._control_registry import get_subagent_control
 
-        parent_agent = get_agent_runtime().get(session_context.session_id)
+        parent_agent = get_agent_runtime().get(session_context.session_id, agent_id=session_context.agent_id)
         if not isinstance(parent_agent, DeepAgent):
             raise_error(
                 StatusCode.EVENTS_STATE_INVALID,
@@ -77,7 +80,7 @@ class _AgentSpawnOps:
         )
         output = await self._bus.trigger(
             Event(AGENT_SPAWN, prepare_agent_spawn_input(request)),
-            session,
+            session_context,
             trigger_context=context,
         )
         if not isinstance(output, AgentSpawnOutput) or context.raw_result is None:

@@ -45,7 +45,7 @@ def test_pruned_reason_is_short_and_user_facing(terminal, expected):
     assert "raw error" not in reason
 
 
-def test_scoring_pruned_reason_does_not_expose_exception():
+def test_scoring_pruned_reason_keeps_short_operational_summary():
     reason = module._friendly_pruned_reason(  # noqa: SLF001
         failure_class="scoring_error",
         phase="scoring",
@@ -56,8 +56,23 @@ def test_scoring_pruned_reason_does_not_expose_exception():
         ),
     )
 
+    assert reason.startswith("评分失败：")
+    assert "provider error" in reason
+    assert "traceback" not in reason.lower()
+
+
+def test_scoring_quality_prune_stays_generic_without_operational_markers():
+    reason = module._friendly_pruned_reason(  # noqa: SLF001
+        failure_class="scoring_error",
+        phase="scoring",
+        terminal=TerminalReport(
+            status="complete",
+            run_id="run-score",
+            failure_reason="score below threshold",
+        ),
+    )
+
     assert reason == "评估结果未达到预期，已剪枝。"
-    assert "provider error" not in reason
 
 
 def test_pruned_reason_does_not_treat_modify_paper_as_quality_failure():
@@ -73,8 +88,24 @@ def test_pruned_reason_does_not_treat_modify_paper_as_quality_failure():
         ),
     )
 
-    assert reason != "论文内容质量未达到要求，已剪枝。"
-    assert "modify_paper" not in reason
+    # Constructor/runtime failures must not be relabeled as paper-quality prune;
+    # the short operational summary may still mention the rejected task_mode.
+    assert reason.startswith("执行失败：")
+    assert "论文内容质量未达到要求" not in reason
+
+
+def test_llm_api_failure_keeps_short_summary_for_ui():
+    reason = module._friendly_pruned_reason(  # noqa: SLF001
+        terminal=TerminalReport(
+            status="failed",
+            run_id="run-llm",
+            failure_reason="openai.RateLimitError: Rate limit exceeded for gpt-4.1",
+        ),
+    )
+
+    assert reason.startswith("执行失败：")
+    assert "Rate limit" in reason
+    assert reason != "当前方案效果未达到要求，已剪枝。"
 
 
 def test_pruned_reason_does_not_treat_resource_as_source_failure():
@@ -184,7 +215,7 @@ async def test_paper_usage_is_persisted_and_emitted_for_baseline_scoring(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_failed_manager_run_becomes_pruned_node_without_raw_error(tmp_path):
+async def test_failed_manager_run_becomes_pruned_node_with_short_error(tmp_path):
     orchestrator = module.PaperTreeOrchestrator(
         task_id="pruned-node",
         run_dir=str(tmp_path),
@@ -217,13 +248,14 @@ async def test_failed_manager_run_becomes_pruned_node_without_raw_error(tmp_path
 
     assert node.type == "pruned"
     assert node.adopted is False
-    assert node.reason == "当前方案效果未达到要求，已剪枝。"
+    assert node.reason is not None
+    assert node.reason.startswith("执行失败：")
+    assert "timed out" in node.reason.lower()
     assert node.summary is None
     assert node.failure_class == "pipeline_failed"
     assert node.paper_extra is not None
     assert node.paper_extra.logical_kind == "pruned"
     assert node.paper_extra.outcome == "failed"
-    assert "timeout" not in (node.reason or "").lower()
     assert "traceback" not in (node.reason or "").lower()
 
 
@@ -330,6 +362,9 @@ async def test_all_pruned_nodes_end_task_as_failed_without_false_success(tmp_pat
     assert state is not None
     assert state.status == "failed"
     assert state.best_node_id is None
-    assert state.error_message == "未生成可用的论文结果。"
+    assert state.error_message is not None
+    assert state.error_message.startswith("未生成可用的论文结果。")
+    assert state.last_reason
+    assert state.last_reason in state.error_message
     assert [node.type for node in nodes] == ["root", "pruned", "pruned"]
-    assert all(node.reason and "error" not in node.reason.lower() for node in nodes[1:])
+    assert all(node.reason for node in nodes[1:])

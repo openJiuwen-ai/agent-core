@@ -65,6 +65,7 @@ async def test_recover_team_restarts_error_but_not_departed_member() -> None:
             ]
         ),
         is_passive_human=AsyncMock(return_value=False),
+        get_member=AsyncMock(return_value=SimpleNamespace(role="teammate")),
         db=SimpleNamespace(member=member_dao),
     )
     spawn_manager = MagicMock()
@@ -103,6 +104,7 @@ async def test_recover_team_restarts_only_members_claimed_from_ready_or_busy() -
             ]
         ),
         is_passive_human=AsyncMock(return_value=False),
+        get_member=AsyncMock(return_value=SimpleNamespace(role="teammate")),
         db=SimpleNamespace(member=member_dao),
     )
     spawn_manager = MagicMock()
@@ -139,6 +141,7 @@ async def test_recover_team_leaves_dormant_members_asleep() -> None:
             ]
         ),
         is_passive_human=AsyncMock(return_value=False),
+        get_member=AsyncMock(return_value=SimpleNamespace(role="teammate")),
         db=SimpleNamespace(member=member_dao),
     )
     spawn_manager = MagicMock()
@@ -151,3 +154,25 @@ async def test_recover_team_leaves_dormant_members_asleep() -> None:
 
     assert restarted == ["failed"]
     spawn_manager.restart_teammate.assert_awaited_once_with("failed")
+
+
+@pytest.mark.asyncio
+async def test_recovery_uses_persisted_role_with_lightweight_roster():
+    from openjiuwen.agent_teams.schema.team import MemberRosterEntry
+
+    roster = [MemberRosterEntry(member_name="colleague", display_name="Colleague", status="ready"),
+              MemberRosterEntry(member_name="expert", display_name="Expert", status="ready")]
+    member_dao = SimpleNamespace(claim_member_restart=AsyncMock(return_value=True))
+    backend = SimpleNamespace(
+        restore_external_cli_specs_from_db=AsyncMock(), list_member_roster=AsyncMock(return_value=roster),
+        get_member=AsyncMock(side_effect=[SimpleNamespace(role="host_managed"), SimpleNamespace(role="teammate")]),
+        is_passive_human=AsyncMock(return_value=False), db=SimpleNamespace(member=member_dao),
+    )
+    spawn = MagicMock()
+    spawn.has_live_handle.return_value = False
+    spawn.restart_teammate = AsyncMock(return_value=True)
+    configurator = SimpleNamespace(team_backend=backend, member_name="leader", team_name="team")
+    restarted = await RecoveryManager(configurator, spawn).recover_team()
+    assert restarted == ["expert"]
+    spawn.restart_teammate.assert_awaited_once_with("expert")
+    member_dao.claim_member_restart.assert_awaited_once_with("expert", "team", MemberStatus.READY)

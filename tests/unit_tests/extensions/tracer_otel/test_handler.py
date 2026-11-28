@@ -8,6 +8,7 @@ relationships, and error marking.
 """
 
 import json
+from datetime import datetime, timedelta
 
 import pytest
 from opentelemetry import context as otel_context
@@ -71,11 +72,8 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_ERROR,
     OJ_GEN_AI_METADATA,
     OJ_GEN_AI_REASONING_DURATION_MS,
-    OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS,
+    OJ_GEN_AI_RESPONSE_TPOT_MS,
     OJ_GEN_AI_TRACE_NAME,
-    OJ_GEN_AI_USAGE_INPUT_COST,
-    OJ_GEN_AI_USAGE_OUTPUT_COST,
-    OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_GEN_AI_USER_ID,
     OJ_INVOKE_ID,
     OJ_LLM_PREV_MESSAGE_COUNT,
@@ -88,11 +86,14 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_STREAM_OUTPUTS,
     OJ_TRACE_ID,
     OJ_WORKFLOW_COMPONENT_ID,
+    OJ_WORKFLOW_COMPONENT_NAME,
     OJ_WORKFLOW_COMPONENT_TYPE,
     OJ_WORKFLOW_ERROR_MESSAGE,
     OJ_WORKFLOW_ID,
+    OJ_WORKFLOW_INPUTS,
     OJ_WORKFLOW_INVOKE_DATA,
     OJ_WORKFLOW_NAME,
+    OJ_WORKFLOW_OUTPUTS,
 )
 from tests.conftest_otel import _EXPORTER, _OTEL_TRACER
 
@@ -223,7 +224,8 @@ class TestOtelAgentHandler:
         assert handler._span_manager.get(agent_span.invoke_id) is None
         s = finished[0]
         assert s.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 0
-        assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == 0.0
+        # Usage cost values stay business data only — never span attributes.
+        assert "openjiuwen.gen_ai.usage.total_cost" not in s.attributes
 
     async def test_agent_llm_end_skips_moment_shaped_first_token_time(self):
         """A numeric timestamp is a moment, not a duration, and must not become TTFT."""
@@ -376,7 +378,11 @@ class TestOtelAgentHandler:
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
         s = finished[0]
-        assert s.name == "retriever.knowledge_retrieval_tool"
+        # Retrieval span naming follows the GenAI operation convention
+        # (this line's deliberate rename; display names differ across
+        # release branches — locate by operation attribute, not by name).
+        assert s.name == "retrieval"
+        assert s.attributes[GEN_AI_OPERATION_NAME] == "retrieval"
         # Business call outcome is unknown; dropped ≠ error
         assert s.status.status_code == trace.StatusCode.OK
         drop_events = [e for e in s.events if e.name == "oj.span.dropped"]
@@ -668,6 +674,115 @@ class TestOtelAgentHandler:
 # ---------------------------------------------------------------------------
 # OtelWorkflowHandler tests
 # ---------------------------------------------------------------------------
+
+
+class TestOtelAgentHandlerRetriever:
+    """Retrieval operation child spans emitted by tool bodies via TracerAgentUtils."""
+
+    async def test_retriever_span_nests_under_open_tool_span(self):
+        """The retrieval span emitted inside a tool call parents onto the
+        still-open execute_tool span via the ambient OTel context."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        tool_span = span_manager.create_agent_span(agent_span)
+
+        await handler.on_plugin_start(
+            span=tool_span,
+            inputs={"inputs": {"query": "什么是九问"}},
+            instance_info={"class_name": "retrieval", "type": "plugin"},
+        )
+
+        retrieval_span = span_manager.create_agent_span(None)
+        await handler.on_retriever_start(
+            span=retrieval_span,
+            inputs={"query": "什么是九问"},
+            instance_info={"class_name": "retrieval", "type": "retriever"},
+        )
+        await handler.on_retriever_end(
+            span=retrieval_span, outputs={"results": ["doc-a", "doc-b"]}
+        )
+        await handler.on_plugin_end(span=tool_span, outputs={"outputs": "ok"})
+
+        finished = _EXPORTER.get_finished_spans()
+        # Locate spans by operation attribute — display names differ across
+        # release branches (tool.<name> vs execute_tool <name>).
+        by_op = {s.attributes.get(GEN_AI_OPERATION_NAME): s for s in finished}
+        assert set(by_op) == {"execute_tool", "retrieval"}
+
+        retrieval = by_op["retrieval"]
+        tool = by_op["execute_tool"]
+        assert retrieval.name == "retrieval"
+        assert retrieval.kind == trace.SpanKind.INTERNAL
+        assert retrieval.attributes[GEN_AI_RETRIEVAL_QUERY_TEXT] == "什么是九问"
+        assert list(retrieval.attributes[GEN_AI_RETRIEVAL_DOCUMENTS]) == ["doc-a", "doc-b"]
+        # Child-of-tool parenting: the retrieval span ended before the tool
+        # span, so the tool span context was the ambient context at start.
+        assert retrieval.parent is not None
+        assert retrieval.parent.span_id == tool.context.span_id
+
+    async def test_retriever_error_marks_error_and_ends(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        retrieval_span = span_manager.create_agent_span(None)
+
+        await handler.on_retriever_start(
+            span=retrieval_span,
+            inputs=None,
+            instance_info={"class_name": "retrieval", "type": "retriever"},
+        )
+        await handler.on_retriever_error(span=retrieval_span, error=RuntimeError("kb down"))
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.name == "retrieval"
+        assert s.status.status_code == trace.StatusCode.ERROR
+        assert s.attributes[OJ_AGENT_ERROR_MESSAGE] == "kb down"
+        # No query inputs → no query attribute.
+        assert GEN_AI_RETRIEVAL_QUERY_TEXT not in s.attributes
+        assert handler._span_manager.get(retrieval_span.invoke_id) is None
+
+    async def test_retriever_done_without_documents_skips_attribute(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        retrieval_span = span_manager.create_agent_span(None)
+
+        await handler.on_retriever_start(
+            span=retrieval_span,
+            inputs={"query": "q"},
+            instance_info={"class_name": "retrieval", "type": "retriever"},
+        )
+        # Empty results list → extractor returns None → attribute absent.
+        await handler.on_retriever_end(span=retrieval_span, outputs={"results": []})
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.name == "retrieval"
+        assert s.attributes[GEN_AI_RETRIEVAL_QUERY_TEXT] == "q"
+        assert GEN_AI_RETRIEVAL_DOCUMENTS not in s.attributes
+        assert s.status.status_code == trace.StatusCode.OK
+
+    async def test_retriever_done_without_open_span_is_noop(self):
+        """A done/error event whose start never registered a span must not
+        raise nor fabricate a span."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        orphan = span_manager.create_agent_span(None)
+
+        await handler.on_retriever_end(span=orphan, outputs={"results": ["x"]})
+        await handler.on_retriever_error(span=orphan, error=RuntimeError("late"))
+
+        assert _EXPORTER.get_finished_spans() == []
 
 
 class TestExplicitParentContext:
@@ -1934,7 +2049,7 @@ class TestGenAiSemconvAttrs:
         assert GEN_AI_REQUEST_TEMPERATURE not in s.attributes
         assert OJ_LLM_PREV_MESSAGE_COUNT not in s.attributes
 
-    async def test_llm_end_extracts_response_usage_and_cost_attrs(self):
+    async def test_llm_end_extracts_response_usage_attrs(self):
         config = OtelTracerConfig(redaction_enabled=False)
         handler = OtelAgentHandler(_OTEL_TRACER, config)
 
@@ -1970,9 +2085,11 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] == 5
         assert s.attributes[GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS] == 7
         assert s.attributes[GEN_AI_USAGE_REASONING_OUTPUT_TOKENS] == 3
-        assert s.attributes[OJ_GEN_AI_USAGE_INPUT_COST] == pytest.approx(0.001)
-        assert s.attributes[OJ_GEN_AI_USAGE_OUTPUT_COST] == pytest.approx(0.002)
-        assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == pytest.approx(0.003)
+        # Usage cost values stay business data only — never span attributes.
+        for key in ("openjiuwen.gen_ai.usage.total_cost",
+                    "openjiuwen.gen_ai.usage.input_cost",
+                    "openjiuwen.gen_ai.usage.output_cost"):
+            assert key not in s.attributes
 
     async def test_llm_end_reads_usage_sibling_of_chunk_list(self):
         """Decorator-measured streams: usage rides the container next to
@@ -2007,7 +2124,7 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 4
         assert s.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 2
         assert s.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.42)
-        assert s.attributes[OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS] == pytest.approx(12.5)
+        assert s.attributes[OJ_GEN_AI_RESPONSE_TPOT_MS] == pytest.approx(12.5)
         # A chunk list carries no finish_reason — skipped, not fatal.
         assert GEN_AI_RESPONSE_FINISH_REASONS not in s.attributes
 
@@ -2259,9 +2376,6 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 0
         assert s.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 0
         assert s.attributes[GEN_AI_RESPONSE_MODEL] == ""
-        assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == 0.0
-        assert s.attributes[OJ_GEN_AI_USAGE_INPUT_COST] == 0.0
-        assert s.attributes[OJ_GEN_AI_USAGE_OUTPUT_COST] == 0.0
 
     async def test_llm_end_sets_streaming_and_reasoning_latency(self):
         """first_token_time parses to time_to_first_chunk; the *_ms latency
@@ -2284,7 +2398,7 @@ class TestGenAiSemconvAttrs:
         s = _EXPORTER.get_finished_spans()[0]
         assert s.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.35)
         # Declared schema has no producer for these yet — absent, not zero.
-        assert OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS not in s.attributes
+        assert OJ_GEN_AI_RESPONSE_TPOT_MS not in s.attributes
         assert OJ_GEN_AI_REASONING_DURATION_MS not in s.attributes
 
         # Raw-dict callers (and future UsageMetadata fields) flow through.
@@ -2296,6 +2410,8 @@ class TestGenAiSemconvAttrs:
         raw = {
             "outputs": {
                 "usage_metadata": {
+                    # Legacy producer key (agent-studio usage payload) — the
+                    # attribute is the converged tpot_ms either way.
                     "inter_token_latency_ms": 12.5,
                     "reasoning_duration_ms": 300.0,
                 }
@@ -2304,8 +2420,20 @@ class TestGenAiSemconvAttrs:
         await handler.on_llm_end(span=agent_span2, outputs=raw)
 
         s2 = _EXPORTER.get_finished_spans()[0]
-        assert s2.attributes[OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS] == pytest.approx(12.5)
+        assert s2.attributes[OJ_GEN_AI_RESPONSE_TPOT_MS] == pytest.approx(12.5)
         assert s2.attributes[OJ_GEN_AI_REASONING_DURATION_MS] == pytest.approx(300.0)
+
+        # Canonical payload key writes the same single attribute.
+        _EXPORTER.clear()
+        agent_span3 = span_manager.create_agent_span()
+        await handler.on_llm_start(
+            span=agent_span3, inputs=None, instance_info={"class_name": "M"},
+        )
+        raw3 = {"outputs": {"usage_metadata": {"tpot_ms": 7.5}}}
+        await handler.on_llm_end(span=agent_span3, outputs=raw3)
+
+        s3 = _EXPORTER.get_finished_spans()[0]
+        assert s3.attributes[OJ_GEN_AI_RESPONSE_TPOT_MS] == pytest.approx(7.5)
 
     async def test_llm_end_malformed_latency_skips_attrs_not_finalization(self):
         """A malformed latency value (str / list off a raw-dict caller) must
@@ -2333,7 +2461,7 @@ class TestGenAiSemconvAttrs:
         await handler.on_llm_end(span=agent_span, outputs=raw)
 
         s = _EXPORTER.get_finished_spans()[0]
-        assert OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS not in s.attributes
+        assert OJ_GEN_AI_RESPONSE_TPOT_MS not in s.attributes
         assert OJ_GEN_AI_REASONING_DURATION_MS not in s.attributes
         # Finalization survived: end attrs set, span closed, manager drained.
         assert OJ_END_TIME in s.attributes
@@ -2595,3 +2723,294 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[ERROR_TYPE] == "RuntimeError"
 
 
+
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[ERROR_TYPE] == "RuntimeError"
+
+
+
+
+class TestOtelWorkflowHandlerDeferredEndNode:
+    """Stream-consumer end nodes: span opens at the finalize marker, not the first chunk.
+
+    Mix-mode end nodes fire on_call_start at the FIRST CHUNK (passive stream
+    consumption), which made the end-node span appear before downstream batch
+    nodes in the waterfall and inflated its duration by the whole streaming
+    window. The begin event now carries metadata.defer_span_start for
+    stream-path end nodes; the handler stashes it and opens the span at
+    on_call_finalize (emitted when the stream is fully consumed). Fallback:
+    if the marker never arrives, on_call_done materializes the span with the
+    stashed first-chunk timestamp, reproducing the old [begin, done] window.
+    """
+
+    _END_METADATA = {
+        "workflow_id": "wf1",
+        "component_id": "end1",
+        "component_name": "结束",
+        "component_type": "End",
+        "defer_span_start": True,
+    }
+
+    async def _start_deferred_end_node(self, handler):
+        await handler.on_call_start(
+            invoke_id="end1",
+            metadata=dict(self._END_METADATA),
+            parent_node_id="",
+            session_id="workflow-session-123",
+        )
+
+    async def test_end_node_span_deferred_until_finalize_marker(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        # No span yet: first chunk is passive consumption, not execution.
+        assert "end1" in handler._deferred_end_starts
+        assert handler._span_manager.get("end1") is None
+        assert len(_EXPORTER.get_finished_spans()) == 0
+
+        # Stream chunks during the deferral window are buffered, not dropped.
+        await handler.on_pre_stream("end1", {"payload": "chunk-1"})
+        await handler.on_pre_stream("end1", {"payload": "chunk-2"})
+        assert len(handler._deferred_end_starts["end1"]["stream_inputs"]) == 2
+
+        await handler.on_call_finalize("end1")
+        assert "end1" not in handler._deferred_end_starts
+        assert handler._span_manager.get("end1") is not None
+
+        await handler.on_call_done("end1", outputs={"answer": "done"})
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.name == "component.end1"
+        # Buffered stream inputs replayed onto the materialized span.
+        assert OJ_STREAM_INPUTS in s.attributes
+        assert "chunk-1" in s.attributes[OJ_STREAM_INPUTS]
+        assert "chunk-2" in s.attributes[OJ_STREAM_INPUTS]
+        assert s.attributes[OJ_WORKFLOW_COMPONENT_ID] == "end1"
+        assert s.attributes[OJ_SESSION_ID] == "workflow-session-123"
+
+    async def test_end_node_fallback_opens_span_with_begin_timestamp(self):
+        """Marker never arrived (stream error): on_call_done falls back to the
+        old [first-chunk, done] window via the stashed begin timestamp."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        stash = handler._deferred_end_starts["end1"]
+        begin_time = stash["begin_time"]
+
+        await handler.on_pre_stream("end1", {"payload": "chunk-1"})
+        # No on_call_finalize — straight to done (error path).
+        await handler.on_call_done("end1", outputs=None)
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.attributes[OJ_START_TIME] == str(begin_time)
+        assert "chunk-1" in s.attributes[OJ_STREAM_INPUTS]
+        assert "end1" not in handler._deferred_end_starts
+
+    async def test_error_path_materializes_deferred_end_node_span(self):
+        """End node failing before the finalize marker: on_invoke(exception)
+        materializes the stashed span so the error marking has a target.
+
+        On the error path core raises before both materializers (the finalize
+        marker in stream_call and on_call_done in call), so on_invoke is the
+        only remaining entry point — without it the end-node span disappears
+        and the stash leaks.
+        """
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        stash = handler._deferred_end_starts["end1"]
+        begin_time = stash["begin_time"]
+        await handler.on_pre_stream("end1", {"payload": "chunk-1"})
+
+        await handler.on_invoke(invoke_id="end1", exception=RuntimeError("end node failed"))
+
+        assert "end1" not in handler._deferred_end_starts
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        # Name policy differs across release lines (human-readable component
+        # name vs component id); pin the stable component-id attribute.
+        assert s.name.startswith("component.")
+        assert s.attributes[OJ_WORKFLOW_COMPONENT_ID] == "end1"
+        assert s.attributes[ERROR_TYPE] == "RuntimeError"
+        assert s.attributes[OJ_STATUS] == NodeStatus.ERROR.value
+        assert s.attributes[OJ_START_TIME] == str(begin_time)
+        # Buffered stream chunks replayed onto the materialized span.
+        assert "chunk-1" in s.attributes[OJ_STREAM_INPUTS]
+
+    async def test_interrupt_path_materializes_deferred_end_node_span(self):
+        """GraphInterrupt on a deferred end node: span materializes and is
+        marked interrupted (control-flow signal, no OTel error status), stash
+        popped."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        await handler.on_pre_stream("end1", {"payload": "chunk-1"})
+
+        await handler.on_invoke(
+            invoke_id="end1",
+            exception=GraphInterrupt(Interrupt({"wait_for": "user_input"})),
+        )
+
+        assert "end1" not in handler._deferred_end_starts
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.name.startswith("component.")
+        assert s.attributes[OJ_WORKFLOW_COMPONENT_ID] == "end1"
+        assert s.attributes[OJ_STATUS] == NodeStatus.INTERRUPTED.value
+        assert ERROR_TYPE not in s.attributes
+
+    async def test_deferred_window_batch_payload_replayed(self):
+        """Batch-invoke events inside the deferral window must not be dropped.
+
+        Mix-mode end nodes fire on_pre_invoke / on_post_invoke while the span
+        is still stashed (the stream begin won the single-fire guard).
+        on_post_invoke is the only source of the end node's final outputs,
+        so both payloads are buffered and replayed at materialization.
+        """
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        # Batch-side events inside the window (stream begin won the guard).
+        await handler.on_pre_invoke(
+            "end1",
+            inputs={"question": "q1"},
+            component_metadata={"component_id": "end1", "component_name": "结束"},
+        )
+        await handler.on_pre_stream("end1", {"payload": "chunk-1"})
+        await handler.on_post_invoke("end1", outputs={"answer": "final-answer"})
+        assert handler._deferred_end_starts["end1"]["inputs"] == {"question": "q1"}
+        assert handler._deferred_end_starts["end1"]["outputs"] == {"answer": "final-answer"}
+
+        await handler.on_call_finalize("end1")
+        await handler.on_call_done("end1", outputs=None)
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert "q1" in s.attributes[OJ_WORKFLOW_INPUTS]
+        assert "final-answer" in s.attributes[OJ_WORKFLOW_OUTPUTS]
+        assert "chunk-1" in s.attributes[OJ_STREAM_INPUTS]
+        assert s.attributes[OJ_WORKFLOW_COMPONENT_NAME] == "结束"
+
+    async def test_deferred_window_payload_survives_error_path(self):
+        """Payload buffered in the deferral window also lands on the error
+        span materialized by on_invoke(exception), matching the
+        pre-deferral behavior where the span already carried it."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        await handler.on_pre_invoke(
+            "end1",
+            inputs={"question": "q1"},
+            component_metadata={"component_id": "end1", "component_name": "结束"},
+        )
+        await handler.on_post_invoke("end1", outputs={"answer": "partial-answer"})
+
+        await handler.on_invoke(invoke_id="end1", exception=RuntimeError("boom"))
+
+        assert "end1" not in handler._deferred_end_starts
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert "q1" in s.attributes[OJ_WORKFLOW_INPUTS]
+        assert "partial-answer" in s.attributes[OJ_WORKFLOW_OUTPUTS]
+        assert s.attributes[ERROR_TYPE] == "RuntimeError"
+        assert s.attributes[OJ_STATUS] == NodeStatus.ERROR.value
+
+    async def test_finalize_marker_without_stash_is_ignored(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_finalize("unknown-end")
+        assert handler._span_manager.get("unknown-end") is None
+        assert len(_EXPORTER.get_finished_spans()) == 0
+
+    async def test_regular_component_untouched_by_deferral(self):
+        """Components without defer_span_start keep the immediate-span path."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="llm1",
+            metadata={
+                "workflow_id": "wf1",
+                "component_id": "llm1",
+                "component_name": "大模型",
+                "component_type": "LLM",
+            },
+            parent_node_id="",
+        )
+        assert handler._span_manager.get("llm1") is not None
+        assert handler._deferred_end_starts == {}
+
+
+class TestSpanTimestampsUseBusinessClock:
+    """OTel span start/end timestamps must carry the agent span's business
+    times, not the event-processing wall clock. Field reports showed every
+    span with a zero duration while openjiuwen.elapsedTime was correct:
+    start_span/end() were both stamped at processing time when events
+    flushed together."""
+
+    async def test_llm_span_duration_uses_business_times(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        start_dt = datetime.now() - timedelta(seconds=10)
+        end_dt = datetime.now() - timedelta(seconds=2)
+        span_manager.update_span(agent_span, {"start_time": start_dt})
+        span_manager.update_span(agent_span, {"end_time": end_dt})
+
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs={"prompt": "hello"},
+            instance_info={"class_name": "TestModel"},
+        )
+        await handler.on_llm_end(span=agent_span, outputs={"response": "world"})
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.start_time == int(start_dt.timestamp() * 1e9)
+        assert s.end_time == int(end_dt.timestamp() * 1e9)
+        # Real 8s duration, not the microseconds between the two handler calls
+        assert s.end_time - s.start_time >= 7 * 10**9
+
+    async def test_error_span_end_uses_business_end_time(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        start_dt = datetime.now() - timedelta(seconds=30)
+        end_dt = datetime.now() - timedelta(seconds=1)
+        span_manager.update_span(agent_span, {"start_time": start_dt})
+        span_manager.update_span(agent_span, {"end_time": end_dt})
+
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs={"prompt": "hello"},
+            instance_info={"class_name": "TestModel"},
+        )
+        await handler.on_llm_error(span=agent_span, error=ValueError("boom"))
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.status.status_code == trace.StatusCode.ERROR
+        assert s.start_time == int(start_dt.timestamp() * 1e9)
+        assert s.end_time == int(end_dt.timestamp() * 1e9)

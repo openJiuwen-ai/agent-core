@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
+from openjiuwen.core.common.exception.errors import FrameworkError
 from openjiuwen.core.foundation.llm.schema.message import UsageMetadata
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.session.agent import create_agent_session
@@ -24,7 +25,7 @@ from openjiuwen.core.runner import Runner
 from tests.unit_tests.fixtures.mock_llm import MockLLMModel, create_text_response
 
 
-def _make_agent(agent_id: str = "test_stream_agent") -> ReActAgent:
+def _make_agent(agent_id: str = "test_stream_agent", max_tokens: int | None = None) -> ReActAgent:
     card = AgentCard(id=agent_id)
     agent = ReActAgent(card=card)
     config = ReActAgentConfig()
@@ -35,6 +36,8 @@ def _make_agent(agent_id: str = "test_stream_agent") -> ReActAgent:
         model_name="gpt-3.5-turbo",
         verify_ssl=False,
     )
+    if max_tokens is not None:
+        config.model_config_obj.max_tokens = max_tokens
     config.configure_prompt_template([{"role": "system", "content": "You are a helpful assistant."}])
     agent.configure(config)
     return agent
@@ -181,7 +184,7 @@ class TestReActAgentStreaming(unittest.IsolatedAsyncioTestCase):
 
         async def streaming_chunks(*args, **kwargs):
             yield AssistantMessageChunk(content="partial ", finish_reason="null")
-            yield AssistantMessageChunk(content="done", finish_reason="length")
+            yield AssistantMessageChunk(content="done", finish_reason="stop")
 
         async def unexpected_invoke(*args, **kwargs):
             raise AssertionError("invoke() should not be used for streaming")
@@ -204,8 +207,35 @@ class TestReActAgentStreaming(unittest.IsolatedAsyncioTestCase):
             result = await agent._railed_model_call(ctx)
 
         self.assertEqual(result.content, "partial done")
-        self.assertEqual(result.finish_reason, "length")
-        self.assertEqual(rail.finish_reasons, ["length"])
+        self.assertEqual(result.finish_reason, "stop")
+        self.assertEqual(rail.finish_reasons, ["stop"])
+
+    @pytest.mark.asyncio
+    async def test_streaming_partial_answer_with_configured_output_limit_raises(self):
+        """A configured output limit must fail the agent turn after partial streamed text."""
+        agent = _make_agent("agent_stream_output_limit", max_tokens=10)
+
+        async def streaming_chunks(*args, **kwargs):
+            yield AssistantMessageChunk(content="partial ", finish_reason="null")
+            yield AssistantMessageChunk(
+                content="answer",
+                finish_reason="length",
+                usage_metadata=UsageMetadata(output_tokens=10),
+            )
+
+        ctx = AgentCallbackContext(
+            agent=agent,
+            session=_FakeSession(),
+            context=_FakeContext(),
+            inputs=ModelCallInputs(messages=[], tools=[]),
+            extra={"_streaming": True},
+        )
+
+        with patch(
+            "openjiuwen.core.foundation.llm.model.Model.stream",
+            side_effect=streaming_chunks,
+        ), pytest.raises(FrameworkError, match="output limit"):
+            await agent._railed_model_call(ctx)
 
     @pytest.mark.asyncio
     async def test_streaming_backfills_latency_into_usage_metadata(self):

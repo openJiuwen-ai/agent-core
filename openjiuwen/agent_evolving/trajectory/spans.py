@@ -3,10 +3,9 @@
 """Stateless accessors and transformations for canonical OTLP trajectories.
 
 The online trajectory path receives ordinary OTLP JSON dictionaries from the
-observability processor.  This module deliberately does not own a window,
-registry, or subscription.  Functions return detached dictionaries/lists and
-transformations create a new :class:`Trajectory` value through
-``Trajectory.from_otlp``.
+observability processor. Internal payload helpers also operate on canonical
+spans shared with the online window. Public transformations return detached
+data or a new :class:`Trajectory`.
 
 Attributes are read only under the current observability conventions; there
 is no fallback to keys that earlier producers wrote.
@@ -15,7 +14,7 @@ is no fallback to keys that earlier producers wrote.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from copy import deepcopy
 from typing import Any, Iterator, TypeAlias
 
@@ -25,6 +24,7 @@ from openjiuwen.agent_evolving.trajectory.schema import (
     RL_PROMPT_TOKEN_IDS,
     RL_REWARD,
 )
+from openjiuwen.extensions.observability.content_addressing import SequenceHead
 from openjiuwen.agent_evolving.trajectory.serialization import to_json_compatible
 from openjiuwen.extensions.observability import semconv
 
@@ -36,7 +36,12 @@ SpanIdentity: TypeAlias = tuple[str, str]
 def encode_otlp_value(value: Any) -> dict[str, Any]:
     """Encode a Python value in the OTLP JSON ``AnyValue`` representation."""
 
-    value = to_json_compatible(value)
+    return _encode_otlp_value(to_json_compatible(value))
+
+
+def _encode_otlp_value(value: Any) -> dict[str, Any]:
+    """Encode a normalized value, including a sequence head in a compact payload."""
+
     if value is None:
         return {"stringValue": ""}
     if isinstance(value, bool):
@@ -45,20 +50,20 @@ def encode_otlp_value(value: Any) -> dict[str, Any]:
         return {"intValue": str(value)}
     if isinstance(value, float):
         return {"doubleValue": value}
-    if isinstance(value, str):
+    if isinstance(value, (str, SequenceHead)):
         return {"stringValue": value}
     if isinstance(value, list):
-        return {"arrayValue": {"values": [encode_otlp_value(item) for item in value]}}
+        return {"arrayValue": {"values": [_encode_otlp_value(item) for item in value]}}
     if isinstance(value, Mapping):
         return {
             "kvlistValue": {
-                "values": [{"key": str(key), "value": encode_otlp_value(item)} for key, item in value.items()]
+                "values": [{"key": str(key), "value": _encode_otlp_value(item)} for key, item in value.items()]
             }
         }
     return {"stringValue": str(value)}
 
 
-def decode_otlp_value(value: Any) -> Any:
+def decode_otlp_value(value: Any, *, preserve_sequences: bool = False) -> Any:
     """Decode an OTLP ``AnyValue`` (or return a detached plain value).
 
     A few exporters hand us already-decoded values, so accepting plain scalar
@@ -66,9 +71,9 @@ def decode_otlp_value(value: Any) -> Any:
     """
 
     if not isinstance(value, Mapping):
-        return to_json_compatible(value)
+        return to_json_compatible(value, preserve_sequences=preserve_sequences)
     if "stringValue" in value:
-        return to_json_compatible(value["stringValue"])
+        return to_json_compatible(value["stringValue"], preserve_sequences=preserve_sequences)
     if "boolValue" in value:
         return bool(value["boolValue"])
     if "intValue" in value:
@@ -84,21 +89,26 @@ def decode_otlp_value(value: Any) -> Any:
     if "arrayValue" in value:
         array = value.get("arrayValue") or {}
         values = array.get("values") if isinstance(array, Mapping) else []
-        return [decode_otlp_value(item) for item in values or []]
+        return [decode_otlp_value(item, preserve_sequences=preserve_sequences) for item in values or []]
     if "kvlistValue" in value:
         kvlist = value.get("kvlistValue") or {}
         values = kvlist.get("values") if isinstance(kvlist, Mapping) else []
         return {
-            str(item.get("key")): decode_otlp_value(item.get("value"))
+            str(item.get("key")): decode_otlp_value(item.get("value"), preserve_sequences=preserve_sequences)
             for item in values or []
             if isinstance(item, Mapping) and item.get("key") is not None
         }
     # Attribute mappings used by tests and some exporters are already plain
     # dictionaries; recursively detach them rather than returning the input.
-    return {str(key): decode_otlp_value(item) for key, item in value.items()}
+    return {
+        str(key): decode_otlp_value(item, preserve_sequences=preserve_sequences)
+        for key, item in value.items()
+    }
 
 
-def attributes_to_map(attributes: Any) -> dict[str, Any]:
+def attributes_to_map(
+    attributes: Any, *, keys: Collection[str] | None = None, preserve_sequences: bool = False
+) -> dict[str, Any]:
     """Decode OTLP attributes into a detached ``{name: value}`` mapping."""
 
     if attributes is None:
@@ -107,9 +117,11 @@ def attributes_to_map(attributes: Any) -> dict[str, Any]:
         # A canonical mapping may still use ``{"value": AnyValue}`` entries.
         result: dict[str, Any] = {}
         for key, value in attributes.items():
+            if keys is not None and str(key) not in keys:
+                continue
             if isinstance(value, Mapping) and set(value) == {"value"}:
                 value = value.get("value")
-            result[str(key)] = decode_otlp_value(value)
+            result[str(key)] = decode_otlp_value(value, preserve_sequences=preserve_sequences)
         return result
     result = {}
     if not isinstance(attributes, Iterable) or isinstance(attributes, (str, bytes)):
@@ -117,22 +129,32 @@ def attributes_to_map(attributes: Any) -> dict[str, Any]:
     for item in attributes:
         if not isinstance(item, Mapping) or item.get("key") is None:
             continue
-        result[str(item["key"])] = decode_otlp_value(item.get("value"))
+        key = str(item["key"])
+        if keys is None or key in keys:
+            result[key] = decode_otlp_value(item.get("value"), preserve_sequences=preserve_sequences)
     return result
 
 
-def attributes_from_map(attributes: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Encode and deterministically order a Python attribute mapping."""
+def attributes_from_map(
+    attributes: Mapping[str, Any], *, preserve_sequences: bool = False
+) -> list[dict[str, Any]]:
+    """Encode sorted OTLP attributes, optionally preserving heads for internal use."""
 
     return [
-        {"key": str(key), "value": encode_otlp_value(attributes[key])}
+        {
+            "key": str(key),
+            "value": _encode_otlp_value(
+                to_json_compatible(attributes[key], preserve_sequences=preserve_sequences)
+            ),
+        }
         for key in sorted(attributes)
         if attributes[key] is not None
     ]
 
 
 def _normalize_attributes(attributes: Any) -> list[dict[str, Any]]:
-    return attributes_from_map(attributes_to_map(attributes))
+    attrs = attributes_to_map(attributes, preserve_sequences=True)
+    return attributes_from_map(attrs, preserve_sequences=True)
 
 
 def normalize_span(span: Mapping[str, Any]) -> Span:
@@ -145,7 +167,7 @@ def normalize_span(span: Mapping[str, Any]) -> Span:
 
     if not isinstance(span, Mapping):
         raise TypeError("span must be a mapping")
-    normalized = to_json_compatible(span)
+    normalized = to_json_compatible(span, preserve_sequences=True)
     if not isinstance(normalized, dict):  # pragma: no cover - conversion contract
         raise TypeError("span must be a mapping")
     if "attributes" in normalized:
@@ -172,7 +194,7 @@ def normalize_otlp(payload: Mapping[str, Any]) -> dict[str, Any]:
 
     if not isinstance(payload, Mapping):
         raise TypeError("OTLP payload must be a mapping")
-    result = to_json_compatible(payload)
+    result = to_json_compatible(payload, preserve_sequences=True)
     if not isinstance(result, dict):  # pragma: no cover - conversion contract
         raise TypeError("OTLP payload must be a mapping")
     resource_spans = result.get("resourceSpans") or []
@@ -182,7 +204,7 @@ def normalize_otlp(payload: Mapping[str, Any]) -> dict[str, Any]:
     for resource_span in resource_spans:
         if not isinstance(resource_span, Mapping):
             continue
-        item = to_json_compatible(resource_span)
+        item = to_json_compatible(resource_span, preserve_sequences=True)
         resource = item.get("resource")
         if not isinstance(resource, Mapping):
             resource = {}
@@ -195,7 +217,7 @@ def normalize_otlp(payload: Mapping[str, Any]) -> dict[str, Any]:
         for scope in scopes:
             if not isinstance(scope, Mapping):
                 continue
-            scope_item = to_json_compatible(scope)
+            scope_item = to_json_compatible(scope, preserve_sequences=True)
             scope_item["scope"] = dict(scope_item.get("scope") or {})
             spans = scope_item.get("spans") or []
             scope_item["spans"] = [normalize_span(span) for span in spans if isinstance(span, Mapping)]
@@ -206,9 +228,15 @@ def normalize_otlp(payload: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _payload_for(value: Any) -> Mapping[str, Any]:
+def compact_payload_for(value: Any) -> Mapping[str, Any]:
+    """Read an OTLP mapping or copy a trajectory payload without expanding sequences."""
+
     if isinstance(value, Mapping):
         return value
+    from openjiuwen.agent_evolving.trajectory.model import Trajectory
+
+    if isinstance(value, Trajectory):
+        return value.copy_compact_payload()
     to_otlp = getattr(value, "to_otlp", None)
     if callable(to_otlp):
         payload = to_otlp()
@@ -236,23 +264,39 @@ def _payload_spans(payload: Mapping[str, Any]) -> Iterator[tuple[int, int, int, 
                 continue
             for span_index, span in enumerate(scope_span.get("spans") or []):
                 if isinstance(span, Mapping):
-                    yield resource_index, scope_index, span_index, normalize_span(span)
+                    yield resource_index, scope_index, span_index, span
+
+
+def iter_payload_spans(payload: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
+    """Traverse a caller-owned OTLP payload without copying or normalizing spans."""
+
+    for _, _, _, span in _payload_spans(payload):
+        yield span
 
 
 def iter_spans(value: Any) -> Iterator[Span]:
     """Yield detached spans from every OTLP resource/scope group."""
 
-    payload = _payload_for(value)
-    for _, _, _, span in _payload_spans(payload):
-        yield span
+    for span in iter_compact_spans(value):
+        yield to_json_compatible(span)
 
 
-def span_attributes(span: Mapping[str, Any]) -> dict[str, Any]:
+def iter_compact_spans(value: Any) -> Iterator[Span]:
+    """Yield internal span copies that may hold SequenceHead objects in stringValue.
+
+    Use iter_spans() for detached, JSON-compatible spans.
+    """
+
+    for span in iter_payload_spans(compact_payload_for(value)):
+        yield normalize_span(span)
+
+
+def span_attributes(span: Mapping[str, Any], *, keys: Collection[str] | None = None) -> dict[str, Any]:
     """Return decoded span attributes as an independent mapping."""
 
     if not isinstance(span, Mapping):
         return {}
-    return attributes_to_map(span.get("attributes"))
+    return attributes_to_map(span.get("attributes"), keys=keys)
 
 
 def span_status(span: Mapping[str, Any]) -> dict[str, Any]:
@@ -294,6 +338,14 @@ def span_identity(span: Mapping[str, Any]) -> SpanIdentity | None:
     return trace_text, span_text
 
 
+def _normalized_span_identity(span: Mapping[str, Any]) -> SpanIdentity | None:
+    # Native OTLP IDs are strings. Match the normalized representation for
+    # other inputs without converting the rest of a replayed span.
+    if all(isinstance(span.get(key), str) for key in ("traceId", "spanId")):
+        return span_identity(span)
+    return span_identity({key: to_json_compatible(span.get(key)) for key in ("traceId", "spanId")})
+
+
 def _id_text(value: Any) -> str:
     if isinstance(value, bytes):
         return value.hex()
@@ -327,79 +379,106 @@ def _scope_bucket_key(scope_span: Mapping[str, Any]) -> tuple[Any, ...]:
     return tuple(sorted((str(k), repr(v)) for k, v in scope.items()))
 
 
-def _sort_payload_spans(payload: dict[str, Any]) -> None:
-    for resource_span in payload.get("resourceSpans") or []:
-        for scope_span in resource_span.get("scopeSpans") or []:
-            spans = scope_span.get("spans") or []
-            scope_span["spans"] = sorted(spans, key=span_sort_key)
+def _append_scope_spans(
+    scopes: dict[tuple[Any, ...], dict[str, Any]],
+    payloads: Iterable[Mapping[str, Any]],
+    admit: Callable[[Span], Span | None],
+) -> None:
+    """Bucket incoming spans by scope and sort only groups that gained spans."""
+
+    additions: dict[tuple[Any, ...], list[Span]] = {}
+    for payload in payloads:
+        for resource in payload.get("resourceSpans") or []:
+            if not isinstance(resource, Mapping):
+                continue
+            for source in resource.get("scopeSpans") or []:
+                if not isinstance(source, Mapping):
+                    continue
+                scope = dict(to_json_compatible(source.get("scope") or {}))
+                key = _scope_bucket_key({"scope": scope})
+                scopes.setdefault(key, {"scope": scope, "spans": []})
+                for span in source.get("spans") or []:
+                    if not isinstance(span, Mapping):
+                        continue
+                    accepted = admit(span)
+                    if accepted is not None:
+                        additions.setdefault(key, []).append(accepted)
+
+    for key, spans in additions.items():
+        group = scopes[key]
+        existing = group["spans"]
+        spans.sort(key=span_sort_key)
+        combined = [*existing, *spans]
+        if existing and span_sort_key(existing[-1]) > span_sort_key(spans[0]):
+            combined.sort(key=span_sort_key)
+        scopes[key] = {**group, "spans": combined}
+
+
+def _merge_payload_groups(
+    first: Mapping[str, Any],
+    scopes: Iterable[dict[str, Any]],
+    payloads: Iterable[Mapping[str, Any]],
+    admit: Callable[[Span], Span | None],
+) -> dict[str, Any]:
+    """Build the logical resource, sharing untouched canonical groups."""
+
+    resources = first.get("resourceSpans") or []
+    resource = (resources[0].get("resource") or {}) if resources else {}
+    buckets = {_scope_bucket_key(group): group for group in scopes}
+    _append_scope_spans(buckets, payloads, admit)
+    return {"resourceSpans": [{"resource": resource, "scopeSpans": list(buckets.values())}]}
+
+
+def _merge_normalized_payloads(
+    payloads: Sequence[Mapping[str, Any]],
+    *,
+    normalize_again: bool = False,
+) -> dict[str, Any]:
+    if not payloads:
+        return {"resourceSpans": []}
+
+    seen: set[SpanIdentity] = set()
+
+    def admit(span: Span) -> Span | None:
+        if normalize_again:
+            span = normalize_span(span)
+        identity = span_identity(span)
+        if identity is not None:
+            if identity in seen:
+                return None
+            seen.add(identity)
+        return span
+
+    return _merge_payload_groups(payloads[0], (), payloads, admit)
 
 
 def merge_payloads(*values: Any) -> dict[str, Any]:
     """Merge OTLP payloads into one logical resource, de-duplicating identities.
 
     The first payload owns resource metadata (including trajectory/session
-    identity).  Native span trace/span IDs from all inputs are retained; later
-    resource-level identity attributes are not copied into a second resource
-    record, which would otherwise make a merged window appear to have multiple
-    trajectories.
+    identity). Native span trace/span IDs from all inputs are retained.
     """
 
-    payloads = [normalize_otlp(_payload_for(value)) for value in values if value is not None]
-    if not payloads:
-        return {"resourceSpans": []}
-    first = deepcopy(payloads[0])
-    first_resources = first.get("resourceSpans") or []
-    first_resource = first_resources[0] if first_resources else {}
-    logical_resource: dict[str, Any] = {
-        "resource": deepcopy(first_resource.get("resource") or {}) if isinstance(first_resource, Mapping) else {},
-        "scopeSpans": [],
-    }
-    result: dict[str, Any] = {"resourceSpans": [logical_resource]}
-    seen: set[SpanIdentity] = set()
-    for payload in payloads:
-        for incoming_resource in payload.get("resourceSpans") or []:
-            if not isinstance(incoming_resource, Mapping):
-                continue
-            for incoming_scope in incoming_resource.get("scopeSpans") or []:
-                if not isinstance(incoming_scope, Mapping):
-                    continue
-                matching_scope = None
-                scope_key = _scope_bucket_key(incoming_scope)
-                for existing_scope in logical_resource["scopeSpans"]:
-                    if _scope_bucket_key(existing_scope) == scope_key:
-                        matching_scope = existing_scope
-                        break
-                if matching_scope is None:
-                    matching_scope = {
-                        "scope": deepcopy(incoming_scope.get("scope") or {}),
-                        "spans": [],
-                    }
-                    logical_resource["scopeSpans"].append(matching_scope)
-                existing_spans = matching_scope.setdefault("spans", [])
-                for incoming_span in incoming_scope.get("spans") or []:
-                    normalized = normalize_span(incoming_span)
-                    identity = span_identity(normalized)
-                    if identity is not None and identity in seen:
-                        continue
-                    existing_spans.append(normalized)
-                    if identity is not None:
-                        seen.add(identity)
-    _sort_payload_spans(result)
-    return normalize_otlp(result)
+    return to_json_compatible(_merge_compact_payloads(*values))
+
+
+def _merge_compact_payloads(*values: Any) -> dict[str, Any]:
+    payloads = [normalize_otlp(compact_payload_for(value)) for value in values if value is not None]
+    return normalize_otlp(_merge_normalized_payloads(payloads, normalize_again=True))
 
 
 def merge_trajectories(*values: Any) -> Any:
     """Return a new canonical trajectory containing unique spans from inputs."""
 
-    return _trajectory_from_payload(merge_payloads(*values))
+    return _trajectory_from_payload(_merge_compact_payloads(*values))
 
 
 def merge_spans(base: Any, additions: Iterable[Mapping[str, Any]]) -> Any:
     """Merge detached span dictionaries into a trajectory value."""
 
-    payload = normalize_otlp(_payload_for(base))
+    payload = normalize_otlp(compact_payload_for(base))
     extra = {"resourceSpans": [{"resource": {}, "scopeSpans": [{"spans": list(additions)}]}]}
-    return _trajectory_from_payload(merge_payloads(payload, extra))
+    return _trajectory_from_payload(_merge_compact_payloads(payload, extra))
 
 
 def _trim_span_indices(
@@ -471,10 +550,40 @@ def trim_trajectory(
     kept when they start no earlier than the oldest span that was.
     """
 
-    payload = normalize_otlp(_payload_for(value))
-    if max_spans is None and start_time is None and end_time is None:
-        return _trajectory_from_payload(payload)
+    payload = compact_payload_for(value)
+    if uncounted is not None:
+        # Public predicates receive ordinary OTLP, including string attributes.
+        payload = to_json_compatible(payload)
+    return trim_compact_trajectory(payload, max_spans, start_time=start_time, end_time=end_time, uncounted=uncounted)
 
+
+def trim_compact_trajectory(
+    payload: Mapping[str, Any],
+    max_spans: int | None,
+    *,
+    start_time: int | None = None,
+    end_time: int | None = None,
+    uncounted: Callable[[Mapping[str, Any]], bool] | None = None,
+) -> Any:
+    """Trim a compact payload, passing compact spans to the optional predicate."""
+
+    return _trajectory_from_payload(
+        _trim_payload(normalize_otlp(payload), max_spans, start_time=start_time, end_time=end_time, uncounted=uncounted)
+    )
+
+
+def _trim_payload(
+    payload: dict[str, Any],
+    max_spans: int | None,
+    *,
+    start_time: int | None = None,
+    end_time: int | None = None,
+    uncounted: Callable[[Mapping[str, Any]], bool] | None = None,
+) -> dict[str, Any]:
+    """Select canonical spans while preserving their original groups."""
+
+    if max_spans is None and start_time is None and end_time is None:
+        return payload
     entries = list(_payload_spans(payload))
     selected = _trim_span_indices(
         [span for _, _, _, span in entries],
@@ -483,17 +592,15 @@ def trim_trajectory(
         end_time=end_time,
         uncounted=uncounted,
     )
-    result = deepcopy(payload)
-    for resource_span in result.get("resourceSpans") or []:
-        for scope_span in resource_span.get("scopeSpans") or []:
-            scope_span["spans"] = []
 
-    # Keep empty groups and their metadata; selected positions identify the original
-    # source even when different groups contain identical trace/span IDs.
+    resources = [
+        {**resource, "scopeSpans": [{**group, "spans": []} for group in resource["scopeSpans"]]}
+        for resource in payload["resourceSpans"]
+    ]
     for index in selected:
         resource_index, scope_index, _, span = entries[index]
-        result["resourceSpans"][resource_index]["scopeSpans"][scope_index]["spans"].append(span)
-    return _trajectory_from_payload(result)
+        resources[resource_index]["scopeSpans"][scope_index]["spans"].append(span)
+    return {**payload, "resourceSpans": resources}
 
 
 def crop_trajectory(value: Any, *args: Any, **kwargs: Any) -> Any:
@@ -752,19 +859,25 @@ def is_compaction_span(span: Mapping[str, Any]) -> bool:
     the trajectory: the window it produced is committed separately.
     """
 
-    return span_attributes(span).get(semconv.OJ_REQUEST_PURPOSE) == "compaction"
+    return span_attributes(span, keys=(semconv.OJ_REQUEST_PURPOSE,)).get(semconv.OJ_REQUEST_PURPOSE) == "compaction"
 
 
 def is_goal_assessment_span(span: Mapping[str, Any]) -> bool:
     """Whether a request independently judges a goal instead of executing it."""
-    return span_attributes(span).get(semconv.OJ_REQUEST_PURPOSE) == "goal_assessment"
+    key = semconv.OJ_REQUEST_PURPOSE
+    return span_attributes(span, keys=(key,)).get(key) == "goal_assessment"
 
 
-def read_llm_exchange(span: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Read detached LLM messages from the standard GenAI attributes."""
+def read_llm_exchange(
+    span: Mapping[str, Any], *, include_prompt: bool = True
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read detached LLM messages, optionally skipping the captured prompt."""
 
-    attrs = span_attributes(span)
-    prompts = _standard_prompt_messages(attrs)
+    keys = (semconv.GEN_AI_OUTPUT_MESSAGES,)
+    if include_prompt:
+        keys += (semconv.GEN_AI_INPUT_MESSAGES, semconv.GEN_AI_SYSTEM_INSTRUCTIONS)
+    attrs = span_attributes(span, keys=keys)
+    prompts = _standard_prompt_messages(attrs) if include_prompt else []
     completions = [
         _flatten_structured_message(message)
         for message in _message_list(attrs.get(semconv.GEN_AI_OUTPUT_MESSAGES))
@@ -782,10 +895,32 @@ def read_llm_messages(span: Mapping[str, Any], *, include_empty: bool = False) -
     return [message for message in messages if message.get("role") is not None or message.get("content") is not None]
 
 
+def read_tool_input(span: Mapping[str, Any]) -> Any:
+    """Read only the tool arguments, decoding the standard structured value."""
+
+    key = semconv.GEN_AI_TOOL_CALL_ARGUMENTS
+    return _decode_structured_attribute(span_attributes(span, keys=(key,)).get(key))
+
+
+def read_tool_output(span: Mapping[str, Any]) -> Any:
+    """Read only the tool result, decoding the standard structured value."""
+
+    key = semconv.GEN_AI_TOOL_CALL_RESULT
+    return _decode_structured_attribute(span_attributes(span, keys=(key,)).get(key))
+
+
 def read_tool_call(span: Mapping[str, Any]) -> dict[str, Any]:
     """Read canonical tool identity/input/output and status from a tool span."""
 
-    attrs = span_attributes(span)
+    attrs = span_attributes(
+        span,
+        keys=(
+            semconv.GEN_AI_TOOL_NAME,
+            semconv.GEN_AI_TOOL_CALL_ID,
+            semconv.GEN_AI_TOOL_CALL_ARGUMENTS,
+            semconv.GEN_AI_TOOL_CALL_RESULT,
+        ),
+    )
     result: dict[str, Any] = {}
     name = attrs.get(semconv.GEN_AI_TOOL_NAME)
     tool_id = attrs.get(semconv.GEN_AI_TOOL_CALL_ID)
@@ -908,12 +1043,14 @@ __all__ = [
     "SpanIdentity",
     "attributes_from_map",
     "attributes_to_map",
+    "compact_payload_for",
     "crop_trajectory",
     "decode_json_attribute",
     "decode_otlp_value",
     "encode_otlp_value",
     "is_compaction_span",
     "is_goal_assessment_span",
+    "iter_compact_spans",
     "iter_spans",
     "merge_payloads",
     "merge_spans",
@@ -926,12 +1063,15 @@ __all__ = [
     "read_rl_fields",
     "read_span_error",
     "read_tool_call",
+    "read_tool_input",
+    "read_tool_output",
     "read_usage",
     "span_attributes",
     "span_events",
     "span_identity",
     "span_sort_key",
     "span_status",
+    "trim_compact_trajectory",
     "trim_spans",
     "trim_trajectory",
 ]

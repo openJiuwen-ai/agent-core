@@ -28,7 +28,7 @@ from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
 )
-from openjiuwen.agent_teams.extensions.ops import TaskDependencyInfo, TeamReadView
+from openjiuwen.agent_teams.extensions.ops import TaskDependencyInfo, TeamReadView, TeamSummary
 from openjiuwen.agent_teams.monitor.models import MemberInfo, MessageInfo, TaskInfo, TeamInfo
 
 if TYPE_CHECKING:
@@ -179,6 +179,8 @@ class DatabaseResolver:
     resolve time; nothing about the runtime pool participates in
     resolution, and the read path never runs DDL — dynamic tables are
     created only when a session binds (the team-runtime write path).
+    ``list_teams`` answers from the static tables alone; runtime liveness
+    stays with the monitor event stream.
     """
 
     def __init__(
@@ -223,6 +225,30 @@ class DatabaseResolver:
             session_id=session_id,
             hide_dm=self._hide_dm,
         )
+
+    async def list_teams(self) -> list[TeamSummary]:
+        """Return one overview row per team, oldest first.
+
+        Answered entirely from the static tables: team rows as a light
+        projection, member counts as one grouped count. A host without
+        team storage lists nothing.
+        """
+        db = await self._db_factory()
+        if db is None:
+            return []
+        rows = await db.team.list_teams()
+        counts = await db.member.count_members_by_team()
+        return [
+            TeamSummary(
+                team_name=row.team_name,
+                display_name=row.display_name,
+                leader_member_name=row.leader_member_name,
+                created=row.created,
+                updated_at=row.updated_at,
+                member_count=counts.get(row.team_name, 0),
+            )
+            for row in rows
+        ]
 
 
 __all__ = [

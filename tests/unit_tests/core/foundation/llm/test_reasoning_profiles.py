@@ -95,6 +95,12 @@ def test_provider_reasoning_rules_expose_provider_scoped_patterns() -> None:
     zhipu_rules = get_provider_reasoning_rules(provider="Zhipu", endpoint_profile="zhipu")
     glm52 = next(rule for rule in zhipu_rules if "glm-5.2*" in rule["patterns"])
     assert glm52["capabilities"]["openai"]["options"] == ["off", "high", "max"]
+    glm53_flash = next(rule for rule in zhipu_rules if "glm-5.3-flash*" in rule["patterns"])
+    assert glm53_flash["capabilities"]["openai"] == {
+        "options": ["low", "high", "max"],
+        "recommended": "max",
+    }
+    assert glm53_flash["capabilities"]["anthropic"]["options"] == []
 
     # Qianfan proxies GLM with a plain toggle: provider rules must reflect the
     # gateway-specific capability, not the home-vendor fallback.

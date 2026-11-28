@@ -21,6 +21,7 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 # delivery time, so the schema stays stable across leader renames and never
 # leaks a specific identity.
 LEADER_ROLE_RECIPIENT = "leader"
+_HOST_MANAGED_DIRECT_ERROR = "Host-managed members only receive public group mentions"
 
 # Upper bound on ``content`` length, in characters. Past this size the body
 # is an artifact, not a message, and belongs in a file under the shared team
@@ -176,6 +177,8 @@ class _SendMessageBase(TeamTool, ABC):
         if self._team and to != USER_PSEUDO_MEMBER_NAME:
             if not await self._team.member_exists(to):
                 return ToolOutput(success=False, error=f"Member '{to}' not found")
+            if await self.message_manager.host_managed_recipients([to]):
+                return ToolOutput(success=False, error=f"{_HOST_MANAGED_DIRECT_ERROR}: {to}")
         await self._auto_start_members()
         if to != USER_PSEUDO_MEMBER_NAME:
             await self._wake_recipients([to])
@@ -229,9 +232,11 @@ class _SendMessageBase(TeamTool, ABC):
         # expensive broadcast — reject it and force the caller onto the
         # broadcast path. list_member_roster() already excludes the caller,
         # so an exact set match means the targets are the whole roster.
+        blocked = set()
         if self._team:
+            blocked = await self.message_manager.host_managed_recipients(deduped)
             roster = {member.member_name for member in await self._team.list_member_roster()}
-            if roster and set(deduped) == roster:
+            if not blocked and roster and set(deduped) == roster:
                 return ToolOutput(
                     success=False,
                     error=(
@@ -248,6 +253,9 @@ class _SendMessageBase(TeamTool, ABC):
         failed: list[dict[str, str]] = []
         valid: list[str] = []
         for name in deduped:
+            if name in blocked:
+                failed.append({"to": name, "reason": _HOST_MANAGED_DIRECT_ERROR})
+                continue
             if self._team:
                 if not await self._team.member_exists(name):
                     failed.append({"to": name, "reason": f"Member '{name}' not found"})

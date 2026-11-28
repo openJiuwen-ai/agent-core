@@ -362,6 +362,76 @@ def test_build_mcp_specs_rejects_invalid_connector_value(
         load_plugin_package(manifest)
 
 
+def _write_template_with_mcps(package_dir: Path, mcps: list[object]) -> Path:
+    persona_dir = package_dir / "persona"
+    persona_dir.mkdir(parents=True)
+    (persona_dir / "expert.md").write_text("# Expert\n", encoding="utf-8")
+    manifest = package_dir / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "package_type": "agent_template",
+                "name": "expert",
+                "description": "expert with connectors",
+                "persona": {"dir": "./persona"},
+                "mcps": mcps,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def test_agent_template_keeps_connector_names(tmp_path: Path) -> None:
+    """Template connector refs are kept as names (deduped, ordered), never as server specs."""
+    from openjiuwen.harness.resources import load_agent_template_package
+
+    manifest = _write_template_with_mcps(
+        tmp_path / "expert",
+        [{"connector": "amap"}, {"connector": "harmonyos-mcp"}, {"connector": "amap"}],
+    )
+
+    spec = load_agent_template_package(manifest)
+
+    assert spec.connectors == ["amap", "harmonyos-mcp"]
+    assert spec.mcps == []
+
+
+def test_agent_template_connectors_survive_snapshot_round_trip(tmp_path: Path) -> None:
+    """The member snapshot (JSON) carries connector names and re-validates."""
+    from openjiuwen.agent_teams.experts.template_member import template_snapshot
+    from openjiuwen.harness.resources import load_agent_template_package
+    from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec
+
+    spec = load_agent_template_package(_write_template_with_mcps(tmp_path / "expert", [{"connector": "amap"}]))
+
+    snapshot = json.loads(json.dumps(template_snapshot(spec)))
+
+    assert snapshot["connectors"] == ["amap"]
+    assert AgentTemplateSpec.model_validate(snapshot).connectors == ["amap"]
+
+
+def test_agent_template_skips_blank_connector_name(tmp_path: Path) -> None:
+    """A blank connector name is skipped (logged) and never fails the template load."""
+    from openjiuwen.harness.resources import load_agent_template_package
+
+    manifest = _write_template_with_mcps(tmp_path / "expert", [{"connector": "   "}, {"connector": "amap"}])
+
+    spec = load_agent_template_package(manifest)
+
+    assert spec.connectors == ["amap"]
+
+
+def test_plugin_connectors_stay_unmodelled(tmp_path: Path) -> None:
+    """Plugins keep skipping connector refs; only templates record them."""
+    from openjiuwen.harness.resources.extension_loader import load_plugin_package
+
+    spec = load_plugin_package(_write_plugin_with_mcps(tmp_path / "pkg", [{"connector": "amap"}]))
+
+    assert spec.mcps == []
+    assert not hasattr(spec, "connectors")
+
+
 def test_plugin_manifest_loads_prompt_sections_from_routed_files(tmp_path: Path) -> None:
     """Plugin prompt_sections are md files under prompt_sections/, routed by file."""
     from openjiuwen.harness.resources.extension_loader import load_plugin_package
