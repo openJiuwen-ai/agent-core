@@ -26,6 +26,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import uuid
 import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager
@@ -83,7 +84,9 @@ ADX_RECREATE_RETRIES = 5
 ADX_RECREATE_SLEEP_SECONDS = 1
 _SDK_LIST_DEPTH = 20
 _ADX_ENVIRONMENTS = "/api/environment/v1/environments"
+_ADX_INSTANCES = "/api/instances"
 _ADX_INVOKE = "/direct"
+_ADX_RESUME_TIMEOUT_SECONDS = 330.0
 
 _T = TypeVar("_T")
 
@@ -570,6 +573,27 @@ def _http_error_message(body: Any) -> str:
     return "ADX request failed"
 
 
+def _error_detail(body: Any) -> dict[str, Any]:
+    if isinstance(body, dict):
+        detail = body.get("error")
+        if isinstance(detail, dict):
+            return detail
+    return {}
+
+
+def _definitive_restore_rejection(status: int, body: Any) -> bool:
+    """Return whether ADX definitively rejected resuming the restore point.
+
+    Expired checkpoints, incompatible release/recovery profiles and local
+    restore points that cannot move to another node are reported as 400 or 409
+    with ``retry=never`` and ``outcome=not_started``.
+    """
+    if status not in (400, 409):
+        return False
+    detail = _error_detail(body)
+    return detail.get("retry") == "never" and detail.get("outcome") == "not_started"
+
+
 def _decode_mgmt_data(body: Any) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise RuntimeError("ADX management response is not an object")
@@ -760,7 +784,7 @@ class _AdxProviderMixin:
                 cls._lifecycle_locks[shared_key] = lock
             return lock
 
-    def _create_instance(self) -> Tuple[str, str]:
+    def _create_instance(self, *, retry_conflict: bool = True) -> Tuple[str, str]:
         body = _adx_create_body(self._launcher_extra_params(), self._executor)
         status, response = _adx_request(
             "POST",
@@ -769,6 +793,18 @@ class _AdxProviderMixin:
             headers=self._auth_headers,
             timeout=self._request_timeout(body.get("createTimeoutSeconds")),
         )
+        if status == 409:
+            environment_id = _error_detail(response).get("environmentId")
+            if isinstance(environment_id, str) and environment_id and environment_id != "unknown":
+                recovered = self._recover_conflicting_instance(environment_id, response)
+                if recovered is not None:
+                    runtime = body.get("runtime")
+                    executor = runtime if isinstance(runtime, str) and runtime else self._executor
+                    return recovered, executor
+                if retry_conflict:
+                    # The paused record disappeared between create and attach.
+                    return self._create_instance(retry_conflict=False)
+            raise AdxHttpError(status, _http_error_message(response))
         if status != 200:
             raise AdxHttpError(status, _http_error_message(response))
         environment_id = _decode_mgmt_data(response).get("environmentId")
@@ -777,6 +813,65 @@ class _AdxProviderMixin:
         runtime = body.get("runtime")
         executor = runtime if isinstance(runtime, str) and runtime else self._executor
         return environment_id, executor
+
+    def _instance_state(self, environment_id: str) -> Optional[str]:
+        quoted = urllib.parse.quote(environment_id, safe="")
+        status, body = _adx_request(
+            "GET",
+            f"{self._base_url()}{_ADX_INSTANCES}?instance_id={quoted}",
+            headers=self._auth_headers,
+            timeout=self._request_timeout(),
+        )
+        if status != 200 or not isinstance(body, list):
+            return None
+        for item in body:
+            if isinstance(item, dict) and item.get("id") == environment_id:
+                return str(item.get("status") or "").lower()
+        return None
+
+    def _wait_for_stable_instance_state(self, environment_id: str, timeout: float = 10.0) -> Optional[str]:
+        deadline = time.monotonic() + timeout
+        while True:
+            state = self._instance_state(environment_id)
+            if state is None or state in ("paused", "running", "failed", "deleted"):
+                return state
+            if time.monotonic() >= deadline:
+                return state
+            time.sleep(0.5)
+
+    def _recover_conflicting_instance(self, environment_id: str, conflict: Any) -> Optional[str]:
+        """Attach to an existing paused environment, resuming or discarding it.
+
+        Returns the environment ID when it can be reused, ``None`` when the
+        record vanished so the caller may create once more, and raises the
+        original conflict for any environment that is not resumable.
+        """
+        state = self._wait_for_stable_instance_state(environment_id)
+        if state is None:
+            return None
+        if state == "running":
+            return environment_id
+        if state != "paused":
+            raise AdxHttpError(409, _http_error_message(conflict))
+        status, body = _adx_request(
+            "POST",
+            f"{_environment_url(self._base_url(), environment_id)}/resume",
+            payload={},
+            headers={**self._auth_headers, "X-ADX-Request-ID": f"resume-{uuid.uuid4()}"},
+            timeout=max(self._request_timeout(), _ADX_RESUME_TIMEOUT_SECONDS),
+        )
+        if status == 200:
+            logger.info("[adx] resumed paused environment %s", environment_id)
+            return environment_id
+        if _definitive_restore_rejection(status, body):
+            if self._wait_for_stable_instance_state(environment_id) == "paused":
+                logger.warning(
+                    "[adx] discarding environment %s after an unusable restore point: %s",
+                    environment_id,
+                    _http_error_message(body),
+                )
+                _delete_environment(self._base_url(), environment_id, self._auth_headers)
+        raise AdxHttpError(status, _http_error_message(body))
 
     def _bind_instance(self, environment_id: str, executor: str) -> Tuple[str, str]:
         self._instance = environment_id
