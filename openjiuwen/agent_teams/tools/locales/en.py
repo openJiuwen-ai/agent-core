@@ -67,11 +67,14 @@ STRINGS: dict[str, str] = {
         "and state in your answer that team initialization failed."
     ),
     "build_team.partial_built": (
-        "The team was created (team row persisted) but initialization did not finish: "
-        "{reason}. Do NOT call build_team again — the team already exists and a retry "
-        "will only fail with 'already exists'. Keep working on the user's task "
-        "directly; if missing members block progress, complete the task solo as the "
-        "leader and state in your answer that team initialization was incomplete."
+        "The team was created (team row persisted) but initialization did not "
+        "finish: {reason}. Do NOT call build_team again — the team already "
+        "exists and a retry will only fail with 'already exists'. The runtime "
+        "already tried to reconcile the predefined roster (expected "
+        "{expected}, present {present}) and did not succeed ({details}). The "
+        "team is NOT usable: do not create tasks, do not broadcast, do not "
+        "rely on teammate collaboration; tell the user that expert-team "
+        "initialization was incomplete and complete the task solo as the leader."
     ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/en/clean_team.md

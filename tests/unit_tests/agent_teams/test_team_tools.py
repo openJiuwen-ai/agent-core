@@ -3,6 +3,7 @@
 
 """Unit tests for team_tools module"""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -15,6 +16,7 @@ from openjiuwen.agent_teams.context import (
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.status import (
+    ExecutionStatus,
     MemberMode,
     MemberStatus,
     TaskStatus,
@@ -26,8 +28,13 @@ from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
 )
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
-from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, TeamRole
-from openjiuwen.agent_teams.tools.team import TeamBackend
+from openjiuwen.agent_teams.schema.team import (
+    ExternalCliAgentSpec,
+    MemberOpResult,
+    TeamMemberSpec,
+    TeamRole,
+)
+from openjiuwen.agent_teams.tools.team import MemberReconcileReport, TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
     ApprovePlanTool,
     ApproveToolCallTool,
@@ -640,6 +647,9 @@ class TestBuildTeamTool:
             # 两轮的 reason 不同（首轮 spawn 爆炸、次轮 create_team 撞
             # 「已存在」），以半建成文案标记断言
             assert result.error and "禁止再调用 build_team" in result.error
+            # 结构化失败：自动补齐后的期望/当前人数必须出现在文案里
+            assert "期望 1 个" in result.error
+            assert "当前 0 个" in result.error
             # 文案不得再指引不存在的工具（预定义模式下无任何 spawn 工具，
             # list_members 也未注册给 leader）
             assert "spawn_member" not in result.error
@@ -658,8 +668,7 @@ class TestBuildTeamTool:
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_partial_built_clears_stale_latch(self, db, message_bus, t):
-        """半建成分支必须先清前轮"未建成"遗留的 latch，再以本轮半建成
-        原因重新置位：
+        """半建成分支必须清掉前轮"未建成"遗留的 latch：
 
         先有一次未建成失败（latch 置位）→ 重试时 create_team 已把行写入
         但后续失败 → 半建成 → on_team_build_recovered 清掉前轮原因，随后
@@ -717,6 +726,273 @@ class TestBuildTeamTool:
         assert events[1] == "recovered"
         assert events[2].startswith("failed:")
         assert "spawn exploded" in events[2]
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_partial_build_reconcile_success_returns_team_usable(
+            self, db, message_bus, t
+    ):
+        """行已落库、注册中断 → 补齐成功后工具按成功返回。
+
+        预定义模式下 leader 工具集没有 list_members/spawn_member，恢复只能由
+        运行时完成；补齐成功后团队立即可用，不再给模型一个不可执行的恢复序列。
+        """
+        backend = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+        )
+        tool = BuildTeamTool(backend, t)
+
+        async def _spawn_boom(**kwargs):
+            raise RuntimeError("db read watchdog tripped")
+
+        async def _fake_reconcile(*, team=None):
+            return MemberReconcileReport(expected=2, present=2, created=["dev-1"])
+
+        backend.spawn_member = _spawn_boom  # type: ignore[method-assign]
+        backend.reconcile_predefined_members = _fake_reconcile  # type: ignore[method-assign]
+        result = await tool.invoke(
+            {
+                "display_name": "X",
+                "team_desc": "d",
+                "leader_display_name": "L",
+                "leader_desc": "d",
+            }
+        )
+
+        assert result.success is True, result.error
+        assert result.data["reconciled_members"] == ["dev-1"]
+        assert result.data["recovered_from"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_reconcile_registers_only_missing_predefined_members(
+            self, db, message_bus, t
+    ):
+        """reconcile 以落库 roster 为期望差集：已在册成员不重复拉起。"""
+        backend = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            predefined_members=[
+                TeamMemberSpec(
+                    member_name="dev-1",
+                    display_name="Dev One",
+                    desc="dev",
+                    prompt="p",
+                ),
+                TeamMemberSpec(
+                    member_name="qa-1",
+                    display_name="QA One",
+                    desc="qa",
+                    prompt="p",
+                ),
+            ],
+        )
+        spawned: list[str] = []
+
+        async def _roster(team_name, status=None):
+            return [
+                SimpleNamespace(member_name="leader1"),
+                SimpleNamespace(member_name="qa-1"),
+            ]
+
+        async def _spawn(**kwargs):
+            spawned.append(kwargs["member_name"])
+            return MemberOpResult.success()
+
+        backend.db.member.get_team_members = _roster  # type: ignore[method-assign]
+        backend.spawn_member = _spawn  # type: ignore[method-assign]
+
+        report = await backend.reconcile_predefined_members()
+
+        assert spawned == ["dev-1"]
+        assert report.expected == 3
+        assert report.present == 3
+        assert report.created == ["dev-1"]
+        assert report.complete is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_reconcile_restores_missing_leader_row(self, db, message_bus):
+        """团队行已落库、leader 行缺失 → reconcile 用与初建相同的参数补回
+        leader 行（BUSY/RUNNING/BUILD_MODE、留存显示名），expected/present
+        才可能相等。"""
+        backend = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+        )
+        backend.leader_display_name = "Leader Display"
+        backend.leader_desc = "PM"
+        await db.team.create_team(
+            team_name="test_team",
+            display_name="X",
+            leader_member_name="leader1",
+        )
+        spawned: list[dict] = []
+
+        async def _roster(team_name, status=None):
+            return []
+
+        async def _spawn(**kwargs):
+            spawned.append(kwargs)
+            return MemberOpResult.success()
+
+        backend.db.member.get_team_members = _roster  # type: ignore[method-assign]
+        backend.spawn_member = _spawn  # type: ignore[method-assign]
+
+        report = await backend.reconcile_predefined_members()
+
+        assert [call["member_name"] for call in spawned] == ["leader1"]
+        leader_call = spawned[0]
+        assert leader_call["display_name"] == "Leader Display"
+        assert leader_call["desc"] == "PM"
+        assert leader_call["status"] == MemberStatus.BUSY
+        assert leader_call["execution_status"] == ExecutionStatus.RUNNING
+        assert leader_call["mode"] == MemberMode.BUILD_MODE
+        assert leader_call["skip_team_exists"] is True
+        assert report.created == ["leader1"]
+        assert report.expected == 1
+        assert report.present == 1
+        assert report.complete is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_reconcile_uses_ctx_leader_identity_without_build(
+            self, db, message_bus
+    ):
+        """leader 身份来自构造期 ctx 注入：从未跑过 build_team 的 backend
+        也能按同一身份补 leader 行（不依赖"先 build 过"的隐式时序）。"""
+        backend = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            leader_display_name="Ctx Leader",
+            leader_desc="ctx desc",
+        )
+        await db.team.create_team(
+            team_name="test_team",
+            display_name="X",
+            leader_member_name="leader1",
+        )
+        spawned: list[dict] = []
+
+        async def _roster(team_name, status=None):
+            return []
+
+        async def _spawn(**kwargs):
+            spawned.append(kwargs)
+            return MemberOpResult.success()
+
+        backend.db.member.get_team_members = _roster  # type: ignore[method-assign]
+        backend.spawn_member = _spawn  # type: ignore[method-assign]
+
+        report = await backend.reconcile_predefined_members()
+
+        assert [call["member_name"] for call in spawned] == ["leader1"]
+        assert spawned[0]["display_name"] == "Ctx Leader"
+        assert spawned[0]["desc"] == "ctx desc"
+        assert report.complete is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_partial_build_restores_leader_and_returns_success(
+            self, db, message_bus, t
+    ):
+        """leader 是 create_team 后第一个写 member 的成员：它失败后补齐成功，
+        工具按 success 返回，leader 行状态与初建一致。"""
+        backend = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            predefined_members=[
+                TeamMemberSpec(
+                    member_name="dev-1",
+                    display_name="Dev One",
+                    desc="dev",
+                    prompt="p",
+                ),
+            ],
+        )
+        tool = BuildTeamTool(backend, t)
+        original_spawn = backend.spawn_member
+        leader_attempts = 0
+
+        async def _flaky_spawn(**kwargs):
+            nonlocal leader_attempts
+            if kwargs["member_name"] == "leader1":
+                leader_attempts += 1
+                if leader_attempts == 1:
+                    raise RuntimeError("db read watchdog tripped")
+            return await original_spawn(**kwargs)
+
+        backend.spawn_member = _flaky_spawn  # type: ignore[method-assign]
+
+        result = await tool.invoke(
+            {
+                "display_name": "X",
+                "team_desc": "d",
+                "leader_display_name": "L",
+                "leader_desc": "PM",
+            }
+        )
+
+        assert result.success is True, result.error
+        assert "leader1" in result.data["reconciled_members"]
+        leader_row = await db.member.get_member("leader1", "test_team")
+        assert leader_row is not None
+        assert leader_row.status == MemberStatus.BUSY.value
+        assert await db.member.get_member("dev-1", "test_team") is not None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_reconcile_refuses_leader_restore_on_name_mismatch(
+            self, db, message_bus
+    ):
+        """team_info 记录的 leader 名与当前调用者不一致 → 拒绝补 leader，
+        避免把另一个 leader 的团队改写。"""
+        backend = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+        )
+        await db.team.create_team(
+            team_name="test_team",
+            display_name="X",
+            leader_member_name="other-leader",
+        )
+        spawned: list[str] = []
+
+        async def _roster(team_name, status=None):
+            return []
+
+        async def _spawn(**kwargs):
+            spawned.append(kwargs["member_name"])
+            return MemberOpResult.success()
+
+        backend.db.member.get_team_members = _roster  # type: ignore[method-assign]
+        backend.spawn_member = _spawn  # type: ignore[method-assign]
+
+        report = await backend.reconcile_predefined_members()
+
+        assert spawned == []
+        assert report.present == 0
+        assert report.complete is False
+        assert any("restore skipped" in item.reason for item in report.failed)
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1992,7 +2268,10 @@ class TestMappedToolOutput:
             success=True,
             data={"type": "broadcast", "from": "leader", "summary": None},
         )
-        assert tool.map_result(output) == "Broadcast Already sent from leader Success"
+        assert (
+                tool.map_result(output)
+                == "Broadcast sent from leader (recipient count unavailable)"
+        )
 
     @pytest.mark.level1
     def test_default_map_result_json(self, agent_team, t):
