@@ -1388,12 +1388,47 @@ class TeamTaskManager:
 
         if task.status == TaskStatus.PENDING.value:
             # A PENDING task with no owner is reserved into the plan gate
-            # (PENDING -> PLANNING) by the first submission. Scheduled tasks
-            # never reach here as PENDING with a free assignee.
-            claimed = await self.db.task.claim_task(task_id, member_name, to_status=TaskStatus.PLANNING)
-            if not claimed:
-                return {"success": False, "task_id": task_id, "message": "Failed to reserve task for planning"}
-            active_status = TaskStatus.PLANNING.value
+            # (PENDING -> PLANNING) by the first submission. A task already
+            # assigned to this member (pre-assigned, reassigned, or unblocked)
+            # must be started with start_task: claim_task only accepts rows
+            # whose assignee is still NULL.
+            if task.assignee == member_name:
+                # Scheduled dispatch owns every start. The scheduler's scan
+                # takes PENDING(assignee) to PLANNING/IN_PROGRESS and sends the
+                # matching start handoff; starting it here would race that scan
+                # and leave the task without a handoff.
+                if self._dispatch_mode == "scheduled":
+                    return {
+                        "success": True,
+                        "task_id": task_id,
+                        "status": TaskStatus.PENDING.value,
+                        "pending_dispatch": True,
+                        "message": (
+                            f"Task {task_id} is waiting for the scheduler to start it; "
+                            "no plan was recorded. Submit the plan again after the start notice."
+                        ),
+                    }
+                # Autonomous dispatch has no scheduler: the owner starts its
+                # own pre-assigned task into the plan gate. resume_pending is
+                # a scheduled member-subtask marker (F_128), so it cannot
+                # reach this path; the scheduler handles it above.
+                moved = await self.db.task.start_task(
+                    task_id,
+                    member_name,
+                    to_status=TaskStatus.PLANNING,
+                )
+                if not moved:
+                    return {"success": False, "task_id": task_id, "message": "Failed to reserve task for planning"}
+                active_status = TaskStatus.PLANNING.value
+            else:
+                claimed = await self.db.task.claim_task(
+                    task_id,
+                    member_name,
+                    to_status=TaskStatus.PLANNING,
+                )
+                if not claimed:
+                    return {"success": False, "task_id": task_id, "message": "Failed to reserve task for planning"}
+                active_status = TaskStatus.PLANNING.value
         elif task.assignee != member_name:
             return {
                 "success": False,
