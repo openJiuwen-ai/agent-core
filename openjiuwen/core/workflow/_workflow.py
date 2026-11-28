@@ -97,6 +97,12 @@ async def execute_single_component(
             self.io_configs = SimpleIOConfig(inputs_schema, outputs_schema)
             self.abilities = [ComponentAbility.INVOKE]
             self.max_retries = 0
+            # Align with the real NodeSpec surface read by Vertex on error
+            # paths (_run_error_recovery / _build_timeout_error access these
+            # unconditionally); missing attributes would mask the component's
+            # original exception with an AttributeError.
+            self.exception_config = None
+            self.timeout = -1.0
 
             # Set input schema and output schema
 

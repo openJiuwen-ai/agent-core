@@ -1509,6 +1509,36 @@ async def test_executor_single_interupt_component():
     assert result['inputs'] == {'a': '测试输入', 'b': '测试输入2'}
 
 
+async def test_executor_single_component_error_propagates_original_exception():
+    """组件执行失败时必须传播原始异常,而不是被 AttributeError 掩盖。
+
+    根因:execute_single_component 内联构造的 SimpleNodeConfig 缺少
+    exception_config 属性,组件失败进入错误恢复路径时
+    vertex._run_error_recovery 读取该属性抛 AttributeError,调用方看到
+    的是 'SimpleNodeConfig' object has no attribute 'exception_config'
+    而非组件真实错误。
+    """
+    from openjiuwen.core.common.exception.codes import StatusCode as _StatusCode
+    from openjiuwen.core.common.exception.errors import raise_error
+
+    class FailingNode(WorkflowComponent):
+        async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+            raise_error(_StatusCode.WORKFLOW_EXECUTION_ERROR, reason="组件执行失败")
+
+    component = FailingNode()
+    session = create_workflow_session(session_id="single_component_error")
+    with pytest.raises(BaseError) as exc_info:
+        await execute_single_component(
+            component_id="failing_component",
+            session=session,
+            executor=component,
+            inputs={"a": "输入"},
+            inputs_schema={"a": "${a}"},
+        )
+    assert "组件执行失败" in str(exc_info.value)
+    assert "exception_config" not in str(exc_info.value)
+
+
 async def test_sub_flow_multi_stream_output():
     class SlowInvokeNode(WorkflowComponent):
 
