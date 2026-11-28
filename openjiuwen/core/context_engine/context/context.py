@@ -742,7 +742,10 @@ class SessionModelContext(ModelContext):
 
     @_fw.emit_before(ContextEvents.CONTEXT_CLEARED, pass_args=False)
     async def clear_messages(self, with_history: bool = True):
-        self.pop_messages(len(self), with_history=with_history)
+        # len(self) is capped by max_buffer_size and may hide older messages.
+        popped_messages = self._message_buffer.clear(with_history=with_history)
+        if popped_messages:
+            self._mark_message_changed("clear")
         self._offload_message_buffer = OffloadMessageBuffer()
         self._configure_offload_message_buffer()
         return
