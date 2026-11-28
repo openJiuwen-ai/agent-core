@@ -126,6 +126,11 @@ from openjiuwen.harness.schema.stop_condition import (
     StopConditionEvaluator,
 )
 from openjiuwen.harness.security.factory import build_permission_interrupt_rail
+from openjiuwen.harness.subagent_type import (
+    canonical_subagent_key,
+    normalize_subagent_type,
+    registered_subagent_name,
+)
 from openjiuwen.harness.task_loop.event_manager import EventManager
 from openjiuwen.harness.task_loop.loop_coordinator import (
     LoopCoordinator,
@@ -2197,6 +2202,11 @@ class DeepAgent(BaseAgent):
     def _find_subagent_spec(self, subagent_type: str) -> Optional["SubAgentConfig | DeepAgent"]:
         """Find SubAgentConfig matching subagent_type.
 
+        ``subagent_type`` comes from a model tool call, so match the exact
+        registered name first, then Unicode variants, then a unique
+        separator/case-insensitive key. Ambiguous canonical matches return
+        ``None`` so the caller keeps the original "not found" error.
+
         Args:
             subagent_type: Type of subagent to find.
 
@@ -2208,14 +2218,31 @@ class DeepAgent(BaseAgent):
 
         from openjiuwen.harness.schema.config import SubAgentConfig
 
+        candidates: List[Tuple[Any, str]] = []
         for spec in self._deep_config.subagents or []:
-            if isinstance(spec, SubAgentConfig) and spec.agent_card.name == subagent_type:
+            if isinstance(spec, (SubAgentConfig, DeepAgent)):
+                candidates.append((spec, registered_subagent_name(spec)))
+
+        for spec, name in candidates:
+            if name == subagent_type:
                 return spec
-            if isinstance(spec, DeepAgent):
-                card = getattr(spec, "card", None)
-                if getattr(card, "name", None) == subagent_type:
+
+        normalized = normalize_subagent_type(subagent_type)
+        if normalized != subagent_type:
+            for spec, name in candidates:
+                if name == normalized:
                     return spec
 
+        key = canonical_subagent_key(subagent_type)
+        if not key:
+            return None
+        matches = [
+            (spec, name)
+            for spec, name in candidates
+            if name and canonical_subagent_key(name) == key
+        ]
+        if len(matches) == 1:
+            return matches[0][0]
         return None
 
     def _normalize_inputs(self, inputs: Any) -> InvokeInputs:

@@ -9,19 +9,21 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, AsyncIterator, Dict, List, Optional
 
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.controller.schema.task import Task as CoreTask, TaskStatus as CoreTaskStatus
-from openjiuwen.core.foundation.tool import Input, Output, Tool
-from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.controller.schema.task import Task as CoreTask
+from openjiuwen.core.controller.schema.task import TaskStatus as CoreTaskStatus
+from openjiuwen.core.foundation.tool import Input, Output, Tool
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.rail.base import (
     current_usage_attribution,
     current_usage_invocation_id,
 )
-from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.kv_cache import kv_cache_subagent_lifecycle
+from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
+from openjiuwen.harness.subagent_type import resolve_subagent_type_name
+from openjiuwen.harness.tools.base_tool import ToolOutput
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -294,7 +296,8 @@ class SessionsSpawnTool(Tool):
             )
 
         browser_capabilities: Optional[List[str]] = None
-        if str(subagent_type) == "browser_agent":
+        subagent_type = resolve_subagent_type_name(self._parent_agent, subagent_type)
+        if subagent_type == "browser_agent":
             raw_capabilities = inputs.get("browser_capabilities")
             if raw_capabilities is None:
                 browser_capabilities = []
