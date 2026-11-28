@@ -156,6 +156,13 @@ FIELD_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
         "cn": "IANA 时区，默认 Asia/Shanghai",
         "en": "IANA timezone, defaults to Asia/Shanghai",
     },
+    "wake_offset_seconds": {
+        "cn": "提前唤醒的秒数。仅在用户明确要求提前唤醒或取消提前唤醒时填写，0 表示到点唤醒。",
+        "en": (
+            "Seconds to wake before the scheduled time. "
+            "Set only when explicitly requested. Use 0 to cancel early wake-up."
+        ),
+    },
     "targets": {
         "cn": "推送频道。用户未明确指定时不填，系统自动使用当前对话频道；禁止从历史记录推断。",
         "en": (
@@ -177,8 +184,8 @@ def _desc(key: str, language: str) -> str:
 def get_cron_input_params(language: str = "cn") -> Dict[str, Any]:
     """Flat parameter schema for the unified cron tool.
 
-    Kept deliberately small (8 params): routing fields such as mode/model/
-    project_id are injected from the session context by the host bridge, and
+    The host bridge injects routing fields such as mode, model, and project_id
+    from the session context, and
     one-shot semantics (``delete_after_run``) are derived from whether
     ``run_at`` or ``cron_expr`` is provided.
     """
@@ -217,6 +224,11 @@ def get_cron_input_params(language: str = "cn") -> Dict[str, Any]:
                 # patch，静默覆盖用户自选时区（如 America/New_York 被改成
                 # Asia/Shanghai）。未传时落 None，由分发层 None 过滤剔除。
             },
+            "wake_offset_seconds": {
+                "type": "integer",
+                "minimum": 0,
+                "description": _desc("wake_offset_seconds", language),
+            },
             "targets": {
                 "type": "string",
                 "description": _desc("targets", language),
@@ -227,7 +239,7 @@ def get_cron_input_params(language: str = "cn") -> Dict[str, Any]:
             },
         },
         "required": ["action"],
-        "additionalProperties": True,
+        "additionalProperties": False,
     }
 
 

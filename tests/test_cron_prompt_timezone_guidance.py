@@ -155,6 +155,7 @@ class CronPromptTimezoneGuidanceTests(unittest.TestCase):
                 "cron_expr",
                 "run_at",
                 "timezone",
+                "wake_offset_seconds",
                 "targets",
                 "enabled",
             },
@@ -196,6 +197,16 @@ class CronDispatchJobIdParamTests(unittest.IsolatedAsyncioTestCase):
     the schema previously said ``job_id`` (snake_case), which landed in
     **kwargs and was silently dropped, making remove/update/run raise
     "jobId is required" until the model self-corrected on retry."""
+
+    async def test_wake_offset_survives_tool_validation_and_partial_updates(self):
+        tool, = create_cron_tools(_DummyCronBackend())
+        created = await tool.invoke({"action": "add", "cron_expr": "0 9 * * *", "wake_offset_seconds": 300})
+        self.assertEqual(created["params"]["wake_offset_seconds"], 300)
+
+        for patch in ({"wake_offset_seconds": 600}, {"name": "renamed"}, {"wake_offset_seconds": 0}):
+            with self.subTest(patch=patch):
+                updated = await tool.invoke({"action": "update", "jobId": "j1", **patch})
+                self.assertEqual(updated["patch"], patch)
 
     async def test_remove_accepts_camel_case_job_id(self):
         deleted: list[str] = []
@@ -249,7 +260,7 @@ class CronDispatchJobIdParamTests(unittest.IsolatedAsyncioTestCase):
         ran: list[str] = []
 
         class _Backend(_DummyCronBackend):
-            async def run_now(self, job_id: str):
+            async def run_now(self, job_id: str, *, context=None):
                 ran.append(job_id)
                 return "run-1"
 
@@ -259,6 +270,11 @@ class CronDispatchJobIdParamTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, {"run_id": "run-1"})
         self.assertEqual(ran, ["j1"])
+
+    def test_schema_excludes_workspace_routing_fields(self):
+        schema = get_cron_input_params("cn")
+        self.assertIs(schema["additionalProperties"], False)
+        self.assertTrue({"project_dir", "project_id", "workspace_id"}.isdisjoint(schema["properties"]))
 
     def test_schema_declares_job_id_param_as_jobId(self):
         """Schema-compliant param must hit the dispatcher's named argument.
