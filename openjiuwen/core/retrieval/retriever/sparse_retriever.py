@@ -10,6 +10,7 @@ from typing import List, Literal, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.foundation.store.query import QueryExpr
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
 from openjiuwen.core.retrieval.retriever.base import Retriever
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
@@ -37,6 +38,7 @@ class SparseRetriever(Retriever):
         top_k: int = 5,
         score_threshold: Optional[float] = None,
         mode: Literal["vector", "sparse", "hybrid"] = "sparse",
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs,
     ) -> List[RetrievalResult]:
         """
@@ -62,7 +64,7 @@ class SparseRetriever(Retriever):
         search_results = await self.vector_store.sparse_search(
             query_text=query,
             top_k=top_k,
-            filters=None,
+            filters=filters,
         )
 
         # Convert to RetrievalResult
@@ -98,6 +100,7 @@ class SparseRetriever(Retriever):
         query: str,
         top_k: int = 5,
         mode: Literal["vector", "sparse", "hybrid"] = "sparse",
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs,
     ) -> List[SearchResult]:
         """
@@ -122,7 +125,7 @@ class SparseRetriever(Retriever):
         search_results = await self.vector_store.sparse_search(
             query_text=query,
             top_k=top_k,
-            filters=None,
+            filters=filters,
         )
         return search_results
 

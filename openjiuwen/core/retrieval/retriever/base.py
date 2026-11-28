@@ -9,6 +9,7 @@ Provides a unified interface for retrievers.
 from abc import ABC, abstractmethod
 from typing import List, Literal, Optional
 
+from openjiuwen.core.foundation.store.query import QueryExpr
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
 
 
@@ -22,6 +23,7 @@ class Retriever(ABC):
         top_k: int = 5,
         score_threshold: Optional[float] = None,
         mode: Literal["vector", "sparse", "hybrid"] = "hybrid",
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs,
     ) -> List[RetrievalResult]:
         """
@@ -32,6 +34,7 @@ class Retriever(ABC):
             top_k: Number of results to return
             score_threshold: Score threshold
             mode: Retrieval mode (vector=vector retrieval, sparse=sparse retrieval/BM25, hybrid=hybrid retrieval)
+            filters: Metadata filter conditions, forwarded to the vector store
             **kwargs: Additional parameters
 
         Returns:
@@ -53,6 +56,7 @@ class Retriever(ABC):
         query: str,
         top_k: int = 5,
         mode: Literal["vector", "sparse", "hybrid"] = "hybrid",
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs,
     ) -> List[SearchResult]:
         """
