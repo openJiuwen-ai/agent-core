@@ -185,6 +185,14 @@ class DialogueCompressorConfig(BaseModel):
     )
     """Selects/configures the model client used by the internal compressor model."""
 
+    use_streaming: bool = Field(
+        default=False,
+        description=(
+            "Use streaming model invocation for dialogue compression. False keeps the existing non-streaming behavior."
+        ),
+    )
+    """Optional streaming switch for the internal compression model call."""
+
 
 @ContextEngine.register_processor()
 class DialogueCompressor(ContextProcessor):
@@ -196,6 +204,7 @@ class DialogueCompressor(ContextProcessor):
         self._messages_to_keep = config.messages_to_keep
         self._keep_last_round = config.keep_last_round
         self._compression_target_tokens = config.compression_target_tokens
+        self._use_streaming = config.use_streaming
         self._model = Model(self.config.model_client, self.config.model)
 
     def rebind_model(
@@ -387,7 +396,41 @@ class DialogueCompressor(ContextProcessor):
             UserMessage(content=self._build_targets_payload(targets)),
         ]
         try:
-            response = await self._model.invoke(model_messages, output_parser=JsonOutputParser())
+            if not self._use_streaming:
+                response = await self._model.invoke(model_messages, output_parser=JsonOutputParser())
+                self._record_compression_usage(response)
+                return response
+
+            content_parts = []
+            usage_metadata = None
+            finish_reason = None
+            async for chunk in self._model.stream(model_messages):
+                if chunk.content:
+                    content_parts.append(chunk.content)
+                if chunk.usage_metadata:
+                    usage_metadata = chunk.usage_metadata
+                if chunk.finish_reason and chunk.finish_reason != "null":
+                    finish_reason = chunk.finish_reason
+
+            content = "".join(content_parts)
+            parser_content = None
+            if content:
+                try:
+                    parser_content = await JsonOutputParser().parse(content)
+                except (TypeError, ValueError, AttributeError) as exc:
+                    # Keep the non-streaming semantics: a parse failure degrades to
+                    # parser_content=None so the caller can fall back to the raw
+                    # text instead of failing the whole compression.
+                    logger.warning(
+                        f"[{self.processor_type()}] streaming compression parse failed, fall back to raw content: {exc}"
+                    )
+
+            response = AssistantMessage(
+                content=content,
+                usage_metadata=usage_metadata,
+                finish_reason=finish_reason or "stop",
+                parser_content=parser_content,
+            )
             self._record_compression_usage(response)
             return response
         except Exception as exc:
