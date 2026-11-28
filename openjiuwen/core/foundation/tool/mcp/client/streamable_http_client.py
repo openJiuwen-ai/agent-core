@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
-from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT, extract_mcp_tool_result_content
+from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT, extract_mcp_tool_result
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig, ToolAuthResult
 from openjiuwen.core.runner.callback.events import ToolCallEvents
@@ -184,15 +184,27 @@ class StreamableHttpClient(McpClient):
 
     async def call_tool(self, tool_name: str, arguments: dict, *, timeout: float = NO_TIMEOUT) -> Any:
         """Call tool via streamable-http."""
+        result, _ = await self._call_tool_with_meta(tool_name, arguments, timeout=timeout)
+        return result
+
+    async def call_tool_with_meta(
+        self, tool_name: str, arguments: dict, *, timeout: float = NO_TIMEOUT
+    ) -> tuple[Any, bool]:
+        """Call tool via streamable-http, keeping the MCP ``isError`` flag."""
+        return await self._call_tool_with_meta(tool_name, arguments, timeout=timeout)
+
+    async def _call_tool_with_meta(
+        self, tool_name: str, arguments: dict, *, timeout: float = NO_TIMEOUT
+    ) -> tuple[Any, bool]:
         if not self._session:
             raise RuntimeError("Not connected to streamable-http server")
 
         try:
             logger.info(f"Calling tool '{tool_name}' via streamable-http with arguments: {arguments}")
             tool_result = await self._session.call_tool(tool_name, arguments=arguments)
-            result_content = extract_mcp_tool_result_content(tool_result)
-            logger.info(f"Tool '{tool_name}' call completed via streamable-http")
-            return result_content
+            result_content, is_error = extract_mcp_tool_result(tool_result)
+            logger.info(f"Tool '{tool_name}' call completed via streamable-http is_error={is_error}")
+            return result_content, is_error
         except Exception as e:
             logger.error(f"Tool call failed via streamable-http: {e}")
             raise
