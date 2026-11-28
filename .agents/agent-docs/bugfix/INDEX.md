@@ -22,6 +22,7 @@ generated: true
 | [core/controller](#module-core-controller) |
 | [core/foundation/llm](#module-core-foundation-llm) |
 | [core/foundation/llm/model_clients](#module-core-foundation-llm-model_clients) |
+| [core/foundation/tool](#module-core-foundation-tool) |
 | [core/runner/drunner/dmessage_queue](#module-core-runner-drunner-dmessage_queue) |
 | [core/session](#module-core-session) |
 | [core/session/checkpointer](#module-core-session-checkpointer) |
@@ -129,6 +130,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [B_20261117_1727_anthropic-output-limit-errors](openjiuwen/core/B_20261117_1727_anthropic-output-limit-errors.md) | B | 模型输出上限截断可见错误修复 | lizhiyuan | 无独立 D：用户在本轮会话确认的 Anthropic 输出上限错误处理范围，未形成独立设计文档。 |
+
+<a id="module-core-foundation-tool"></a>
+
+## core/foundation/tool
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [B_20261118_1133_tool-enum-schema](core_runtime/B_20261118_1133_tool-enum-schema.md) | B | 工具枚举参数的 JSON 类型推断修复 | liaojunzhuo-sefonsoft | 无独立 D：单模块修复既有 Enum 类型注解的 Schema 生成错误，不新增公开接口或改变枚举合法值契约。 |
 
 <a id="module-core-runner-drunner-dmessage_queue"></a>
 
