@@ -3247,9 +3247,10 @@ async def test_completion_commits_before_notification_failure_or_cancellation(ca
     handler = agent._coordination.dispatcher.team_completion
     event = InnerEventMessage(event_type=InnerEventType.POLL_TASK)
 
+    snapshots = []
+
     async def fail_notification(topic_id, message):
-        assert handler._team_completed_emitted
-        assert agent.stream_controller.stream_queue.qsize() == 2
+        snapshots.append((handler._team_completed_emitted, agent.stream_controller.stream_queue.qsize()))
         await asyncio.sleep(0)
         if cancel:
             raise asyncio.CancelledError
@@ -3262,6 +3263,7 @@ async def test_completion_commits_before_notification_failure_or_cancellation(ca
     else:
         await handler.on_poll_task(event)
     await handler.on_poll_task(event)
+    assert snapshots == [(True, 2)]
     assert agent.stream_controller.stream_queue.qsize() == 2
     bus.publish.assert_awaited_once()
 

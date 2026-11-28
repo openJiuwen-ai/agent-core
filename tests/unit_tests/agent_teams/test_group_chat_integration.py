@@ -483,7 +483,7 @@ async def test_host_notification_cancellation_preserves_in_flight_read(runtime, 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("callbacks", [1, 2])
-async def test_host_callback_can_stop_its_own_team(runtime, callbacks):
+async def test_host_callback_can_stop_its_own_team(runtime, callbacks, monkeypatch):
     from openjiuwen.agent_teams.agent.coordination.kernel import CoordinationKernel
     from openjiuwen.agent_teams.group_chat.message_handler import GroupMessageHandler
     from tests.unit_tests.agent_teams.test_coordination_lifecycle import _make_kernel_host
@@ -498,32 +498,76 @@ async def test_host_callback_can_stop_its_own_team(runtime, callbacks):
     kernel._dispatcher = SimpleNamespace(group_message=handler)
     runtime.agent.stop_coordination = kernel.stop
     entered = 0
-    ready, release, stopped = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    ready, release = asyncio.Event(), asyncio.Event()
+    outcomes = []
+    cancellation_sources = {}
+    drain = handler.cancel_host_notifications
+
+    async def observe_drain():
+        caller = asyncio.current_task()
+        peers = {task: task.cancelling() for task in tasks if task is not caller}
+        try:
+            await drain()
+        finally:
+            if caller in tasks:
+                for task, before in peers.items():
+                    if task.cancelling() > before:
+                        cancellation_sources[task] = caller
+
+    monkeypatch.setattr(handler, "cancel_host_notifications", observe_drain)
 
     async def callback(message):
         nonlocal entered
-        entered += 1
-        if entered == callbacks:
-            ready.set()
-        await release.wait()
-        assert await runtime.manager.stop_team(team_name="group", session_id="session")
-        stopped.set()
+        task = asyncio.current_task()
+        result, pool_absent, error = None, None, None
+        try:
+            entered += 1
+            if entered == callbacks:
+                ready.set()
+            await release.wait()
+            result = await runtime.manager.stop_team(team_name="group", session_id="session")
+            if result is False:
+                pool_absent = await runtime.manager.pool.get("group") is None
+        except asyncio.CancelledError as exc:
+            error = exc
+            raise
+        except Exception as exc:
+            error = exc
+            raise
+        finally:
+            outcomes.append((message.message_id, task, result, pool_absent, error))
 
     await runtime.backend.register_host_managed_inbound("colleague", callback)
+    message_ids = set()
     for index in range(callbacks):
         posted = await runtime.backend.append_group_message(
             "user", "Stop", client_message_id=f"stop-{index}", mentions=["colleague"],
         )
+        message_ids.add(posted.message.message_id)
         handler._schedule_host_notification(runtime.backend, posted.message.message_id)
     tasks = tuple(handler._host_notifications.values())
     try:
         await asyncio.wait_for(ready.wait(), timeout=1)
         release.set()
-        await asyncio.wait_for(stopped.wait(), timeout=1)
-        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=1)
+        task_results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=1)
     finally:
         release.set()
         await handler.cancel_host_notifications()
+    assert len(outcomes) == callbacks
+    assert {row[0] for row in outcomes} == message_ids
+    successful = {task for _, task, result, _, error in outcomes if result is True and error is None}
+    assert successful
+    results_by_task = dict(zip(tasks, task_results))
+    for _, task, result, pool_absent, error in outcomes:
+        if isinstance(error, asyncio.CancelledError):
+            assert cancellation_sources.get(task) in successful
+            assert isinstance(results_by_task[task], asyncio.CancelledError)
+        else:
+            assert error is None, repr(error)
+            assert result is True or result is False
+            if result is False:
+                assert pool_absent
+            assert results_by_task[task] is None
     host.stream_controller.close_stream.assert_called()
     host.session_manager.release_session.assert_called()
     assert await runtime.manager.pool.get("group") is None

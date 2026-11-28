@@ -18,6 +18,7 @@ files:
   - openjiuwen/agent_teams/tools/database/member_dao.py
   - openjiuwen/agent_teams/tools/database/message_dao.py
   - tests/unit_tests/core/extension/test_install_report.py
+  - tests/unit_tests/agent_teams/test_team_agent_coordination.py
 designs: [D-20261125-1414-team-stopped-approval-recovery, D-20261126-1704-team-lifecycle-boundaries]
 ---
 
@@ -72,3 +73,18 @@ code-quality-check 已按候选完成实现与范围核对；架构升级 Not tr
 将 READY 成功/false/异常与取消次数合并为一个参数化集成用例，共用屏障、真实停止链、清理及最终状态断言。相对 fd80a8465，测试变更从 75 增 5 删（80 行、净增 70）收敛为 47 增 12 删（59 行、净增 35）。保留已提交 READY 下停止超时和三次取消、无取消的 false/异常、DAO 失败与二次取消并发及 SHUTDOWN 不被覆盖；所有分支在文件/内存 SQLite 验证。生产代码、S_03 及清理边界未改变。
 
 精简候选审批恢复文件 41 passed（11.40 秒）；临时在进程内替换为 HEAD 的旧 READY 等待函数后，同一参数化测试为 8 failed、6 passed、27 deselected（3.49 秒），确认仍检出取消穿透。该对照只替换目标函数，不代表完整旧分支回放。原生产改动未变，上轮 74 项关联回归证据继续适用，本轮未重复执行。2026-11-27 同一 independent-reviewer 对精简候选独立复查，结论 Approve，确认全部参数组合有效、原缺陷检测力和关键清理证据保留，无必须修改项。未提交或推送。证据目录 /private/tmp/core-3893-ready-tests-compact-20261127/。
+
+
+## 2026-11-28　回合 PR !4025 测试断言补强
+
+用户批准 `/private/tmp/core-4025-assertion-audit.k27Zrz/reviewed-plan.md` 后，在 !4025 原 worktree 实施测试修复。起点为 `da391c041aff19a92b04203a662bdcb0aa14af9b`，候选为该提交加本地三个测试文件差异，尚未提交。此处续写测试验证记录，原恢复设计、生产实现和 S_03 契约继续有效。
+
+审计发现三个新增测试存在假绿路径，且与原 !3893 最终分支内容一致。群聊回调的断言由生产异常隔离捕获；普通广播在投递完成前发成功事件；非取消参数的完成通知顺序断言也由生产路径捕获。本轮只修复测试观测与断言位置，没有改变生产异常隔离、取消或消息处理语义。
+
+群聊用例保持全部 callback 到达后同时释放，主协程核对实际 message ID、每路终局及 gather 结果。取消来源由原 handler 清理调用前后的任务取消计数变化和发起者最终停止成功共同证明，外层 finally 不计入正常来源。广播用例在真实投递返回后记录成功，并核对目标 ID 仍存在且已读。完成通知在入口记录标志和队列快照，由主协程验证两个参数各自的顺序。
+
+正常回归包含此前审计的 46 个差异函数、三份 fixture 所属测试文件和三份修复文件的完整测试，去除重复选择后为 **301 passed、19 skipped**，退出码 0。九项负向运行分别覆盖停止异常、pool 尚在时返回 False、无来源取消、投递持续失败、目标未标记已读，以及两参数的完成标志错误和队列未提交，均为预期的单项失败且注入点确实命中。投递和未读负向分别在成功事件等待、目标已读等待处超时；其余在主协程结果或快照断言处失败。移除注入后五项目标用例 **5 passed**。
+
+证据在 `/private/tmp/core-4025-test-repair/`，含 normal、九项独立负向目录、negative-summary.json、final-normal 和运行期探针。初始审计及故障注入旧测试仍通过的证据保留在原审计目录。正常回归的 skipped 为既有测试标记，当前环境没有执行这些用例，不能把它们计作通过。
+
+code-quality-check 已核对完整三个测试差异与实际负向失败位置。架构升级结果 **Not triggered**，局部观测沿用现有 task/handler/pool，没有新增生产职责、接口或状态权威。遵守仓库约束未运行静态或格式化工具。本次测试修复不重跑已通过的真实模型审批 E2E，也未改变其候选生产代码。2026-11-28，independent-reviewer（review_4025_followup）检查最终差异、真实调用链、JUnit 和负向失败位置后给出 **Approve**，无阻塞项。19 项原有跳过用例仍未验证，本次结论限于测试补强。未提交或推送。

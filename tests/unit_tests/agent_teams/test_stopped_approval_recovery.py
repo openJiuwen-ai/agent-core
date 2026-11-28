@@ -504,6 +504,7 @@ async def test_postclaim_broadcast_before_ready_uses_normal_mailbox(tmp_path, mo
         transition = backend.db.member.try_transition_member_status
         deliver = TeamAgent.deliver_input
         marker = "POSTCLAIM_BROADCAST"
+        successes, errors = [], []
 
         async def gated_ready(member, team, old, new):
             if member == "worker" and old == MemberStatus.RESTARTING and new == MemberStatus.READY:
@@ -512,9 +513,17 @@ async def test_postclaim_broadcast_before_ready_uses_normal_mailbox(tmp_path, mo
             return await transition(member, team, old, new)
 
         async def observe_input(self, *args, **kwargs):
-            if self.member_name == "worker" and marker in str((args, kwargs)):
+            target = self.member_name == "worker" and marker in str((args, kwargs))
+            try:
+                result = await deliver(self, *args, **kwargs)
+            except (asyncio.CancelledError, Exception) as exc:
+                if target:
+                    errors.append(exc)
+                raise
+            if target:
+                successes.append((args, kwargs))
                 delivered.set()
-            return await deliver(self, *args, **kwargs)
+            return result
 
         monkeypatch.setattr(backend.db.member, "try_transition_member_status", gated_ready)
         monkeypatch.setattr(TeamAgent, "deliver_input", observe_input)
@@ -524,11 +533,22 @@ async def test_postclaim_broadcast_before_ready_uses_normal_mailbox(tmp_path, mo
         try:
             await asyncio.wait_for(entered.wait(), 3)
             assert (await backend.get_member("worker")).status == MemberStatus.RESTARTING.value
-            assert await backend.message_manager.broadcast_message(marker)
+            message_id = await backend.message_manager.broadcast_message(marker)
+            assert message_id
         finally:
             release.set()
-        await asyncio.wait_for(asyncio.shield(recovery), 5)
+        assert await asyncio.wait_for(asyncio.shield(recovery), 5) is True
         await asyncio.wait_for(delivered.wait(), 3)
+
+        async def target_read():
+            unread = await backend.message_manager.get_broadcast_messages(member_name="worker", unread_only=True)
+            return message_id not in {message.message_id for message in unread}
+
+        await eventually(target_read)
+        messages = await backend.message_manager.get_broadcast_messages(member_name="worker", unread_only=False)
+        assert message_id in {message.message_id for message in messages}
+        assert successes
+        assert not errors
 
 
 @pytest.mark.asyncio
