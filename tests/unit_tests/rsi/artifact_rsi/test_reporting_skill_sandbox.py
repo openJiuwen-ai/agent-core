@@ -45,6 +45,40 @@ def test_build_paper_agent_copies_skills_into_workspace(tmp_path, monkeypatch):
         set_project_root(None)
 
 
+def test_reporting_timeout_bounds_model_calls_not_the_session(tmp_path, monkeypatch):
+    # completion_timeout is applied to the whole task-loop round (= the whole
+    # paper-writing session), so reporting.timeout must only reach init_model.
+    set_project_root(tmp_path)
+    try:
+        captured: dict = {}
+        model_kwargs: dict = {}
+
+        def fake_create_deep_agent(model, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+        def fake_init_model(**kwargs):
+            model_kwargs.update(kwargs)
+            return object()
+
+        monkeypatch.setattr("openjiuwen.harness.create_deep_agent", fake_create_deep_agent)
+        monkeypatch.setattr("openjiuwen.core.foundation.llm.init_model", fake_init_model)
+        monkeypatch.delenv("MODEL_TIMEOUT", raising=False)
+        monkeypatch.setenv("API_KEY", "mock-api-key")
+        monkeypatch.setenv("API_BASE", "http://localhost:0/v1")
+
+        run_id = "rsi-test-r1"
+        paper_workspace_dir(run_id).mkdir(parents=True, exist_ok=True)
+        config = {"reporting": {"timeout": 1800, "max_iterations": 120}}
+        ReportingAgent(config)._build_paper_agent(run_id=run_id)
+
+        assert model_kwargs["timeout"] == 1800.0
+        assert captured["completion_timeout"] is None
+        assert captured["max_iterations"] == 120
+    finally:
+        set_project_root(None)
+
+
 def test_method_figure_disabled_omits_ts_figure(tmp_path):
     agent = ReportingAgent({"reporting": {"method_figure": {"enabled": False}}})
     dest = agent._materialize_skills(tmp_path / "paper", agent._enabled_skill_dirs())
