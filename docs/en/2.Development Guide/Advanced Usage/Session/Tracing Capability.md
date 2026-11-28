@@ -136,7 +136,7 @@ Again using the custom component `CustomComponent`, we build a workflow that inc
 
 ```python
 from openjiuwen.core.workflow import WorkflowComponent
-from openjiuwen.core.workflow.components.loop import LoopGroup, LoopComponent
+from openjiuwen.core.workflow import LoopComponent, LoopGroup
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.workflow import Input, Output
 from openjiuwen.core.workflow.components import Session
@@ -298,7 +298,7 @@ sub_workflow.add_connection("sub_a", "sub_end")
 Build the nested workflow that includes a start component, an end component, and uses the sub-workflow as the main workflow’s component "a". The main workflow’s output also equals the input provided when invoking the main workflow:
 
 ```python
-from openjiuwen.core.workflow.components.flow import SubWorkflowComponent
+from openjiuwen.core.workflow import SubWorkflowComponent
 
 """
 workflow: start -> a (sub-workflow) -> end
@@ -406,7 +406,8 @@ Create a custom component `AddComponent` for addition operations, and call Sessi
 ```python
 import time
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.workflow import WorkflowComponent
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.workflow import Input, Output
@@ -422,11 +423,11 @@ class AddComponent(WorkflowComponent):
         a = inputs.get('a')
         b = inputs.get('b')
         if not a:
-            error = JiuWenBaseException(-1, 'a is not exit')
+            error = build_error(StatusCode.ERROR, msg='a is not exit')
             await session.trace_error(error)
             raise error
         if not b:
-            error = JiuWenBaseException(-1, 'b is not exit')
+            error = build_error(StatusCode.ERROR, msg='b is not exit')
             await session.trace_error(error)
             raise error
         start_time = time.time()

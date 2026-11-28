@@ -372,8 +372,9 @@ from typing import Any, Optional
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
-from openjiuwen.harness.rails import ConfirmInterruptRail, ConfirmPayload
-from openjiuwen.harness.rails.interrupt.decision import InterruptDecision
+from openjiuwen.harness.rails import ConfirmInterruptRail
+from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload
+from openjiuwen.harness.rails.interrupt.interrupt_base import InterruptDecision
 
 class BashPermissionRail(ConfirmInterruptRail):
     """Bash Permission Control Rail - Demonstrates custom decision engine and fine-grained auto-confirmation

@@ -65,7 +65,7 @@ class ResponseHandlerComponent(WorkflowComponent):
 Add the custom `ResponseHandlerComponent` to the workflow via `workflow.add_workflow_comp`, set the component id to "handler", and specify the streaming input schema as `"${llm.response}"`:
 
 ```python
-from openjiuwen.core.workflow.base import Workflow
+from openjiuwen.core.workflow import Workflow
 
 workflow = Workflow()
 workflow.add_workflow_comp("response_handler", ResponseHandlerComponent(),

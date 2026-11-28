@@ -40,7 +40,7 @@ openJiuwen 提供了多种检查点实现：
 **使用示例**：
 
 ```python
-from openjiuwen.core.session.checkpointer import InMemoryCheckpointer
+from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
 
 # 创建内存检查点实例
 checkpointer = InMemoryCheckpointer()
@@ -61,10 +61,8 @@ checkpointer = InMemoryCheckpointer()
 **配置示例**：
 
 ```python
-from openjiuwen.core.session.checkpointer import (
-    CheckpointerFactory,
-    CheckpointerConfig,
-)
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
+from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 
 # 使用 SQLite 存储（基础配置）
 config = CheckpointerConfig(
@@ -123,10 +121,8 @@ checkpointer = await CheckpointerFactory.create(config)
 **配置示例**：
 
 ```python
-from openjiuwen.core.session.checkpointer import (
-    CheckpointerFactory,
-    CheckpointerConfig,
-)
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
+from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 
 # 独立 Redis
 config = CheckpointerConfig(
@@ -230,7 +226,7 @@ Runner 是 openJiuwen 框架的核心执行器，在 Runner 启动时会自动�
 ```python
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.runner_config import RunnerConfig
-from openjiuwen.core.session.checkpointer import CheckpointerConfig
+from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 
 # 创建 Runner 配置
 runner_config = RunnerConfig()
@@ -255,7 +251,7 @@ await Runner.start()
 ```python
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.runner_config import RunnerConfig
-from openjiuwen.core.session.checkpointer import CheckpointerConfig
+from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 
 runner_config = RunnerConfig()
 runner_config.checkpointer_config = CheckpointerConfig(
@@ -273,7 +269,7 @@ await Runner.start()
 ```python
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.runner_config import RunnerConfig
-from openjiuwen.core.session.checkpointer import CheckpointerConfig
+from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 
 runner_config = RunnerConfig()
 runner_config.checkpointer_config = CheckpointerConfig(
@@ -301,7 +297,7 @@ await Runner.start()
 ```python
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.runner_config import RunnerConfig
-from openjiuwen.core.session.checkpointer import CheckpointerConfig
+from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 
 runner_config = RunnerConfig()
 runner_config.checkpointer_config = CheckpointerConfig(
@@ -322,7 +318,7 @@ await Runner.start()
 ```python
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.runner_config import RunnerConfig
-from openjiuwen.core.session.checkpointer import CheckpointerConfig
+from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 
 # 独立 Redis
 runner_config = RunnerConfig()
@@ -391,7 +387,7 @@ Runner 在启动时会执行以下步骤：
 Agent 会自动使用 Runner 配置的检查点进行状态管理。如果 Runner 已配置检查点，Agent 无需额外配置：
 
 ```python
-from openjiuwen.core.application import LLMAgent
+from openjiuwen.core.application.llm_agent import LLMAgent
 from openjiuwen.core.runner import Runner
 
 # Runner 已配置检查点并启动
@@ -403,11 +399,9 @@ agent = LLMAgent(...)
 如果需要在 Runner 外部单独使用检查点：
 
 ```python
-from openjiuwen.core.application import LLMAgent
-from openjiuwen.core.session.checkpointer import (
-    CheckpointerFactory,
-    CheckpointerConfig,
-)
+from openjiuwen.core.application.llm_agent import LLMAgent
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
+from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 
 # 如果使用 Redis checkpointer，需要先导入以注册 provider
 # from openjiuwen.extensions.checkpointer.redis import checkpointer  # noqa: F401
@@ -443,10 +437,8 @@ workflow = Workflow()
 
 ```python
 from openjiuwen.core.workflow import Workflow
-from openjiuwen.core.session.checkpointer import (
-    CheckpointerFactory,
-    CheckpointerConfig,
-)
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
+from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 
 # 如果使用 Redis checkpointer，需要先导入以注册 provider
 # from openjiuwen.extensions.checkpointer.redis import checkpointer  # noqa: F401
@@ -476,11 +468,9 @@ workflow = Workflow()
 `in_memory` 和 `persistence` 类型的 provider 会在导入 `openjiuwen.core.session.checkpointer` 时自动注册：
 
 ```python
-from openjiuwen.core.session.checkpointer import (
-    CheckpointerFactory,
-    CheckpointerConfig,
-    InMemoryCheckpointer,
-)
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
+from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
+from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
 
 # 使用内存检查点（自动注册）
 checkpointer = InMemoryCheckpointer()
@@ -505,10 +495,8 @@ CheckpointerFactory.set_default_checkpointer(checkpointer)
 对于扩展的 checkpointer（如 Redis），需要先导入相应的模块以确保 provider 注册：
 
 ```python
-from openjiuwen.core.session.checkpointer import (
-    CheckpointerFactory,
-    CheckpointerConfig,
-)
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
+from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 
 # 重要：必须先导入 Redis checkpointer 模块以注册 provider
 from openjiuwen.extensions.checkpointer.redis import checkpointer  # noqa: F401

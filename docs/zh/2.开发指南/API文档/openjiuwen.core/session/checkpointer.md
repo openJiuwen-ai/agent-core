@@ -201,7 +201,7 @@ class openjiuwen.core.session.checkpointer.InMemoryCheckpointer()
 **样例**：
 
 ```python
->>> from openjiuwen.core.session.checkpointer import InMemoryCheckpointer
+>>> from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
 >>> 
 >>> checkpointer = InMemoryCheckpointer()
 >>> # 使用 checkpointer 进行状态管理
@@ -222,7 +222,7 @@ class openjiuwen.core.session.checkpointer.PersistenceCheckpointer(kv_store: Bas
 **样例**：
 
 ```python
->>> from openjiuwen.core.session.checkpointer import PersistenceCheckpointer
+>>> from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointer
 >>> from openjiuwen.core.foundation.store.kv import ShelveStore
 >>> 
 >>> kv_store = ShelveStore("checkpoint.db")
@@ -285,7 +285,8 @@ classmethod async create(checkpointer_conf: CheckpointerConfig) -> Checkpointer
 **样例**：
 
 ```python
->>> from openjiuwen.core.session.checkpointer import CheckpointerFactory, CheckpointerConfig
+>>> from openjiuwen.core.session.checkpointer import CheckpointerFactory
+>>> from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 >>> 
 >>> config = CheckpointerConfig(type="in_memory", conf={})
 >>> checkpointer = await CheckpointerFactory.create(config)
