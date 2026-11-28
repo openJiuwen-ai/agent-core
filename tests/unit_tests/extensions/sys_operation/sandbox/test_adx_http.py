@@ -885,3 +885,26 @@ def test_invoke_does_not_retry_a_forwarded_503(monkeypatch):
         provider._invoke("env", "file.exists", {"path": "/workspace"}, timeout=30)
     assert raised.value.status == 503
     assert len(calls) == 1
+
+
+def test_environment_name_follows_the_agent_key(monkeypatch):
+    from openjiuwen.extensions.sys_operation.sandbox.providers import adx
+
+    provider = object.__new__(adx.AdxShellProvider)
+    provider._instance = None
+    provider._auth_headers = {}
+    provider._timeout_seconds = 30
+    provider._executor = "runsc"
+    provider.endpoint = SimpleNamespace(base_url="http://adx.test")
+    provider.config = SimpleNamespace(
+        launcher_config=SimpleNamespace(extra_params={"executor": "runsc", "idle_timeout": 0}),
+    )
+
+    monkeypatch.setenv("JIUWENSWARM_ADX_AGENT_KEY", "agent-a")
+    first = provider._environment_name()
+    monkeypatch.setenv("JIUWENSWARM_ADX_AGENT_KEY", "agent-b")
+    second = provider._environment_name()
+
+    assert first.startswith("tools-")
+    assert second.startswith("tools-")
+    assert first != second

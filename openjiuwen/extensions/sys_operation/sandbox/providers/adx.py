@@ -95,6 +95,7 @@ _ADX_ENVIRONMENTS = "/api/environment/v1/environments"
 _ADX_INSTANCES = "/api/instances"
 _ADX_INVOKE = "/direct"
 _ADX_RESUME_TIMEOUT_SECONDS = 330.0
+_PROCESS_IDENTITY = uuid.uuid4().hex
 
 _T = TypeVar("_T")
 
@@ -880,8 +881,14 @@ class _AdxProviderMixin:
             return lock
 
     def _environment_name(self) -> str:
-        """Return the deterministic ADX name shared by every process in this scope."""
-        return "tools-" + hashlib.sha256(self._shared_scope_key().encode()).hexdigest()[:40]
+        """Pin the ADX name from ``JIUWENSWARM_ADX_AGENT_KEY`` like the SDK provider.
+
+        Without the key this process gets its own identity, matching the SDK
+        provider's ``_PROCESS_IDENTITY`` fallback.
+        """
+        agent_key = os.environ.get("JIUWENSWARM_ADX_AGENT_KEY") or _PROCESS_IDENTITY
+        identity = self._shared_scope_key() + "|agent=" + agent_key
+        return "tools-" + hashlib.sha256(identity.encode()).hexdigest()[:40]
 
     def _create_instance(self, *, retry_conflict: bool = True) -> Tuple[str, str]:
         body = _adx_create_body(self._launcher_extra_params(), self._executor)
