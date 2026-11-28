@@ -120,6 +120,28 @@ async def test_probe_retries_without_vendor_switches() -> None:
 
 
 @pytest.mark.asyncio
+async def test_probe_sends_no_temperature() -> None:
+    """A model that refuses ``temperature`` still gets a conclusive probe."""
+
+    async def invoke_probe(*_args: Any, **kwargs: Any) -> _FakeResponse:
+        if "temperature" in kwargs:
+            raise RuntimeError(
+                "Error code: 400 - {'type': 'error', 'error': {'type': "
+                "'invalid_request_error', 'message': '`temperature` is "
+                "deprecated for this model.'}}"
+            )
+        return _FakeResponse("Red")
+
+    invoke = AsyncMock(side_effect=invoke_probe)
+    llm = _make_llm(model_name="claude-haiku-5-5", invoke=invoke)
+
+    assert await probe_image_support(llm) is True
+    assert invoke.await_count == 1
+    assert "temperature" not in invoke.await_args.kwargs
+    assert get_cached_image_support(llm) is True
+
+
+@pytest.mark.asyncio
 async def test_probe_without_content_is_inconclusive() -> None:
     llm = _make_llm(invoke=AsyncMock(return_value=_FakeResponse("   ")))
 
