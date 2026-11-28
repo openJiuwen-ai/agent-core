@@ -460,6 +460,54 @@ class TestDecator:
         assert results[0][2].get("instance_info", {}).get("class_name", "") == "qwen3-max"
 
 
+    async def test_decorate_model_display_name_set_directly_on_model(self):
+        """Lowest-priority carrier: a display name set directly on the model
+        object by wiring code wins over the probe when no config carries
+        one, and loses to the client-config carrier when both are set."""
+
+        class _DirectModel:
+            def __init__(self, direct, on_client_config):
+                self.model_config = ModelRequestConfig(model="3f2b8c1e-uuid")
+                self.model_client_config = (
+                    type("_Cfg", (), {"model_display_name": on_client_config})
+                    if on_client_config
+                    else None
+                )
+                if direct:
+                    self.model_display_name = direct
+
+            async def invoke(self, messages, **kwargs):
+                return BaseMessage(role="assistant", content="ok")
+
+            async def stream(self, messages, **kwargs):
+                yield BaseMessage(role="assistant", content="ok")
+
+        results = []
+
+        async def mock_trigger(handler_class_name: str, event_name: str, **kwargs):
+            results.append([handler_class_name, event_name, kwargs])
+
+        mock_tracer = MagicMock()
+        mock_tracer.trigger = mock_trigger
+        mock_tracer.tracer_agent_span_manager = MagicMock()
+        mock_session = MagicMock()
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+        mock_inner_session.span.return_value = MagicMock()
+
+        # Direct-set only: wins over the probe's service id.
+        wrapped = decorate_model_with_trace(_DirectModel("Qwen-Max", None), mock_session)
+        await wrapped.invoke([BaseMessage(role="user", content="hi")])
+        assert results[0][2]["instance_info"]["class_name"] == "Qwen-Max"
+
+        # Both set: the client-config carrier wins — direct-set is the
+        # lowest-priority carrier, same order as the rail-side probe.
+        results.clear()
+        wrapped = decorate_model_with_trace(_DirectModel("Direct-Name", "Config-Name"), mock_session)
+        await wrapped.invoke([BaseMessage(role="user", content="hi")])
+        assert results[0][2]["instance_info"]["class_name"] == "Config-Name"
+
     async def test_decorate_model_identity_passthrough(self):
         """identity= merges definition-scoped keys flat into instance_info.
 
