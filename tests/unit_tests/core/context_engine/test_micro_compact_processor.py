@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import logging
 from typing import List
 
 import pytest
 
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.processor.compressor.micro_compact_processor import (
+    MicroCompactProcessor,
     MicroCompactProcessorConfig,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage, UserMessage
@@ -38,6 +40,41 @@ async def create_context_with_micro_compact(
         history_messages=history_messages or [],
         processors=[("MicroCompactProcessor", config)],
     )
+
+
+class _FakeSummaryResponse:
+    def __init__(self, content: str, usage=None):
+        self.content = content
+        self.usage_metadata = usage
+
+
+class _FakeSummaryModel:
+    def __init__(self, content: str, usage=None):
+        self._content = content
+        self._usage = usage
+
+    async def invoke(self, messages=None, tools=None):
+        return _FakeSummaryResponse(self._content, usage=self._usage)
+
+
+class _RaisingSummaryModel:
+    def __init__(self):
+        self.calls = 0
+
+    async def invoke(self, messages=None, tools=None):
+        self.calls += 1
+        raise RuntimeError("summary generation failed")
+
+
+def create_ontology_messages(count: int, start: int = 1):
+    msgs = []
+    for index in range(start, start + count):
+        tool_call_id = f"oc-{index}"
+        msgs.append(
+            AssistantMessage(content="", tool_calls=create_tool_call_list([tool_call_id], ["ontology_context"]))
+        )
+        msgs.append(ToolMessage(content=f"ontology-{index}", tool_call_id=tool_call_id))
+    return msgs
 
 
 class TestMicroCompactProcessor:
@@ -251,3 +288,314 @@ class TestMicroCompactProcessor:
             config.cleared_marker,
             "fresh-content",
         ]
+
+    @pytest.mark.asyncio
+    async def test_semantic_critical_tool_is_not_marker_cleared(self):
+        """Semantic-critical tools are protected from marker clearing."""
+        config = MicroCompactProcessorConfig(
+            trigger_threshold=1,
+            compactable_tool_names=["ontology_context"],
+            keep_recent_per_tool=1,
+        )
+        ctx = await create_context_with_micro_compact(config)
+
+        await ctx.add_messages([
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["oc-1"], ["ontology_context"])),
+            ToolMessage(content="ontology-1", tool_call_id="oc-1"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["oc-2"], ["ontology_context"])),
+            ToolMessage(content="ontology-2", tool_call_id="oc-2"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["oc-3"], ["ontology_context"])),
+            ToolMessage(content="ontology-3", tool_call_id="oc-3"),
+        ])
+
+        tool_messages = [msg for msg in ctx.get_messages() if isinstance(msg, ToolMessage)]
+        assert [msg.content for msg in tool_messages] == [
+            "ontology-1",
+            "ontology-2",
+            "ontology-3",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_summary_mode_replaces_stale_results_with_per_tool_summary(self):
+        """Summary mode replaces stale results with a per-tool LLM digest."""
+        config = MicroCompactProcessorConfig(
+            trigger_threshold=1,
+            compactable_tool_names=["ontology_context"],
+            keep_recent_per_tool=1,
+            compact_strategy="summary",
+        )
+        ctx = await create_context_with_micro_compact(config)
+        processor = ctx._processors[0]  # type: ignore[attr-defined]
+        processor._model = _FakeSummaryModel("ontology digest")
+
+        await ctx.add_messages([
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["oc-1"], ["ontology_context"])),
+            ToolMessage(content="ontology-1", tool_call_id="oc-1"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["oc-2"], ["ontology_context"])),
+            ToolMessage(content="ontology-2", tool_call_id="oc-2"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["oc-3"], ["ontology_context"])),
+            ToolMessage(content="ontology-3", tool_call_id="oc-3"),
+        ])
+
+        tool_messages = [msg for msg in ctx.get_messages() if isinstance(msg, ToolMessage)]
+        # The digest is written once (on the most recent cleared message); the rest
+        # of the stale messages use the short placeholder to keep context small.
+        assert [msg.content for msg in tool_messages] == [
+            config.cleared_marker,
+            config.summary_prefix + "ontology digest",
+            "ontology-3",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_summary_mode_llm_failure_falls_back_to_marker_for_fetchable_tool(self):
+        """LLM failure degrades fetchable tools back to the marker placeholder."""
+        config = MicroCompactProcessorConfig(
+            trigger_threshold=1,
+            compactable_tool_names=["read_file"],
+            keep_recent_per_tool=1,
+            compact_strategy="summary",
+        )
+        ctx = await create_context_with_micro_compact(config)
+        processor = ctx._processors[0]  # type: ignore[attr-defined]
+        processor._model = _RaisingSummaryModel()
+
+        await ctx.add_messages([
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["r-1"], ["read_file"])),
+            ToolMessage(content="read-1", tool_call_id="r-1"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["r-2"], ["read_file"])),
+            ToolMessage(content="read-2", tool_call_id="r-2"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["r-3"], ["read_file"])),
+            ToolMessage(content="read-3", tool_call_id="r-3"),
+        ])
+
+        tool_messages = [msg for msg in ctx.get_messages() if isinstance(msg, ToolMessage)]
+        assert [msg.content for msg in tool_messages] == [
+            config.cleared_marker,
+            config.cleared_marker,
+            "read-3",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_summary_mode_llm_failure_keeps_semantic_critical_tool_verbatim(self):
+        """LLM failure never degrades semantic-critical results to the marker."""
+        config = MicroCompactProcessorConfig(
+            trigger_threshold=1,
+            compactable_tool_names=["ontology_context"],
+            keep_recent_per_tool=1,
+            compact_strategy="summary",
+        )
+        ctx = await create_context_with_micro_compact(config)
+        processor = ctx._processors[0]  # type: ignore[attr-defined]
+        processor._model = _RaisingSummaryModel()
+
+        await ctx.add_messages([
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["oc-1"], ["ontology_context"])),
+            ToolMessage(content="ontology-1", tool_call_id="oc-1"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["oc-2"], ["ontology_context"])),
+            ToolMessage(content="ontology-2", tool_call_id="oc-2"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["oc-3"], ["ontology_context"])),
+            ToolMessage(content="ontology-3", tool_call_id="oc-3"),
+        ])
+
+        tool_messages = [msg for msg in ctx.get_messages() if isinstance(msg, ToolMessage)]
+        assert [msg.content for msg in tool_messages] == [
+            "ontology-1",
+            "ontology-2",
+            "ontology-3",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_multimodal_tool_result_is_not_compacted(self):
+        """List content (multimodal tool results) never breaks or participates in compaction."""
+        config = MicroCompactProcessorConfig(
+            trigger_threshold=1,
+            compactable_tool_names=["read_file"],
+            keep_recent_per_tool=1,
+        )
+        ctx = await create_context_with_micro_compact(config)
+
+        await ctx.add_messages([
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["m-1"], ["read_file"])),
+            ToolMessage(content=["screenshot: a.png", {"size": 123}], tool_call_id="m-1"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["m-2"], ["read_file"])),
+            ToolMessage(content=["screenshot: b.png", {"size": 456}], tool_call_id="m-2"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["m-3"], ["read_file"])),
+            ToolMessage(content=["screenshot: c.png", {"size": 789}], tool_call_id="m-3"),
+        ])
+
+        tool_messages = [msg for msg in ctx.get_messages() if isinstance(msg, ToolMessage)]
+        assert [msg.content for msg in tool_messages] == [
+            ["screenshot: a.png", {"size": 123}],
+            ["screenshot: b.png", {"size": 456}],
+            ["screenshot: c.png", {"size": 789}],
+        ]
+
+    @pytest.mark.asyncio
+    async def test_summary_mode_records_compression_usage(self):
+        """Summary-mode LLM calls are metered into compression usage."""
+        config = MicroCompactProcessorConfig(
+            trigger_threshold=1,
+            compactable_tool_names=["read_file"],
+            keep_recent_per_tool=1,
+            compact_strategy="summary",
+        )
+        ctx = await create_context_with_micro_compact(config)
+        processor = ctx._processors[0]  # type: ignore[attr-defined]
+        processor._model = _FakeSummaryModel(
+            "digest",
+            usage={"input_tokens": 30, "output_tokens": 12, "total_tokens": 42},
+        )
+
+        await ctx.add_messages([
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["r-1"], ["read_file"])),
+            ToolMessage(content="read-1", tool_call_id="r-1"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["r-2"], ["read_file"])),
+            ToolMessage(content="read-2", tool_call_id="r-2"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["r-3"], ["read_file"])),
+            ToolMessage(content="read-3", tool_call_id="r-3"),
+        ])
+
+        usage = processor._current_compression_usage()
+        assert usage is not None
+        assert usage["calls"] == 1
+        assert usage["total_tokens"] == 42
+
+    @pytest.mark.asyncio
+    async def test_summary_failure_is_suppressed_until_rebind(self):
+        """A failed summary is not retried until the model is rebound."""
+        config = MicroCompactProcessorConfig(
+            trigger_threshold=1,
+            compactable_tool_names=["ontology_context"],
+            keep_recent_per_tool=1,
+            compact_strategy="summary",
+        )
+        ctx = await create_context_with_micro_compact(config)
+        processor = ctx._processors[0]  # type: ignore[attr-defined]
+        failing = _RaisingSummaryModel()
+        processor._model = failing
+
+        await ctx.add_messages(create_ontology_messages(3))
+        assert failing.calls == 1
+
+        # A round of another tool still triggers compaction but the suppressed
+        # summary is not retried.
+        await ctx.add_messages([
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["r-1"], ["read_file"])),
+            ToolMessage(content="read-1", tool_call_id="r-1"),
+        ])
+        assert failing.calls == 1
+        tool_messages = [msg for msg in ctx.get_messages() if isinstance(msg, ToolMessage)]
+        assert [msg.content for msg in tool_messages] == [
+            "ontology-1",
+            "ontology-2",
+            "ontology-3",
+            "read-1",
+        ]
+
+        # A rebound model clears the suppression and summaries the stale results.
+        assert processor.rebind_model(model=_FakeSummaryModel("digest")) is True
+        await ctx.add_messages([
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["r-2"], ["read_file"])),
+            ToolMessage(content="read-2", tool_call_id="r-2"),
+        ])
+        tool_messages = [msg for msg in ctx.get_messages() if isinstance(msg, ToolMessage)]
+        assert [msg.content for msg in tool_messages] == [
+            config.cleared_marker,
+            config.summary_prefix + "digest",
+            "ontology-3",
+            "read-1",
+            "read-2",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_summary_retries_after_new_content_arrives(self):
+        """New clearable content after a failure allows one retry."""
+        config = MicroCompactProcessorConfig(
+            trigger_threshold=1,
+            compactable_tool_names=["ontology_context"],
+            keep_recent_per_tool=1,
+            compact_strategy="summary",
+        )
+        ctx = await create_context_with_micro_compact(config)
+        processor = ctx._processors[0]  # type: ignore[attr-defined]
+        failing = _RaisingSummaryModel()
+        processor._model = failing
+
+        await ctx.add_messages(create_ontology_messages(3))
+        assert failing.calls == 1
+
+        # A fourth result changes the clearable count, so one retry happens.
+        await ctx.add_messages(create_ontology_messages(1, start=4))
+        assert failing.calls == 2
+
+    @pytest.mark.asyncio
+    async def test_summary_mode_without_model_falls_back_to_marker_for_fetchable_tool(self):
+        """Without a summarizer model, fetchable tools still fall back to the marker."""
+        config = MicroCompactProcessorConfig(
+            trigger_threshold=1,
+            compactable_tool_names=["read_file"],
+            keep_recent_per_tool=1,
+            compact_strategy="summary",
+        )
+        ctx = await create_context_with_micro_compact(config)
+
+        await ctx.add_messages([
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["r-1"], ["read_file"])),
+            ToolMessage(content="read-1", tool_call_id="r-1"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["r-2"], ["read_file"])),
+            ToolMessage(content="read-2", tool_call_id="r-2"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["r-3"], ["read_file"])),
+            ToolMessage(content="read-3", tool_call_id="r-3"),
+        ])
+
+        tool_messages = [msg for msg in ctx.get_messages() if isinstance(msg, ToolMessage)]
+        assert [msg.content for msg in tool_messages] == [
+            config.cleared_marker,
+            config.cleared_marker,
+            "read-3",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_summary_mode_without_model_keeps_semantic_critical_tool_verbatim(self):
+        """Without a summarizer model, semantic-critical results are never marker-cleared."""
+        config = MicroCompactProcessorConfig(
+            trigger_threshold=1,
+            compactable_tool_names=["ontology_context"],
+            keep_recent_per_tool=1,
+            compact_strategy="summary",
+        )
+        ctx = await create_context_with_micro_compact(config)
+
+        await ctx.add_messages([
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["oc-1"], ["ontology_context"])),
+            ToolMessage(content="ontology-1", tool_call_id="oc-1"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["oc-2"], ["ontology_context"])),
+            ToolMessage(content="ontology-2", tool_call_id="oc-2"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["oc-3"], ["ontology_context"])),
+            ToolMessage(content="ontology-3", tool_call_id="oc-3"),
+        ])
+
+        tool_messages = [msg for msg in ctx.get_messages() if isinstance(msg, ToolMessage)]
+        assert [msg.content for msg in tool_messages] == [
+            "ontology-1",
+            "ontology-2",
+            "ontology-3",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_marker_mode_warns_when_semantic_critical_tool_registered(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            config = MicroCompactProcessorConfig(
+                trigger_threshold=1,
+                compactable_tool_names=["ontology_context"],
+                keep_recent_per_tool=1,
+            )
+            await create_context_with_micro_compact(config)
+        assert "semantic-critical" in caplog.text
+
+    def test_rebind_model_updates_summarizer(self):
+        config = MicroCompactProcessorConfig()
+        processor = MicroCompactProcessor(config)
+        assert processor._model is None
+        assert processor.rebind_model(model=_FakeSummaryModel("digest")) is True
+        assert processor._model is not None
