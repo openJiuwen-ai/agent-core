@@ -321,6 +321,7 @@ async def test_execute_ability_yields_failure() \
         -> None:
     """Exception in invoke yields a TASK_FAILED chunk."""
     agent = _make_agent(fail=True)
+    manager = _install_recording_manager(agent)
     deps, tm = _make_deps()
 
     session = FakeSession()
@@ -350,6 +351,9 @@ async def test_execute_ability_yields_failure() \
     )
     meta = chunks[0].payload.metadata
     assert meta["task_id"] == "t2"
+    assert meta["termination_reason"] == "error"
+    after_index = manager.fired.index(AgentCallbackEvent.AFTER_TASK_ITERATION)
+    assert manager.results[after_index]["termination_reason"] == meta["termination_reason"]
     error_text = chunks[0].payload.data[0].text
     assert "invoke failed" in error_text
 

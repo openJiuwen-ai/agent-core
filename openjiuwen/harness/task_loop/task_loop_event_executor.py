@@ -40,7 +40,9 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
+    AgentTerminationReason,
     TaskIterationInputs,
+    termination_reason_of,
 )
 
 if TYPE_CHECKING:
@@ -340,6 +342,7 @@ class TaskLoopEventExecutor(TaskExecutor):
             # result), no TaskPlan mark — cancel() owns that.
             raise
         except Exception as exc:
+            reason = termination_reason_of(exc) or AgentTerminationReason.ERROR
             logger.error(
                 f"Task {task_id} execution failed: "
                 f"{exc}",
@@ -358,6 +361,7 @@ class TaskLoopEventExecutor(TaskExecutor):
                 iter_inputs.result = {
                     "result_type": "error",
                     "error": str(exc),
+                    "termination_reason": reason.value,
                 }
                 ctx.inputs = iter_inputs
                 ctx.exception = exc
@@ -377,7 +381,7 @@ class TaskLoopEventExecutor(TaskExecutor):
             payload = ControllerOutputPayload(
                 type=EventType.TASK_FAILED,
                 data=[TextDataFrame(text=str(exc))],
-                metadata={"task_id": task_id},
+                metadata={"task_id": task_id, "termination_reason": reason.value},
             )
             yield ControllerOutputChunk(
                 index=0,

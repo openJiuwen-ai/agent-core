@@ -244,7 +244,7 @@ async def test_after_task_iteration_fires_when_round_fails() -> None:
         # Fired once for the failed round with the error-shaped result installed
         # by the executor's exception branch, not a leftover success result.
         assert len(fired) == 1
-        assert fired == [{"result_type": "error", "error": "boom"}]
+        assert fired == [{"result_type": "error", "error": "boom", "termination_reason": "error"}]
     finally:
         await Runner.stop()
 

@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.context_engine import ContextEngineConfig
 from openjiuwen.core.events.builtins.event_types.turn import (
     TURN_COMPLETE,
@@ -828,6 +828,57 @@ async def test_stream_task_loop_yields_result() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True], ids=["invoke", "stream"])
+@pytest.mark.parametrize("failure", ["model_error", "completion_timeout"])
+async def test_task_loop_reports_structured_failure(
+    monkeypatch: pytest.MonkeyPatch, streaming: bool, failure: str,
+) -> None:
+    model = _create_dummy_model()
+
+    async def fail_model(*args, **kwargs):
+        if failure == "completion_timeout":
+            await asyncio.Future()
+        raise build_error(StatusCode.MODEL_CALL_FAILED, error_msg="test model failed")
+
+    async def fail_model_stream(*args, **kwargs):
+        yield await fail_model(*args, **kwargs)
+
+    monkeypatch.setattr(model, "invoke", fail_model)
+    monkeypatch.setattr(model, "stream", fail_model_stream)
+    agent = create_deep_agent(
+        model=model,
+        enable_task_loop=True,
+        completion_timeout=1.0 if failure == "completion_timeout" else 5.0,
+        enable_sys_operation=False,
+        enable_model_anomaly_detection_rail=False,
+        enable_read_image_multimodal=False,
+        auto_create_workspace=False,
+    )
+    inputs = {"query": "run a task", "conversation_id": agent.card.id}
+
+    await Runner.start()
+    try:
+        async with asyncio.timeout(15):
+            if streaming:
+                chunks = [chunk async for chunk in Runner.run_agent_streaming(agent, inputs)]
+                [result] = [chunk.payload for chunk in chunks if chunk.type == "answer"]
+            else:
+                result = await Runner.run_agent(agent, inputs)
+    finally:
+        await Runner.stop()
+
+    if failure == "completion_timeout":
+        assert result["error"] == "completion_timeout"
+        assert result["termination_reason"] == "error"
+        assert result["output"].startswith("Task loop round timed out")
+    else:
+        assert "test model failed" in result["error"]
+        assert result["termination_reason"] == "model_error"
+        assert result["output"] == "Task loop round failed."
+    assert result["result_type"] == "error"
+
+
+@pytest.mark.asyncio
 async def test_follow_up_steer_noop_without_queue() -> None:
     agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=False))
 
@@ -981,7 +1032,37 @@ async def test_abort_sets_coordinator_flag() -> None:
 
     # Future should be resolved with abort error
     fut_result = await handler.wait_completion(timeout=1.0)
-    assert fut_result == {"error": "aborted"}
+    assert fut_result == {
+        "output": "aborted",
+        "result_type": "error",
+        "error": "aborted",
+        "termination_reason": "cancelled",
+    }
+
+
+@pytest.mark.asyncio
+async def test_task_loop_invoke_returns_abort_reason() -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=True))
+    slow_react = SlowReactAgent()
+    agent.set_react_agent(slow_react, initialized=True)
+
+    await Runner.start()
+    task = asyncio.create_task(Runner.run_agent(agent, {"query": "slow"}))
+    try:
+        async with asyncio.timeout(15):
+            await slow_react.started.wait()
+            await agent.abort()
+            assert await task == {
+                "output": "aborted",
+                "result_type": "error",
+                "error": "aborted",
+                "termination_reason": "cancelled",
+            }
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await Runner.stop()
 
 
 @pytest.mark.asyncio

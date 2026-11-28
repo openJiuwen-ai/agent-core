@@ -29,6 +29,7 @@ from openjiuwen.core.controller.schema.task import (
 from openjiuwen.core.controller.schema.task import (
     TaskStatus as CoreTaskStatus,
 )
+from openjiuwen.core.single_agent.rail.base import AgentTerminationReason
 from openjiuwen.harness.task_loop.loop_queues import (
     LoopQueues,
 )
@@ -46,12 +47,18 @@ if TYPE_CHECKING:
 _CANCEL_WAIT_TIMEOUT = 1.5
 
 
-def _error_result(error: str, output: Optional[str] = None) -> Dict[str, Any]:
+def _error_result(
+    error: str,
+    output: Optional[str] = None,
+    *,
+    termination_reason: Optional[str] = None,
+) -> Dict[str, Any]:
     """Build an error result that survives the answer-stream adapter."""
     return {
         "output": output or error,
         "result_type": "error",
         "error": error,
+        "termination_reason": termination_reason or AgentTerminationReason.ERROR.value,
     }
 
 
@@ -156,7 +163,7 @@ class TaskLoopEventHandler(EventHandler):
             and returns a standard error result.
         """
         if self._current_future is None:
-            return {"error": "no active round"}
+            return _error_result("no active round")
         round_id = self._round_id
         try:
             if timeout is not None:
@@ -178,8 +185,9 @@ class TaskLoopEventHandler(EventHandler):
                 ),
             )
         except asyncio.CancelledError:
-            result = {"error": "cancelled"}
-            self._last_result = result
+            self._last_result = _error_result(
+                "cancelled", termination_reason=AgentTerminationReason.CANCELLED.value,
+            )
             raise
         finally:
             self._round_task_ids.pop(round_id, None)
@@ -577,7 +585,12 @@ class TaskLoopEventHandler(EventHandler):
         )
 
         self._resolve_future(
-            {"error": str(error_msg)}, round_id,
+            _error_result(
+                str(error_msg),
+                output="Task loop round failed.",
+                termination_reason=(event.metadata or {}).get("termination_reason"),
+            ),
+            round_id,
         )
 
         return {
@@ -754,12 +767,12 @@ class TaskLoopEventHandler(EventHandler):
     async def on_abort(self) -> None:
         """Signal abort to the outer loop.
 
-        Resolves the current round's Future with an
-        error dict so wait_completion() returns
-        immediately.
+        Resolves the current round's Future with an abort result so
+        wait_completion() returns immediately.
         """
         self._resolve_future(
-            {"error": "aborted"}, self._round_id,
+            _error_result("aborted", termination_reason=AgentTerminationReason.CANCELLED.value),
+            self._round_id,
         )
 
 
