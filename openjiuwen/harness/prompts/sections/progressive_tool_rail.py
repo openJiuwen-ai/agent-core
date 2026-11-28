@@ -163,14 +163,13 @@ def _compact_tool_description(description: str) -> str:
         return compact
 
     sentence_endings = ("。", ".", "！", "!", "？", "?")
-    first_ending = min(
-        (
-            index
-            for index, char in enumerate(compact)
-            if char in sentence_endings and index > 0
-        ),
-        default=-1,
-    )
+    first_ending = -1
+    for index, char in enumerate(compact):
+        if index == 0 or char not in sentence_endings:
+            continue
+        if char in "。！？" or index + 1 == len(compact) or compact[index + 1] == " ":
+            first_ending = index
+            break
     if 0 < first_ending < _MAX_DEFERRED_TOOL_SUMMARY_CHARS:
         return compact[: first_ending + 1]
 
