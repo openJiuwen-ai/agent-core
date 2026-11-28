@@ -949,7 +949,10 @@ async def _on_agent_session_created(session_id: str = None, card=None, session=N
 
     data_container = chain_session.data_container
     if hasattr(data_container, 'session'):
-        data_container.session = session
+        if hasattr(data_container, 'switch_session'):
+            data_container.switch_session(session)
+        else:
+            data_container.session = session
         logger.debug(
             f"[session_created] updated data_container session for "
             f"agent '{agent_id}', session_id '{session_id}'"

@@ -346,6 +346,9 @@ class SessionController:
                 data_container=data_container,
                 session_dir=session_dir
             )
+            if not await session.load():
+                logger.error(f"Failed to restore session {session_id} from {session_dir}")
+                return False
 
             # Add to cache
             self.session_cache[session_id] = session
@@ -438,7 +441,8 @@ class SessionController:
                 if active_session:
                     # Return the existing active session
                     if active_session.session_id not in self.session_cache:
-                        await self._load_session(session_scope, active_session.session_id)
+                        if not await self._load_session(session_scope, active_session.session_id):
+                            raise ValueError(f"Failed to restore active session {active_session.session_id}")
                     return False, self.session_cache[active_session.session_id]
 
                 # Create new session

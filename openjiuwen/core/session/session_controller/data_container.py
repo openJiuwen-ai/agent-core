@@ -209,6 +209,7 @@ class AgentSessionContainer(DataContainer):
 
     def __init__(self, session=None):
         self.session = session
+        self._keys: set[str] = set()
 
     @classmethod
     async def load(cls, agent_id: str, session_id: str, serialized: Any) -> 'DataContainer':
@@ -217,17 +218,30 @@ class AgentSessionContainer(DataContainer):
         from openjiuwen.core.single_agent import AgentCard
         agent_session = create_agent_session(session_id=session_id, card=AgentCard(id=agent_id))
         await agent_session.pre_run()
-        return AgentSessionContainer(agent_session)
+        container = AgentSessionContainer(agent_session)
+        if isinstance(serialized, dict) and serialized:
+            container.update(serialized)
+        return container
 
     async def dump(self) -> Any:
-        """Asynchronously serialize the session container, returning self."""
-        return {}
+        """Asynchronously serialize the keys written through update()."""
+        if not self.session:
+            return {}
+        return {key: self.session.get_state(key) for key in sorted(self._keys)}
+
+    def switch_session(self, session) -> None:
+        """Replace the delegated session, carrying over the keys written through update()."""
+        previous = self.session
+        if previous is not None and previous is not session and self._keys:
+            session.update_state({key: previous.get_state(key) for key in self._keys})
+        self.session = session
 
     def update(self, data: dict) -> bool:
         """Update data by delegating to the session's update_state."""
         if not self.session:
             return False
         self.session.update_state(data)
+        self._keys.update(data)
         return True
 
     def get(self, key: Union[str, list, dict] = None) -> dict:
