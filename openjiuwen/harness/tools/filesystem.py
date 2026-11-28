@@ -2608,7 +2608,11 @@ class GrepTool(Tool):
             rg_path: str = "rg",
     ) -> str:
         parts: List[str] = [
-            self._shell_quote(rg_path),
+            # On Windows, the command runs via PowerShell, which requires the
+            # call operator (&) to invoke a quoted executable path.  Without
+            # it, PowerShell treats the quoted string as a literal expression
+            # and the command silently fails (grep returns no matches).
+            f"& {self._shell_quote(rg_path)}" if os.name == "nt" else self._shell_quote(rg_path),
             "--hidden",
             "--color=never",
             "--max-columns",
@@ -2836,8 +2840,28 @@ class GrepTool(Tool):
             head_limit: Optional[int],
             offset: int,
             base_path: str,
+            search_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         raw_lines = [line for line in stdout.splitlines() if line.strip()]
+        # When searching a single file, ripgrep omits the filename from output
+        # (e.g. "3:## Overview" instead of "file.py:3:## Overview").  Prepend
+        # the actual filename so _relativize_line and the result display show
+        # the correct file path instead of misinterpreting the line number.
+        if search_path and os.path.isfile(search_path):
+            fname = os.path.basename(search_path)
+            prefixed_lines = []
+            for line in raw_lines:
+                if output_mode == "files_with_matches":
+                    prefixed_lines.append(fname)
+                elif output_mode == "count":
+                    if ":" in line:
+                        prefixed_lines.append(f"{fname}:{line}")
+                    else:
+                        prefixed_lines.append(line)
+                else:
+                    # content mode: line is "linenum:content" or "linenum-content-content"
+                    prefixed_lines.append(f"{fname}:{line}")
+            raw_lines = prefixed_lines
         limited_lines, applied_limit = self._apply_head_limit(raw_lines, head_limit, offset)
         final_lines = [self._relativize_line(line, base_path, output_mode) for line in limited_lines]
         content = "\n".join(final_lines)
@@ -2977,7 +3001,13 @@ class GrepTool(Tool):
                 return ToolOutput(success=False, error="multiline search requires ripgrep (rg) to be installed")
 
         shell_type = "powershell" if os.name == "nt" else "auto"
-        res = await self.operation.shell().execute_cmd(cmd, timeout=30, shell_type=shell_type)
+        # ripgrep always emits UTF-8 regardless of the launching shell's code page.
+        # Without forcing UTF-8 decoding, rg output is decoded as GBK on Chinese
+        # Windows, producing garbled or empty results (the "grep is broken" bug).
+        exec_options = {"encoding": "utf-8"} if rg_bin else None
+        res = await self.operation.shell().execute_cmd(
+            cmd, timeout=30, shell_type=shell_type, options=exec_options,
+        )
 
         if res.code != StatusCode.SUCCESS.code:
             return ToolOutput(success=False, error=res.message)
@@ -2997,6 +3027,7 @@ class GrepTool(Tool):
                 head_limit=head_limit,
                 offset=offset,
                 base_path=path if os.path.isdir(path) else os.path.dirname(path) or ".",
+                search_path=path,
             ),
             error=stderr if not success else None
         )
