@@ -598,21 +598,33 @@ async def test_dead_worker_identity_is_cleared_even_when_handle_cleanup_is_delay
     worker = await ready_worker(tmp_path)
     process = worker["process"]
     original_wait = process.wait
+    cleanup_paused = threading.Event()
+    release_cleanup = threading.Event()
 
     def slow_cleanup(*args, **kwargs):
         result = original_wait(*args, **kwargs)
-        time.sleep(0.25)
+        cleanup_paused.set()
+        release_cleanup.wait(30)
         return result
 
     monkeypatch.setattr(process, "wait", slow_cleanup)
     try:
         await capacity._close_capacity_worker(tmp_path)
+        # Closing has a bounded wait; synchronize with process exit before
+        # checking that a close can forget the dead worker during cleanup.
+        await until(cleanup_paused.is_set)
         assert process.poll() is not None
+        await capacity._close_capacity_worker(tmp_path)
+        assert not worker["cleanup"].done()
         assert tmp_path not in capacity._CAPACITY_WORKERS
         new_pid = await _recover_and_reclaim(tmp_path)
         assert new_pid != process.pid
     finally:
+        release_cleanup.set()
         await capacity._close_capacity_worker(tmp_path)
+        completion = worker.get("cleanup")
+        if completion is not None:
+            await asyncio.wait_for(asyncio.wrap_future(completion), timeout=3)
 
 
 @pytest.mark.asyncio
