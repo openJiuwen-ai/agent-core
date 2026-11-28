@@ -6,7 +6,7 @@ from typing import Any, List, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpToolCard
-from openjiuwen.core.foundation.tool.mcp.base import McpServerConfig, NO_TIMEOUT, extract_mcp_tool_result_content
+from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT, McpServerConfig, extract_mcp_tool_result_content
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 
 
@@ -21,6 +21,7 @@ class PlaywrightClient(McpClient):
         self._session = None
         self._read = None
         self._write = None
+        self._params = config.params if config.params else {}
         self._exit_stack = AsyncExitStack()
         self._is_disconnected: bool = False
 
@@ -78,6 +79,36 @@ class PlaywrightClient(McpClient):
             self._read = None
             self._write = None
 
+    def _resolve_timeout(self, timeout: float) -> float:
+        """Resolve an operation bound: explicit > config timeout_s > 60s.
+
+        Used by list_tools, where a dead server must fail fast instead of
+        hanging the caller.
+        """
+        if isinstance(timeout, (int, float)) and timeout > 0:
+            return float(timeout)
+        configured = self._params.get("timeout_s")
+        if isinstance(configured, (int, float)) and configured > 0:
+            return float(configured)
+        return 60.0
+
+    def _resolve_call_bound(self, timeout: float) -> Optional[float]:
+        """Resolve the per-call bound for ``call_tool``: explicit > config, else unbounded.
+
+        A browser tool call may legitimately run minutes (long navigations,
+        scrapes), so ``NO_TIMEOUT`` without a configured ``timeout_s`` keeps
+        the SDK default of no per-call ceiling — matching
+        ``StreamableHttpClient`` and the pre-fix behavior (issue #1976
+        review). Pass an explicit ``timeout`` or set
+        ``params["timeout_s"]`` to bound the call.
+        """
+        if isinstance(timeout, (int, float)) and timeout > 0:
+            return float(timeout)
+        configured = self._params.get("timeout_s")
+        if isinstance(configured, (int, float)) and configured > 0:
+            return float(configured)
+        return None
+
     async def list_tools(self, *, timeout: float = NO_TIMEOUT) -> List[Any]:
         """List available browser tools"""
         if not self._session:
@@ -101,13 +132,22 @@ class PlaywrightClient(McpClient):
             raise
 
     async def call_tool(self, tool_name: str, arguments: dict, *, timeout: float = NO_TIMEOUT) -> Any:
-        """Call browser tool"""
+        """Call browser tool.
+
+        The explicit ``timeout`` (seconds) bounds this single call via
+        ``asyncio.timeout`` so long-running browser tools complete when the
+        caller raises the budget (issue #1976 / REQ-001). ``NO_TIMEOUT``
+        without a configured ``params["timeout_s"]`` keeps the call
+        unbounded, matching ``StreamableHttpClient`` and the SDK default.
+        """
         if not self._session:
             raise RuntimeError("Not connected to Playwright server")
 
         try:
             logger.info(f"Calling browser tool '{tool_name}' with arguments: {arguments}")
-            tool_result = await self._session.call_tool(tool_name, arguments=arguments)
+            actual_timeout = self._resolve_call_bound(timeout)
+            async with asyncio.timeout(actual_timeout):
+                tool_result = await self._session.call_tool(tool_name, arguments=arguments)
             result_content = extract_mcp_tool_result_content(
                 tool_result,
                 include_image_content=self._include_image_content,
@@ -115,6 +155,16 @@ class PlaywrightClient(McpClient):
             )
             logger.info(f"Browser tool '{tool_name}' call completed")
             return result_content
+        except TimeoutError as exc:
+            if actual_timeout is None:
+                # Unbounded call: the error came from the session/SDK, not from
+                # our asyncio.timeout wrapper — keep the original message
+                # (raising a reformatted one would lose its diagnostics).
+                raise
+            raise TimeoutError(
+                f"playwright call_tool '{tool_name}' did not complete within "
+                f"{actual_timeout:g}s"
+            ) from exc
         except Exception as e:
             logger.error(f"Browser tool call failed: {e}")
             raise

@@ -26,13 +26,34 @@ class StdioClient(McpClient):
         self._is_disconnected: bool = False
 
     def _resolve_timeout(self, timeout: float) -> float:
-        """Resolve an operation bound: explicit > config timeout_s > 60s."""
+        """Resolve an operation bound: explicit > config timeout_s > 60s.
+
+        Used by connect/list_tools, where a dead server must fail fast
+        instead of hanging the caller.
+        """
         if isinstance(timeout, (int, float)) and timeout > 0:
             return float(timeout)
         configured = self._params.get("timeout_s")
         if isinstance(configured, (int, float)) and configured > 0:
             return float(configured)
         return 60.0
+
+    def _resolve_call_bound(self, timeout: float) -> Optional[float]:
+        """Resolve the per-call bound for ``call_tool``: explicit > config, else unbounded.
+
+        Unlike connect/list_tools, a tool call may legitimately run minutes
+        (simulation solves, batch jobs), so ``NO_TIMEOUT`` without a
+        configured ``timeout_s`` keeps the SDK default of no per-call
+        ceiling — matching ``StreamableHttpClient`` and the pre-fix stdio
+        behavior (issue #1976 review). Pass an explicit ``timeout`` or set
+        ``params["timeout_s"]`` to bound the call.
+        """
+        if isinstance(timeout, (int, float)) and timeout > 0:
+            return float(timeout)
+        configured = self._params.get("timeout_s")
+        if isinstance(configured, (int, float)) and configured > 0:
+            return float(configured)
+        return None
 
     async def connect(self, *, timeout: float = NO_TIMEOUT) -> bool:
         """Establish Stdio connection to the tool server"""
@@ -134,13 +155,23 @@ class StdioClient(McpClient):
             raise
 
     async def call_tool(self, tool_name: str, arguments: dict, *, timeout: float = NO_TIMEOUT) -> Any:
-        """Call tool via Stdio"""
+        """Call tool via Stdio.
+
+        The explicit ``timeout`` (seconds) bounds this single call via
+        ``asyncio.timeout`` so long-running tools (e.g. minute-level
+        simulation solves) complete when the caller raises the budget, while
+        short tools still fail fast (issue #1976 / REQ-001). ``NO_TIMEOUT``
+        without a configured ``params["timeout_s"]`` keeps the call
+        unbounded, matching ``StreamableHttpClient`` and the SDK default.
+        """
         if not self._session:
             raise RuntimeError("Not connected to Stdio server")
 
         try:
             logger.info(f"Calling tool '{tool_name}' via Stdio with arguments: {arguments}")
-            tool_result = await self._session.call_tool(tool_name, arguments=arguments)
+            actual_timeout = self._resolve_call_bound(timeout)
+            async with asyncio.timeout(actual_timeout):
+                tool_result = await self._session.call_tool(tool_name, arguments=arguments)
             result_content = extract_mcp_tool_result_content(
                 tool_result,
                 include_image_content=self._include_image_content,
@@ -148,6 +179,16 @@ class StdioClient(McpClient):
             )
             logger.info(f"Tool '{tool_name}' call completed via Stdio")
             return result_content
+        except TimeoutError as exc:
+            if actual_timeout is None:
+                # Unbounded call: the error came from the session/SDK, not from
+                # our asyncio.timeout wrapper — keep the original message
+                # (raising a reformatted one would lose its diagnostics).
+                raise
+            raise TimeoutError(
+                f"stdio call_tool '{tool_name}' did not complete within "
+                f"{actual_timeout:g}s"
+            ) from exc
         except Exception as e:
             logger.error(f"Tool call failed via Stdio: {e}")
             raise

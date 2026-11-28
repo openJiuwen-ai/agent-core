@@ -39,7 +39,7 @@ from openjiuwen.core.foundation.tool.client import (
     is_client_tool,
 )
 from openjiuwen.core.foundation.tool import McpServerConfig
-from openjiuwen.core.foundation.tool.mcp.base import mcp_model_tool_name, mcp_model_tool_prefix
+from openjiuwen.core.foundation.tool.mcp.base import McpToolCard, mcp_model_tool_name, mcp_model_tool_prefix
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -259,6 +259,18 @@ DEFAULT_TOOL_CALL_TIMEOUT: float = float(os.getenv("DEFAULT_TOOL_CALL_TIMEOUT", 
 MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT: float = float(
     os.getenv("MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT", "3600.0")
 )
+
+# Outer-ceiling slack for MCP tools (issue #1976 review). The card budget is
+# forwarded to the MCP client as its per-call deadline; the outer
+# ``anyio.fail_after`` starts earlier, so with the same budget it would always
+# expire first and cancel the client-side wait before it can report. The outer
+# ceiling therefore exceeds the forwarded budget by this slack, so the client
+# reports the precise timeout and the outer scope only guards a client that
+# ignores its budget. The slack is a share of the budget, clamped to a floor
+# (tiny budgets) and a ceiling (huge budgets), all in seconds.
+MCP_OUTER_TIMEOUT_GRACE_SHARE: float = 0.1
+MCP_OUTER_TIMEOUT_GRACE_MIN_SECONDS: float = 5.0
+MCP_OUTER_TIMEOUT_GRACE_MAX_SECONDS: float = 60.0
 
 
 class AbilityManager:
@@ -743,6 +755,115 @@ class AbilityManager:
         if not isinstance(tool, Tool):
             return default_timeout
         return tool.get_call_timeout(tool_args, default_timeout=default_timeout)
+
+    @staticmethod
+    def _build_tool_invoke_kwargs(
+            tool: Any,
+            call_timeout: float,
+            session: Session,
+            callback_context: Optional[AgentCallbackContext],
+    ) -> Dict[str, Any]:
+        """Build the shared ``tool.invoke`` kwargs for both execution paths.
+
+        Used by the registered-tool branch and the resource_mgr fallback
+        branch of ``_execute_single_tool_call_bound`` so both resolve the
+        budget identically (issue #1976): the resolved call timeout is
+        forwarded to MCP tools as the per-call ``timeout`` kwarg so the
+        client-side wait raises a precise error inside the outer
+        ``anyio.fail_after`` ceiling. Non-MCP tools keep their invocation
+        contract (no extra kwarg).
+        """
+        invoke_kwargs: Dict[str, Any] = {"session": session}
+        if isinstance(getattr(tool, "card", None), McpToolCard):
+            invoke_kwargs["timeout"] = call_timeout
+        # The fixed progressive ``tool_call`` wrapper needs the active
+        # callback context to dispatch its discovered target through this
+        # AbilityManager. Keep the extra kwarg opt-in so ordinary tools and
+        # third-party tools retain their existing invocation contract.
+        if (
+            callback_context is not None
+            and getattr(tool, "accepts_tool_callback_context", False)
+        ):
+            invoke_kwargs["_tool_callback_context"] = callback_context
+        return invoke_kwargs
+
+    @staticmethod
+    def _resolve_outer_timeout(
+            tool: Any,
+            call_timeout: float,
+            *,
+            budget_is_hard_limit: bool = False,
+    ) -> float:
+        """Return the outer ``fail_after`` ceiling for one tool call.
+
+        Ordinary tools keep the resolved budget unchanged. MCP tools, whose
+        budget is forwarded to the client as its per-call deadline, get
+        cleanup slack on top so the outer scope cannot cancel the client-side
+        wait first (see ``MCP_OUTER_TIMEOUT_GRACE_SHARE``).
+
+        ``budget_is_hard_limit`` marks an exempt tool bounded by
+        ``MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT``: that limit is absolute, so no
+        slack is added and the client gets the same budget as the outer scope.
+        """
+        if budget_is_hard_limit:
+            return call_timeout
+        if not isinstance(getattr(tool, "card", None), McpToolCard):
+            return call_timeout
+        slack = call_timeout * MCP_OUTER_TIMEOUT_GRACE_SHARE
+        slack = min(max(slack, MCP_OUTER_TIMEOUT_GRACE_MIN_SECONDS), MCP_OUTER_TIMEOUT_GRACE_MAX_SECONDS)
+        return call_timeout + slack
+
+    @staticmethod
+    def _wrapped_timeout_cause(
+            tool: Any,
+            error: BaseException,
+    ) -> Optional[TimeoutError]:
+        """Return the client-side ``TimeoutError`` that ``error`` wraps, if any.
+
+        ``MCPTool.invoke`` wraps every failure of the underlying client in an
+        error with status ``TOOL_MCP_EXECUTION_ERROR`` whose ``__cause__`` is
+        that failure, so a timeout reported by the client reaches the outer
+        ``except TimeoutError`` clause as a plain ``Exception``.
+
+        Only that explicit wrapper and its explicit ``__cause__`` are
+        accepted, and the client failure itself must be the ``TimeoutError``.
+        The implicit ``__context__`` is deliberately ignored: a client that
+        recovers from a transport timeout and then raises a business error
+        carries the stale timeout as ``__context__``, and that error must
+        keep its own text.
+
+        Only tools whose budget was forwarded (MCP tools) are unwrapped:
+        for them a ``TimeoutError`` from the client is a call-level timeout.
+        Other tools keep their error contract untouched.
+        """
+        if not isinstance(getattr(tool, "card", None), McpToolCard):
+            return None
+        if getattr(error, "status", None) is not StatusCode.TOOL_MCP_EXECUTION_ERROR:
+            return None
+        cause = error.__cause__
+        if not isinstance(cause, TimeoutError):
+            return None
+        return cause
+
+    @staticmethod
+    def _timeout_error_message(
+            tool_name: str,
+            call_timeout: float,
+            timeout: TimeoutError,
+    ) -> str:
+        """Build the model-facing text of a timeout reported by the MCP client.
+
+        The generic text always comes first and names the declared budget, so
+        callers that parse ``timed out after Ns`` and the retry rail's
+        "timed out" marker keep working. The client's own message, when it
+        has one, is appended as the precise cause; a bare ``TimeoutError``
+        (streamable-http, SSE) adds nothing rather than an empty fragment.
+        """
+        message = f"Tool '{tool_name}' timed out after {call_timeout}s"
+        client_message = str(timeout).strip()
+        if not client_message:
+            return message
+        return f"{message} ({client_message})"
 
     @staticmethod
     def _get_stream_writer_manager(session: Session) -> Any:
@@ -1858,22 +1979,17 @@ class AbilityManager:
             call_timeout = self._resolve_call_timeout(tool_card)
             # Global hard limit: even exempt tools (None) get a ceiling so they
             # cannot hang the round indefinitely.
+            budget_is_hard_limit = call_timeout is None
             if call_timeout is None:
                 call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
                 call_timeout = self._resolve_invocation_timeout(tool, tool_args, call_timeout)
-                invoke_kwargs = {"session": session}
-                # The fixed progressive ``tool_call`` wrapper needs the active
-                # callback context to dispatch its discovered target through
-                # this AbilityManager.  Keep the extra kwarg opt-in so ordinary
-                # tools and third-party tools retain their existing invocation
-                # contract.
-                if (
-                    callback_context is not None
-                    and getattr(tool, "accepts_tool_callback_context", False)
+                invoke_kwargs = self._build_tool_invoke_kwargs(
+                    tool, call_timeout, session, callback_context
+                )
+                with anyio.fail_after(
+                    self._resolve_outer_timeout(tool, call_timeout, budget_is_hard_limit=budget_is_hard_limit)
                 ):
-                    invoke_kwargs["_tool_callback_context"] = callback_context
-                with anyio.fail_after(call_timeout):
                     result = await tool.invoke(tool_args, **invoke_kwargs)
             except TimeoutError as e:
                 error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
@@ -1892,8 +2008,17 @@ class AbilityManager:
                 # deferred tools can raise one from inside the tool_call wrapper.
                 raise
             except Exception as e:
-                error_msg = f"Tool execution error: {str(e)}"
-                logger.exception(error_msg)
+                # An MCP client that enforces its forwarded deadline raises a
+                # TimeoutError, which MCPTool.invoke wraps in an
+                # ExecutionError(TOOL_MCP_EXECUTION_ERROR): report it as the
+                # timeout it is instead of a generic execution error.
+                client_timeout = self._wrapped_timeout_cause(tool, e)
+                if client_timeout is not None:
+                    error_msg = self._timeout_error_message(tool_name, call_timeout, client_timeout)
+                    logger.exception(error_msg)
+                else:
+                    error_msg = f"Tool execution error: {str(e)}"
+                    logger.exception(error_msg)
                 raise self._build_execution_error(
                     tool_call,
                     error_msg,
@@ -2003,12 +2128,18 @@ class AbilityManager:
             # Use the same card policy and input-aware budget as registered tools.
             call_timeout = self._resolve_call_timeout(tool.card)
             # Global hard limit: even exempt tools (None) get a ceiling.
+            budget_is_hard_limit = call_timeout is None
             if call_timeout is None:
                 call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
                 call_timeout = self._resolve_invocation_timeout(tool, tool_args, call_timeout)
-                with anyio.fail_after(call_timeout):
-                    result = await tool.invoke(tool_args, session=session)
+                invoke_kwargs = self._build_tool_invoke_kwargs(
+                    tool, call_timeout, session, callback_context
+                )
+                with anyio.fail_after(
+                    self._resolve_outer_timeout(tool, call_timeout, budget_is_hard_limit=budget_is_hard_limit)
+                ):
+                    result = await tool.invoke(tool_args, **invoke_kwargs)
             except TimeoutError as e:
                 error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
                 logger.warning(error_msg)
@@ -2021,8 +2152,15 @@ class AbilityManager:
                 logger.warning("[AbilityManager] Task cancellation caught, re-raising CancelledError")
                 raise
             except Exception as e:
-                error_msg = f"Tool execution error: {str(e)}"
-                logger.exception(error_msg)
+                # Same contract as the registered-tool branch: a timeout reported
+                # by the MCP client is surfaced as a timeout, not a generic error.
+                client_timeout = self._wrapped_timeout_cause(tool, e)
+                if client_timeout is not None:
+                    error_msg = self._timeout_error_message(tool_name, call_timeout, client_timeout)
+                    logger.exception(error_msg)
+                else:
+                    error_msg = f"Tool execution error: {str(e)}"
+                    logger.exception(error_msg)
                 raise self._build_execution_error(
                     tool_call,
                     error_msg,

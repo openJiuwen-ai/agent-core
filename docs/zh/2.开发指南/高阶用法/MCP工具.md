@@ -206,6 +206,28 @@ mcp_config = McpServerConfig(
 )
 ```
 
+### 4.6 工具调用超时配置
+
+MCP 工具调用有两层超时，理解二者关系可避免"长调用仍被掐断"的困惑（issue #1976）：
+
+| 层级 | 配置方式 | 作用范围 | 默认值 |
+|------|---------|---------|--------|
+| **单次调用超时** | 客户端 `call_tool(..., timeout=秒)` | 单个工具调用，客户端内以 `asyncio.timeout` 包裹 | `NO_TIMEOUT`(-1)：**无单次上限**（与 Streamable HTTP 及 MCP SDK 默认一致）；stdio/playwright 配置了 `params["timeout_s"]` 时按配置值兜底；SSE 固定 60s 兜底 |
+| **卡片级超时** | `ToolCard.properties["resilience"]["timeout_s"]` | `tool.invoke` 的外层调用预算 | `DEFAULT_TOOL_CALL_TIMEOUT`（300s，可用环境变量覆盖）；`timeout_s: null` 表示豁免（仍受 `MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT`=3600s 硬上限约束） |
+
+**解析顺序**：MCP 工具经 `AbilityManager` 执行时，先解析卡片级预算并转发给客户端的单次调用等待——客户端按确切预算抛出精确的超时错误。外层 `fail_after` 只是硬性兜底：它比转发的预算多一段清理余量（预算的 10%，限制在 5–60s），因此只要客户端超时后的清理在余量内完成，就由客户端的单次等待上报自己的超时；否则外层以通用文本终止调用。对于忽略 `timeout` 参数的客户端，外层仍会终止调用。上报的时长始终是卡片级预算；客户端有自己的消息时（stdio、playwright）追加在后，例如 `Tool 'solve' timed out after 300.0s (stdio call_tool 'solve' did not complete within 300s)`。客户端抛出的 `TimeoutError` 一律按调用预算到期解读；其他客户端失败保留各自的错误文本。豁免工具（`timeout_s: null`）不加余量：`MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT` 是绝对上限。两条执行路径（注册工具与 resource_mgr 回退）行为一致。直接使用客户端时，自行向 `call_tool` 传 `timeout`。
+
+```python
+# 长耗时工具示例：分钟级仿真求解。
+# 1) 推荐：在卡片上声明一次预算（秒）。
+card.properties = {"resilience": {"timeout_s": 300}}
+
+# 2) 或直接调用客户端时传单次超时。
+result = await client.call_tool("solve_flowsheet", {"sim": "Sim 1"}, timeout=300.0)
+```
+
+**建议**：对合法运行数分钟的工具（仿真求解、批处理、模型推理），将 `resilience.timeout_s` 设为覆盖预期时长——短工具保持默认快速失败，长工具按配置的预算等待，而不是被连接级 HTTP 超时掐断。
+
 ---
 
 ## 5. 行业客户"最佳实践"完整 Demo
