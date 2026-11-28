@@ -19,13 +19,17 @@ _LEGACY_READ_FILE_DESCRIPTION: Dict[str, str] = {
 
 READ_FILE_DESCRIPTION: Dict[str, str] = {
     "cn": (
-        "按绝对路径读取文件。文本默认最多返回 2000 行并带行号，长文件用 offset/limit 分段，按内容查找用 grep。支持 PDF 和 Jupyter "
-        "Notebook，启用图片能力时可读图片。不支持读取目录。"
+        "按绝对路径读取文件。文本默认最多返回 2000 行并带行号。"
+        "已知位置时用 offset/limit 读取所需范围，未知位置先用 grep 定位。"
+        "需要通读长文件时分段读取，复核时只回读待核对的部分及必要上下文。"
+        "支持 PDF 和 Jupyter Notebook，启用图片能力时可读图片。不支持读取目录。"
     ),
     "en": (
-        "Read an absolute file path. Text defaults to up to 2,000 numbered lines. Use "
-        "offset/limit for long files and grep to find content. Supports PDF and Jupyter "
-        "notebooks, and images when image input is enabled. Does not read directories."
+        "Read an absolute file path. Text defaults to up to 2,000 numbered lines. "
+        "Use offset/limit for known ranges and use grep to locate text first if its position is unknown. "
+        "Read long files in sections when full coverage is needed. For verification, reread only the parts being checked "
+        "and their necessary context. Supports PDF and Jupyter notebooks, and images when image input is enabled. "
+        "Does not read directories."
     ),
 }
 
@@ -46,13 +50,20 @@ _LEGACY_EDIT_FILE_DESCRIPTION: Dict[str, str] = {
 
 EDIT_FILE_DESCRIPTION: Dict[str, str] = {
     "cn": (
-        "精确替换文本。编辑已有文件前先完整读取。old_string 默认必须唯一匹配，重复时补足上下文或用 replace_all。空 old_string "
-        "可创建缺失文件或写入已有空文件，不能清空非空文件。不支持 .ipynb。"
+        "精确替换文本。编辑已有文件前用 read_file 读取目标片段及必要上下文。"
+        "文件在读取后发生变更时，先检查改动范围和影响，再读取相关内容并基于最新版本编辑。"
+        "确认变更与本次编辑无关时，只需重读目标片段。"
+        "old_string 默认须唯一匹配，重复时补足上下文。仅在确实要替换所有匹配项时用 replace_all。"
+        "空 old_string 可创建缺失文件或写入已有空文件，不能清空非空文件。不支持 .ipynb。"
     ),
     "en": (
-        "Replace exact text. Fully read an existing file first. Match old_string once, or add "
-        "context/use replace_all. An empty old_string can create a missing file or write to an "
-        "existing empty file. It cannot clear a non-empty file. No .ipynb edits."
+        "Replace exact text. Before editing an existing file, use read_file for the target text and necessary context. "
+        "If the file changed since the read, check the scope and impact of the changes, then refresh the relevant content "
+        "before editing the latest version. Reread only the target text if the changes are confirmed to be "
+        "unrelated to the edit. "
+        "By default, old_string must match exactly once. Add context to distinguish matches. "
+        "Use replace_all only when every match should change. An empty old_string can create a missing file or write to "
+        "an existing empty file. It cannot clear a non-empty file. No .ipynb edits."
     ),
 }
 
