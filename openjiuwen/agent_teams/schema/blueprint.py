@@ -729,6 +729,40 @@ class TeamAgentSpec(BaseModel):
 
         self.build_context = build_context_from_seed(self.build_context_seed)
 
+    def effective_model_pool(
+        self,
+    ) -> "tuple[list[ModelPoolEntry], Literal['round_robin', 'by_model_name', 'router', 'intelli_router']]":
+        """Return the post-expansion ``(model_pool, model_pool_strategy)``.
+
+        ``model_router`` / ``model_intelli_router`` are convenience inputs
+        that expand into the flat ``model_pool`` view at ``build()`` time
+        (see ``build()``). This helper centralises the expansion so callers
+        that need the effective pool *outside* ``build()`` — most importantly
+        the cold-recovery path in ``TeamAgent.recover_from_session`` — read
+        the same source of truth as ``AgentConfigurator``'s write-back check
+        (which reads the already-expanded ``ctx.team_spec.model_pool``).
+
+        Without this shared source, ``AgentConfigurator`` writes
+        ``ctx.member_model`` for router / intelli_router teams (whose
+        ``ctx.team_spec.model_pool`` is non-empty after ``build()`` expanded
+        the convenience inputs) while the recovery path checks the
+        *unexpanded* ``runtime_spec.model_pool`` (still empty for those
+        teams), skips re-materialization, and lets a stale
+        ``ctx.member_model`` survive a host-side credential rotation
+        (issue #115 review round 14, sibling of 现象 5).
+
+        Returns ``(list(self.model_pool), self.model_pool_strategy)`` when
+        no convenience input is set; otherwise the expanded pool and the
+        matching ``"router"`` / ``"intelli_router"`` strategy, exactly as
+        ``build()`` propagates to ``TeamSpec.model_pool`` /
+        ``TeamSpec.model_pool_strategy``.
+        """
+        if self.model_router is not None:
+            return self.model_router.to_pool_entries(), "router"
+        if self.model_intelli_router is not None:
+            return self.model_intelli_router.to_pool_entries(), "intelli_router"
+        return list(self.model_pool), self.model_pool_strategy
+
     @model_validator(mode="after")
     def _validate_pool_router_exclusive(self) -> "TeamAgentSpec":
         """Reject configs that set more than one model-pool source.
@@ -933,17 +967,14 @@ class TeamAgentSpec(BaseModel):
         # inputs that expand into the flat ``model_pool`` view at build
         # time. Doing the expansion here keeps every downstream component
         # (resolver, pool refresh, DB ref lookup) on a single code path —
-        # they only ever see entries.
-        team_strategy: Literal["round_robin", "by_model_name", "router", "intelli_router"]
-        if self.model_router is not None:
-            team_pool = self.model_router.to_pool_entries()
-            team_strategy = "router"
-        elif self.model_intelli_router is not None:
-            team_pool = self.model_intelli_router.to_pool_entries()
-            team_strategy = "intelli_router"
-        else:
-            team_pool = list(self.model_pool)
-            team_strategy = self.model_pool_strategy
+        # they only ever see entries. The expansion is centralised in
+        # ``effective_model_pool`` so callers that need the effective pool
+        # outside ``build()`` (notably ``TeamAgent.recover_from_session``)
+        # read the same source of truth as ``AgentConfigurator``'s
+        # write-back check (which reads the already-expanded
+        # ``ctx.team_spec.model_pool``); see that helper for the cross-
+        # caller invariant.
+        team_pool, team_strategy = self.effective_model_pool()
 
         external_messager_config = self.external_transport.build() if self.external_transport else None
         team_spec = TeamSpec(

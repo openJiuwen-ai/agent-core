@@ -44,18 +44,87 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
   （也被 DDL helper 用到）；`read_engine` / `read_session_local` 是读者池。
 - **`DbSessions`（`database/engine.py`）** —— 四个 DAO 共享的一个 provider，
   暴露分别绑定到读者 / 写者工厂的 `read()` / `write()` async-context 访问器。
-  `write()` 持有一把进程级 `asyncio.Lock`。内存 SQLite 的 `read()` 也持同一把锁，
-  避免结束读取时回滚共享连接上尚未提交的事务。文件 SQLite 与服务端数据库的读取独立运行。
-  锁**不可重入**，同一事务中的 helper 应复用调用方的 session。当一个公开写委托给另一个（`verify_and_fix_task_consistency` →
+  SQLite（file / `:memory:`）上 `write()` 持有一把进程级 `asyncio.Lock`；`read()` 不持锁，
+  例外是 `:memory:`（`single_connection=True`，读写共用一条 StaticPool 连接）——
+  此时 `read()` 也持同一把锁，避免结束读取时回滚共享连接上尚未提交的事务。
+  PostgreSQL / MySQL（client/server 后端）上 `write()` **跳过**进程级写锁——这些
+  后端的原生写并发（行锁 + MVCC）才是写仲裁者，进程内串行化只会拖吞吐（issue #115
+  5 路 advocate 负载下 30s 看门狗堆积）。写锁是**不可重入**的：当一个公开
+  写委托给另一个（`verify_and_fix_task_consistency` →
   `_verify_and_fix_blocked_tasks`）时，只有最内层的 session opener 取锁。
+  **PG/MySQL 引擎显式设 `isolation_level="READ COMMITTED"`**：MySQL 默认
+  `REPEATABLE READ` 会在事务首个一致性读建立 read view，使 `_refresh_status_in_session`
+  的 deps count（普通 SELECT）在 FOR UPDATE 行锁拿到后仍读旧 view，看不到并发上游已
+  提交的 dep 解析 → 下游卡 BLOCKED。READ COMMITTED 让每条语句取新快照，FOR UPDATE
+  串行化才真正生效。`create_async_engine` 在 `initialize_engine` 里统一设。
+  **跳过进程级写锁后，并发正确性由「DDL 锁 + CAS + 行锁」三件套保证**：
+  (1) DDL / cleanup helper（`create_cur_session_tables` / `drop_cur_session_tables` /
+  `cleanup_all_runtime_state` / `drop_session_tables_by_id`）及组织表迁移
+  （`_ensure_org_schema`）额外取 `sessions.ddl_lock()`，DDL-vs-DDL 在所有后端串行；
+  DDL-vs-写由 DB 自身的表级 DDL 锁守护（PG `AccessExclusiveLock` / MySQL metadata lock）。
+  **`ddl_lock()` 是进程级 `asyncio.Lock`，跨进程不串行**——`ensure_org_static_tables` 的
+  `create_all` / `CREATE INDEX` 与 `ADD COLUMN` 一样有 checkfirst 的 TOCTOU 竞态，故全部
+  走 `_add_column_idempotent` / `_run_ddl_idempotent`（SAVEPOINT + DBAPIError catch，
+  MySQL 跳 savepoint），跨进程吞 `already exists` / `duplicate` 错误、保持外层事务
+  committable。**同款竞态也存在于 `_ensure_session_tables` 的 `Table.create(checkfirst=True)`**：
+  两个 teammate 进程并发首次 bind 同一 `session_id`（PG/MySQL 后端）时，两边 checkfirst 都读
+  「表不存在」并发 `CREATE TABLE`，第二个失败（PG `ProgrammingError` 42P07 / MySQL 1050），
+  `retry_on_transient` 不覆盖 `already exists`，会崩 `initialize()`。故 `_ensure_session_tables`
+  的每个 `Table.create` 同样包进 `_run_ddl_idempotent`（`verify = inspect.has_table`）。
+  **`initialize_engine._create_static_tables` 的 `create_all` 也走同款包装**——`initialize_engine`
+  在 `DbSessions` 发布前直接跑在 writer engine 上、无 `ddl_lock()` 可取，两个进程并发首次
+  `initialize()` 同一 PG/MySQL 库时同款 TOCTOU 命中（`team_info` / `team_member` 等静态表），
+  故 `_create_static_tables` 也用 `_run_ddl_idempotent` 包住 `SQLModel.metadata.create_all(
+  tables=static_tables())`（`verify = all(t.name in has_table_names for t in static_tables())`）。
+  **`_add_column_idempotent` / `_run_ddl_idempotent` 住在 `tools/database/engine.py`，
+  `organization/db.py` re-export 它们**（同一份原语服务 per-session 动态表 DDL 与 org 静态表 DDL）。
+  **同款原语也覆盖 `DROP COLUMN`**：`_drop_column_idempotent`（同文件，未 re-export——目前仅
+  `_ensure_team_member_options_column` 一处使用）镜像 `_add_column_idempotent` 的 SAVEPOINT +
+  DBAPIError catch + `inspect` 复查模式，跨进程吞「no such column」/「does not exist」/
+  「can't drop」（SQLite / PG / MySQL）错误。`_ensure_team_member_options_column` 的 legacy
+  `model_ref_json` 迁移除了包 DROP 幂等，**还在迁移 SELECT 前 re-inspect** —— 顶部 inspect 抓的
+  `columns` 集合是 stale 的，两个进程并发迁移时败方的 SELECT 会撞「no such column:
+  model_ref_json」（赢方已 DROP）。re-inspect 让败方 short-circuit，DROP 幂等再兜底 re-inspect
+  与 DROP 之间窄窗（issue #115 review round 14）。
+  **两条路径吞错后均复查 DDL 目标是否真存在**（savepoint 路径靠回滚恢复
+  事务状态 + `verify` / `inspect` 复查；MySQL 路径无 savepoint，复查直接读隐式提交后的
+  ground truth）——若目标仍缺失，re-raise 不一致态，不静默吞掉。
+  (2) 状态翻转 / 删除走 CAS（`UPDATE/DELETE ... WHERE status=...` 看 `rowcount`）：
+  `update_task_status` / `delete_task` / `cancel_task`（经 `_terminate_task_in_session`）/
+  `delete_team` / `claim_task` / `reassign_task` / `start_task` / `observe_revision` 等。
+  (3) 整 JSON / 整行 read-modify-write（`update_member_worktree` /
+  `update_member_builtin_model` / `update_member_served_model` /
+  `promote_member_fallback_model` / `update_task` / `reset_task` / `approve_plan_task` /
+  `_refresh_status_in_session` / `_mark_read_in_session` 广播水位）走
+  `SELECT ... FOR UPDATE`——SQLite 方言剥离 `FOR UPDATE`（进程级写锁兜底），
+  PG/MySQL 靠行锁串行化读改写。**新增读改写入口前先归类属于哪一类（DDL / CAS /
+  FOR UPDATE），不要默认走普通 SELECT-then-UPDATE。**
+  (4) 依赖图环校验的串行化锁不是 (3) 类：`mutate_dependency_graph` 在
+  `add_edges` 非空时取 `select(Team).where(...).with_for_update()` 的 **team_info**
+  行锁——dep 表的 SELECT 是普通 SELECT（不是 FOR UPDATE），否则与
+  `_terminate_task_in_session` 的 task→dep 行锁序反向死锁。team_info 行是单点
+  短锁，`_terminate_task_in_session` 锁 task+dep、不锁 team_info，两者无冲突。
+  该锁使 team_info 行成为加边的硬前置条件：team 不存在则 `mutate_dependency_graph`
+  直接 `_MutationFailure("Team ... not found")`，不插孤儿边。`_check_cycle_and_compute_new_edges`
+  本身不取锁——它是 `mutate_dependency_graph` 的纯计算子步骤，串行化由调用方
+  在加边前取 team 行锁保证。
+  **`_apply_new_edges` 另对每条新边的上游（`depends_on_task_id`）端点取
+  `select(task_id, status).where(...).with_for_update()` 的标量行锁**——不是
+  (3) 类的整行 FOR UPDATE：上游行已被 `_load_endpoints_and_validate` 载入本
+  session 的 identity map，整行 FOR UPDATE 会回退缓存对象的过期属性而非现读
+  DB，故用**标量列投影绕过 identity map** 读 `status`。该锁闭合「加边与上游
+  并发完成」竞态：验证读到的上游仍在执行，上游随后完成提交（其 dep 扫描还看
+  不到这条边，不解锁下游），加边再按过期读写入 `resolved=False` → 下游永久
+  BLOCKED。锁序与 `_terminate_task_in_session` 一致（上游 task → dep 行 → 下游
+  task），不重引第五轮移除的 dep→task 反向死锁；team_info 行锁不被 terminator
+  触碰，不增冲突。
   **bind-time 动态表 DDL 同样在 `write()` 内执行**（
-  `create_cur_session_tables(sessions)` 收 `DbSessions` 不收 engine）——DDL 与
-  DAO 写同锁串行；经 `engine.begin()` 直连会绕过锁、并发 bind 占满写池（F_83）。
-  DROP 路径（`drop_cur_session_tables`）暂未收编，见 F_83 已知遗留。
+  `create_cur_session_tables(sessions)` 收 `DbSessions` 不收 engine）；经
+  `engine.begin()` 直连会绕过 `ddl_lock()` + `write()`，并发 bind 占满写池（F_83）。
   **同库的其它存储也复用这一个 provider**：组织层 `OrgDbContext` 不缓存 provider，每次都经
-  `TeamDatabase.sessions` 读取同一个 `DbSessions`；`org_*` 静态表 DDL 在 `write()` 内执行、
-  每个 provider 只做一次。新建第二个 `DbSessions` 就等于第二把写锁，写操作会和 DAO 写争池
-  （B_20261031_1134_org-ddl-bypasses-write-lock）。
+  `TeamDatabase.sessions` 读取同一个 `DbSessions`；`org_*` 静态表 DDL 在 `write()` +
+  `ddl_lock()` 内执行、每个 provider 只做一次。新建第二个 `DbSessions` 就等于第二把写锁，
+  写操作会和 DAO 写争池（B_20261031_1134_org-ddl-bypasses-write-lock）。
 - **`TeamDatabase` 生命周期** —— `sessions` 只在 `initialize()` 全部完成后才发布，中途失败会
   释放已建好的 engine 再抛出，可以重试；`initialize_engine` 自己的静态表 DDL 失败时也会先
   dispose 刚建的读写 engine 再抛出（engine 还没交给调用方，别人没法释放）。`close()` 持

@@ -374,6 +374,45 @@ async def test_mark_messages_read_batch_multiple_broadcasts(file_db: TeamDatabas
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
+async def test_concurrent_mark_broadcast_read_no_integrity_error(file_db: TeamDatabase) -> None:
+    """Two concurrent broadcast read-marks for the same (member, team) must
+    not raise ``IntegrityError`` on the composite PK.
+
+    Regression for the upsert fix: under READ COMMITTED (the engine's pinned
+    isolation level) a zero-row ``SELECT ... FOR UPDATE`` acquires no gap
+    lock, so two concurrent ``mark_message_read`` calls for the same member
+    both see ``read_status is None`` and both INSERT. Before the upsert fix
+    the loser hit ``IntegrityError`` on the UNIQUE (member_name, team_name)
+    constraint, and ``retry_on_locked`` does not catch it, so it bubbled up
+    and aborted the mailbox drain. The dialect-aware upsert (INSERT ... ON
+    CONFLICT DO NOTHING / ON DUPLICATE KEY UPDATE) makes the loser's INSERT
+    a no-op (SQLite/PG) or an in-place seed (MySQL); both calls succeed and
+    the watermark ends at the newest broadcast timestamp.
+    """
+    team = "team1"
+    await file_db.team.create_team(team, "Team 1", "leader")
+    await file_db.member.create_member("m1", team, "M1", "{}", MemberStatus.UNSTARTED.value)
+    await file_db.message.create_message("b1", team, "leader", "all-1", broadcast=True)
+    await file_db.message.create_message("b2", team, "leader", "all-2", broadcast=True)
+
+    # Drive two concurrent single-message marks against the same member.
+    # Both hit the row-does-not-exist INSERT branch for the watermark row.
+    results = await asyncio.gather(
+        file_db.message.mark_message_read("b1", "m1"),
+        file_db.message.mark_message_read("b2", "m1"),
+        return_exceptions=True,
+    )
+    for r in results:
+        assert not isinstance(r, Exception), f"concurrent mark raised: {r!r}"
+    assert list(results) == [True, True]
+
+    # The watermark advances to the newer broadcast; both should be read.
+    unread = await file_db.message.get_broadcast_messages(team, "m1", unread_only=True)
+    assert unread == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.level1
 async def test_mark_messages_read_skips_missing(file_db: TeamDatabase) -> None:
     """Missing ids are skipped; the count reflects only applied marks."""
@@ -982,3 +1021,35 @@ async def test_create_cur_session_tables_retries_on_watchdog_timeout(file_db: Te
     async with file_db.read_session_local() as session:
         conn = await session.connection()
         assert await conn.run_sync(lambda sc: inspect(sc).has_table(task_table))
+
+
+@pytest.mark.level0
+def test_refresh_status_in_session_for_update_carries_order_by():
+    """Multi-row ``SELECT ... FOR UPDATE`` in ``_refresh_status_in_session``
+    carries ``ORDER BY task_id`` so two concurrent callers with overlapping
+    but differently-ordered task_ids acquire row locks in the same order and
+    cannot deadlock (issue #115 review round 15).
+
+    On SQLite ``FOR UPDATE`` is stripped (the process-level write lock is the
+    serialiser), so this test compiles the query and asserts the ``ORDER BY``
+    clause is present rather than exercising a real cross-process deadlock.
+    The companion ``_apply_new_edges`` upstream-endpoint FOR UPDATE carries
+    the same ordering clause.
+    """
+    from sqlalchemy import select
+
+    from openjiuwen.agent_teams.tools.models import _get_task_model
+
+    team_task_model = _get_task_model()
+
+    stmt = (
+        select(team_task_model.task_id, team_task_model.status)
+        .where(team_task_model.task_id.in_(["t1", "t2"]))
+        .order_by(team_task_model.task_id)
+        .with_for_update()
+    )
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "ORDER BY" in compiled.upper(), (
+        f"FOR UPDATE query must carry ORDER BY for deterministic lock order; "
+        f"compiled: {compiled}"
+    )

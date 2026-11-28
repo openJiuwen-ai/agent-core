@@ -787,26 +787,50 @@ class MemberDao:
         isolation: Optional[str] = None,
         worktree_path: Optional[str] = None,
     ) -> bool:
-        """Update worktree isolation metadata for a member."""
-        async with self._sessions.write() as session:
-            result = await session.execute(
-                select(TeamMember).where(
-                    TeamMember.member_name == member_name,
-                    TeamMember.team_name == team_name,
+        """Update worktree isolation metadata for a member.
+
+        Uses ``SELECT ... FOR UPDATE`` (``with_for_update()``) so two
+        concurrent updates to the same member's ``options`` JSON serialise
+        on the row lock: one caller's read-modify-write of ``options``
+        commits before the other's read, so the second caller sees the
+        first's changes instead of clobbering them (lost update). On SQLite
+        the dialect strips ``FOR UPDATE`` (the process-level write lock is
+        the serialiser); on PostgreSQL / MySQL the row lock is the
+        serialiser.
+
+        Wrapped in ``retry_on_locked`` (mirroring ``update_member_status``):
+        a transient SQLite file-lock wait, a temporarily exhausted write
+        pool, or a PG/MySQL row-lock wait that hits ``innodb_lock_wait_timeout``
+        (1205) must retry rather than crash the member (issue #115 review).
+        """
+        async def _op() -> bool:
+            async with self._sessions.write() as session:
+                result = await session.execute(
+                    select(TeamMember)
+                    .where(
+                        TeamMember.member_name == member_name,
+                        TeamMember.team_name == team_name,
+                    )
+                    .with_for_update()
                 )
-            )
-            member = result.scalar_one_or_none()
-            if not member:
-                team_logger.error("Member %s not found in team %s", member_name, team_name)
-                return False
-            member.options = set_member_worktree_options(
-                member.options,
-                worktree,
-                isolation=isolation,
-                worktree_path=worktree_path,
-            )
-            await session.commit()
-            return True
+                member = result.scalar_one_or_none()
+                if not member:
+                    team_logger.error("Member %s not found in team %s", member_name, team_name)
+                    return False
+                member.options = set_member_worktree_options(
+                    member.options,
+                    worktree,
+                    isolation=isolation,
+                    worktree_path=worktree_path,
+                )
+                await session.commit()
+                return True
+
+        return await retry_on_locked(
+            _op,
+            on_locked_result=False,
+            label=f"update_member_worktree {member_name}",
+        )
 
     async def update_member_builtin_model(
         self,
@@ -814,21 +838,41 @@ class MemberDao:
         team_name: str,
         builtin_model: MemberBuiltinModel | None,
     ) -> bool:
-        """Persist the built-in CLI model an external-CLI member runs on."""
-        async with self._sessions.write() as session:
-            result = await session.execute(
-                select(TeamMember).where(
-                    TeamMember.member_name == member_name,
-                    TeamMember.team_name == team_name,
+        """Persist the built-in CLI model an external-CLI member runs on.
+
+        Uses ``SELECT ... FOR UPDATE`` (``with_for_update()``) so two
+        concurrent updates to the same member's ``options`` JSON serialise
+        on the row lock, mirroring ``update_member_worktree``: without it, a
+        ``worktree`` update and a ``builtin_model`` update running in
+        parallel each read the old JSON, mutated their slice, and wrote
+        back the whole column — clobbering the other's slice (lost update).
+
+        Wrapped in ``retry_on_locked`` (see ``update_member_worktree`` for
+        rationale).
+        """
+        async def _op() -> bool:
+            async with self._sessions.write() as session:
+                result = await session.execute(
+                    select(TeamMember)
+                    .where(
+                        TeamMember.member_name == member_name,
+                        TeamMember.team_name == team_name,
+                    )
+                    .with_for_update()
                 )
-            )
-            member = result.scalar_one_or_none()
-            if member is None:
-                team_logger.error("Member %s not found in team %s", member_name, team_name)
-                return False
-            member.options = set_member_builtin_model(member.options, builtin_model)
-            await session.commit()
-            return True
+                member = result.scalar_one_or_none()
+                if member is None:
+                    team_logger.error("Member %s not found in team %s", member_name, team_name)
+                    return False
+                member.options = set_member_builtin_model(member.options, builtin_model)
+                await session.commit()
+                return True
+
+        return await retry_on_locked(
+            _op,
+            on_locked_result=False,
+            label=f"update_member_builtin_model {member_name}",
+        )
 
     async def update_member_served_model(
         self,
@@ -841,52 +885,87 @@ class MemberDao:
         Appends to the member's served-model history only when the model differs
         from the latest entry.
 
+        Uses ``SELECT ... FOR UPDATE`` (``with_for_update()``) so two
+        concurrent updates to the same member's ``options`` JSON serialise
+        on the row lock, mirroring ``update_member_worktree`` (see its
+        docstring for the rationale).
+
+        Wrapped in ``retry_on_locked`` (see ``update_member_worktree`` for
+        rationale).
+
         Returns:
             Whether the member row exists (False lets the caller retry later).
         """
-        async with self._sessions.write() as session:
-            result = await session.execute(
-                select(TeamMember).where(
-                    TeamMember.member_name == member_name,
-                    TeamMember.team_name == team_name,
+        async def _op() -> bool:
+            async with self._sessions.write() as session:
+                result = await session.execute(
+                    select(TeamMember)
+                    .where(
+                        TeamMember.member_name == member_name,
+                        TeamMember.team_name == team_name,
+                    )
+                    .with_for_update()
                 )
-            )
-            member = result.scalar_one_or_none()
-            if member is None:
-                # The leader routes its first calls before build_team writes its row.
-                team_logger.debug("Member %s not found in team %s", member_name, team_name)
-                return False
-            now = get_current_time()
-            options = append_member_served_model(member.options, served_model, now)
-            if options == member.options:
+                member = result.scalar_one_or_none()
+                if member is None:
+                    # The leader routes its first calls before build_team writes its row.
+                    team_logger.debug("Member %s not found in team %s", member_name, team_name)
+                    return False
+                now = get_current_time()
+                options = append_member_served_model(member.options, served_model, now)
+                if options == member.options:
+                    return True
+                member.options = options
+                # The served models are rendered in the leader's roster, so a new one
+                # is a roster mutation: bump the column the roster probe watches.
+                member.updated_at = now
+                await session.commit()
                 return True
-            member.options = options
-            # The served models are rendered in the leader's roster, so a new one
-            # is a roster mutation: bump the column the roster probe watches.
-            member.updated_at = now
-            await session.commit()
-            return True
+
+        return await retry_on_locked(
+            _op,
+            on_locked_result=False,
+            label=f"update_member_served_model {member_name}",
+        )
 
     async def promote_member_fallback_model(
         self,
         member_name: str,
         team_name: str,
     ) -> bool:
-        """Promote the persisted fallback model to the active model reference."""
-        async with self._sessions.write() as session:
-            result = await session.execute(
-                select(TeamMember).where(
-                    TeamMember.member_name == member_name,
-                    TeamMember.team_name == team_name,
+        """Promote the persisted fallback model to the active model reference.
+
+        Uses ``SELECT ... FOR UPDATE`` (``with_for_update()``) so two
+        concurrent updates to the same member's ``options`` JSON serialise
+        on the row lock, mirroring ``update_member_worktree`` (see its
+        docstring for the rationale).
+
+        Wrapped in ``retry_on_locked`` (see ``update_member_worktree`` for
+        rationale).
+        """
+        async def _op() -> bool:
+            async with self._sessions.write() as session:
+                result = await session.execute(
+                    select(TeamMember)
+                    .where(
+                        TeamMember.member_name == member_name,
+                        TeamMember.team_name == team_name,
+                    )
+                    .with_for_update()
                 )
-            )
-            member = result.scalar_one_or_none()
-            if member is None:
-                team_logger.error("Member %s not found in team %s", member_name, team_name)
-                return False
-            promoted = promote_member_fallback_model(member.options)
-            if promoted == member.options:
-                return False
-            member.options = promoted
-            await session.commit()
-            return True
+                member = result.scalar_one_or_none()
+                if member is None:
+                    team_logger.error("Member %s not found in team %s", member_name, team_name)
+                    return False
+                promoted = promote_member_fallback_model(member.options)
+                if promoted == member.options:
+                    return False
+                member.options = promoted
+                await session.commit()
+                return True
+
+        return await retry_on_locked(
+            _op,
+            on_locked_result=False,
+            label=f"promote_member_fallback_model {member_name}",
+        )

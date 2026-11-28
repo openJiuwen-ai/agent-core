@@ -743,29 +743,126 @@ class MessageDao:
                 return False
 
         if message.broadcast:
+            # Serialise the broadcast watermark read-modify-write per member
+            # with a SELECT ... FOR UPDATE on the read_status row. When the
+            # row already exists the second concurrent mark blocks on the
+            # row lock and sees the first's committed read_at after it
+            # acquires the lock (READ COMMITTED — pinned in engine.py —
+            # gives each statement a fresh snapshot).
+            #
+            # The read is a scalar projection (``member_name, read_at``), not
+            # an ORM entity: a row that was already loaded into this
+            # session's identity map (e.g. by a concurrent
+            # ``_mark_read_in_session`` call earlier in the same mailbox
+            # drain that ran into a retry, or by a previous batch iteration)
+            # would be returned from the cache with its stale ``read_at``
+            # attribute instead of the live committed value under the row
+            # lock, defeating the lock entirely. A scalar projection
+            # bypasses the identity map and reads the live committed value.
+            # The watermark advance is then a scalar UPDATE guarded on the
+            # read_at value we just read under the lock — a forward-only
+            # CAS so a stale read can never rewind the watermark.
+            #
+            # The row-does-not-exist branch cannot be protected by this lock:
+            # under READ COMMITTED a zero-row FOR UPDATE acquires no gap lock,
+            # so two concurrent transactions both see None and both INSERT.
+            # Use a dialect-aware upsert (INSERT ... ON CONFLICT DO NOTHING /
+            # ON DUPLICATE KEY UPDATE) so the loser's INSERT becomes a no-op
+            # rather than raising IntegrityError — which retry_on_locked
+            # does not catch, so it would bubble up and fail the mailbox
+            # drain. After the upsert, re-SELECT the row (now guaranteed
+            # present) and advance read_at under the existing FOR UPDATE
+            # lock from the first SELECT (the row was absent there, so no
+            # lock was held — but the upsert's own row write serialises
+            # concurrent upserts on the same PK, and the subsequent UPDATE
+            # is a CAS-style forward-only advance).
             read_result = await session.execute(
-                select(read_status_model).where(
+                select(read_status_model.member_name, read_status_model.read_at)
+                .where(
                     read_status_model.member_name == member_name,
                     read_status_model.team_name == message.team_name,
                 )
+                .with_for_update()
             )
-            read_status = read_result.scalar_one_or_none()
-            if read_status is None:
-                read_status = read_status_model(
-                    member_name=member_name,
-                    team_name=message.team_name,
-                    read_at=message.timestamp,
+            read_row = read_result.first()
+            if read_row is None:
+                await self._upsert_broadcast_read_status(
+                    session, read_status_model, member_name, message.team_name, message.timestamp,
                 )
-                session.add(read_status)
-                # Flush the pending INSERT so a second broadcast id in the same
-                # batch transaction sees this watermark row on its SELECT. The
-                # session runs autoflush=False, so without this the next
-                # broadcast re-inserts the same (member_name, team_name) PK and
-                # the commit hits a UNIQUE violation. Flush holds no fsync — the
-                # single commit still batches the whole drain into one.
-                await session.flush()
-            elif read_status.read_at is None or message.timestamp > read_status.read_at:
-                read_status.read_at = message.timestamp
+                # Re-read the row the upsert materialised (ours or the
+                # concurrent winner's) and advance the watermark if the
+                # incoming broadcast is newer. The re-SELECT takes FOR UPDATE
+                # so two concurrent upserters serialise on the now-existing
+                # row: the second blocks until the first commits, then sees
+                # the first's committed read_at (READ COMMITTED gives each
+                # statement a fresh snapshot) and only advances forward.
+                # Without the lock both would re-SELECT the same read_at,
+                # both compute the same new value, and last-writer-wins could
+                # lose an update.
+                read_result = await session.execute(
+                    select(read_status_model.member_name, read_status_model.read_at)
+                    .where(
+                        read_status_model.member_name == member_name,
+                        read_status_model.team_name == message.team_name,
+                    )
+                    .with_for_update()
+                )
+                read_row = read_result.first()
+            current_read_at = read_row[1] if read_row is not None else None
+            if current_read_at is None or message.timestamp > current_read_at:
+                # Scalar UPDATE guarded on the read_at we just read under the
+                # lock — a forward-only CAS so a stale read can never rewind
+                # the watermark.
+                #
+                # Use ``IS NULL`` when ``current_read_at`` is ``None``: SQL
+                # ``read_at = NULL`` is always NULL (not True), so a plain
+                # ``== None`` guard would match 0 rows and the watermark would
+                # silently not advance while we still returned True
+                # (issue #115 review round 15). ``read_at`` is ``nullable=True``
+                # with ``default=None``, so a row seeded by a path that did
+                # not set ``read_at`` (or a legacy row) hits this branch.
+                read_at_guard = (
+                    read_status_model.read_at.is_(None)
+                    if current_read_at is None
+                    else read_status_model.read_at == current_read_at
+                )
+                cas_result = await session.execute(
+                    update(read_status_model)
+                    .where(
+                        read_status_model.member_name == member_name,
+                        read_status_model.team_name == message.team_name,
+                        read_at_guard,
+                    )
+                    .values(read_at=message.timestamp)
+                )
+                if (cas_result.rowcount or 0) == 0:
+                    # 0 rows matched: the row's read_at changed between our
+                    # SELECT FOR UPDATE and our UPDATE (concurrent transaction
+                    # advanced the watermark under us — should not happen under
+                    # the lock but defensive), or the row was deleted, or the
+                    # upsert did not materialise a row. The watermark was not
+                    # advanced by us; return False so the caller does not
+                    # count this message as marked.
+                    team_logger.warning(
+                        "broadcast read-status CAS for %s/%s did not apply (rowcount=0): "
+                        "current_read_at=%s, message.timestamp=%s",
+                        member_name,
+                        message.team_name,
+                        current_read_at,
+                        message.timestamp,
+                    )
+                    return False
+            # When the watermark already covers this broadcast
+            # (``current_read_at >= message.timestamp``) there is nothing to
+            # write — the read-status row already marks every broadcast up to
+            # ``current_read_at`` as read, which includes this message. Unlike
+            # direct messages, broadcast ``is_read`` is NOT a persisted column
+            # (it is derived from the watermark), so we do NOT set
+            # ``message.is_read = True`` here — that would write the ORM
+            # object's ``is_read`` column to the DB and corrupt the broadcast's
+            # per-message read flag.
+            # Mark the matching group notification (if any) consumed so the
+            # targeted group-message notice stops surfacing in inbox queries.
             notification_model = _get_group_notification_model()
             pending = (
                 notification_model.team_name == message.team_name,
@@ -773,8 +870,11 @@ class MessageDao:
                 notification_model.message_id == message_id,
                 notification_model.consumed_at.is_(None),
             )
-            # Most broadcasts carry no notification; skip the write and the clock read for them.
-            found = await session.execute(select(notification_model.notification_id).where(*pending).limit(1))
+            # Most broadcasts carry no notification; skip the write and the
+            # clock read for them.
+            found = await session.execute(
+                select(notification_model.notification_id).where(*pending).limit(1)
+            )
             if found.first() is not None:
                 await session.execute(
                     update(notification_model).where(*pending).values(consumed_at=get_current_time())
@@ -783,6 +883,58 @@ class MessageDao:
             message.is_read = True
 
         return True
+
+    async def _upsert_broadcast_read_status(
+        self,
+        session: AsyncSession,
+        read_status_model: type,
+        member_name: str,
+        team_name: str,
+        read_at: int,
+    ) -> None:
+        """Insert a broadcast read-status row idempotently across processes.
+
+        Under READ COMMITTED a zero-row ``SELECT ... FOR UPDATE`` takes no
+        gap lock, so two concurrent ``_mark_read_in_session`` calls for the
+        same ``(member_name, team_name)`` both see ``None`` and both INSERT,
+        and the loser hits the composite PK with ``IntegrityError`` — which
+        ``retry_on_locked`` does not catch, so it would bubble up and abort
+        the mailbox drain. The upsert makes the loser's INSERT a no-op
+        (SQLite / PG ``ON CONFLICT DO NOTHING``) or an in-place watermark
+        seed (MySQL ``ON DUPLICATE KEY UPDATE``); the caller then re-SELECTs
+        the row and advances ``read_at`` forward-only if the incoming
+        broadcast is newer.
+        """
+        from sqlalchemy import func
+        from sqlalchemy.dialects.mysql import insert as mysql_insert
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        dialect_name = session.bind.dialect.name if session.bind is not None else "sqlite"
+        values = {
+            "member_name": member_name,
+            "team_name": team_name,
+            "read_at": read_at,
+        }
+        if dialect_name == "mysql":
+            # ON DUPLICATE KEY UPDATE with GREATEST so the watermark only moves
+            # forward: a concurrent INSERT that carries an OLDER broadcast
+            # timestamp cannot regress read_at below its current value. Without
+            # GREATEST a bare ``read_at = VALUES(read_at)`` would overwrite a
+            # newer watermark with the incoming (older) one.
+            stmt = mysql_insert(read_status_model).values(**values).on_duplicate_key_update(
+                read_at=func.greatest(read_status_model.read_at, read_at),
+            )
+        else:
+            insert_fn = pg_insert if dialect_name == "postgresql" else sqlite_insert
+            # ON CONFLICT DO NOTHING: the winner seeds read_at, the loser's
+            # INSERT is dropped. The caller re-SELECTs (with FOR UPDATE) and
+            # advances read_at forward-only, so a newer concurrent broadcast
+            # still wins via the subsequent UPDATE.
+            stmt = insert_fn(read_status_model).values(**values).on_conflict_do_nothing(
+                index_elements=["member_name", "team_name"],
+            )
+        await session.execute(stmt)
 
     async def mark_message_read(self, message_id: str, member_name: str) -> bool:
         """Mark a message as read by a member (works for both direct and broadcast messages)."""

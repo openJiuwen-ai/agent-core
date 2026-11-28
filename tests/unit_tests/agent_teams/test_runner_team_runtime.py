@@ -1305,6 +1305,119 @@ def test_team_agent_recover_from_session_restores_checkpoints():
     }
 
 
+@pytest.mark.level0
+def test_team_agent_recover_from_session_router_strategy_preserves_checkpoint_model_name():
+    """Cold recovery for a ``model_router`` team preserves the checkpoint's
+    model_name hint instead of silently drifting to ``pool[0]``.
+
+    Round-14 ``effective_model_pool()`` made the re-materialization branch
+    reachable for ``router`` teams (whose blueprint ``model_pool`` is empty
+    until ``build()`` expands ``model_router`` into ``team_spec.model_pool``).
+    The existing recovery code only handled ``intelli_router`` / ``by_model_name``
+    — ``router`` fell through to ``allocator.allocate(None)`` which returns
+    ``pool[0]`` for ``RouterAllocator``, dropping the checkpoint's model_name
+    hint. Round 15 treats ``router`` like ``by_model_name``: passes the
+    checkpoint name as the allocation hint so ``RouterAllocator.allocate(name)``
+    returns the entry for that name.
+
+    This test constructs a router team whose checkpoint leader model was
+    ``"b"`` (the second-declared model name) and asserts the recovered
+    ``context.member_model`` still points at ``"b"`` after cold recovery
+    (not ``"a"`` which is ``pool[0]``).
+    """
+    from openjiuwen.agent_teams.runtime.metadata import write_team_namespace
+
+    from openjiuwen.agent_teams.models.pool import ModelRouterConfig
+    from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec, LeaderSpec
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+
+    session_id = f"recover_router_{uuid.uuid4().hex}"
+    team_name = "router_team"
+    session = create_agent_team_session(session_id=session_id, team_id=team_name)
+
+    # Build a router spec whose pool has two model names. The leader's
+    # checkpoint model is the second-declared ("b"), not pool[0] ("a").
+    router_cfg = ModelRouterConfig(
+        api_base_url="https://router.test/v1",
+        api_key="sk-shared",
+        api_provider="OpenAI",
+        model_names=["a", "b"],
+        metadata={"client": {"verify_ssl": False}},
+    )
+    runtime_spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        team_name=team_name,
+        model_router=router_cfg,
+        leader=LeaderSpec(member_name="leader"),
+        spawn_mode="inprocess",
+    )
+    # Materialise the expanded pool the way build() does so the checkpoint
+    # context carries the post-expansion team_spec.
+    expanded_pool, _ = runtime_spec.effective_model_pool()
+    from openjiuwen.agent_teams.schema.team import TeamSpec
+
+    team_spec = TeamSpec(
+        team_name=team_name,
+        display_name=team_name,
+        leader_member_name="leader",
+        model_pool=expanded_pool,
+        model_pool_strategy="router",
+    )
+
+    # Synthesise a checkpoint leader member_model pointing at "b".
+    from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
+    from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
+
+    checkpoint_member_model = TeamModelConfig(
+        model_client_config=ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="sk-shared",
+            api_base="https://router.test/v1",
+            verify_ssl=False,
+        ),
+        model_request_config=ModelRequestConfig(model="b"),
+    )
+
+    write_team_namespace(
+        session,
+        team_name,
+        {
+            "spec": {
+                "team_name": team_name,
+                "agents": {"leader": {}},
+                "model_router": router_cfg.model_dump(),
+                "model_pool": [],
+                "model_pool_strategy": "round_robin",
+                "leader": {"member_name": "leader"},
+                "spawn_mode": "inprocess",
+            },
+            "context": {
+                "role": "leader",
+                "member_name": "leader",
+                "desc": "leader",
+                "team_spec": team_spec.model_dump(),
+                "member_model": checkpoint_member_model.model_dump(),
+                "messager_config": {},
+                "db_config": {},
+            },
+        },
+    )
+
+    agent = TeamAgent.recover_from_session(session, team_name, runtime_spec=runtime_spec)
+
+    # The recovered leader's member_model must still point at "b", not "a".
+    assert agent._configurator is not None
+    recovered_model = agent._configurator.ctx.member_model
+    assert recovered_model is not None
+    assert recovered_model.model_request_config is not None
+    assert recovered_model.model_request_config.model_name == "b"
+    # The recovered spec's leader.model_name must be synced to the same name.
+    # (``spec.leader.model_name = allocation_name`` in the recovery path writes
+    # to the recovered spec, not to ``runtime_spec``.)
+    assert agent.spec is not None
+    assert agent.spec.leader.model_name == "b"
+
+
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_checkpoints_survive_reload(isolated_checkpointer):

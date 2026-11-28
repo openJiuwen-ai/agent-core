@@ -19,7 +19,7 @@ import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,6 +45,7 @@ from openjiuwen.agent_teams.tools.database.graph import (
     detect_cycle_in_adjacency,
 )
 from openjiuwen.agent_teams.tools.models import (
+    Team,
     TeamTaskBase,
     TeamTaskDependencyBase,
     TeamTaskReviewVoteBase,
@@ -114,7 +115,48 @@ async def _refresh_status_in_session(
     task_ids: Iterable[str],
     now: int,
 ) -> List[TeamTaskBase]:
-    """Recompute PENDING/BLOCKED status for tasks based on unresolved deps."""
+    """Recompute PENDING/BLOCKED status for tasks based on unresolved deps.
+
+    Uses ``SELECT ... FOR UPDATE`` on the candidate task rows so two
+    upstreams completing concurrently against the same downstream serialise
+    on the row lock. Without the lock, under ``READ COMMITTED`` each
+    upstream's read-modify-write sees only its own resolved dependency (the
+    other's is uncommitted), so each computes "1 unresolved" and both leave
+    the downstream ``BLOCKED``; the terminal CAS in
+    ``_terminate_task_in_session`` does not cover this dependent refresh.
+    With the lock, the second upstream's read happens after the first's
+    commit, so it sees all dependencies resolved and lifts ``BLOCKED``.
+    On SQLite the dialect strips ``FOR UPDATE`` (the process-level write
+    lock is the serialiser); on PostgreSQL / MySQL the row lock is the
+    serialiser.
+
+    The deps count query below is a plain (consistent) SELECT. The row
+    lock on the candidate tasks is a current read, but under MySQL's
+    default ``REPEATABLE READ`` the count query would reuse the read view
+    established at the first consistent read earlier in the transaction
+    (e.g. ``_terminate_task_in_session``'s plain SELECT), hiding the other
+    upstream's committed dep resolutions and leaving the downstream
+    ``BLOCKED``. ``engine.py`` therefore pins the PG/MySQL engines to
+    ``READ COMMITTED`` so each statement — including the count query —
+    sees a fresh snapshot and the FOR UPDATE lock's serialisation actually
+    takes effect.
+
+    The candidate rows are read as a scalar projection
+    (``task_id, status``), not as an ORM entity, mirroring
+    ``_apply_new_edges``'s upstream-endpoint read: the rows may already be
+    loaded into this session's identity map (e.g. by
+    ``_terminate_task_in_session``'s plain SELECT after its CAS), and an
+    entity SELECT ``with_for_update()`` would return those cached objects
+    with their stale attributes instead of the current DB value under the
+    row lock. A scalar projection bypasses the identity map and reads the
+    live committed value, so the FOR UPDATE lock's serialisation actually
+    takes effect on the current state (not a cached snapshot). The status
+    flip is then a scalar UPDATE — ``WHERE task_id = ? AND status = ?`` —
+    so the lock's read-modify-write never goes through the identity map
+    and never clobbers a concurrent terminal state (the ``status = ?``
+    guard rejects a row that has since become ``IN_PROGRESS`` / terminal,
+    so a stale IN_PROGRESS read can never be flipped back to BLOCKED).
+    """
     unique_ids = list({tid for tid in task_ids if tid})
     if not unique_ids:
         return []
@@ -122,14 +164,29 @@ async def _refresh_status_in_session(
     team_task_model = _get_task_model()
     task_dependency_model = _get_task_dependency_model()
 
-    tasks_result = await session.execute(select(team_task_model).where(team_task_model.task_id.in_(unique_ids)))
-    candidates = [
-        t for t in tasks_result.scalars().all() if t.status in (TaskStatus.PENDING.value, TaskStatus.BLOCKED.value)
-    ]
-    if not candidates:
+    # Scalar projection: bypass the identity map so the FOR UPDATE lock
+    # sees the live committed status, not a cached object's stale attribute.
+    # ``order_by(task_id)`` enforces a deterministic lock-acquisition order
+    # across concurrent callers so two ``_refresh_status_in_session``
+    # invocations with overlapping but differently-ordered task_ids cannot
+    # deadlock (issue #115 review round 15). Without it, PG/MySQL acquire
+    # row locks in the scan order, which depends on the query plan (index
+    # scan vs. seq scan) and may differ across callers.
+    tasks_result = await session.execute(
+        select(team_task_model.task_id, team_task_model.status)
+        .where(team_task_model.task_id.in_(unique_ids))
+        .order_by(team_task_model.task_id)
+        .with_for_update()
+    )
+    candidate_ids: List[str] = []
+    current_status: Dict[str, str] = {}
+    for tid, status in tasks_result.all():
+        if status in (TaskStatus.PENDING.value, TaskStatus.BLOCKED.value):
+            candidate_ids.append(tid)
+            current_status[tid] = status
+    if not candidate_ids:
         return []
 
-    candidate_ids = [t.task_id for t in candidates]
     unresolved_result = await session.execute(
         select(
             task_dependency_model.task_id,
@@ -144,18 +201,50 @@ async def _refresh_status_in_session(
     unresolved_by_task: Dict[str, int] = {row[0]: row[1] for row in unresolved_result.all()}
 
     refreshed: List[TeamTaskBase] = []
-    for task in candidates:
-        unresolved = unresolved_by_task.get(task.task_id, 0)
-        if task.status == TaskStatus.PENDING.value and unresolved > 0:
-            task.status = TaskStatus.BLOCKED.value
-            task.updated_at = now
-            refreshed.append(task)
-            team_logger.info("Task %s blocked (%d unresolved deps)", task.task_id, unresolved)
-        elif task.status == TaskStatus.BLOCKED.value and unresolved == 0:
-            task.status = TaskStatus.PENDING.value
-            task.updated_at = now
-            refreshed.append(task)
-            team_logger.info("Task %s unblocked (all deps resolved)", task.task_id)
+    for tid in candidate_ids:
+        unresolved = unresolved_by_task.get(tid, 0)
+        old_status = current_status[tid]
+        if old_status == TaskStatus.PENDING.value and unresolved > 0:
+            new_status = TaskStatus.BLOCKED.value
+            team_logger.info("Task %s blocked (%d unresolved deps)", tid, unresolved)
+        elif old_status == TaskStatus.BLOCKED.value and unresolved == 0:
+            new_status = TaskStatus.PENDING.value
+            team_logger.info("Task %s unblocked (all deps resolved)", tid)
+        else:
+            continue
+        # Scalar UPDATE guarded on the status we just read under the lock,
+        # so a stale read can never flip a terminal / IN_PROGRESS row back.
+        update_result = await session.execute(
+            update(team_task_model)
+            .where(
+                team_task_model.task_id == tid,
+                team_task_model.status == old_status,
+            )
+            .values(status=new_status, updated_at=now)
+        )
+        # ``(rowcount or 0)`` (mirrors claim_task / start_task / reassign_task
+        # in this file): defends against a backend that returns None for
+        # rowcount, where ``None == 1`` would be False and we'd silently drop
+        # the refresh event.
+        if (update_result.rowcount or 0) == 1:
+            # Re-read the full row under the existing FOR UPDATE lock so the
+            # returned entity satisfies the caller's contract — the HITT
+            # auto-start path (_start_human_assigned_task_if_ready) reads
+            # task.assignee, and the mutation-result consumer reads
+            # task.status. A 3-field stub (task_id/status/updated_at) would
+            # leave assignee as None and defeat the HITT auto-start (issue
+            # #115 review round 14, blocked). The re-SELECT is a current
+            # read under the row lock we already hold, so it sees the just-
+            # committed status (and READ COMMITTED gives it a fresh snapshot
+            # on PG/MySQL); the row is the only one matching the PK, so this
+            # is one extra round-trip per refreshed task, not per scanned
+            # candidate.
+            reloaded = await session.execute(
+                select(team_task_model).where(team_task_model.task_id == tid)
+            )
+            row = reloaded.scalar_one_or_none()
+            if row is not None:
+                refreshed.append(row)
     return refreshed
 
 
@@ -425,13 +514,71 @@ async def _apply_new_edges(
     new_edge_set: set[tuple[str, str]],
     endpoint_tasks: Dict[str, TeamTaskBase],
 ) -> None:
-    """Insert dependency rows for the freshly computed new edges."""
+    """Insert dependency rows for the freshly computed new edges.
+
+    The ``resolved`` flag of each edge is decided from the upstream task's
+    *current* status, re-read under a ``SELECT ... FOR UPDATE`` row lock on
+    every upstream endpoint, rather than the plain-SELECT snapshot taken
+    earlier in ``_load_endpoints_and_validate``. The lock closes the race
+    against a concurrent ``_terminate_task_in_session`` on the same upstream
+    task: without it, the validation read may see the upstream still
+    executing; the upstream then completes and commits — its dependency
+    scan sees no edge yet, so it resolves nothing for this downstream — and
+    this insert writes ``resolved=False`` from the stale read, leaving the
+    downstream permanently ``BLOCKED`` (the completion event that should
+    have unblocked it already fired). Locking the upstream current-read
+    makes the two serialise: either the edge is inserted before the
+    completion (the terminator's dep scan then finds and resolves it) or
+    after it (the insert reads the terminal status and births the edge
+    already resolved).
+
+    The status is read as a scalar column projection
+    (``task_id, status``), not as an ORM entity: the upstream rows were
+    already loaded into the session's identity map by
+    ``_load_endpoints_and_validate``, and an entity SELECT would return
+    those cached objects with their stale attributes instead of the
+    current DB value. A scalar projection bypasses the identity map and
+    reads the live committed value (under ``READ COMMITTED`` — see
+    ``engine.py`` — each statement takes a fresh snapshot, so the FOR
+    UPDATE read sees the concurrent completion).
+
+    Lock ordering stays compatible with ``_terminate_task_in_session``:
+    that path locks the upstream task (CAS), then its dep rows, then the
+    downstream task (refresh); this path locks the upstream task
+    (FOR UPDATE), then inserts its dep row, then the downstream task
+    (refresh) — same task→dep→downstream order, so the two never deadlock.
+    The ``team_info`` row lock taken earlier in
+    ``mutate_dependency_graph`` is never touched by the terminator, so it
+    adds no conflict.
+    """
     if not new_edge_set:
         return
 
+    team_task_model = _get_task_model()
     task_dependency_model = _get_task_dependency_model()
+
+    # Current-read the upstream endpoints' status under a row lock, as a
+    # scalar projection so the identity map does not hand back the stale
+    # validation snapshot. See the docstring for the race.
+    # ``order_by(task_id)`` enforces a deterministic lock-acquisition order
+    # (same fix as ``_refresh_status_in_session``, issue #115 review round 15).
+    upstream_ids = {dep_id for _, dep_id in new_edge_set}
+    upstream_status: Dict[str, str] = {}
+    if upstream_ids:
+        upstream_result = await session.execute(
+            select(team_task_model.task_id, team_task_model.status)
+            .where(team_task_model.task_id.in_(list(upstream_ids)))
+            .order_by(team_task_model.task_id)
+            .with_for_update()
+        )
+        upstream_status = {row[0]: row[1] for row in upstream_result.all()}
+
     for tid, dep_id in new_edge_set:
-        dep_status = endpoint_tasks[dep_id].status
+        # Fall back to the validated status only if the upstream vanished
+        # between the validation read and this locked read (a concurrent
+        # hard delete) — existence was already validated, so this is a
+        # defensive default, not the expected path.
+        dep_status = upstream_status.get(dep_id, endpoint_tasks[dep_id].status)
         initial_resolved = dep_status in TASK_TERMINAL_STATUSES
         session.add(
             task_dependency_model(
@@ -1090,7 +1237,11 @@ class TaskDao:
         """
         team_task_model = _get_task_model()
         async with self._sessions.write() as session:
-            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+            result = await session.execute(
+                select(team_task_model)
+                .where(team_task_model.task_id == task_id)
+                .with_for_update()
+            )
             task = result.scalar_one_or_none()
             if not task:
                 team_logger.error("Task %s not found", task_id)
@@ -1329,7 +1480,11 @@ class TaskDao:
         """
         team_task_model = _get_task_model()
         async with self._sessions.write() as session:
-            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+            result = await session.execute(
+                select(team_task_model)
+                .where(team_task_model.task_id == task_id)
+                .with_for_update()
+            )
             task = result.scalar_one_or_none()
             if not task:
                 team_logger.error("Task %s not found", task_id)
@@ -1356,11 +1511,35 @@ class TaskDao:
             return task
 
     async def update_task_status(self, task_id: str, status: str) -> bool:
-        """Update task status."""
+        """Update task status.
+
+        Uses a conditional ``UPDATE ... WHERE task_id = ? AND status = ?``
+        (CAS): the row is only moved if its current status matches the one
+        we read, so a concurrent writer that flipped the status between our
+        read and write causes ``rowcount == 0`` and we return ``False``
+        instead of clobbering it (lost update). The transition validity is
+        checked in Python first so an illegal transition still returns
+        ``False`` without touching the row. ``is_valid_transition`` is a
+        pure function over the status enum, so it is safe to run on the
+        read-back status before the CAS.
+
+        The initial SELECT is taken with ``FOR UPDATE`` so a concurrent
+        ``update_task`` / ``update_task_status`` reading the same row
+        serialises on the row lock rather than both reading the stale
+        status and both paying the transition check (one then loses the
+        CAS race and returns False — correct, but a spurious failure that
+        the row lock avoids). Mirrors ``update_task``'s locked SELECT.
+        On SQLite the dialect strips ``FOR UPDATE`` (the process-level
+        write lock is the serialiser).
+        """
         team_task_model = _get_task_model()
         task_dependency_model = _get_task_dependency_model()
         async with self._sessions.write() as session:
-            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+            result = await session.execute(
+                select(team_task_model)
+                .where(team_task_model.task_id == task_id)
+                .with_for_update()
+            )
             task = result.scalar_one_or_none()
             if not task:
                 team_logger.error("Task %s not found", task_id)
@@ -1380,8 +1559,29 @@ class TaskDao:
                 return False
 
             now = get_current_time()
-            task.status = status
-            task.updated_at = now
+            # CAS: only move the row if its status is still what we read.
+            # A concurrent writer that flipped it between the SELECT above
+            # and this UPDATE yields rowcount == 0 — treat as a lost race
+            # rather than clobbering the new state.
+            cas_result = await session.execute(
+                update(team_task_model)
+                .where(
+                    team_task_model.task_id == task_id,
+                    team_task_model.status == task.status,
+                )
+                .values(status=status, updated_at=now)
+            )
+            # ``(rowcount or 0)`` guards a backend that returns None for
+            # rowcount (mirrors _refresh_status_in_session /
+            # _terminate_task_in_session in this same batch): ``None == 0``
+            # is False, so a None result would bypass the lost-race path and
+            # read as "CAS applied", silently clobbering the concurrent write.
+            if (cas_result.rowcount or 0) == 0:
+                team_logger.warning(
+                    "Task %s status changed concurrently; CAS update skipped",
+                    task_id,
+                )
+                return False
 
             if status == TaskStatus.COMPLETED.value:
                 team_logger.info("Task %s completed at %s", task_id, now)
@@ -1430,7 +1630,11 @@ class TaskDao:
         """
         team_task_model = _get_task_model()
         async with self._sessions.write() as session:
-            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+            result = await session.execute(
+                select(team_task_model)
+                .where(team_task_model.task_id == task_id)
+                .with_for_update()
+            )
             task = result.scalar_one_or_none()
             if not task:
                 team_logger.error("Task %s not found", task_id)
@@ -1585,6 +1789,14 @@ class TaskDao:
         ``suspend_parent`` is ``(task_id, owner)``: that ``IN_PROGRESS`` task
         is parked at ``BLOCKED`` in the same transaction, before its new
         edges are validated (member subtasks, F_128).
+
+        When ``add_edges`` is non-empty, a ``SELECT ... FOR UPDATE`` on the
+        ``team_info`` row serialises concurrent graph mutations on the same
+        team (cycle-check / lock-ordering rationale documented at the lock
+        site). This makes a present ``team_info`` row a hard precondition
+        for adding edges: a missing team is rejected with
+        ``_MutationFailure("Team ... not found")`` before any edge work,
+        so no orphan edges are inserted.
         """
         new_tasks = list(new_tasks or [])
         add_edges = list(add_edges or [])
@@ -1608,6 +1820,32 @@ class TaskDao:
         async with self._sessions.write() as session:
             try:
                 now = get_current_time()
+                # Serialise all graph mutations on the same team by locking the
+                # team_info row. This prevents two concurrent
+                # mutate_dependency_graph calls from each reading a stale edge
+                # set, each passing the cycle check, and together forming a
+                # cycle. The dep SELECT itself is a plain SELECT (no FOR
+                # UPDATE): on an empty edge set a dep-row FOR UPDATE would
+                # acquire zero locks, and even on a non-empty set it would
+                # deadlock with _terminate_task_in_session (which locks task
+                # rows, then dep rows — the opposite order). The team_info
+                # row is a single short-lived lock and does not conflict with
+                # _terminate_task_in_session (which never locks team_info).
+                # Side effect: a present team_info row is a hard precondition
+                # for ANY graph mutation (new tasks or edges). The check runs
+                # whenever there is work to do — not only under ``add_edges``
+                # — so a new_tasks-only call against a missing team fails fast
+                # with _MutationFailure instead of staging rows that the
+                # commit-time FK would reject (or, on SQLite without FK
+                # enforcement, silently leave as orphans). New_tasks + edges
+                # for a missing team therefore rolls back together as one
+                # atomic unit, matching the caller's all-or-nothing contract.
+                if new_tasks or add_edges:
+                    team_result = await session.execute(
+                        select(Team).where(Team.team_name == team_name).with_for_update()
+                    )
+                    if team_result.scalar_one_or_none() is None:
+                        raise _MutationFailure(f"Team {team_name} not found")
                 await _stage_new_tasks(session, team_name, new_tasks, now)
                 if suspend_parent is not None:
                     await _suspend_parent_in_session(session, *suspend_parent, now)
@@ -1704,16 +1942,97 @@ class TaskDao:
             return [row[0] for row in result.all()]
 
     async def delete_task(self, task_id: str) -> bool:
-        """Delete a task."""
+        """Delete a task.
+
+        Uses a single conditional ``DELETE ... WHERE task_id = ?`` and checks
+        ``rowcount`` rather than a SELECT-then-``session.delete`` read-modify-
+        write: the conditional DELETE is atomic at the row level on every
+        backend, so a concurrent caller that already deleted (or moved) the
+        row yields ``rowcount == 0`` and we return ``False`` instead of
+        re-reading a stale row and re-issuing a delete.
+
+        Before the DELETE, the ``team_info`` row is locked with
+        ``SELECT ... FOR UPDATE`` so a concurrent ``mutate_dependency_graph``
+        / ``_apply_new_edges`` — which also takes the team_info row lock
+        before inserting a new edge — cannot slip a new edge in between our
+        downstream SELECT and our DELETE. Without this lock, on PG/MySQL
+        (where ``DbSessions.write()`` skips the process-level write lock)
+        ``add_edges`` could read the upstream as PENDING, insert a new edge,
+        then our DELETE cascades that edge away, and the new downstream is
+        stranded in ``BLOCKED`` with no edge to refresh against. The
+        team_info lock is chosen over a FOR UPDATE on the target task row
+        because the latter would break the unified ascending-id lock
+        ordering that ``_refresh_status_in_session`` uses (``order_by
+        task_id``): locking an arbitrary-id target before locking the
+        ordered downstream set can deadlock with a concurrent
+        ``_refresh_status_in_session`` whose downstream set spans both.
+        team_info is a single short-lived lock that
+        ``_terminate_task_in_session`` never touches, so it adds no conflict
+        with the task-row lock ordering. On SQLite the process-wide write
+        lock already serialises the two, so the row lock is stripped by the
+        dialect there.
+
+        The dependency-edge table carries ``ondelete=CASCADE`` FKs on both
+        ``task_id`` and ``depends_on_task_id``, so deleting the row removes
+        its incoming and outgoing edges in the same statement. A downstream
+        task that was ``BLOCKED`` solely by this task is not automatically
+        refreshed, though — its status stays ``BLOCKED`` until
+        ``_refresh_status_in_session`` runs. We capture the downstream ids
+        before the delete (the edges are gone afterwards) and refresh them
+        once the edges have been cascaded away, so a deleted dependency
+        unblocks its dependents instead of stranding them in ``BLOCKED``
+        forever (issue #115 review follow-up).
+        """
         team_task_model = _get_task_model()
+        task_dependency_model = _get_task_dependency_model()
         async with self._sessions.write() as session:
-            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
-            task = result.scalar_one_or_none()
-            if not task:
+            # Read team_name (plain SELECT, no lock) to locate the
+            # team_info row. The team_info FOR UPDATE that follows
+            # serialises with add_edges; the plain read is safe because
+            # the DELETE's rowcount check catches a concurrent delete
+            # that removed the task between this read and the lock.
+            probe = await session.execute(
+                select(team_task_model.team_name).where(team_task_model.task_id == task_id)
+            )
+            team_name = probe.scalar_one_or_none()
+            if team_name is None:
                 team_logger.debug("Task %s not found for deletion", task_id)
                 return False
 
-            await session.delete(task)
+            # Serialise with mutate_dependency_graph / _apply_new_edges,
+            # which also FOR UPDATE team_info before inserting a new edge.
+            await session.execute(
+                select(Team).where(Team.team_name == team_name).with_for_update()
+            )
+
+            # Capture downstream ids before the FK cascade removes the
+            # outgoing edges — after the delete we can no longer read them.
+            # Safe because add_edges is blocked on the team_info lock.
+            downstream_result = await session.execute(
+                select(task_dependency_model.task_id)
+                .where(task_dependency_model.depends_on_task_id == task_id)
+                .distinct()
+            )
+            downstream_ids = {row[0] for row in downstream_result.all()}
+
+            result = await session.execute(
+                delete(team_task_model).where(team_task_model.task_id == task_id)
+            )
+            deleted = (result.rowcount or 0) == 1
+            if not deleted:
+                team_logger.debug("Task %s not found for deletion", task_id)
+                return False
+
+            if downstream_ids:
+                refreshed = await _refresh_status_in_session(
+                    session, downstream_ids, get_current_time()
+                )
+                if refreshed:
+                    team_logger.info(
+                        "Refreshed %d dependent task(s) after deleting %s",
+                        len(refreshed),
+                        task_id,
+                    )
             await session.commit()
             team_logger.info("Task %s deleted", task_id)
             return True

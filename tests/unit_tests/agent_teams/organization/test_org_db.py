@@ -412,3 +412,401 @@ async def test_close_waits_for_inflight_initialize_and_releases_it(tmp_path: Pat
     assert db.closed
     assert db.engine is None and db.read_engine is None
     assert db.sessions is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_org_static_tables_is_idempotent_when_columns_already_exist() -> None:
+    """Re-running ensure_org_static_tables on a fully-migrated DB is a no-op.
+
+    Covers the cross-process race where two processes both see a column
+    missing and both fire ALTER TABLE ADD COLUMN — the second one must not
+    abort the outer transaction. Simulates the race by pre-adding every
+    org_task / org_summary_execution / org_info column, then calling
+    ensure_org_static_tables inside an open transaction and asserting the
+    commit succeeds.
+    """
+    from openjiuwen.agent_teams.organization import db as org_db
+
+    database = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    await database.initialize()
+    assert database.engine is not None
+
+    # First call migrates to the latest schema.
+    async with database.engine.begin() as conn:
+        await conn.run_sync(org_db.ensure_org_static_tables)
+
+    # Second call inside an explicit transaction: every column already exists,
+    # so every ALTER would fail. The SAVEPOINT + DBAPIError catch in
+    # _add_column_idempotent must swallow the "duplicate column" error and
+    # leave the transaction committable.
+    async with database.engine.begin() as conn:
+        await conn.run_sync(org_db.ensure_org_static_tables)
+        # If the failed ALTER poisoned the transaction, commit (implicit at
+        # block exit) would raise InFailedSQLTransaction. Reaching here means
+        # the savepoint correctly isolated the failure.
+
+    # Sanity: the org tables and their columns are still present.
+    async with database.engine.connect() as conn:
+        org_task_columns = await conn.run_sync(
+            lambda sync_conn: {c["name"] for c in inspect(sync_conn).get_columns("org_task")}
+        )
+        for name, _ in org_db._ORG_TASK_NEW_COLUMNS:
+            assert name in org_task_columns
+        org_info_columns = await conn.run_sync(
+            lambda sync_conn: {c["name"] for c in inspect(sync_conn).get_columns("org_info")}
+        )
+        assert "unclaimed_task_policy_json" in org_info_columns
+
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_add_column_idempotent_swallows_duplicate_column() -> None:
+    """_add_column_idempotent catches duplicate-column errors on all backends.
+
+    Direct unit test for the helper: pre-create a table with the target
+    column, then call _add_column_idempotent. It must not raise and must
+    not poison the surrounding transaction.
+    """
+    from openjiuwen.agent_teams.organization import db as org_db
+
+    database = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    await database.initialize()
+    assert database.engine is not None
+
+    async with database.engine.begin() as conn:
+        await conn.exec_driver_sql("CREATE TABLE idempotent_test (id INTEGER PRIMARY KEY)")
+        await conn.exec_driver_sql("ALTER TABLE idempotent_test ADD COLUMN marker TEXT")
+        # Column now exists; _add_column_idempotent must swallow the error.
+        await conn.run_sync(
+            lambda sync_conn: org_db._add_column_idempotent(
+                sync_conn, "idempotent_test", "marker", "TEXT"
+            )
+        )
+        # Surrounding transaction must still be committable (implicit commit
+        # at block exit). A follow-up write proves the transaction is alive.
+        await conn.exec_driver_sql("INSERT INTO idempotent_test (id, marker) VALUES (1, 'x')")
+
+    async with database.engine.connect() as conn:
+        rows = await conn.exec_driver_sql("SELECT marker FROM idempotent_test WHERE id = 1")
+        assert rows.fetchone()[0] == "x"
+
+    await database.close()
+
+
+def test_add_column_idempotent_mysql_skips_savepoint_and_rechecks(monkeypatch):
+    """On MySQL _add_column_idempotent does not wrap the ALTER in a
+    SAVEPOINT — DDL implicitly commits *whether the DDL succeeds or
+    fails*, so the savepoint is destroyed before ``begin_nested`` can
+    roll back to it, and the savepoint's exit-time ROLLBACK would raise a
+    second ``DBAPIError`` that masks the original "Duplicate column name"
+    error.
+
+    The helper instead runs the ALTER bare and, when a duplicate-column
+    error is swallowed, follows it with an ``inspect`` re-check that
+    confirms the column is actually present (the implicit commit makes
+    the post-ALTER state the ground truth).
+
+    This test drives the MySQL branch with a hand-rolled fake connection:
+    the real implicit-commit behaviour cannot be reproduced on SQLite, so
+    we verify the helper takes the right branch (no ``begin_nested``,
+    ALTER issued, ``inspect`` re-check on swallow).
+    """
+    from unittest.mock import MagicMock, patch
+
+    from sqlalchemy.exc import OperationalError  # OperationalError is a DBAPIError subclass
+
+    from openjiuwen.agent_teams.organization import db as org_db
+    from openjiuwen.agent_teams.tools.database import engine as engine_module
+
+    fake_conn = MagicMock()
+    fake_conn.dialect.name = "mysql"
+
+    # The ALTER raises a duplicate-column error (the column was added by a
+    # concurrent process). The helper must swallow this on the MySQL path.
+    fake_conn.exec_driver_sql.side_effect = OperationalError(
+        "ALTER TABLE t ADD COLUMN c TEXT",
+        {},
+        Exception("Duplicate column name 'c'"),
+    )
+
+    # begin_nested must NOT be called on the MySQL path; if it is, the
+    # AssertionError fails the test loudly.
+    fake_conn.begin_nested.side_effect = AssertionError("MySQL path must not call begin_nested")
+
+    # inspect(sync_conn).get_columns(table) returns the column, confirming
+    # a concurrent process added it; the re-check passes and the helper
+    # returns without re-raising.
+    fake_inspector = MagicMock()
+    fake_inspector.get_columns.return_value = [{"name": "c"}]
+
+    # The helpers now live in ``engine_module`` (org_db re-exports them), so
+    # ``inspect`` is resolved in the engine namespace — patch it there.
+    with patch.object(engine_module, "inspect", return_value=fake_inspector):
+        org_db._add_column_idempotent(fake_conn, "t", "c", "TEXT")
+
+    fake_conn.begin_nested.assert_not_called()
+    fake_conn.exec_driver_sql.assert_called_once()
+    fake_inspector.get_columns.assert_called_once_with("t")
+
+
+def test_add_column_idempotent_mysql_reraises_when_column_still_missing(monkeypatch):
+    """On MySQL, if the duplicate-column error is swallowed but the
+    ``inspect`` re-check finds the column still missing (an inconsistent
+    state — the column should have been added by a concurrent process),
+    the helper re-raises rather than silently leaving the column absent.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from sqlalchemy.exc import OperationalError
+
+    from openjiuwen.agent_teams.organization import db as org_db
+    from openjiuwen.agent_teams.tools.database import engine as engine_module
+
+    fake_conn = MagicMock()
+    fake_conn.dialect.name = "mysql"
+
+    fake_conn.exec_driver_sql.side_effect = OperationalError(
+        "ALTER TABLE t ADD COLUMN c TEXT",
+        {},
+        Exception("Duplicate column name 'c'"),
+    )
+
+    # inspect reports the column is NOT present — inconsistent with the
+    # "Duplicate column name" error. The helper must surface this.
+    fake_inspector = MagicMock()
+    fake_inspector.get_columns.return_value = [{"name": "other"}]
+
+    # The helpers now live in ``engine_module`` (org_db re-exports them), so
+    # ``inspect`` is resolved in the engine namespace — patch it there.
+    with patch.object(engine_module, "inspect", return_value=fake_inspector):
+        with pytest.raises(OperationalError):
+            org_db._add_column_idempotent(fake_conn, "t", "c", "TEXT")
+
+    fake_conn.begin_nested.assert_not_called()
+    fake_inspector.get_columns.assert_called_once_with("t")
+
+
+@pytest.mark.asyncio
+async def test_run_ddl_idempotent_swallows_already_exists_on_savepoint_path() -> None:
+    """_run_ddl_idempotent catches 'already exists' on SQLite/PG (savepoint path).
+
+    Direct unit test for the helper: pre-create a table, then call
+    _run_ddl_idempotent with a DDL callable that tries to CREATE TABLE the
+    same name (bypassing checkfirst to force the race-failure path). The
+    savepoint must isolate the failure so the outer transaction stays
+    committable and a follow-up write succeeds.
+    """
+    from openjiuwen.agent_teams.organization import db as org_db
+
+    database = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    await database.initialize()
+    assert database.engine is not None
+
+    async with database.engine.begin() as conn:
+        await conn.exec_driver_sql("CREATE TABLE ddl_idempotent_test (id INTEGER PRIMARY KEY)")
+        # The table already exists; _run_ddl_idempotent must swallow the
+        # "already exists" error via its SAVEPOINT + DBAPIError catch.
+        await conn.run_sync(
+            lambda sync_conn: org_db._run_ddl_idempotent(
+                sync_conn,
+                lambda: sync_conn.exec_driver_sql(
+                    "CREATE TABLE ddl_idempotent_test (id INTEGER PRIMARY KEY)"
+                ),
+                lambda: True,
+            )
+        )
+        # Surrounding transaction must still be committable. A follow-up write
+        # proves the transaction is alive — if the failed CREATE had poisoned
+        # it, this INSERT would raise InFailedSQLTransaction.
+        await conn.exec_driver_sql("INSERT INTO ddl_idempotent_test (id) VALUES (1)")
+
+    async with database.engine.connect() as conn:
+        rows = await conn.exec_driver_sql("SELECT id FROM ddl_idempotent_test WHERE id = 1")
+        assert rows.fetchone()[0] == 1
+
+    await database.close()
+
+
+def test_run_ddl_idempotent_mysql_skips_savepoint_and_rechecks():
+    """On MySQL _run_ddl_idempotent does not wrap the DDL in a SAVEPOINT.
+
+    DDL implicitly commits *whether the DDL succeeds or fails*, so the
+    savepoint is destroyed before ``begin_nested`` can roll back to it. The
+    helper instead runs the DDL bare and, when an ``already exists`` /
+    ``duplicate`` error is swallowed, calls the ``verify`` callable to
+    re-check that the DDL target actually exists.
+
+    Drives the MySQL branch with a hand-rolled fake connection: the real
+    implicit-commit behaviour cannot be reproduced on SQLite, so we verify
+    the helper takes the right branch (no ``begin_nested``, DDL issued,
+    ``verify`` called on swallow).
+    """
+    from unittest.mock import MagicMock, patch
+
+    from openjiuwen.agent_teams.organization import db as org_db
+
+    fake_conn = MagicMock()
+    fake_conn.dialect.name = "mysql"
+
+    fake_conn.exec_driver_sql.side_effect = OperationalError(
+        "CREATE TABLE t (id INT)",
+        {},
+        Exception("Table 't' already exists"),
+    )
+
+    fake_conn.begin_nested.side_effect = AssertionError("MySQL path must not call begin_nested")
+
+    # verify returns True — a concurrent process created the table, so the
+    # helper returns without re-raising.
+    verify = MagicMock(return_value=True)
+
+    org_db._run_ddl_idempotent(
+        fake_conn,
+        lambda: fake_conn.exec_driver_sql("CREATE TABLE t (id INT)"),
+        verify,
+    )
+
+    fake_conn.begin_nested.assert_not_called()
+    fake_conn.exec_driver_sql.assert_called_once()
+    verify.assert_called_once()
+
+
+def test_run_ddl_idempotent_mysql_reraises_when_verify_fails():
+    """On MySQL, if the 'already exists' error is swallowed but ``verify``
+    returns False (an inconsistent state — the DDL target should exist),
+    the helper re-raises rather than silently leaving it absent.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from openjiuwen.agent_teams.organization import db as org_db
+
+    fake_conn = MagicMock()
+    fake_conn.dialect.name = "mysql"
+
+    fake_conn.exec_driver_sql.side_effect = OperationalError(
+        "CREATE TABLE t (id INT)",
+        {},
+        Exception("Table 't' already exists"),
+    )
+
+    # verify returns False — the table is somehow still missing. The helper
+    # must surface this inconsistency.
+    verify = MagicMock(return_value=False)
+
+    with pytest.raises(OperationalError):
+        org_db._run_ddl_idempotent(
+            fake_conn,
+            lambda: fake_conn.exec_driver_sql("CREATE TABLE t (id INT)"),
+            verify,
+        )
+
+    fake_conn.begin_nested.assert_not_called()
+    verify.assert_called_once()
+
+
+def test_run_ddl_idempotent_savepoint_path_reraises_when_verify_fails():
+    """On the savepoint path (SQLite / PG), if the 'already exists' error is
+    swallowed but ``verify`` returns False (an inconsistent state — the DDL
+    target should exist), the helper re-raises rather than silently leaving
+    it absent.
+
+    The savepoint's rollback restores the transaction to a clean state, but
+    that alone does not confirm a concurrent process actually committed this
+    DDL target — ``verify`` does. Drives the savepoint branch with a
+    hand-rolled fake connection: the savepoint context manager is faked so
+    the DDL raises inside it and the exception propagates to the outer
+    ``except`` (matching real ``begin_nested``'s ROLLBACK-then-propagate
+    behaviour).
+    """
+    from unittest.mock import MagicMock, patch
+
+    from openjiuwen.agent_teams.organization import db as org_db
+
+    fake_conn = MagicMock()
+    fake_conn.dialect.name = "sqlite"
+
+    # The DDL raises "already exists" inside the savepoint; the helper must
+    # swallow it and then call verify.
+    fake_conn.exec_driver_sql.side_effect = OperationalError(
+        "CREATE TABLE t (id INT)",
+        {},
+        Exception("Table t already exists"),
+    )
+
+    # Fake the savepoint context manager so the DDL runs inside it. ``__exit__``
+    # returns False to propagate the exception to the outer try/except —
+    # matching real SQLAlchemy ``begin_nested``'s behaviour of issuing
+    # ROLLBACK TO SAVEPOINT and then letting the exception propagate.
+    class _FakeSavepoint:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    fake_conn.begin_nested.return_value = _FakeSavepoint()
+
+    # verify returns False — the table is somehow still missing. The helper
+    # must surface this inconsistency.
+    verify = MagicMock(return_value=False)
+
+    with pytest.raises(OperationalError):
+        org_db._run_ddl_idempotent(
+            fake_conn,
+            lambda: fake_conn.exec_driver_sql("CREATE TABLE t (id INT)"),
+            verify,
+        )
+
+    fake_conn.begin_nested.assert_called_once()
+    verify.assert_called_once()
+
+
+def test_add_column_idempotent_savepoint_path_reraises_when_column_still_missing():
+    """On the savepoint path (SQLite / PG), if the duplicate-column error is
+    swallowed but the ``inspect`` re-check finds the column still missing
+    (an inconsistent state — the column should have been added by a
+    concurrent process), the helper re-raises rather than silently leaving
+    it absent.
+
+    The savepoint's rollback restores the transaction to a clean state, but
+    that alone does not confirm a concurrent process actually committed this
+    column — the inspect re-check does. Drives the savepoint branch with a
+    hand-rolled fake connection.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from openjiuwen.agent_teams.organization import db as org_db
+    from openjiuwen.agent_teams.tools.database import engine as engine_module
+
+    fake_conn = MagicMock()
+    fake_conn.dialect.name = "sqlite"
+
+    fake_conn.exec_driver_sql.side_effect = OperationalError(
+        "ALTER TABLE t ADD COLUMN c TEXT",
+        {},
+        Exception("duplicate column name: c"),
+    )
+
+    class _FakeSavepoint:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False  # propagate to outer except (see above test)
+
+    fake_conn.begin_nested.return_value = _FakeSavepoint()
+
+    # inspect reports the column is NOT present — inconsistent with the
+    # "duplicate column" error. The helper must surface this.
+    fake_inspector = MagicMock()
+    fake_inspector.get_columns.return_value = [{"name": "other"}]
+
+    # The helpers now live in ``engine_module`` (org_db re-exports them), so
+    # ``inspect`` is resolved in the engine namespace — patch it there.
+    with patch.object(engine_module, "inspect", return_value=fake_inspector):
+        with pytest.raises(OperationalError):
+            org_db._add_column_idempotent(fake_conn, "t", "c", "TEXT")
+
+    fake_conn.begin_nested.assert_called_once()
+    fake_inspector.get_columns.assert_called_once_with("t")

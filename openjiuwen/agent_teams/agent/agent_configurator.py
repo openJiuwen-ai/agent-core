@@ -672,6 +672,36 @@ class AgentConfigurator:
             self.team_backend.register_cleanup_path(workspace_root_path)
 
         model_config = ctx.member_model or agent_spec.model
+        # Write back the resolved model so checkpoint serialization carries it
+        # forward — but only when the team carries a model pool. Without this,
+        # ``ctx.member_model`` stays ``None`` after the first build when the
+        # per-agent fallback was used, and cold recovery later sees
+        # ``context.member_model is None`` → falls through to
+        # ``current_pool[0]`` for every concurrent team (issue #115 现象 5).
+        # Restricted to pool teams because the recovery path
+        # (``team_agent.py`` ``if runtime_spec.model_pool:``) re-materializes
+        # ``context.member_model`` from the *current* pool only when a pool is
+        # present, so the written-back value is always overwritten with fresh
+        # credentials. For no-pool teams recovery skips re-materialization, so
+        # writing the per-agent ``TeamModelConfig`` (with its endpoint/api_key)
+        # into the checkpoint would let a stale client override the current
+        # spec's per-agent model after a host-side credential rotation —
+        # leaving ``ctx.member_model`` ``None`` lets ``AgentConfigurator``'s
+        # ``ctx.member_model or agent_spec.model`` fall through to the current
+        # spec on every recovery instead.
+        #
+        # Use the *expanded* pool on ``ctx.team_spec`` rather than the
+        # blueprint ``spec.model_pool``: ``model_router`` /
+        # ``model_intelli_router`` are convenience inputs that expand into
+        # ``team_spec.model_pool`` at ``build()`` time (blueprint.py), leaving
+        # ``spec.model_pool`` empty for router / intelli_router teams. Checking
+        # the blueprint field would skip the write-back for exactly those teams
+        # and re-open 现象 5. ``ctx.team_spec.model_pool`` is the authoritative
+        # post-expansion answer (mirrors ``spawn_manager.py``'s
+        # ``has_model_pool = team_spec is not None and bool(team_spec.model_pool)``).
+        has_model_pool = ctx.team_spec is not None and bool(ctx.team_spec.model_pool)
+        if ctx.member_model is None and model_config is not None and has_model_pool:
+            ctx.member_model = model_config
 
         sys_operation_spec = agent_spec.sys_operation or SysOperationSpec(
             id=f"{self._card.id}.sys_operation",

@@ -15,7 +15,7 @@ import asyncio
 
 import pytest
 
-from openjiuwen.agent_teams.tools.database import engine as engine_module
+from openjiuwen.agent_teams.tools.database.config import DatabaseType
 from openjiuwen.agent_teams.tools.database.engine import DbSessions
 
 
@@ -35,10 +35,10 @@ def _fake_session_factory() -> _FakeSession:
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_read_block_exceeding_watchdog_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_read_block_exceeding_watchdog_raises() -> None:
     """A read block hanging past the watchdog raises TimeoutError instead of stalling."""
-    monkeypatch.setattr(engine_module, "_DB_SESSION_WATCHDOG_SECONDS", 0)
     sessions = DbSessions(_fake_session_factory)
+    sessions._watchdog_seconds = 0
 
     with pytest.raises(TimeoutError):
         async with sessions.read():
@@ -50,12 +50,10 @@ async def test_read_block_exceeding_watchdog_raises(monkeypatch: pytest.MonkeyPa
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_write_block_exceeding_watchdog_raises_and_releases_lock(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_write_block_exceeding_watchdog_raises_and_releases_lock() -> None:
     """A hung write block raises TimeoutError and leaves the write lock free."""
-    monkeypatch.setattr(engine_module, "_DB_SESSION_WATCHDOG_SECONDS", 0)
     sessions = DbSessions(_fake_session_factory)
+    sessions._watchdog_seconds = 0
 
     with pytest.raises(TimeoutError):
         async with sessions.write():
@@ -66,15 +64,15 @@ async def test_write_block_exceeding_watchdog_raises_and_releases_lock(
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_write_lock_wait_is_not_counted_by_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_write_lock_wait_is_not_counted_by_watchdog() -> None:
     """Queueing behind the write lock is not counted by the watchdog; only the block is.
 
     With a zero watchdog, *any* wait longer than zero exceeds the budget —
     so a writer that merely queues for the lock would already time out if
     the lock were inside the ``asyncio.timeout`` context. It must survive.
     """
-    monkeypatch.setattr(engine_module, "_DB_SESSION_WATCHDOG_SECONDS", 0)
     sessions = DbSessions(_fake_session_factory)
+    sessions._watchdog_seconds = 0
 
     entered = asyncio.Event()
 
@@ -106,3 +104,58 @@ async def test_fast_read_and_write_paths_unaffected() -> None:
         assert isinstance(read_session, _FakeSession)
     async with sessions.write() as write_session:
         assert isinstance(write_session, _FakeSession)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_sqlite_write_holds_process_lock() -> None:
+    """On SQLite write() holds the process-level lock during the block."""
+    sessions = DbSessions(_fake_session_factory, db_type=DatabaseType.SQLITE)
+    assert sessions._use_write_lock
+    async with sessions.write():
+        assert sessions._write_lock.locked()
+    assert not sessions._write_lock.locked()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_client_server_write_skips_process_lock() -> None:
+    """On PostgreSQL/MySQL write() does NOT hold the process-level lock."""
+    for db_type in (DatabaseType.POSTGRESQL, DatabaseType.MYSQL):
+        sessions = DbSessions(_fake_session_factory, db_type=db_type)
+        assert not sessions._use_write_lock
+        async with sessions.write():
+            assert not sessions._write_lock.locked()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_ddl_lock_serialises_concurrent_acquirers() -> None:
+    """ddl_lock() serialises concurrent acquirers on all backends."""
+    sessions = DbSessions(_fake_session_factory)
+    acquired = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def hold_ddl() -> None:
+        async with sessions.ddl_lock():
+            acquired.set()
+            await proceed.wait()
+
+    holder = asyncio.create_task(hold_ddl())
+    await acquired.wait()
+
+    # The waiter should block until the holder releases.
+    waiter_done = asyncio.Event()
+
+    async def wait_ddl() -> None:
+        async with sessions.ddl_lock():
+            waiter_done.set()
+
+    waiter = asyncio.create_task(wait_ddl())
+    await asyncio.sleep(0.01)
+    assert not waiter_done.is_set()
+
+    proceed.set()
+    await asyncio.wait_for(waiter, timeout=1.0)
+    assert waiter_done.is_set()
+    await holder

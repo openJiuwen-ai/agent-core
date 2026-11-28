@@ -2267,9 +2267,23 @@ class TeamAgent(BaseAgent):
         # Without this merge a cold recovery silently rebuilt the old
         # by-model-name allocator even though the UI had selected a model
         # group for the current request.
-        if runtime_spec is not None and runtime_spec.model_pool:
-            current_pool = list(runtime_spec.model_pool)
-            current_strategy = runtime_spec.model_pool_strategy
+        #
+        # Use the *expanded* pool via ``effective_model_pool`` rather than the
+        # raw ``runtime_spec.model_pool`` so router / intelli_router teams
+        # (whose ``runtime_spec.model_pool`` is empty until ``build()``
+        # expands the convenience inputs into ``team_spec.model_pool``) also
+        # re-materialize ``context.member_model``. Without this the write-back
+        # path in ``AgentConfigurator`` (which checks the already-expanded
+        # ``ctx.team_spec.model_pool``) writes ``ctx.member_model`` for
+        # exactly those teams, but the recovery path skips re-materialization
+        # — letting a stale client survive a host-side credential rotation
+        # (issue #115 review round 14, sibling of 现象 5).
+        if runtime_spec is not None:
+            current_pool, current_strategy = runtime_spec.effective_model_pool()
+        else:
+            current_pool: list = []
+            current_strategy = spec.model_pool_strategy
+        if current_pool:
             if context.team_spec is None:
                 raise ValueError(f"No team spec found for '{team_name}' recovery")
             context.team_spec = context.team_spec.model_copy(
@@ -2290,6 +2304,20 @@ class TeamAgent(BaseAgent):
             # instead of retaining the checkpoint's old client.  Name-routed
             # strategies need an explicit logical name; IntelliRouter always
             # uses its single wildcard entry.
+            #
+            # ``router`` is name-routed just like ``by_model_name``: a
+            # ``RouterAllocator`` honours the ``model_name`` hint (returns the
+            # entry for that name, or ``None`` when absent), so the
+            # checkpoint's ``model_name`` is the right allocation hint. The
+            # round-14 ``effective_model_pool()`` change made this branch
+            # reachable for ``router`` teams for the first time — before that
+            # the unexpanded ``runtime_spec.model_pool`` was empty for them,
+            # so recovery skipped re-materialization entirely and let the
+            # checkpoint's stale client survive. Treating ``router`` like
+            # ``by_model_name`` here preserves the checkpoint's model choice
+            # instead of silently drifting to ``pool[0]``
+            # (``RouterAllocator.allocate(None)`` would return ``pool[0]``,
+            # issue #115 review round 15).
             checkpoint_name = None
             checkpoint_model = context.member_model
             if checkpoint_model is not None and checkpoint_model.model_request_config is not None:
@@ -2300,7 +2328,7 @@ class TeamAgent(BaseAgent):
             if current_strategy == "intelli_router":
                 allocation_name = "*"
                 spec.leader.model_name = "*"
-            elif current_strategy == "by_model_name" and current_pool:
+            elif current_strategy in ("by_model_name", "router") and current_pool:
                 from openjiuwen.agent_teams.models.allocator import resolve_member_model
 
                 allocation = (
@@ -2328,6 +2356,15 @@ class TeamAgent(BaseAgent):
                 )
 
             if current_strategy == "intelli_router":
+                from openjiuwen.agent_teams.models.allocator import build_model_allocator
+
+                allocator = build_model_allocator(spec, context.team_spec)
+                allocation = allocator.allocate(allocation_name) if allocator is not None else None
+            elif current_strategy == "router":
+                # Pass the resolved ``allocation_name`` (checkpoint hint or
+                # the pool[0] fallback) so ``RouterAllocator`` returns the
+                # entry for that name. ``allocate(None)`` would return
+                # ``pool[0]`` and silently drop the checkpoint hint.
                 from openjiuwen.agent_teams.models.allocator import build_model_allocator
 
                 allocator = build_model_allocator(spec, context.team_spec)

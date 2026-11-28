@@ -1848,3 +1848,126 @@ def test_intelli_router_all_entries_share_one_router_cache_key():
     # names stay inside the deployment snapshot and are never allocator names.
     models = [e.to_team_model_config().model_request_config.model_name for e in entries]
     assert models == ["*"]
+
+
+# ---------------------------------------------------------------------------
+# TeamAgentSpec.effective_model_pool — shared expansion source for build()
+# and cold-recovery re-materialization (issue #115 review round 14)
+# ---------------------------------------------------------------------------
+
+
+def test_effective_model_pool_returns_configured_pool_when_no_router_inputs():
+    """Without ``model_router`` / ``model_intelli_router`` the effective pool
+    is the configured ``model_pool`` / ``model_pool_strategy`` verbatim."""
+    pool = _make_pool(2)
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        model_pool=pool,
+        model_pool_strategy="by_model_name",
+    )
+    effective_pool, effective_strategy = spec.effective_model_pool()
+    assert [e.model_name for e in effective_pool] == ["m0", "m1"]
+    assert effective_strategy == "by_model_name"
+
+
+def test_effective_model_pool_expands_model_router_into_pool_with_router_strategy():
+    """``model_router`` expands into a flat ``model_pool`` view with the
+    ``"router"`` strategy, exactly as ``build()`` propagates to
+    ``TeamSpec.model_pool`` / ``TeamSpec.model_pool_strategy``.
+
+    The recovery path in ``TeamAgent.recover_from_session`` reads this same
+    source instead of the raw ``runtime_spec.model_pool`` (which stays empty
+    for router teams), so the write-back check in ``AgentConfigurator`` and
+    the recovery re-materialization check share one source of truth.
+    """
+    cfg = _make_router_config()
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        model_router=cfg,
+        # Configured pool stays empty (convenience input owns the pool);
+        # the blueprint field is *not* the authoritative post-expansion view.
+        model_pool=[],
+        model_pool_strategy="round_robin",
+    )
+    effective_pool, effective_strategy = spec.effective_model_pool()
+    assert [e.model_name for e in effective_pool] == ["gpt-4o", "claude-opus", "gemini-pro"]
+    assert effective_strategy == "router"
+    # The blueprint fields are untouched — the helper is read-only.
+    assert spec.model_pool == []
+    assert spec.model_pool_strategy == "round_robin"
+
+
+@_requires_intelli_router
+def test_effective_model_pool_expands_model_intelli_router_into_pool_with_intelli_strategy():
+    """``model_intelli_router`` expands into a one-entry pool carrying the
+    full deployment list, with the ``"intelli_router"`` strategy."""
+    cfg = _make_intelli_router_config()
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        model_intelli_router=cfg,
+        model_pool=[],
+        model_pool_strategy="round_robin",
+    )
+    effective_pool, effective_strategy = spec.effective_model_pool()
+    assert len(effective_pool) == 1
+    assert effective_pool[0].model_name == "*"
+    assert effective_strategy == "intelli_router"
+    # The blueprint fields are untouched — the helper is read-only.
+    assert spec.model_pool == []
+    assert spec.model_pool_strategy == "round_robin"
+
+
+def test_effective_model_pool_matches_build_propagation_for_all_three_input_shapes():
+    """The ``(pool, strategy)`` returned by ``effective_model_pool`` must match
+    what ``build()`` propagates into ``TeamSpec.model_pool`` /
+    ``TeamSpec.model_pool_strategy`` for *all three* input shapes
+    (plain ``model_pool``, ``model_router``, ``model_intelli_router``).
+
+    This is the cross-caller invariant: ``AgentConfigurator``'s write-back
+    check reads the already-expanded ``ctx.team_spec.model_pool`` (set by
+    ``build()``); the cold-recovery path reads
+    ``runtime_spec.effective_model_pool()`` instead of the raw
+    ``runtime_spec.model_pool``. If the two sources disagree, the
+    write-back fires for a team whose recovery skips re-materialization
+    (or vice versa), re-opening issue #115 现象 5 or letting a stale client
+    survive a host-side credential rotation.
+
+    ``build()`` itself now delegates to ``effective_model_pool()`` for the
+    expansion, so this test asserts the helper returns the values the
+    blueprint fields document for each input shape — covering all three
+    shapes in one place.
+    """
+    # Plain pool.
+    plain_pool = _make_pool(2)
+    plain_spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        model_pool=plain_pool,
+        model_pool_strategy="by_model_name",
+    )
+    effective_pool, effective_strategy = plain_spec.effective_model_pool()
+    assert [e.model_name for e in effective_pool] == ["m0", "m1"]
+    assert effective_strategy == "by_model_name"
+    # Blueprint fields untouched.
+    assert plain_spec.model_pool == plain_pool
+    assert plain_spec.model_pool_strategy == "by_model_name"
+
+    # Router input.
+    router_spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        model_router=_make_router_config(),
+    )
+    effective_pool, effective_strategy = router_spec.effective_model_pool()
+    assert [e.model_name for e in effective_pool] == ["gpt-4o", "claude-opus", "gemini-pro"]
+    assert effective_strategy == "router"
+
+    # IntelliRouter input — skip if the optional package is missing.
+    if _HAS_INTELLI_ROUTER:
+        intelli_spec = TeamAgentSpec(
+            agents={"leader": DeepAgentSpec()},
+            model_intelli_router=_make_intelli_router_config(),
+        )
+        effective_pool, effective_strategy = intelli_spec.effective_model_pool()
+        assert len(effective_pool) == 1
+        assert effective_pool[0].model_name == "*"
+        assert effective_strategy == "intelli_router"
+

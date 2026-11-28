@@ -46,6 +46,7 @@ from openjiuwen.agent_teams.tools.team_tools import (
     ViewTaskToolV2,
 )
 from openjiuwen.agent_teams.tools.tool_member import ListCheckpointsTool
+from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness_protocol import HarnessCapability, HarnessCard, ModelChoice
@@ -2026,6 +2027,12 @@ class TestClaimTaskTool:
         assert "task_id" in props
         assert "status" in props
         assert tool.card.input_params["required"] == ["task_id", "status"]
+        # Verify the ``resilience.timeout_s`` override is wired onto the
+        # card and resolves through ``AbilityManager._resolve_call_timeout``
+        # (issue #115: default 300s was hit by 5-way concurrent advocate
+        # load; widened to 600s to absorb transient DB lock stalls).
+        assert tool.card.properties["resilience"]["timeout_s"] == 600.0
+        assert AbilityManager._resolve_call_timeout(tool.card) == 600.0
 
     @pytest.mark.asyncio
     @pytest.mark.level1

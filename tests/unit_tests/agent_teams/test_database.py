@@ -34,6 +34,7 @@ from openjiuwen.agent_teams.tools.database import (
 )
 from openjiuwen.agent_teams.tools.database.engine import (
     _create_index_if_absent,
+    _drop_column_idempotent,
     _drop_index_if_present,
     _ensure_dynamic_table_indexes,
     _ensure_team_member_options_column,
@@ -158,6 +159,215 @@ class TestTeamDatabaseInit:
             assert options.model_ref.model_index == 1
         finally:
             engine.dispose()
+
+    @pytest.mark.level0
+    def test_drop_column_idempotent_swallows_not_found_after_concurrent_drop(self):
+        """_drop_column_idempotent catches "no such column" errors on all backends.
+
+        Direct unit test for the helper that mirrors
+        ``test_add_column_idempotent_swallows_duplicate_column`` for the DROP
+        path: pre-create a table with the target column, drop the column
+        (simulating the winner of a concurrent race), then call
+        ``_drop_column_idempotent``. It must not raise and must not poison
+        the surrounding transaction (issue #115 review round 14).
+        """
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    "CREATE TABLE idempotent_drop_test (id INTEGER PRIMARY KEY, marker TEXT)"
+                )
+                # Winner of the race already dropped the column.
+                conn.exec_driver_sql("ALTER TABLE idempotent_drop_test DROP COLUMN marker")
+                # Loser reaches the DROP after the winner committed; the helper
+                # must swallow the "no such column" error.
+                _drop_column_idempotent(conn, "idempotent_drop_test", "marker")
+                # Surrounding transaction must still be committable (implicit
+                # commit at block exit). A follow-up write proves the
+                # transaction is alive.
+                conn.exec_driver_sql("INSERT INTO idempotent_drop_test (id) VALUES (1)")
+
+            with engine.connect() as conn:
+                rows = conn.exec_driver_sql(
+                    "SELECT id FROM idempotent_drop_test WHERE id = 1"
+                )
+                assert rows.fetchone()[0] == 1
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level0
+    def test_ensure_team_member_options_column_skips_migration_when_model_ref_json_already_dropped(self):
+        """The migration re-inspects right before the legacy-column SELECT.
+
+        Two concurrent processes both pass the top-of-function
+        ``model_ref_json in columns`` check (captured before any ALTER), then
+        race the migration. The winner completes SELECT/UPDATE/DROP; the
+        loser reaches the SELECT after the winner's DROP committed. Without
+        the re-inspect the loser's SELECT crashes with "no such column:
+        model_ref_json" (issue #115 review round 14).
+
+        Simulate by dropping ``model_ref_json`` before invoking the
+        migration helper: the re-inspect must short-circuit and the helper
+        must return without raising. Compare to the bare-SELECT behaviour
+        which would crash.
+        """
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_member (
+                        member_name TEXT NOT NULL,
+                        team_name TEXT NOT NULL,
+                        options TEXT,
+                        model_ref_json TEXT,
+                        PRIMARY KEY (member_name, team_name)
+                    )
+                    """
+                )
+                # Another process already finished the migration: dropped
+                # model_ref_json and backfilled options.
+                conn.exec_driver_sql("ALTER TABLE team_member DROP COLUMN model_ref_json")
+                # Stale top-of-function inspect still sees model_ref_json
+                # (simulated by the helper being called after the column is
+                # already gone). The re-inspect must short-circuit.
+                _ensure_team_member_options_column(conn)
+                columns = {col["name"] for col in inspect(conn).get_columns("team_member")}
+
+            assert "model_ref_json" not in columns
+            assert "options" in columns
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level0
+    def test_drop_column_idempotent_mysql_skips_savepoint_and_rechecks(self):
+        """On MySQL _drop_column_idempotent does not wrap the ALTER in a
+        SAVEPOINT — DDL implicitly commits *whether the DDL succeeds or
+        fails*, so the savepoint is destroyed before ``begin_nested`` can
+        roll back to it. The helper instead runs the ALTER bare and, when a
+        not-found error is swallowed, follows it with an ``inspect``
+        re-check that confirms the column is actually gone (the implicit
+        commit makes the post-ALTER state the ground truth).
+
+        Mirrors ``test_add_column_idempotent_mysql_skips_savepoint_and_rechecks``
+        for the DROP path.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from sqlalchemy.exc import OperationalError
+
+        from openjiuwen.agent_teams.tools.database import engine as engine_module
+
+        fake_conn = MagicMock()
+        fake_conn.dialect.name = "mysql"
+
+        # The ALTER raises a not-found error (the column was dropped by a
+        # concurrent process). The helper must swallow this on the MySQL path.
+        fake_conn.exec_driver_sql.side_effect = OperationalError(
+            "ALTER TABLE t DROP COLUMN c",
+            {},
+            Exception("Can't DROP 'c'; check that column/key exists"),
+        )
+
+        # begin_nested must NOT be called on the MySQL path.
+        fake_conn.begin_nested.side_effect = AssertionError(
+            "MySQL path must not call begin_nested"
+        )
+
+        # inspect(sync_conn).get_columns(table) reports the column is gone,
+        # confirming a concurrent process dropped it; the re-check passes
+        # and the helper returns without re-raising.
+        fake_inspector = MagicMock()
+        fake_inspector.get_columns.return_value = [{"name": "other"}]
+
+        with patch.object(engine_module, "inspect", return_value=fake_inspector):
+            _drop_column_idempotent(fake_conn, "t", "c")
+
+        fake_conn.begin_nested.assert_not_called()
+        fake_conn.exec_driver_sql.assert_called_once()
+        fake_inspector.get_columns.assert_called_once_with("t")
+
+    @pytest.mark.level0
+    def test_drop_column_idempotent_mysql_reraises_when_column_still_present(self):
+        """On MySQL, if the not-found error is swallowed but the ``inspect``
+        re-check finds the column still present (an inconsistent state — the
+        column should have been dropped by a concurrent process), the helper
+        re-raises rather than silently leaving the column in place.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from sqlalchemy.exc import OperationalError
+
+        from openjiuwen.agent_teams.tools.database import engine as engine_module
+
+        fake_conn = MagicMock()
+        fake_conn.dialect.name = "mysql"
+
+        fake_conn.exec_driver_sql.side_effect = OperationalError(
+            "ALTER TABLE t DROP COLUMN c",
+            {},
+            Exception("Can't DROP 'c'; check that column/key exists"),
+        )
+
+        # inspect reports the column IS still present — inconsistent with the
+        # "Can't DROP" error. The helper must surface this.
+        fake_inspector = MagicMock()
+        fake_inspector.get_columns.return_value = [{"name": "c"}, {"name": "other"}]
+
+        with patch.object(engine_module, "inspect", return_value=fake_inspector):
+            with pytest.raises(OperationalError):
+                _drop_column_idempotent(fake_conn, "t", "c")
+
+        fake_conn.begin_nested.assert_not_called()
+        fake_inspector.get_columns.assert_called_once_with("t")
+
+    @pytest.mark.level0
+    def test_drop_column_idempotent_savepoint_path_reraises_when_column_still_present(self):
+        """On the savepoint path (SQLite / PG), if the not-found error is
+        swallowed but the ``inspect`` re-check finds the column still present
+        (an inconsistent state — the column should have been dropped by a
+        concurrent process), the helper re-raises rather than silently
+        leaving the column in place.
+
+        Mirrors ``test_add_column_idempotent_savepoint_path_reraises_when_column_still_missing``
+        for the DROP path. Drives the savepoint branch with a hand-rolled
+        fake connection.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from sqlalchemy.exc import OperationalError
+
+        from openjiuwen.agent_teams.tools.database import engine as engine_module
+
+        fake_conn = MagicMock()
+        fake_conn.dialect.name = "sqlite"
+
+        fake_conn.exec_driver_sql.side_effect = OperationalError(
+            "ALTER TABLE t DROP COLUMN c",
+            {},
+            Exception("no such column: c"),
+        )
+
+        class _FakeSavepoint:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False  # propagate to outer except (see _add_column test)
+
+        fake_conn.begin_nested.return_value = _FakeSavepoint()
+
+        # inspect reports the column IS still present — inconsistent with the
+        # "no such column" error. The helper must surface this.
+        fake_inspector = MagicMock()
+        fake_inspector.get_columns.return_value = [{"name": "c"}, {"name": "other"}]
+
+        with patch.object(engine_module, "inspect", return_value=fake_inspector):
+            with pytest.raises(OperationalError):
+                _drop_column_idempotent(fake_conn, "t", "c")
+
+        fake_conn.begin_nested.assert_called_once()
+        fake_inspector.get_columns.assert_called_once_with("t")
 
     @pytest.mark.level0
     def test_task_migration_adds_reviewer_and_folds_legacy_statuses(self):
@@ -1913,6 +2123,51 @@ class TestTaskDependencyOperations:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
+    async def test_mutate_dependency_graph_rejects_edges_for_missing_team(self, db):
+        """Adding edges for a non-existent team is rejected with
+        ``_MutationFailure`` before any edge work: the team_info row
+        lock that serialises the cycle check is also a hard precondition
+        for adding edges, so no orphan dependency rows are inserted."""
+        result = await db.task.mutate_dependency_graph(
+            team_name="missing_team",
+            add_edges=[("taskA", "taskB")],
+        )
+        assert result.ok is False
+        assert "missing_team" in result.reason
+        assert "not found" in result.reason.lower()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_mutate_dependency_graph_rejects_new_tasks_for_missing_team(self, db):
+        """A new_tasks-only call against a missing team is rejected with
+        ``_MutationFailure`` before any row is staged, rather than letting the
+        commit-time FK reject (or, on SQLite without FK enforcement, silently
+        leave orphan task rows). The team_info row check runs whenever there
+        is work to do (new tasks or edges), so both paths fail fast and
+        consistently."""
+        from openjiuwen.agent_teams.schema.status import TaskStatus
+        from openjiuwen.agent_teams.tools.database.task_dao import NewTaskSpec
+
+        result = await db.task.mutate_dependency_graph(
+            team_name="missing_team",
+            new_tasks=[
+                NewTaskSpec(
+                    task_id="orphan-task",
+                    title="t",
+                    content="c",
+                    initial_status=TaskStatus.PENDING.value,
+                )
+            ],
+        )
+        assert result.ok is False
+        assert "missing_team" in result.reason
+        assert "not found" in result.reason.lower()
+        # The orphan task row must not have been staged.
+        task = await db.task.get_task("orphan-task")
+        assert task is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_mutate_dependency_graph_adds_single_edge(self, db):
         """Adding an edge through mutate_dependency_graph wires it into
         the dependency table; an edge to a COMPLETED target is born
@@ -2651,6 +2906,83 @@ class TestCascadeDelete:
         # Task and its dependencies should be gone
         task = await db.task.get_task("task16")
         assert task is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_delete_task_unblocks_downstream(self, db):
+        """Deleting an upstream task refreshes dependent tasks so they are
+        not stranded in BLOCKED forever (issue #115 review follow-up).
+
+        The dependency edges are removed by the FK ondelete=CASCADE when the
+        upstream row is deleted, but a downstream task that was BLOCKED solely
+        by the deleted task is not automatically refreshed — without the
+        explicit ``_refresh_status_in_session`` call it would stay BLOCKED
+        even though it no longer has any unresolved dependency.
+        """
+        await db.team.create_team(
+            team_name="team_del_task",
+            display_name="Team Del Task",
+            leader_member_name="leader_del_task",
+        )
+        await db.task.create_task(
+            task_id="upstream_del",
+            team_name="team_del_task",
+            title="Upstream",
+            content="Content",
+            status="pending",
+        )
+        await db.task.create_task(
+            task_id="downstream_del",
+            team_name="team_del_task",
+            title="Downstream",
+            content="Content",
+            status="pending",
+        )
+        # downstream depends on upstream -> downstream becomes BLOCKED.
+        result = await db.task.mutate_dependency_graph(
+            team_name="team_del_task",
+            add_edges=[("downstream_del", "upstream_del")],
+        )
+        assert result.ok
+
+        downstream = await db.task.get_task("downstream_del")
+        assert downstream.status == "blocked"
+
+        deleted = await db.task.delete_task("upstream_del")
+        assert deleted is True
+
+        # The downstream task should be unblocked now that its only
+        # dependency was removed, and the upstream task should be gone.
+        downstream = await db.task.get_task("downstream_del")
+        assert downstream is not None
+        assert downstream.status == "pending", (
+            f"downstream should be PENDING after upstream delete, got {downstream.status}"
+        )
+        assert await db.task.get_task("upstream_del") is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_delete_task_missing_returns_false_no_refresh(self, db):
+        """Deleting a non-existent task returns False without touching rows."""
+        await db.team.create_team(
+            team_name="team_del_missing",
+            display_name="Team Del Missing",
+            leader_member_name="leader_del_missing",
+        )
+        await db.task.create_task(
+            task_id="survivor",
+            team_name="team_del_missing",
+            title="Survivor",
+            content="Content",
+            status="pending",
+        )
+
+        deleted = await db.task.delete_task("nonexistent_del")
+        assert deleted is False
+
+        survivor = await db.task.get_task("survivor")
+        assert survivor is not None
+        assert survivor.status == "pending"
 
 
 class TestVerifyAndFixTaskConsistency:
@@ -4226,6 +4558,77 @@ async def test_mutate_dependency_graph_rejects_terminal_target(db):
     )
     assert result.ok is False
     assert "in_progress" in result.reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_add_edge_to_upstream_completed_after_validation_is_born_resolved(db):
+    """An edge whose upstream completes between the validation read and the
+    edge insert is born ``resolved=True``.
+
+    Regression for the concurrent add-edge / complete-upstream race: the
+    plain SELECT in ``_load_endpoints_and_validate`` may read the upstream
+    as still executing; the upstream then commits a terminal transition
+    whose dependency scan sees no edge yet (so it resolves nothing for the
+    downstream); the edge insert then wrote ``resolved=False`` from the
+    stale read, leaving the downstream permanently ``BLOCKED`` — the
+    completion event that should have unblocked it had already fired.
+
+    ``_apply_new_edges`` now re-reads the upstream status under
+    ``SELECT ... FOR UPDATE`` so ``resolved`` reflects the upstream's
+    *current* terminal status at insert time. This test fakes the
+    interleaving by flipping the upstream to terminal inside the same
+    transaction, between the validation read and the edge insert — the
+    property under test is "the insert uses a fresh upstream status, not
+    the stale validation snapshot".
+    """
+    from sqlalchemy import update as sql_update
+
+    from openjiuwen.agent_teams.tools.database.task_dao import (
+        _apply_new_edges,
+        _check_cycle_and_compute_new_edges,
+        _load_endpoints_and_validate,
+    )
+    from openjiuwen.agent_teams.tools.models import _get_task_model
+
+    await db.team.create_team(team_name="team_race", display_name="Race", leader_member_name="leader")
+    await db.task.create_task("A", "team_race", "A", "c", "in_progress")
+    await db.task.create_task("B", "team_race", "B", "c", "pending")
+
+    async with db.sessions.write() as session:
+        # Validation read: upstream A is still IN_PROGRESS.
+        endpoint_tasks = await _load_endpoints_and_validate(session, [("B", "A")])
+        assert endpoint_tasks["A"].status == "in_progress"
+
+        # The upstream completes between the validation read and the edge
+        # insert — the concurrent terminal transition whose dep scan sees
+        # no edge yet, so it resolves nothing for B. ``synchronize_session``
+        # is disabled so the validation-time ORM object in
+        # ``endpoint_tasks`` stays stale (as it would in the real race,
+        # where the commit happens in a *different* session that this
+        # session's identity map never learns about); the DB now holds
+        # ``completed``.
+        team_task_model = _get_task_model()
+        await session.execute(
+            sql_update(team_task_model)
+            .where(team_task_model.task_id == "A")
+            .values(status="completed"),
+            execution_options={"synchronize_session": False},
+        )
+
+        new_edge_set = await _check_cycle_and_compute_new_edges(session, "team_race", [("B", "A")])
+        await _apply_new_edges(session, "team_race", new_edge_set, endpoint_tasks)
+        await session.commit()
+
+    deps_b = await db.task.get_task_dependencies("B")
+    assert len(deps_b) == 1
+    assert deps_b[0].resolved is True, (
+        "edge to an upstream that completed between validation and insert "
+        "must be born resolved, not stale-blocked"
+    )
+
+    b = await db.task.get_task("B")
+    assert b.status == "pending", "B must not be left BLOCKED by a stale upstream read"
 
 
 @pytest.mark.asyncio
