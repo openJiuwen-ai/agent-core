@@ -23,6 +23,7 @@ from openjiuwen.core.events.builtins.event_types.turn import (
 )
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.session import get_current_session as get_current_agent_session
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.deep_agent import DeepAgent
@@ -887,6 +888,35 @@ async def test_run_one_round_uses_single_round_path_for_interrupt_resume(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["host turn_id must not be rewritten", ""])
+async def test_run_one_round_keeps_exception_text(
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+) -> None:
+    """Round failures keep the original exception text for execution.error."""
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    session = Session(session_id="round-error")
+
+    monkeypatch.setattr(agent, "_ensure_initialized", AsyncMock())
+    monkeypatch.setattr(
+        agent,
+        "prepare_interaction_task_loop",
+        AsyncMock(side_effect=RuntimeError(reason)),
+    )
+
+    outcome = await agent.run_one_round(
+        RoundWorkItem.user(request_id="user-1", inputs={"query": "hello"}),
+        "task-1",
+        session,
+    )
+
+    assert outcome.next_work is None
+    assert outcome.error_code == "round_execution_error"
+    assert outcome.error_message == (reason or "interaction round execution failed")
+    assert agent._invoke_active is False
+
+
+@pytest.mark.asyncio
 async def test_run_one_round_starts_new_turn_and_resume_preserves_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -908,6 +938,7 @@ async def test_run_one_round_starts_new_turn_and_resume_preserves_it(
 
     async def trigger(event, event_session):
         assert event_session is session
+        assert get_current_agent_session() is session
         if event.event_type == TURN_START:
             persisted = agent.load_state(session).turn_state
             assert persisted is not None
