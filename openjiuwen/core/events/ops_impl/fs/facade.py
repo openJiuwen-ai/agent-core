@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TypeVar
 
 from openjiuwen.core.events.bus import ExtensionEventBus
@@ -42,7 +42,7 @@ from openjiuwen.core.events.ops_impl.fs.models import (
     write_failure,
 )
 from openjiuwen.core.events.ops_impl.guard import OpsCallGuard
-from openjiuwen.core.events.ops_impl.runtime import build_context
+from openjiuwen.core.events.ops_impl.runtime import live_cwd
 from openjiuwen.core.events.types import Event, SessionContext
 
 _Request = FsReadInput | FsWriteInput | FsListInput | FsStatInput | FsExistsInput | FsAncestorsInput
@@ -61,7 +61,14 @@ class FsOpsFacade:
     def from_ops(cls, bus: ExtensionEventBus, ops: EventHandlerOps) -> FsOpsFacade:
         """Build the facade from the calling handler's ops view."""
 
-        return cls(bus=bus, session=build_context(ops))
+        session = ops.session_context
+        if session is None:
+            raise RuntimeError("ops.fs requires SessionContext")
+        if not session.cwd:
+            current = live_cwd()
+            if current is not None:
+                session = replace(session, cwd=current)
+        return cls(bus=bus, session=session)
 
     async def read(self, request: FsReadInput) -> FsReadOutput:
         """Trigger ``fs.read``."""
